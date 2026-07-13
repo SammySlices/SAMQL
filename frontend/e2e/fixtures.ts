@@ -188,9 +188,15 @@ export async function readJsonOrText(response: Response): Promise<unknown> {
 }
 
 export async function apiToken(page: Page): Promise<string> {
-  const meta = page.locator('meta[name="samql-api-token"]');
-  await expect(meta).toHaveCount(1);
-  const token = await meta.getAttribute("content");
+  // Capability is HttpOnly; read it from the browser cookie jar, not HTML.
+  await expect
+    .poll(async () => {
+      const cookies = await page.context().cookies();
+      return cookies.find((c) => c.name === "samql_api_token")?.value || "";
+    })
+    .not.toEqual("");
+  const cookies = await page.context().cookies();
+  const token = cookies.find((c) => c.name === "samql_api_token")?.value;
   expect(token).toBeTruthy();
   return token!;
 }

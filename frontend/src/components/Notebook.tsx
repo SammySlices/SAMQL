@@ -877,6 +877,9 @@ export const Notebook: React.FC<Props> = ({
           { surface: "journal", label: cell.name || "cell" },
         );
       }
+      if (aborts.current.get(id)?.queryId !== queryId) {
+        return null;
+      }
       if (res.error) {
         if (res.cancelled || res.error === "cancelled") {
           patch(id, { running: false });
@@ -930,6 +933,9 @@ export const Notebook: React.FC<Props> = ({
     } catch (e: any) {
       if (isCancelledError(e, queryId)) {
         patch(id, { running: false });
+        return null;
+      }
+      if (aborts.current.get(id)?.queryId !== queryId) {
         return null;
       }
       patch(id, { running: false, error: e?.message || String(e), ranOnce: true });

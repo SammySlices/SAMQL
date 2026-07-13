@@ -78,8 +78,10 @@ export function useNodeFlowGraphController({
   );
 
   const addNodeAt = useCallback(
-    (type: NodeType, x: number, y: number) => {
-      const node = createGraphNode(type, x, y);
+    (type: NodeType, x: number, y: number, config?: Record<string, any>) => {
+      const node = config
+        ? createGraphNode(type, x, y, undefined, config)
+        : createGraphNode(type, x, y);
       setNodes((current) => syncNodes([...current, node]));
       setSelectedId(node.id);
       fireBorn(node.id);

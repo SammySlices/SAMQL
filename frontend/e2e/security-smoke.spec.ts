@@ -1,6 +1,6 @@
 import { apiToken, expect, openApp, test } from "./fixtures";
 
-test("HTML capability authenticates the API", async ({ page, request }) => {
+test("HttpOnly capability cookie authenticates the API", async ({ page, request }) => {
   await openApp(page);
   const token = await apiToken(page);
 

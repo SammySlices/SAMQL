@@ -289,6 +289,21 @@ export const NODE_HELP: Record<string, NodeHelp> = {
     what: "A sticky note on the canvas.",
     use: "Documentation only — it isn't part of the data flow.",
   },
+  dyn_input: {
+    title: "Dynamic Input",
+    what: "Marks an entry port for a Created Node you author from a tab.",
+    use: "Place at the start of the tab graph. When you Create a node, each Dynamic Input becomes an input on the reusable node (ordered top-to-bottom).",
+  },
+  dyn_output: {
+    title: "Dynamic Output",
+    what: "Marks an exit port for a Created Node you author from a tab.",
+    use: "Wire the final transform into this node. When you Create a node, each Dynamic Output becomes an output on the reusable node (ordered top-to-bottom).",
+  },
+  usernode: {
+    title: "Created node",
+    what: "A reusable macro built from a full NodeFlow tab graph.",
+    use: "Wire its inputs and preview any output port. The embedded graph runs in place — export/load Created Nodes to share with others.",
+  },
 };
 
 export function getNodeHelp(type: string): NodeHelp {

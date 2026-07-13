@@ -95,6 +95,8 @@ frontend/src/components/ActivityShared.tsx
 frontend/src/components/ChartPanel.tsx
 frontend/src/components/ChartView.tsx
 frontend/src/components/ConfirmPop.tsx
+frontend/src/components/CreatedNodeModals.tsx
+frontend/src/components/CreatedNodesSettings.tsx
 frontend/src/components/DataGrid.component.test.tsx
 frontend/src/components/DataGrid.tsx
 frontend/src/components/DiagnosticsModal.tsx
@@ -181,10 +183,13 @@ frontend/src/controllers/useCatalogController.ts
 frontend/src/controllers/useIdeController.ts
 frontend/src/controllers/useResultController.ts
 frontend/src/controllers/useWorkspaceController.ts
+frontend/src/lib/CreatedNodeFlows.component.test.tsx
 frontend/src/lib/activity.ts
 frontend/src/lib/api.ts
 frontend/src/lib/apiProfiles.ts
 frontend/src/lib/chartOption.ts
+frontend/src/lib/createdNodes.component.test.ts
+frontend/src/lib/createdNodes.ts
 frontend/src/lib/docking.ts
 frontend/src/lib/echart.ts
 frontend/src/lib/format.ts

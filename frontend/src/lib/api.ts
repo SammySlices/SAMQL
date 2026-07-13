@@ -16,15 +16,13 @@ const BASE = "";
 let _apiToken: string | null | undefined;
 export function getApiToken(): string {
   if (_apiToken !== undefined) return _apiToken || "";
-  const meta =
-    typeof document !== "undefined"
-      ? document.querySelector<HTMLMetaElement>('meta[name="samql-api-token"]')
-      : null;
-  const fromMeta = meta?.content?.trim() || "";
+  // Dev/Vite can inject a token. Production delivers the capability via an
+  // HttpOnly cookie (credentials: same-origin); the HTML shell no longer
+  // embeds the secret in a scrapeable meta tag.
   const fromDev =
     ((import.meta as any).env?.VITE_SAMQL_API_TOKEN as string | undefined)?.trim() ||
     "";
-  _apiToken = fromMeta || fromDev || null;
+  _apiToken = fromDev || null;
   return _apiToken || "";
 }
 
@@ -89,6 +87,7 @@ const UNBOUNDED_ENDPOINTS = new Set<string>([
   "/api/nodeflow/validate",
   "/api/nodeflow/chart",
   "/api/nodeflow/browse",
+  "/api/nodeflow/run-batch",
   "/api/iterator/run",
   "/api/while/run",
   "/api/node-api-fetch",
@@ -101,6 +100,8 @@ const UNBOUNDED_ENDPOINTS = new Set<string>([
   "/api/load/files-start",
   "/api/excel/peek",
   "/api/load/sniff",
+  "/api/directory/read",
+  "/api/folder/read",
 ]);
 function isUnboundedPath(path: string): boolean {
   const p = path.split("?")[0];
@@ -156,6 +157,7 @@ async function apiFetch<T>(
     const res = await fetch(BASE + path, {
       ...rest,
       headers,
+      credentials: rest.credentials ?? "same-origin",
       signal,
     });
     const text = await res.text();

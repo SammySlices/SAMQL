@@ -107,10 +107,12 @@ def frontend_tests(do_build):
                     encoding="utf-8").read()
         pkg = json.load(open(os.path.join(FRONTEND, "package.json"),
                              encoding="utf-8"))
-        need('name="samql-api-token"' in srv
+        need('_api_token_set_cookie' in srv
              and 'X-SamQL-Token' in srv
-             and "hmac.compare_digest" in srv,
-             "per-process API capability is enforced and injected")
+             and "hmac.compare_digest" in srv
+             and "HttpOnly" in srv
+             and "samql_api_token" in srv,
+             "per-process API capability is enforced via HttpOnly cookie")
         need("SAMQL_JSON_BODY_MB" in srv and "_json_body_cap_bytes" in srv,
              "ordinary JSON requests have a configurable memory ceiling")
         fetch_calls = 0
@@ -118,8 +120,10 @@ def frontend_tests(do_build):
             if f.endswith((".ts", ".tsx")):
                 fetch_calls += open(f, encoding="utf-8").read().count("fetch(")
         eq(fetch_calls, 1, "all frontend network calls share apiFetch")
-        need("getApiToken" in api_src and 'headers.set("X-SamQL-Token"' in api_src,
-             "the shared client attaches the HTML capability")
+        need("getApiToken" in api_src
+             and 'headers.set("X-SamQL-Token"' in api_src
+             and 'credentials: rest.credentials ?? "same-origin"' in api_src,
+             "the shared client attaches credentials and optional Vite token")
         scripts = pkg.get("scripts") or {}
         need("lint" in scripts and "check" in scripts and "test:e2e" in scripts,
              "lint/check/browser-test scripts are registered")
@@ -1088,6 +1092,8 @@ console.log("OK");
         m = re.search(r"type NodeType =([^;]*);", nb)
         union = set(re.findall(r'"([a-z]+)"', m.group(1))) if m else set()
         HIDDEN = {"fill", "antijoin"}  # kept for old flows, off the palette
+        # Instantiated from Created Nodes only (not a blank palette tile).
+        CREATED_ONLY = {"usernode"}
 
         need(len(palette) > 30, "palette has the full node set (got %d)" % len(palette))
         miss_group = sorted(set(palette) - groups)
@@ -1102,8 +1108,67 @@ console.log("OK");
             need(h in union, "hidden type %s still declared in NodeType" % h)
             need(h not in set(palette), "hidden type %s must stay off the palette" % h)
             need(h not in groups, "hidden type %s must stay out of categories" % h)
-        unexpected = sorted(union - set(palette) - HIDDEN)
+        for c in CREATED_ONLY:
+            need(c in union, "created-only type %s still declared in NodeType" % c)
+            need(c not in set(palette), "created-only type %s must stay off NODE_PALETTE_ORDER" % c)
+            need(c not in groups, "created-only type %s must stay out of NODE_GROUPS" % c)
+            need(c in insp, "created-only type %s needs an inspector panel" % c)
+        unexpected = sorted(union - set(palette) - HIDDEN - CREATED_ONLY)
         need(not unexpected, "node types neither in palette nor known-hidden: " + ", ".join(unexpected))
+
+    def t_created_nodes_wiring():
+        # Save / export / load Created Nodes, plus port-count + run path.
+        app = _read_fe("src", "App.tsx")
+        created = _read_fe("src", "lib", "createdNodes.ts")
+        modals = _read_fe("src", "components", "CreatedNodeModals.tsx")
+        palette = _read_fe("src", "components", "nodeflow", "NodeFlowPalette.tsx")
+        model = _read_fe("src", "lib", "nodeFlowModel.ts")
+        nf = open(os.path.join(BACKEND, "samql_core", "nodeflow.py"),
+                  encoding="utf-8").read()
+        be = open(os.path.join(ROOT, "tests", "suites", "backend.py"),
+                  encoding="utf-8").read()
+        checks = [
+            ("Settings offers Create / Export / Load created node",
+             (lambda settings: (
+                 "useCreatedNodesSettings" in app
+                 and "Create a node…" in settings
+                 and "Export created node…" in settings
+                 and "Load created node…" in settings
+                 and "CreateCreatedNodeModal" in settings
+             ))(open(os.path.join(FRONTEND, "src", "components",
+                                  "CreatedNodesSettings.tsx"),
+                     encoding="utf-8").read())),
+            ("create/export/load helpers persist and round-trip a file",
+             "upsertCreatedNode" in created
+             and "serializeCreatedNodeFile" in created
+             and "parseCreatedNodeFile" in created
+             and 'CREATED_NODE_FILE_FORMAT = "samql-created-node"' in created),
+            ("modals call save + export + load helpers",
+             "buildCreatedNodeDefinition" in modals
+             and "serializeCreatedNodeFile" in modals
+             and "parseCreatedNodeFile" in modals
+             and "upsertCreatedNode" in modals),
+            ("palette lists Created Nodes from the catalog",
+             "Created Nodes" in palette
+             and "application/x-nb-created-node" in palette
+             and "loadCreatedNodes" in palette),
+            ("usernode arrow count follows inputCount/outputCount",
+             "function portsOf" in model
+             and "inputCount" in model
+             and "outputCount" in model),
+            ("backend expands and the suite runs created nodes",
+             "def _expand_usernode" in nf
+             and "def t_usernode_run" in be
+             and "def t_usernode_multi_input_run" in be),
+            ("component tests cover save/export/load + port arrows",
+             os.path.isfile(os.path.join(
+                 FRONTEND, "src", "lib", "createdNodes.component.test.ts"))
+             and os.path.isfile(os.path.join(
+                 FRONTEND, "src", "lib",
+                 "CreatedNodeFlows.component.test.tsx"))),
+        ]
+        missing = [n for n, ok in checks if not ok]
+        need(not missing, "created-nodes wiring broken: " + "; ".join(missing))
 
     def t_ide_surface():
         # The IDE view's editing surface is wired: Run all / Run statement with
@@ -3993,16 +4058,16 @@ console.log("OK");
             ("tab bar is styled",
              ".nb2-tab" in rd("src", "styles.css")),
             # --- .93: category reorg ---
-            ("Input is a nested category (input + 6 source nodes)",
+            ("Input is a nested category (input + source nodes including Dynamic Input)",
              '{ id: "input", label: "Input", icon: "Database", types: '
              '["input", "shred", "directory", "appendfolder", "filebrowser", '
-             '"apinode", "createtable"] }' in nb),
+             '"apinode", "createtable", "dyn_input"] }' in nb),
             ("chart + dashboard live in the Create category",
              '"chart", "dashboard", "sql", "text"' in nb),
             ("validate + profile in Transform",
              '"renamecols", "validate", "profile"' in nb),
-            ("Output category is just viewers/exporters",
-             '"browse", "write", "output"' in nb),
+            ("Output category includes Dynamic Output",
+             '"browse", "write", "output", "iterator", "while", "dyn_output"' in nb),
             # --- .93: chart/dashboard output saves on Run all (no button) ---
             ("output: no manual Save image button",
              '{isImage ? "Save image" : "Run & export"}' not in nb
@@ -5807,6 +5872,8 @@ console.log("OK");
         ("modal Cancel + close-X share one cancel fn",
          t_modal_cancel_close_consolidated),
         ("Node palette / category / config coverage", t_node_palette_coverage),
+        ("Created Nodes: save/export/load + ports + run wiring",
+         t_created_nodes_wiring),
         ("Disconnect + cell add-button placement wiring",
          t_disconnect_and_addbtn_wiring),
         ("HDFS connector tab wiring (connect/browse/scan/load, feed-first)",

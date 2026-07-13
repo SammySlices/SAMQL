@@ -6,7 +6,7 @@
   "phase": 10,
   "generatedAt": "2026-07-12T23:59:00Z",
   "sourceManifest": "SOURCE_MANIFEST.txt",
-  "sourceFileCount": 259,
+  "sourceFileCount": 264,
   "runtime": {
     "pythonMinimum": "3.10",
     "nodeMinimum": "20.19",

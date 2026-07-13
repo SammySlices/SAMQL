@@ -135,6 +135,7 @@ class SecretStore:
         return {}
 
     def _save(self):
+        """Persist ``_data`` to disk. Returns True on success."""
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             tmp = self.path + ".tmp"
@@ -145,13 +146,14 @@ class SecretStore:
                 os.chmod(self.path, 0o600)
             except Exception:
                 pass
+            return True
         except Exception:
-            pass
+            return False
 
     def set(self, key, plaintext):
         """Encrypt + persist a secret. Returns True on success, False when
-        encryption is unavailable or the input is empty (never stores
-        plaintext)."""
+        encryption is unavailable, the input is empty, or the disk write
+        failed (never stores plaintext; memory is rolled back on write fail)."""
         if not key or plaintext is None or plaintext == "":
             return False
         if not self.available:
@@ -160,10 +162,18 @@ class SecretStore:
             blob = self._protect(str(plaintext))
         except Exception:
             return False
+        encoded = base64.b64encode(bytes(blob)).decode("ascii")
         with self._lock:
-            self._data[key] = base64.b64encode(bytes(blob)).decode("ascii")
-            self._save()
-        return True
+            previous = self._data.get(key)
+            had_previous = key in self._data
+            self._data[key] = encoded
+            if self._save():
+                return True
+            if had_previous:
+                self._data[key] = previous
+            else:
+                self._data.pop(key, None)
+            return False
 
     def get(self, key):
         """Decrypt + return a stored secret, or None if absent/undecryptable."""
@@ -184,8 +194,11 @@ class SecretStore:
 
     def delete(self, key):
         with self._lock:
-            if key in self._data:
-                del self._data[key]
-                self._save()
+            if key not in self._data:
+                return False
+            previous = self._data[key]
+            del self._data[key]
+            if self._save():
                 return True
-        return False
+            self._data[key] = previous
+            return False

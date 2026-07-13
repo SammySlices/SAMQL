@@ -3,9 +3,11 @@ auth and query parameters) and flatten it into relational tables, the
 same way the original APITab did. Uses only urllib from the stdlib.
 """
 import base64
+import ipaddress
 import json
 import os
 import random
+import socket
 import ssl
 import time
 import urllib.error
@@ -13,6 +15,95 @@ import urllib.parse
 import urllib.request
 
 from .flatten import _json_loads, JSONFlattener, stream_json_records
+
+
+# Outbound fetches must not target loopback, link-local, or RFC1918 space by
+# default (SSRF). Operators who intentionally load from a private API can set
+# SAMQL_ALLOW_PRIVATE_FETCH=1. Cloud metadata (169.254.169.254) stays blocked
+# even then unless SAMQL_ALLOW_METADATA_FETCH=1 is also set.
+_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+)
+_METADATA_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in ("169.254.169.254/32", "fd00:ec2::254/128")
+)
+
+
+def _env_flag(name):
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def validate_outbound_http_url(url, *, allow_private=None, purpose="fetch"):
+    """Raise ValueError when ``url`` is not a safe outbound http(s) target."""
+    if allow_private is None:
+        allow_private = _env_flag("SAMQL_ALLOW_PRIVATE_FETCH")
+    allow_metadata = _env_flag("SAMQL_ALLOW_METADATA_FETCH")
+    parsed = urllib.parse.urlparse((url or "").strip())
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            "Only http:// and https:// URLs can be used for %s (got %r)."
+            % (purpose, scheme or "no scheme")
+        )
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL is missing a host.")
+    candidates = []
+    try:
+        candidates.append(ipaddress.ip_address(host))
+    except ValueError:
+        # Hostname: resolve only when enforcing the private-network blocklist.
+        # HDFS (allow_private=True) intentionally targets internal NameNodes
+        # whose DNS may be environment-specific; still refuse known metadata
+        # hostnames without doing a lookup.
+        if allow_private:
+            if host.lower() in (
+                "metadata.google.internal",
+                "metadata.google",
+                "instance-data.ec2.internal",
+            ) and not allow_metadata:
+                raise ValueError(
+                    "Refusing to %s cloud-metadata host %r." % (purpose, host)
+                )
+            return
+        port = parsed.port or (443 if scheme == "https" else 80)
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ValueError("Could not resolve host %r: %s" % (host, exc)) from exc
+        for info in infos:
+            candidates.append(ipaddress.ip_address(info[4][0]))
+    for ip in candidates:
+        if any(ip in net for net in _METADATA_NETWORKS) and not allow_metadata:
+            raise ValueError(
+                "Refusing to %s cloud-metadata address %s." % (purpose, ip)
+            )
+        if (not allow_private) and any(ip in net for net in _PRIVATE_NETWORKS):
+            raise ValueError(
+                "Refusing to %s private/link-local address %s (host %r). "
+                "Set SAMQL_ALLOW_PRIVATE_FETCH=1 to override."
+                % (purpose, ip, host)
+            )
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate every redirect hop against the outbound URL policy."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_outbound_http_url(newurl, purpose="follow redirect to")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def build_url(base_url, params=None):
@@ -33,15 +124,15 @@ def fetch_json(url, auth_user=None, auth_pass=None, timeout=60,
                max_bytes=512 * 1024 * 1024, headers=None):
     """Fetch and parse JSON from ``url``. Returns
     (status, content_type, data, text, error_str). Only http(s) URLs are
-    allowed, and the response is capped at ``max_bytes`` so a huge or hostile
-    endpoint can't exhaust memory. ``headers`` is an optional dict of extra
-    request headers (e.g. an API-key header)."""
+    allowed, private/link-local targets are blocked by default, and the
+    response is capped at ``max_bytes`` so a huge or hostile endpoint can't
+    exhaust memory. ``headers`` is an optional dict of extra request headers
+    (e.g. an API-key header)."""
     status, ctype, raw, error = None, "", b"", None
-    scheme = urllib.parse.urlparse((url or "").strip()).scheme.lower()
-    if scheme not in ("http", "https"):
-        return (None, "", None, "",
-                "Only http:// and https:// URLs can be fetched "
-                "(got %r)." % (scheme or "no scheme"))
+    try:
+        validate_outbound_http_url(url, purpose="fetch")
+    except ValueError as exc:
+        return (None, "", None, "", str(exc))
     try:
         req = urllib.request.Request(
             url, headers={"Accept": "application/json, */*"})
@@ -55,8 +146,12 @@ def fetch_json(url, auth_user=None, auth_pass=None, timeout=60,
             req.add_header("Authorization", f"Basic {token}")
         ctx = ssl.create_default_context()
         http_err = None
+        opener = urllib.request.build_opener(
+            _SafeRedirectHandler(),
+            urllib.request.HTTPSHandler(context=ctx),
+        )
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+            resp = opener.open(req, timeout=timeout)
         except urllib.error.HTTPError as he:
             resp = he
             http_err = he

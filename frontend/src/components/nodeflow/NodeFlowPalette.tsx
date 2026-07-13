@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
 import {
+  loadCreatedNodes,
+  type CreatedNodeDefinition,
+  type CreatedNodeIcon,
+} from "../../lib/createdNodes";
+import {
   FAVORITES_KEY,
   LEGACY_FAVORITES_KEY,
   type NodeType,
@@ -28,6 +33,9 @@ export function useNodeFlowPalette(showNodeSearch?: boolean) {
       return [];
     }
   });
+  const [createdNodes, setCreatedNodes] = useState<CreatedNodeDefinition[]>(
+    () => loadCreatedNodes(),
+  );
 
   useEffect(() => {
     if (showNodeSearch === false && palSearch) setPalSearch("");
@@ -40,6 +48,16 @@ export function useNodeFlowPalette(showNodeSearch?: boolean) {
       // Favorites remain available for the current session.
     }
   }, [favorites]);
+
+  useEffect(() => {
+    const refresh = () => setCreatedNodes(loadCreatedNodes());
+    window.addEventListener("samql-created-nodes-changed", refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener("samql-created-nodes-changed", refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
 
   const addFavorite = (type: NodeType) =>
     setFavorites((current) =>
@@ -69,6 +87,7 @@ export function useNodeFlowPalette(showNodeSearch?: boolean) {
     favorites,
     addFavorite,
     removeFavorite,
+    createdNodes,
     palRef,
     onPaletteWheel,
   };
@@ -105,6 +124,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
     favorites,
     addFavorite,
     removeFavorite,
+    createdNodes,
     palRef,
     onPaletteWheel,
   } = model;
@@ -185,6 +205,20 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
               </button>
             );
           })}
+          <button
+            className={
+              "btn sm nb2-cat" + (openCat === "created" ? " active" : "")
+            }
+            onClick={() =>
+              setOpenCat(openCat === "created" ? null : "created")
+            }
+            title="Nodes you created from a tab graph"
+          >
+            <Icon.Sparkle size={13} /> Created Nodes
+            <span className="nb2-cat-caret">
+              {openCat === "created" ? "▾" : "▸"}
+            </span>
+          </button>
         </div>
         {showNodeSearch !== false && (
           <div className="nb2-pal-search">
@@ -306,7 +340,42 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
           )}
         </div>
       )}
+      {openCat === "created" && (
+        <div className="nb2-cat-sub">
+          {createdNodes.length === 0 ? (
+            <span className="nb2-fav-empty">
+              No created nodes yet. Build a tab with Dynamic Input / Output,
+              then Settings → Create a node.
+            </span>
+          ) : (
+            createdNodes.map((definition) => {
+              const iconName = (definition.icon || "Sparkle") as CreatedNodeIcon;
+              const NodeIcon = (Icon[iconName] || Icon.Sparkle) as React.FC<{
+                size?: number;
+              }>;
+              return (
+                <button
+                  key={definition.id}
+                  className="btn sm nb2-pal-item"
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.setData(
+                      "application/x-nb-created-node",
+                      definition.id,
+                    );
+                    event.dataTransfer.effectAllowed = "copy";
+                  }}
+                  title={`Drag ${definition.name} onto the canvas (${definition.inputs.length} in · ${definition.outputs.length} out)`}
+                >
+                  <NodeIcon size={13} /> {definition.name}
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
       {openCat &&
+        openCat !== "created" &&
         (() => {
           const group = NODE_GROUPS.find((item) => item.id === openCat);
           if (!group || group.types.length <= 1) return null;
@@ -342,33 +411,63 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
               item.label.toLowerCase().includes(query) ||
               item.type.toLowerCase().includes(query),
           );
+          const createdHits = createdNodes.filter((item) =>
+            item.name.toLowerCase().includes(query),
+          );
           return (
             <div className="nb2-cat-sub nb2-search-sub">
-              {hits.length === 0 ? (
+              {hits.length === 0 && createdHits.length === 0 ? (
                 <span className="nb2-search-empty">
                   No nodes match “{palSearch.trim()}”.
                 </span>
               ) : (
-                hits.map((item) => {
-                  const NodeIcon = Icon[item.icon] as React.FC<{ size?: number }>;
-                  return (
-                    <button
-                      key={item.type}
-                      className="btn sm nb2-pal-item"
-                      draggable
-                      onDragStart={(event) => {
-                        event.dataTransfer.setData(
-                          "application/x-nb-node",
-                          item.type,
-                        );
-                        event.dataTransfer.effectAllowed = "copy";
-                      }}
-                      title={`Drag ${item.label} onto the canvas`}
-                    >
-                      <NodeIcon size={13} /> {item.label}
-                    </button>
-                  );
-                })
+                <>
+                  {hits.map((item) => {
+                    const NodeIcon = Icon[item.icon] as React.FC<{
+                      size?: number;
+                    }>;
+                    return (
+                      <button
+                        key={item.type}
+                        className="btn sm nb2-pal-item"
+                        draggable
+                        onDragStart={(event) => {
+                          event.dataTransfer.setData(
+                            "application/x-nb-node",
+                            item.type,
+                          );
+                          event.dataTransfer.effectAllowed = "copy";
+                        }}
+                        title={`Drag ${item.label} onto the canvas`}
+                      >
+                        <NodeIcon size={13} /> {item.label}
+                      </button>
+                    );
+                  })}
+                  {createdHits.map((definition) => {
+                    const iconName = (definition.icon ||
+                      "Sparkle") as CreatedNodeIcon;
+                    const NodeIcon = (Icon[iconName] ||
+                      Icon.Sparkle) as React.FC<{ size?: number }>;
+                    return (
+                      <button
+                        key={definition.id}
+                        className="btn sm nb2-pal-item"
+                        draggable
+                        onDragStart={(event) => {
+                          event.dataTransfer.setData(
+                            "application/x-nb-created-node",
+                            definition.id,
+                          );
+                          event.dataTransfer.effectAllowed = "copy";
+                        }}
+                        title={`Drag ${definition.name} onto the canvas`}
+                      >
+                        <NodeIcon size={13} /> {definition.name}
+                      </button>
+                    );
+                  })}
+                </>
               )}
             </div>
           );

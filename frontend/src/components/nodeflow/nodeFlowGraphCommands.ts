@@ -51,13 +51,16 @@ export function createGraphNode(
   x: number,
   y: number,
   id = uid(),
+  config?: Record<string, any>,
 ): NbNode {
   return {
     id,
     type,
     x: Math.max(0, Math.round(x)),
     y: Math.max(0, Math.round(y)),
-    config: createDefaultNodeConfig(type),
+    config: config
+      ? { ...createDefaultNodeConfig(type), ...config }
+      : createDefaultNodeConfig(type),
   };
 }
 

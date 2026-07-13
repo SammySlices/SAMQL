@@ -3,6 +3,7 @@ import {
   isTopInput,
   nodeHeight,
   nodeWidth,
+  portsOf,
   portXY,
   type NbEdge,
   type NbNode,
@@ -55,16 +56,17 @@ function indexedVisibleInputCount(
   node: NbNode,
   incoming: readonly NbEdge[],
 ): number {
-  const inputs = PORTS[node.type].inputs;
+  const inputs = portsOf(node).inputs;
   if (node.type === "union") return 1;
-  if (node.type !== "group") return inputs.length;
+  if (node.type === "usernode") return inputs.length;
+  if (node.type !== "group") return PORTS[node.type].inputs.length;
 
   let maxIndex = -1;
   for (const edge of incoming) {
-    const index = inputs.indexOf(edge.to.port);
+    const index = PORTS[node.type].inputs.indexOf(edge.to.port);
     if (index > maxIndex) maxIndex = index;
   }
-  return Math.min(inputs.length, Math.max(1, maxIndex + 2));
+  return Math.min(PORTS[node.type].inputs.length, Math.max(1, maxIndex + 2));
 }
 
 function edgeRevision(edge: NbEdge): string {
@@ -141,8 +143,8 @@ export function buildNodeFlowRenderModel(
     const fromNode = nodeById.get(edge.from.node);
     const toNode = nodeById.get(edge.to.node);
     if (!fromNode || !toNode) continue;
-    const outputIndex = PORTS[fromNode.type].outputs.indexOf(edge.from.port);
-    const inputIndex = PORTS[toNode.type].inputs.indexOf(edge.to.port);
+    const outputIndex = portsOf(fromNode).outputs.indexOf(edge.from.port);
+    const inputIndex = portsOf(toNode).inputs.indexOf(edge.to.port);
     const start = portXY(fromNode, "out", outputIndex < 0 ? 0 : outputIndex);
     const end = portXY(
       toNode,

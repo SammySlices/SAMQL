@@ -1796,6 +1796,18 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             cur = "(" + child_sql + ")"
         return "SELECT * FROM %s AS _grpout" % cur
 
+    if typ == "dyn_input":
+        raise NodeflowError(
+            "Dynamic Input is a placeholder for creating a reusable node. "
+            "Wire it into a flow, then use Settings → Create a node.")
+
+    if typ == "dyn_output":
+        # Passthrough while authoring; created-node expansion starts upstream.
+        return "SELECT * FROM %s AS _dynout" % need("in")
+
+    if typ == "usernode":
+        return _expand_usernode(node, port, get_input, cols_of, engine, needed)
+
     if typ == "output":
         return "SELECT * FROM %s AS _o" % need("in")
 
@@ -1833,6 +1845,115 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             "node to save it as an image.")
 
     raise NodeflowError("This node type isn't supported yet: %s" % typ)
+
+
+def _expand_usernode(node, port, outer_get_input, cols_of, engine, needed):
+    """Compile one output of a user-authored macro node.
+
+    The instance config embeds the authored graph plus port maps that link
+    external inN/outN ports to Dynamic Input / Dynamic Output node ids.
+    """
+    cfg = node.get("config") or {}
+    label = cfg.get("label") or cfg.get("name") or "created node"
+    inner = cfg.get("graph") or {}
+    if not isinstance(inner, dict) or not (inner.get("nodes") or []):
+        raise NodeflowError(
+            'The "%s" created node has no saved graph.' % label)
+
+    inputs = cfg.get("inputs") or []
+    outputs = cfg.get("outputs") or []
+    dyn_in_by_id = {}
+    for item in inputs:
+        if not isinstance(item, dict):
+            continue
+        nid = item.get("nodeId")
+        p = item.get("port")
+        if nid and p:
+            dyn_in_by_id[nid] = p
+    out_by_port = {}
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        p = item.get("port")
+        nid = item.get("nodeId")
+        if p and nid:
+            out_by_port[p] = nid
+
+    dyn_out_id = out_by_port.get(port)
+    if not dyn_out_id:
+        raise NodeRunError(
+            'The "%s" node has no Dynamic Output for port "%s".'
+            % (label, port),
+            node_id=node.get("id"), node_type="usernode")
+
+    sn, sp = upstream(inner, dyn_out_id, "in")
+    if sn is None:
+        raise NodeRunError(
+            'The "%s" node\'s Dynamic Output ("%s") has nothing connected.'
+            % (label, port),
+            node_id=node.get("id"), node_type="usernode")
+
+    return _compile_usernode_port(
+        inner, sn, sp, cols_of, engine, outer_get_input, dyn_in_by_id,
+        needed=needed)
+
+
+def _compile_usernode_port(graph, node_id, port, cols_of, engine, outer_get,
+                           dyn_in_by_id, _stack=None, _memo=None, needed=None):
+    """Like compile_port, but Dynamic Input ports read from the outer usernode."""
+    nodes = _node_map(graph)
+    node = nodes.get(node_id)
+    if node is None:
+        raise NodeflowError("A node inside this created node is missing.")
+    typ = node.get("type")
+    if typ == "usernode":
+        raise NodeflowError(
+            "Nested created nodes are not supported — expand the inner one "
+            "into the tab before creating a new node.")
+    if typ == "dyn_output":
+        raise NodeflowError(
+            "Dynamic Output nodes cannot feed other Dynamic Outputs.")
+
+    _stack = _stack or []
+    if _memo is None:
+        _memo = {}
+    key = (node_id, port)
+    if key in _stack:
+        raise NodeflowError(
+            "This created node has a loop — remove the cycle inside it.")
+    if key in _memo:
+        return _memo[key]
+    stack = _stack + [key]
+
+    if typ == "dyn_input":
+        ext = dyn_in_by_id.get(node_id)
+        if not ext:
+            raise NodeflowError(
+                "A Dynamic Input inside this created node is not mapped.")
+        src = outer_get(ext)
+        if src is None:
+            raise NodeRunError(
+                'Connect input "%s" on the created node.' % ext,
+                node_id=node_id, node_type="dyn_input")
+        sql = "SELECT * FROM %s AS _udi" % src
+        _memo[key] = sql
+        return sql
+
+    def get_input(in_port):
+        sn, sp = upstream(graph, node_id, in_port)
+        if sn is None:
+            return None
+        return "(" + _compile_usernode_port(
+            graph, sn, sp, cols_of, engine, outer_get, dyn_in_by_id,
+            stack, _memo) + ")"
+
+    sql = node_output_sql(node, port, get_input, cols_of, engine, needed)
+    if len(sql) > _MAX_COMPILED_SQL:
+        raise NodeflowError(
+            "This created node expands into too much SQL. Materialise a "
+            "shared step into a table and read from that instead.")
+    _memo[key] = sql
+    return sql
 
 
 def compile_port(graph, node_id, port, cols_of, _stack=None, engine=None,
@@ -1947,6 +2068,12 @@ NODE_PORTS = {
     "output": {"in": ["in"], "out": []},
     "group": {"in": ["in", "in2", "in3", "in4", "in5"], "out": ["out"]},
     "dashboard": {"in": ["in1", "in2", "in3", "in4"], "out": ["out"]},
+    "dyn_input": {"in": [], "out": ["out"]},
+    "dyn_output": {"in": ["in"], "out": []},
+    "usernode": {"in": ["in1", "in2", "in3", "in4", "in5",
+                        "in6", "in7", "in8", "in9", "in10"],
+                 "out": ["out1", "out2", "out3", "out4", "out5",
+                         "out6", "out7", "out8", "out9", "out10"]},
 }
 
 

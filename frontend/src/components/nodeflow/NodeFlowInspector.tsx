@@ -5629,6 +5629,50 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   })()}
                 </>
               )}
+
+              {inspectorType === "dyn_input" && (
+                <div className="nb2-note">
+                  Entry port for a Created Node. Wire this into the start of your
+                  tab graph, then use Settings → Create a node. Order on the
+                  canvas (top to bottom) sets in1, in2, …
+                </div>
+              )}
+
+              {inspectorType === "dyn_output" && (
+                <div className="nb2-note">
+                  Exit port for a Created Node. Wire the last transform into this
+                  node. Top-to-bottom order sets out1, out2, …
+                </div>
+              )}
+
+              {inspectorType === "usernode" && (
+                <>
+                  <div className="nb2-note">
+                    Reusable node “
+                    {sel.config.name || sel.config.label || "created"}” with{" "}
+                    {sel.config.inputCount || 0} input
+                    {(sel.config.inputCount || 0) === 1 ? "" : "s"} and{" "}
+                    {sel.config.outputCount || 0} output
+                    {(sel.config.outputCount || 0) === 1 ? "" : "s"}.
+                  </div>
+                  {(sel.config.outputs || []).map((out: any) => (
+                    <button
+                      key={out.port}
+                      className="btn sm"
+                      disabled={running}
+                      onClick={() =>
+                        doPreview(
+                          sel,
+                          out.port,
+                          `${sel.config.label || sel.config.name} · ${out.port}`,
+                        )
+                      }
+                    >
+                      Preview {out.port}
+                    </button>
+                  ))}
+                </>
+              )}
             </>
           )}
         </InspectorShell>

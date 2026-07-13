@@ -52,7 +52,9 @@ def parse_webhdfs_url(url):
         path = fragment or "/"
         if not path.startswith("/"):
             path = "/" + path
-        return f"{scheme}://{parsed.netloc}/webhdfs/v1", path
+        base = f"{scheme}://{parsed.netloc}/webhdfs/v1"
+        _guard_webhdfs_base(base)
+        return base, path
 
     url = url.rstrip("/")
     marker = "/webhdfs/v1"
@@ -62,6 +64,7 @@ def parse_webhdfs_url(url):
         path = url[idx + len(marker):] or "/"
         if not path.startswith("/"):
             path = "/" + path
+        _guard_webhdfs_base(base)
         return base, path
 
     # Bare host[:port] (optionally with a path) -> assume the standard mount.
@@ -72,7 +75,23 @@ def parse_webhdfs_url(url):
     path = parsed.path or "/"
     if not path.startswith("/"):
         path = "/" + path
-    return f"{scheme}://{parsed.netloc}/webhdfs/v1", path
+    base = f"{scheme}://{parsed.netloc}/webhdfs/v1"
+    _guard_webhdfs_base(base)
+    return base, path
+
+
+def _guard_webhdfs_base(base):
+    """Allow private NameNodes; still refuse non-http(s) and cloud metadata."""
+    parsed = urllib.parse.urlparse(base)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError("WebHDFS URLs must use http:// or https://.")
+    from .apiload import validate_outbound_http_url
+    validate_outbound_http_url(
+        f"{scheme}://{parsed.netloc}/",
+        allow_private=True,
+        purpose="connect to WebHDFS",
+    )
 
 
 class WebHDFSClient:

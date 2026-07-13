@@ -18,17 +18,17 @@ $Source = (Resolve-Path -LiteralPath $Source).Path
 $text = Get-Content -LiteralPath $Source -Raw -Encoding UTF8
 $beginMarker = "DATA_BEGIN"
 $endMarker = "DATA_END"
-$beginIndex = $text.IndexOf($beginMarker, [StringComparison]::Ordinal)
-if ($beginIndex -lt 0) {
+$beginMatch = [regex]::Match($text, '(?m)^DATA_BEGIN\s*$')
+if (-not $beginMatch.Success) {
   throw "APHEX transport is missing DATA_BEGIN."
 }
 
-$header = $text.Substring(0, $beginIndex)
-$payloadStart = $beginIndex + $beginMarker.Length
-$endIndex = $text.IndexOf($endMarker, $payloadStart, [StringComparison]::Ordinal)
-if ($endIndex -ge 0) {
-  $payload = $text.Substring($payloadStart, $endIndex - $payloadStart)
-  $trailing = $text.Substring($endIndex + $endMarker.Length)
+$header = $text.Substring(0, $beginMatch.Index)
+$payloadStart = $beginMatch.Index + $beginMatch.Length
+$endMatch = [regex]::Match($text.Substring($payloadStart), '(?m)^DATA_END\s*$')
+if ($endMatch.Success) {
+  $payload = $text.Substring($payloadStart, $endMatch.Index)
+  $trailing = $text.Substring($payloadStart + $endMatch.Index + $endMatch.Length)
   if ($trailing.Trim().Length -ne 0) {
     throw "APHEX transport contains unexpected data after DATA_END."
   }

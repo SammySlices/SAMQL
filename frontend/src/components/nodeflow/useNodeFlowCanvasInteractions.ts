@@ -21,6 +21,7 @@ import {
   SQL_BODY_H,
   nodeHeight,
   nodeWidth,
+  portsOf,
   portXY,
   visibleInputCount,
   type NbEdge,
@@ -192,7 +193,7 @@ export function useNodeFlowCanvasInteractions(
       const ports: { node: string; port: string; x: number; y: number }[] = [];
       for (const node of current.nodesRef.current || []) {
         if (node.id === fromNode) continue;
-        const inputs = PORTS[node.type]?.inputs || [];
+        const inputs = portsOf(node).inputs;
         const visible = visibleInputCount(node, edges);
         for (let index = 0; index < Math.min(inputs.length, visible); index += 1) {
           const point = portXY(node, "in", index, visible);

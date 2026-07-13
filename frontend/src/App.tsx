@@ -44,6 +44,7 @@ import { ErrorLogModal } from "./components/ErrorLogModal";
 import { DiagnosticsModal } from "./components/DiagnosticsModal";
 import { FlowCacheModal } from "./components/FlowCacheModal";
 import { ActivityModal } from "./components/ActivityModal";
+import { useCreatedNodesSettings } from "./components/CreatedNodesSettings";
 import {
   useActivityStatus,
   useEngineReset,
@@ -611,6 +612,7 @@ export default function App() {
     },
     [],
   );
+  const createdNodesUi = useCreatedNodesSettings(toast);
 
   const {
     tables,
@@ -893,17 +895,24 @@ export default function App() {
   };
 
   const runResolved = useCallback(
-    async (sql: string, _retry = false, previewLimit?: number) => {
+    async (
+      sql: string,
+      _retry = false,
+      previewLimit?: number,
+      lockedTabId?: string,
+    ) => {
       const trimmed = (sql || "").trim();
       if (!trimmed) return;
       // supersede THIS TAB's in-flight query only: other tabs' queries run
       // concurrently and are left alone. Abort the fetch *and* tell the
-      // backend to interrupt it so it stops burning CPU.
-      const tabId = activeIdRef.current;
+      // backend to interrupt it so it stops burning CPU. Freeze tabId for
+      // the whole run so a mid-query switch cannot rebind or retry elsewhere.
+      const tabId = lockedTabId || activeIdRef.current;
       const prev = runsNow()[tabId];
       if (prev) cancelOne(prev.queryId, prev.ctrl);
       const ctrl = new AbortController();
       const queryId = uid() + uid();
+      const stillOwnsRun = () => runsNow()[tabId]?.queryId === queryId;
       setRuns((m) => ({
         ...m,
         [tabId]: { ctrl, queryId, startedAt: Date.now() },
@@ -926,6 +935,7 @@ export default function App() {
             per_statement: previewLimit == null,
             preview_limit: previewLimit },
         );
+        if (!stillOwnsRun()) return res;
         if (res.error) {
           if (res.error === "cross_engine_conflict") {
             setConflict(res.detail);
@@ -942,14 +952,14 @@ export default function App() {
           );
           refreshTables();
         } else {
-          // SELECT result -> bind to the active editor (query) tab.
+          // SELECT result -> bind to the tab that started this run.
           if (res.result_capped)
             toast(
               "warn",
               "Result capped",
               `Stopped at the ${(res.result_cap ?? 0).toLocaleString()}-row safety limit — the query produced more. Add a filter (or raise SAMQL_MAX_RESULT_ROWS) to see everything.`,
             );
-          const originId = activeIdRef.current;
+          const originId = tabId;
           const edTab = edTabsRef.current.find((t) => t.id === originId);
           const liveId = edTab?.liveResId;
           const cur = resTabsRef.current;
@@ -1021,6 +1031,7 @@ export default function App() {
         return res;
       } catch (e: any) {
         if (isCancelledError(e, queryId)) return; // cancelled (any surface)
+        if (!stillOwnsRun()) return;
         const network =
           !(e instanceof ApiError) &&
           (e instanceof TypeError ||
@@ -1032,10 +1043,11 @@ export default function App() {
         if (network && !_retry && !wasCancelled(queryId)) {
           // the local server retired a poisoned keep-alive socket (e.g.
           // right after cancelling a long query). Reap any phantom run,
-          // breathe, and retry ONCE on a fresh connection + id.
+          // breathe, and retry ONCE on a fresh connection + id for the
+          // same originating tab.
           void api.cancelQuery(queryId).catch(() => {});
           await new Promise((r) => setTimeout(r, 350));
-          return runResolved(trimmed, true, previewLimit);
+          return runResolved(trimmed, true, previewLimit, tabId);
         }
         const msg =
           e instanceof ApiError ? e.message : e.message || String(e);
@@ -1407,11 +1419,15 @@ export default function App() {
           }),
         );
       } catch {
-        /* quota or serialization issue: skip */
+        toast(
+          "warn",
+          "Session not saved",
+          "Browser storage refused the workspace snapshot (quota or private mode). Your tabs may not survive a reload.",
+        );
       }
     }, 500);
     return () => clearTimeout(h);
-  }, [edTabs, activeId, target, readOnly, dialect, sidebarW, showTables, showNodeSearch, resultsH]);
+  }, [edTabs, activeId, target, readOnly, dialect, sidebarW, showTables, showNodeSearch, resultsH, toast]);
 
   // ---- export ----
   const doSaveResultAsTable = async () => {
@@ -2291,6 +2307,7 @@ export default function App() {
                 >
                   Engine tuning (memory / threads)…
                 </button>
+                {createdNodesUi.menu(() => setSettingsOpen(false))}
                 <div className="sep" />
                 <div className="label">Workflow</div>
                 <button
@@ -3669,6 +3686,7 @@ export default function App() {
           onToast={toast}
         />
       )}
+      {createdNodesUi.modals}
       {tableProps && (
         <TablePropsModal
           engine={tableProps.engine}

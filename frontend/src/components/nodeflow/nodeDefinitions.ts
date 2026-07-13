@@ -9,7 +9,8 @@ export type NodeGroupId =
   | "aggregate"
   | "combine"
   | "create"
-  | "output";
+  | "output"
+  | "created";
 
 export type NodeInspectorType = NodeType;
 
@@ -179,7 +180,11 @@ const summaryFor = (node: NbNode, edges: NbEdge[]): string => {
     case "text":
     case "variable":
     case "group":
+    case "dyn_input":
+    case "dyn_output":
       return "";
+    case "usernode":
+      return `${cfg.inputCount || 0} in · ${cfg.outputCount || 0} out`;
   }
 };
 
@@ -252,6 +257,19 @@ export const NODE_DEFINITIONS = {
   group: define("group", "Group", "Group", () => ({ children: [], label: "group", note: "" }), true),
   write: define("write", "Write to table", "ArrowDownToLine", () => ({ name: "flow_result", label: "write" })),
   output: define("output", "Output", "FileDown", () => ({ folder: "", format: "csv", base_name: "output", label: "output" })),
+  dyn_input: define("dyn_input", "Dynamic Input", "Upload", () => ({ label: "dyn in" })),
+  dyn_output: define("dyn_output", "Dynamic Output", "Download", () => ({ label: "dyn out" })),
+  usernode: define("usernode", "Created node", "Sparkle", () => ({
+    label: "created",
+    definitionId: "",
+    name: "",
+    icon: "Sparkle",
+    inputCount: 0,
+    outputCount: 0,
+    inputs: [],
+    outputs: [],
+    graph: { nodes: [], edges: [] },
+  })),
 } satisfies Record<NodeType, NodeDefinition>;
 
 export const NODE_PALETTE_ORDER: NodeType[] = [
@@ -261,7 +279,7 @@ export const NODE_PALETTE_ORDER: NodeType[] = [
   "topn", "coalesce", "renamecols", "validate", "pivot", "join", "multijoin",
   "crossjoin", "union", "chart", "dashboard", "browse", "profile", "reconcile", "group",
   "createtable", "directory", "appendfolder", "filebrowser", "apinode", "text", "variable",
-  "sql", "write", "output", "iterator", "while",
+  "sql", "write", "output", "iterator", "while", "dyn_input", "dyn_output",
 ];
 
 export const NODE_PALETTE = NODE_PALETTE_ORDER.map((type) => {
@@ -283,12 +301,12 @@ export const NODE_GROUPS: {
   icon: NodeIconName;
   types: NodeType[];
 }[] = [
-  { id: "input", label: "Input", icon: "Database", types: ["input", "shred", "directory", "appendfolder", "filebrowser", "apinode", "createtable"] },
+  { id: "input", label: "Input", icon: "Database", types: ["input", "shred", "directory", "appendfolder", "filebrowser", "apinode", "createtable", "dyn_input"] },
   { id: "transform", label: "Transform", icon: "Filter", types: ["select", "filter", "formula", "sort", "sample", "unique", "bin", "dedupe", "split", "jsonextract", "explode", "textclean", "date", "maprecode", "parse", "coalesce", "renamecols", "validate", "profile"] },
   { id: "aggregate", label: "Aggregate", icon: "Step", types: ["summarize", "pivot", "unpivot", "window", "perioddelta", "rank", "groupconcat", "topn"] },
   { id: "combine", label: "Combine", icon: "Swap", types: ["join", "multijoin", "crossjoin", "union", "reconcile", "group"] },
   { id: "create", label: "Create", icon: "Table", types: ["chart", "dashboard", "sql", "text", "variable"] },
-  { id: "output", label: "Output", icon: "Download", types: ["browse", "write", "output", "iterator", "while"] },
+  { id: "output", label: "Output", icon: "Download", types: ["browse", "write", "output", "iterator", "while", "dyn_output"] },
 ];
 
 

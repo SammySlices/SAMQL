@@ -58,7 +58,10 @@ export type NodeType =
   | "sql"
   | "group"
   | "write"
-  | "output";
+  | "output"
+  | "dyn_input"
+  | "dyn_output"
+  | "usernode";
 
 export interface NbNode {
   id: string;
@@ -133,6 +136,13 @@ export const PORTS: Record<NodeType, { inputs: string[]; outputs: string[] }> = 
   group: { inputs: ["in", "in2", "in3", "in4", "in5"], outputs: ["out"] },
   write: { inputs: ["in"], outputs: ["out"] },
   output: { inputs: ["in"], outputs: [] },
+  dyn_input: { inputs: [], outputs: ["out"] },
+  dyn_output: { inputs: ["in"], outputs: [] },
+  // Max ports; visible count comes from config.inputCount / outputCount.
+  usernode: {
+    inputs: ["in1", "in2", "in3", "in4", "in5", "in6", "in7", "in8", "in9", "in10"],
+    outputs: ["out1", "out2", "out3", "out4", "out5", "out6", "out7", "out8", "out9", "out10"],
+  },
 };
 export const PORT_LABEL: Record<string, string> = {
   out: "out",
@@ -150,6 +160,21 @@ export const PORT_LABEL: Record<string, string> = {
   in3: "in 3",
   in4: "in 4",
   in5: "in 5",
+  in6: "in 6",
+  in7: "in 7",
+  in8: "in 8",
+  in9: "in 9",
+  in10: "in 10",
+  out1: "out 1",
+  out2: "out 2",
+  out3: "out 3",
+  out4: "out 4",
+  out5: "out 5",
+  out6: "out 6",
+  out7: "out 7",
+  out8: "out 8",
+  out9: "out 9",
+  out10: "out 10",
   vars: "values",
 };
 
@@ -456,6 +481,24 @@ export function nodeWidth(n: NbNode) {
   }
   return NODE_W;
 }
+/** Effective ports for layout (usernode trims to configured counts). */
+export function portsOf(n: NbNode): { inputs: string[]; outputs: string[] } {
+  const base = PORTS[n.type] || { inputs: [], outputs: [] };
+  if (n.type !== "usernode") return base;
+  const inCount = Math.max(
+    0,
+    Math.min(base.inputs.length, Number(n.config?.inputCount) || 0),
+  );
+  const outCount = Math.max(
+    0,
+    Math.min(base.outputs.length, Number(n.config?.outputCount) || 0),
+  );
+  return {
+    inputs: base.inputs.slice(0, inCount),
+    outputs: base.outputs.slice(0, outCount),
+  };
+}
+
 export function nodeHeight(n: NbNode) {
   if (n.type === "text") {
     const lines = String(n.config.text || "")
@@ -469,8 +512,9 @@ export function nodeHeight(n: NbNode) {
     ).length;
     return Math.max(58, Math.min(46 + Math.max(1, k) * 22, 260));
   }
-  const p = PORTS[n.type];
-  const rows = Math.max(leftInputsOf(n.type).length, p.outputs.length, 1);
+  const p = portsOf(n);
+  const leftIns = p.inputs.filter((port) => !isTopInput(n.type, port));
+  const rows = Math.max(leftIns.length, p.outputs.length, 1);
   const base = PORT_TOP + rows * PORT_GAP + 8;
   const bodyH = (def: number) =>
     typeof n.config.bodyH === "number"
@@ -494,17 +538,22 @@ export function nodeHeight(n: NbNode) {
 // Critically this is also used to lay the arrows out and to anchor the wires,
 // so the rendered triangles and the wire endpoints always agree.
 export function visibleInputCount(n: NbNode, edges: NbEdge[]): number {
-  const arr = PORTS[n.type].inputs;
+  const arr = portsOf(n).inputs;
   // .551: UNION shows ONE input triangle that accepts up to 10 stacked
   // connections. The 10 in1..in10 ports are backing slots; each new wire
   // auto-routes to the next free one, but only a single arrow is drawn.
   if (n.type === "union") return 1;
+  if (n.type === "usernode") return Math.max(arr.length, 0);
   if (n.type !== "group") return arr.length;
   let maxIdx = -1;
   for (let i = 0; i < arr.length; i++) {
     if (edges.some((e) => e.to.node === n.id && e.to.port === arr[i])) maxIdx = i;
   }
   return Math.min(arr.length, Math.max(1, maxIdx + 2));
+}
+
+export function visibleOutputCount(n: NbNode): number {
+  return portsOf(n).outputs.length;
 }
 // Vertical offset (from the node's top) of port `idx` on a side. Ports are
 // centered as a block within the node's height -- so a single in/out sits in
@@ -528,8 +577,8 @@ export function portTopOffset(
   const t =
     total ??
     (side === "in"
-      ? PORTS[n.type].inputs.length
-      : PORTS[n.type].outputs.length);
+      ? portsOf(n).inputs.length
+      : portsOf(n).outputs.length);
   const span = (t - 1) * PORT_GAP;
   return nodeHeight(n) / 2 - span / 2 + idx * PORT_GAP;
 }
@@ -539,7 +588,7 @@ export function portXY(
   idx: number,
   total?: number,
 ) {
-  const arr = side === "in" ? PORTS[n.type].inputs : PORTS[n.type].outputs;
+  const arr = side === "in" ? portsOf(n).inputs : portsOf(n).outputs;
   const port = arr[idx];
   // top inputs (the iterator's "vars" driver) anchor on the top edge, centered
   if (side === "in" && isTopInput(n.type, port)) {
@@ -548,7 +597,7 @@ export function portXY(
   if (side === "in") {
     // left inputs are laid out excluding any top inputs, so the remaining
     // arrows stay centered on the left edge (e.g. the iterator's lone "in")
-    const left = leftInputsOf(n.type);
+    const left = arr.filter((p) => !isTopInput(n.type, p));
     if (left.length !== arr.length) {
       const li = Math.max(0, left.indexOf(port));
       return { x: n.x, y: n.y + portTopOffset(n, "in", li, left.length) };

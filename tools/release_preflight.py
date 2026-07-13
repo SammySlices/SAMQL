@@ -571,10 +571,35 @@ def _check_docs_and_transport(root: Path, release: dict[str, Any], checks: Check
         and "$raw.Replace($fang" not in expander,
         "pre-write count/hash/path verification + targeted refang",
     )
+    # Expand's capture group must match RELEASE_MANIFEST dangerousExtensions
+    # exactly so pack/expand cannot drift.
+    expand_m = re.search(r"\\\[\\.\\\]\((?P<exts>[^)]+)\)", expander)
+    declared = {
+        str(item).lstrip(".").lower()
+        for item in (dangerous or [])
+        if isinstance(item, str) and item
+    }
+    expand_set = set()
+    if expand_m:
+        expand_set = {
+            part.strip().lower()
+            for part in expand_m.group("exts").split("|")
+            if part.strip()
+        }
+    checks.add(
+        "Expand dangerous-extension parity",
+        bool(expand_m) and expand_set == declared == {
+            "exe", "dll", "msi", "bat", "cmd", "scr", "vbs", "ps1", "jar"
+        },
+        "expand=%s declared=%s" % (sorted(expand_set), sorted(declared)),
+    )
     checks.add(
         "APHEX decoder boundary",
-        "DATA_END" in decoder and "Expected SHA256" in decoder,
-        "payload marker and SHA verification",
+        "DATA_END" in decoder
+        and "Expected SHA256" in decoder
+        and "(?m)^DATA_BEGIN" in decoder
+        and "(?m)^DATA_END" in decoder,
+        "line-anchored payload marker and SHA verification",
     )
     checks.add(
         "release wrapper boundary",

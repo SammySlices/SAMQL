@@ -3898,7 +3898,7 @@ def backend_tests(datadir, csv_path, json_path):
         app = open(os.path.join(ROOT, "frontend", "src", "App.tsx"),
                    encoding="utf-8").read()
         need("if (network && !_retry && !wasCancelled(queryId))" in app
-             and "return runResolved(trimmed, true, previewLimit)" in app,
+             and "return runResolved(trimmed, true, previewLimit, tabId)" in app,
              "the IDE retries a network-failed run once -- never for a "
              "run the user cancelled (.519)")
 
@@ -22257,6 +22257,20 @@ def backend_tests(datadir, csv_path, json_path):
         eq(st.get("mssql:Prod"), "hunter2", "get round-trips the secret")
         raw = open(st.path, encoding="utf-8").read()
         need("hunter2" not in raw, "stored file contains no plaintext secret")
+        # A failed disk write must not leave memory ahead of disk or return True.
+        real_replace = _oss.replace
+        def _boom(src, dst):
+            raise OSError("disk full")
+        _oss.replace = _boom
+        try:
+            need(st.set("mssql:Prod", "new-secret") is False,
+                 "set returns False when persistence fails")
+            eq(st.get("mssql:Prod"), "hunter2",
+               "in-memory value rolls back after a failed write")
+            need("new-secret" not in open(st.path, encoding="utf-8").read(),
+                 "failed write leaves the previous on-disk blob untouched")
+        finally:
+            _oss.replace = real_replace
         need(st.set("api:x", "") is False, "an empty secret is refused")
         # reload from disk -> still decrypts
         st2 = SecretStore(protector=prot)
@@ -23720,6 +23734,11 @@ def backend_tests(datadir, csv_path, json_path):
             st, ct, data, text, err = apiload.fetch_json(bad)
             need(data is None and err and "http" in err.lower(),
                  "rejects non-http(s) URL: %r -> %r" % (bad, err))
+        for bad in ("http://127.0.0.1/secret", "http://169.254.169.254/latest",
+                    "http://10.0.0.1/x"):
+            st, ct, data, text, err = apiload.fetch_json(bad)
+            need(data is None and err and "refus" in err.lower(),
+                 "rejects private/metadata URL: %r -> %r" % (bad, err))
         # a well-formed https URL is accepted past the scheme check (it will
         # then fail to connect in the sandbox, which is fine -- not a scheme
         # error).
@@ -28247,6 +28266,211 @@ def backend_tests(datadir, csv_path, json_path):
             raised = "Output" in str(e) or "view" in str(e)
         need(raised, "using a dashboard as data raises a friendly error")
 
+    def t_usernode_expand():
+        # Created nodes embed a tab graph; Dynamic Input/Output map to ports.
+        from samql_core import nodeflow
+        need(nodeflow.NODE_PORTS["dyn_input"] == {"in": [], "out": ["out"]},
+             "dyn_input is a source port placeholder")
+        need(nodeflow.NODE_PORTS["dyn_output"] == {"in": ["in"], "out": []},
+             "dyn_output is a sink port placeholder")
+        need(len(nodeflow.NODE_PORTS["usernode"]["in"]) == 10
+             and len(nodeflow.NODE_PORTS["usernode"]["out"]) == 10,
+             "usernode declares up to 10 in/out ports")
+        raised = False
+        try:
+            nodeflow.node_output_sql(
+                {"type": "dyn_input", "id": "d", "config": {}}, "out",
+                lambda p: None, lambda s: [])
+        except nodeflow.NodeflowError:
+            raised = True
+        need(raised, "standalone Dynamic Input refuses to compile")
+        graph = {
+            "nodes": [
+                {"id": "di", "type": "dyn_input", "config": {}},
+                {"id": "sel", "type": "select",
+                 "config": {"fields": [{"name": "a", "keep": True}]}},
+                {"id": "do", "type": "dyn_output", "config": {}},
+            ],
+            "edges": [
+                {"id": "e1",
+                 "from": {"node": "di", "port": "out"},
+                 "to": {"node": "sel", "port": "in"}},
+                {"id": "e2",
+                 "from": {"node": "sel", "port": "out"},
+                 "to": {"node": "do", "port": "in"}},
+            ],
+        }
+        cfg = {
+            "label": "created",
+            "inputs": [{"nodeId": "di", "port": "in1"}],
+            "outputs": [{"nodeId": "do", "port": "out1"}],
+            "graph": graph,
+        }
+        sql = nodeflow.node_output_sql(
+            {"type": "usernode", "id": "u", "config": cfg}, "out1",
+            lambda p: "src_t" if p == "in1" else None,
+            lambda s: ["a"])
+        need("src_t" in sql and '"a"' in sql,
+             "usernode expands dyn_input → select → dyn_output")
+
+    def t_usernode_run():
+        # End-to-end: a created node with multiple dyn ports must execute
+        # through Session.run_nodeflow and return real rows on each output.
+        from samql_core import nodeflow
+        s = Session()
+        try:
+            r = s.run_query(
+                "CREATE TABLE sales AS "
+                "SELECT 1 AS id, 'East' AS region, 100 AS amt "
+                "UNION ALL SELECT 2, 'West', 200 "
+                "UNION ALL SELECT 3, 'East', 50")
+            need(not r.get("error"), "seed sales: %s" % r.get("error"))
+
+            # Authored graph: dyn_in → filter(East) → dyn_out1
+            #                 dyn_in → select(id)  → dyn_out2
+            inner = {
+                "nodes": [
+                    {"id": "di", "type": "dyn_input", "config": {}},
+                    {"id": "flt", "type": "filter",
+                     "config": {"condition": "region = 'East'",
+                                "label": "east"}},
+                    {"id": "sel", "type": "select",
+                     "config": {"fields": [
+                         {"name": "id", "keep": True},
+                         {"name": "region", "keep": False},
+                         {"name": "amt", "keep": False},
+                     ], "label": "ids"}},
+                    {"id": "do1", "type": "dyn_output", "config": {}},
+                    {"id": "do2", "type": "dyn_output", "config": {}},
+                ],
+                "edges": [
+                    {"id": "e1",
+                     "from": {"node": "di", "port": "out"},
+                     "to": {"node": "flt", "port": "in"}},
+                    {"id": "e2",
+                     "from": {"node": "flt", "port": "true"},
+                     "to": {"node": "do1", "port": "in"}},
+                    {"id": "e3",
+                     "from": {"node": "di", "port": "out"},
+                     "to": {"node": "sel", "port": "in"}},
+                    {"id": "e4",
+                     "from": {"node": "sel", "port": "out"},
+                     "to": {"node": "do2", "port": "in"}},
+                ],
+            }
+            cfg = {
+                "label": "east_pack",
+                "name": "east_pack",
+                "inputCount": 1,
+                "outputCount": 2,
+                "inputs": [{"nodeId": "di", "port": "in1", "label": "data"}],
+                "outputs": [
+                    {"nodeId": "do1", "port": "out1", "label": "east"},
+                    {"nodeId": "do2", "port": "out2", "label": "ids"},
+                ],
+                "graph": inner,
+            }
+            need(len(nodeflow.NODE_PORTS["usernode"]["out"]) >= 2,
+                 "usernode supports multiple output arrows")
+
+            outer = {
+                "nodes": [
+                    {"id": "src", "type": "input",
+                     "config": {"table": "sales", "label": "sales"}},
+                    {"id": "u", "type": "usernode", "config": cfg},
+                ],
+                "edges": [
+                    {"id": "w1",
+                     "from": {"node": "src", "port": "out"},
+                     "to": {"node": "u", "port": "in1"}},
+                ],
+            }
+            east = s.run_nodeflow(outer, "u", "out1")
+            need(not east.get("error"),
+                 "created node out1 runs: %s" % east.get("error"))
+            eq(east.get("total_rows", len(east.get("rows") or [])), 2,
+               "out1 is East filter (2 rows)")
+
+            ids = s.run_nodeflow(outer, "u", "out2")
+            need(not ids.get("error"),
+                 "created node out2 runs: %s" % ids.get("error"))
+            eq(ids.get("total_rows", len(ids.get("rows") or [])), 3,
+               "out2 select returns all 3 ids")
+            cols = ids.get("columns") or []
+            need(cols == ["id"] or (cols and cols[0] == "id"),
+                 "out2 projects id only: %s" % cols)
+        finally:
+            s.shutdown()
+
+    def t_usernode_multi_input_run():
+        # Two Dynamic Inputs → join → one Dynamic Output must run.
+        s = Session()
+        try:
+            need(not s.run_query(
+                "CREATE TABLE left_t AS "
+                "SELECT 1 AS id, 'a' AS name UNION ALL SELECT 2, 'b'"
+            ).get("error"), "seed left_t")
+            need(not s.run_query(
+                "CREATE TABLE right_t AS "
+                "SELECT 1 AS id, 10 AS score UNION ALL SELECT 3, 30"
+            ).get("error"), "seed right_t")
+
+            inner = {
+                "nodes": [
+                    {"id": "di1", "type": "dyn_input", "config": {}},
+                    {"id": "di2", "type": "dyn_input", "config": {}},
+                    {"id": "jn", "type": "join",
+                     "config": {"keys": [{"left": "id", "right": "id"}]}},
+                    {"id": "do", "type": "dyn_output", "config": {}},
+                ],
+                "edges": [
+                    {"id": "e1",
+                     "from": {"node": "di1", "port": "out"},
+                     "to": {"node": "jn", "port": "left"}},
+                    {"id": "e2",
+                     "from": {"node": "di2", "port": "out"},
+                     "to": {"node": "jn", "port": "right"}},
+                    {"id": "e3",
+                     "from": {"node": "jn", "port": "inner"},
+                     "to": {"node": "do", "port": "in"}},
+                ],
+            }
+            cfg = {
+                "label": "joiner",
+                "inputCount": 2,
+                "outputCount": 1,
+                "inputs": [
+                    {"nodeId": "di1", "port": "in1"},
+                    {"nodeId": "di2", "port": "in2"},
+                ],
+                "outputs": [{"nodeId": "do", "port": "out1"}],
+                "graph": inner,
+            }
+            outer = {
+                "nodes": [
+                    {"id": "L", "type": "input",
+                     "config": {"table": "left_t"}},
+                    {"id": "R", "type": "input",
+                     "config": {"table": "right_t"}},
+                    {"id": "u", "type": "usernode", "config": cfg},
+                ],
+                "edges": [
+                    {"id": "w1",
+                     "from": {"node": "L", "port": "out"},
+                     "to": {"node": "u", "port": "in1"}},
+                    {"id": "w2",
+                     "from": {"node": "R", "port": "out"},
+                     "to": {"node": "u", "port": "in2"}},
+                ],
+            }
+            res = s.run_nodeflow(outer, "u", "out1")
+            need(not res.get("error"),
+                 "multi-input created node runs: %s" % res.get("error"))
+            eq(res.get("total_rows", len(res.get("rows") or [])), 1,
+               "inner join keeps the one matching id")
+        finally:
+            s.shutdown()
+
     def t_directory_node():
         # The directory node reads a file the user picks from a folder: it
         # loads into a hidden table and behaves like an input in a flow.
@@ -31628,6 +31852,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_chart_multi_series),
         ("chart treemap + candlestick + multix shapes", t_chart_treemap_candlestick),
         ("dashboard node (4 chart inputs, view-only)", t_dashboard_node),
+        ("created usernode expands dyn in/out graph", t_usernode_expand),
+        ("created usernode runs with multiple outputs", t_usernode_run),
+        ("created usernode runs with multiple inputs (join)",
+         t_usernode_multi_input_run),
         ("bin node (numeric -> labelled buckets)", t_bin_node),
         ("rank node (row_number/rank + top-N per group)", t_rank_node),
         ("fill node (nulls -> value/average)", t_fill_node),

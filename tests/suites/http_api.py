@@ -86,13 +86,20 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         eq(st, 403, "unapproved Host rejected")
 
     def t_api_token_and_json_limit():
-        # The HTML shell receives the per-process capability, but unauthenticated
-        # local processes cannot use sensitive endpoints.
-        st, html = c.call("GET", "/")
-        eq(st, 200, "HTML shell status")
-        token_marker = ('name="samql-api-token" content="%s"' %
-                        httpd.samql_api_token).encode()
-        need(token_marker in html, "HTML shell embeds the process API token")
+        # The HTML shell sets an HttpOnly capability cookie. Unauthenticated
+        # local processes still cannot use sensitive endpoints without it.
+        import http.client
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        body = resp.read()
+        eq(resp.status, 200, "HTML shell status")
+        cookies = resp.getheader("Set-Cookie") or ""
+        need("samql_api_token=" in cookies and "HttpOnly" in cookies,
+             "HTML shell sets an HttpOnly API capability cookie")
+        need(httpd.samql_api_token.encode() not in body,
+             "HTML body must not embed the process API token")
+        conn.close()
 
         no_token = Client(c.base)
         st, d = no_token.js("GET", "/api/tables")
@@ -103,6 +110,10 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             "X-SamQL-Token": "definitely-wrong",
         })
         eq(st, 403, "wrong token rejected")
+        st, d = no_token.js("GET", "/api/tables", headers={
+            "Cookie": "samql_api_token=%s" % httpd.samql_api_token,
+        })
+        eq(st, 200, "HttpOnly cookie authenticates API calls")
 
         old = os.environ.get("SAMQL_JSON_BODY_MB")
         os.environ["SAMQL_JSON_BODY_MB"] = "1"

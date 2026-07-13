@@ -27,6 +27,7 @@ import { useNodeFlowGraphSnapshot } from "./nodeflow/useNodeFlowGraphSnapshot";
 import { useNodeFlowKeyboardShortcuts } from "./nodeflow/useNodeFlowKeyboardShortcuts";
 import { useNodeFlowViewport } from "./nodeflow/useNodeFlowViewport";
 import { findChildNode } from "./nodeflow/nodeFlowGraphCommands";
+import { registerActiveNodeFlowGraphGetter } from "../lib/createdNodes";
 
 export const NodeFlow: React.FC<{
   tables: TableInfo[];
@@ -72,6 +73,15 @@ export const NodeFlow: React.FC<{
   useLayoutEffect(() => {
     edgesRef.current = edges;
   }, [edges]);
+
+  useEffect(() => {
+    registerActiveNodeFlowGraphGetter(() => ({
+      nodes: nodesRef.current,
+      edges: edgesRef.current,
+    }));
+    return () => registerActiveNodeFlowGraphGetter(null);
+  }, []);
+
   // nodes that errored on their last preview/run (id -> message) for inline
   // error badges on the canvas
   const [nodeErrors, setNodeErrors] = useState<Record<string, string>>({});

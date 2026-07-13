@@ -7,6 +7,7 @@ import {
   PORT_LABEL,
   isTopInput,
   nodeShowsBody,
+  portsOf,
   portTopOffset,
   portXY,
   type NbEdge,
@@ -17,6 +18,10 @@ import { useRenderCount } from "../../lib/renderDebug";
 import { ChartView } from "../ChartView";
 import { Icon } from "../Icon";
 import { CanvasNodeFrame } from "../NodeFlowCanvas";
+import {
+  loadCreatedNodes,
+  usernodeConfigFromDefinition,
+} from "../../lib/createdNodes";
 import { getNodeCardSummary, NODE_BY_TYPE } from "./nodeDefinitions";
 import { NodeFlowCanvasShell } from "./NodeFlowCanvasShell";
 import type { CanvasMenuState, NodeMenuState } from "./NodeFlowMenus";
@@ -49,7 +54,12 @@ interface NodeFlowSceneProps {
   toContent: (clientX: number, clientY: number) => { x: number; y: number };
   groupAtContentPoint: (x: number, y: number, excludeId?: string) => NbNode | null;
   setCanvasMenu: React.Dispatch<React.SetStateAction<CanvasMenuState | null>>;
-  addNodeAt: (type: NodeType, x: number, y: number) => void;
+  addNodeAt: (
+    type: NodeType,
+    x: number,
+    y: number,
+    config?: Record<string, any>,
+  ) => void;
   groupAddChild: (groupId: string, type: NodeType) => void;
   zoom: number;
   snap: boolean;
@@ -207,7 +217,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
     if (!pendingWire) return null;
     const source = renderModel.nodeById.get(pendingWire.node);
     if (!source) return null;
-    const outputIndex = PORTS[source.type].outputs.indexOf(pendingWire.port);
+    const outputIndex = portsOf(source).outputs.indexOf(pendingWire.port);
     const start = portXY(source, "out", outputIndex < 0 ? 0 : outputIndex);
     return {
       ax: start.x,
@@ -237,13 +247,32 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
       }}
       onDrop={(event) => {
         event.preventDefault();
+        const createdId = event.dataTransfer.getData(
+          "application/x-nb-created-node",
+        );
+        const point = toContent(event.clientX, event.clientY);
+        if (createdId) {
+          const definition = loadCreatedNodes().find((d) => d.id === createdId);
+          if (!definition) return;
+          addNodeAt(
+            "usernode",
+            point.x - NODE_W / 2,
+            point.y - HEAD_H,
+            usernodeConfigFromDefinition(definition),
+          );
+          return;
+        }
         const type = event.dataTransfer.getData(
           "application/x-nb-node",
         ) as NodeType;
         if (!type || !PORTS[type]) return;
-        const point = toContent(event.clientX, event.clientY);
         const group = groupAtContentPoint(point.x, point.y);
-        if (group && type !== "group" && type !== "iterator") {
+        if (
+          group &&
+          type !== "group" &&
+          type !== "iterator" &&
+          type !== "usernode"
+        ) {
           groupAddChild(group.id, type);
           return;
         }
@@ -271,8 +300,9 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
       renderedNodeCount={visibleNodes.length}
     >
       {visibleNodes.map((node) => {
-        const ports = PORTS[node.type];
-        const visibleInputCount = renderModel.visibleInputCountByNode[node.id] ?? ports.inputs.length;
+        const ports = portsOf(node);
+        const visibleInputCount =
+          renderModel.visibleInputCountByNode[node.id] ?? ports.inputs.length;
         const incomingEdges = renderModel.incomingByNode[node.id] || [];
         const childSelection =
           (node.type === "group" || node.type === "iterator") &&
@@ -323,9 +353,19 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
               className="nb2-node-head"
               onPointerDown={(event) => startNodeDrag(event, node)}
             >
-              <span className="nb2-node-type">{node.type}</span>
+              <span className="nb2-node-type">
+                {node.type === "usernode"
+                  ? "created"
+                  : node.type === "dyn_input"
+                    ? "dyn in"
+                    : node.type === "dyn_output"
+                      ? "dyn out"
+                      : node.type}
+              </span>
               <span className="nb2-node-label">
-                {node.config.label || node.type}
+                {node.config.label ||
+                  node.config.name ||
+                  node.type}
               </span>
               {ports.inputs.length >= 1 && ports.outputs.length >= 1 && (
                 <button

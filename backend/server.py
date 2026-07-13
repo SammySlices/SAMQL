@@ -761,20 +761,39 @@ def _token_meta(token):
             .replace("<", "&lt;").replace(">", "&gt;"))
 
 
+def _api_token_set_cookie(token):
+    """HttpOnly cookie carries the capability; it must not appear in HTML."""
+    return ("samql_api_token=%s; Path=/; HttpOnly; SameSite=Strict"
+            % str(token))
+
+
+def _token_from_cookie_header(header):
+    raw = str(header or "")
+    for part in raw.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == "samql_api_token" and value:
+            return value
+    return ""
+
+
 def _inject_api_token_html(data, token):
-    """Inject the per-process API token into the served HTML shell."""
-    if not token:
-        return data
-    marker = b'name="samql-api-token"'
-    if marker in data:
-        return data
-    tag = ('<meta name="samql-api-token" content="%s">'
-           % _token_meta(token)).encode("utf-8")
-    low = data.lower()
-    pos = low.find(b"</head>")
-    if pos >= 0:
-        return data[:pos] + tag + b"\n" + data[pos:]
-    return tag + b"\n" + data
+    """Deprecated no-op: capability is delivered via HttpOnly cookie only.
+
+    Kept as a named hook so older call sites and contract greps stay stable
+    while the HTML shell no longer embeds the secret.
+    """
+    return data
+
+
+def _env_truthy(name):
+    return (os.environ.get(name) or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _is_loopback_host(host):
+    h = (host or "").strip().lower()
+    return h in ("127.0.0.1", "localhost", "::1", "") or h.startswith("127.")
 
 
 def _unlink_with_retry(path, attempts=8, base_delay=0.025):
@@ -1093,30 +1112,31 @@ def _graceful_shutdown(*_args):
     try:
         if _HTTPD is not None:
             _HTTPD.shutdown()
-    except Exception:
-        pass
+    except Exception as exc:
+        print("[samql] shutdown: httpd.shutdown failed: %s" % exc, file=sys.stderr)
     if SESSION is not None:
         try:
             SESSION.shutdown()
-        except Exception:
-            pass
+        except Exception as exc:
+            print("[samql] shutdown: session.shutdown failed: %s" % exc,
+                  file=sys.stderr)
     try:
         tmputil.cleanup_instance()
-    except Exception:
-        pass
+    except Exception as exc:
+        print("[samql] shutdown: temp cleanup failed: %s" % exc, file=sys.stderr)
     # Also tidy any directories left behind by previous instances that were
     # killed before they could clean up, so a clean exit never leaves temp
     # directories accumulating across runs.
     try:
         tmputil.sweep_stale()
-    except Exception:
-        pass
+    except Exception as exc:
+        print("[samql] shutdown: stale sweep failed: %s" % exc, file=sys.stderr)
     # Close the native window last, so stopping the server from the UI closes
     # the app. When the window goes, webview.start() on the main thread returns.
     try:
         _destroy_window()
-    except Exception:
-        pass
+    except Exception as exc:
+        print("[samql] shutdown: window destroy failed: %s" % exc, file=sys.stderr)
 
 
 def _install_exit_handlers():
@@ -3283,7 +3303,11 @@ class Api:
                 read_only=bool(b.get("read_only", True)))
         except Exception as e:
             cause, fix = classify_mssql_error(str(e))
-            raise ApiError(400, f"{type(e).__name__}: {e}\n{cause}\n{fix}")
+            from samql_core.errfmt import err_str, redact_secrets
+            raise ApiError(
+                400,
+                "%s\n%s\n%s" % (err_str(e), redact_secrets(cause), redact_secrets(fix)),
+            )
         s.connections[name] = conn
         return {"ok": True, "name": name, "spid": getattr(conn, "spid", None),
                 "databases": conn.list_databases()}
@@ -4045,6 +4069,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_bytes(self, status, data, content_type, extra_headers=None):
         headers = dict(extra_headers or {})
+        if str(content_type or "").lower().startswith("text/html"):
+            token = str(getattr(self.server, "samql_api_token", "") or "")
+            if token and "Set-Cookie" not in headers:
+                headers["Set-Cookie"] = _api_token_set_cookie(token)
         enc = None
         # Transparently gzip large, compressible payloads when the client
         # asks for it (result pages and the JS bundle compress a lot;
@@ -4158,17 +4186,34 @@ class Handler(BaseHTTPRequestHandler):
         return origin.lower() in _csv_env("SAMQL_ALLOWED_ORIGINS")
 
     def _api_token_required(self, method, path):
-        # Health is used by launch/reuse probes before any HTML exists. Focus is
-        # a deliberately low-risk local single-instance action. Everything else
-        # under /api requires the per-process capability token.
-        return not (path == "/api/health" and method in ("GET", "HEAD")
-                    or path == "/api/focus" and method == "POST")
+        # Health is used by launch/reuse probes before any HTML exists.
+        # Focus stays token-free only for loopback peers (second-launch attach).
+        if path == "/api/health" and method in ("GET", "HEAD"):
+            return False
+        if path == "/api/focus" and method == "POST":
+            return not self._client_is_loopback()
+        return True
+
+    def _client_is_loopback(self):
+        try:
+            addr = self.client_address[0]
+        except Exception:
+            return False
+        return _is_loopback_host(str(addr))
 
     def _request_api_token_allowed(self):
         expected = str(getattr(self.server, "samql_api_token", "") or "")
+        if not expected:
+            return False
         supplied = str(self.headers.get("X-SamQL-Token") or "")
-        return bool(expected and supplied and
-                    hmac.compare_digest(expected, supplied))
+        if not supplied:
+            supplied = _token_from_cookie_header(self.headers.get("Cookie"))
+        return bool(supplied and hmac.compare_digest(expected, supplied))
+
+    def _emit_api_token_cookie(self):
+        token = str(getattr(self.server, "samql_api_token", "") or "")
+        if token:
+            self.send_header("Set-Cookie", _api_token_set_cookie(token))
 
     def _request_boundary_allowed(self):
         return self._request_host_allowed() and self._request_origin_allowed()
@@ -4552,6 +4597,12 @@ class _QuietServer(ThreadingHTTPServer):
 
 
 def make_server(host="127.0.0.1", port=8765):
+    if not _is_loopback_host(host) and not _env_truthy("SAMQL_ALLOW_REMOTE"):
+        raise SystemExit(
+            "Refusing to bind SamQL to non-loopback host %r without "
+            "SAMQL_ALLOW_REMOTE=1 (filesystem and outbound-fetch APIs are "
+            "powerful on a shared network)." % (host,)
+        )
     port = _find_free_port(host, port)
     httpd = _QuietServer((host, port), Handler)
     # Port 0 asks the OS for an ephemeral port. Return the ACTUAL bound port,
