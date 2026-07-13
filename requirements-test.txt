@@ -1,0 +1,18 @@
+# Complete Python dependency set used by SamQL's deterministic test suites.
+# Test-SamQL-All.ps1 installs this into an isolated .samql-test-venv.
+duckdb>=1.0
+pyarrow
+sqlglot
+openpyxl
+orjson
+ijson
+tzdata
+pillow
+pandas
+# Executes the SQL Server driver/availability boundary on Windows.
+pyodbc; platform_system == "Windows"
+# Executes DPAPI/Windows-auth capability paths on Windows.
+pywin32; platform_system == "Windows"
+# Exercises the native-window import path on Windows; pythonnet/WebView2
+# dependencies are resolved transitively by pywebview.
+pywebview; platform_system == "Windows"

@@ -1,0 +1,34 @@
+# Local / generated — not part of SOURCE_MANIFEST
+.samql-test-venv/
+.samql-npm-cache/
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+frontend/playwright/.cache/
+
+# Python / build
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+backend/build/
+backend/dist/
+build/
+dist/
+*.spec.bak
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.code-workspace
+
+# Release / local outputs
+release/
+samql_txt/
+*.aphex.txt
+*_EMAIL_SAFE_APHEX.txt
+*_RELEASE_RECEIPT.json

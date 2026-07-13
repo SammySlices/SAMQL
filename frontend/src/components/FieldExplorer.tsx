@@ -1,0 +1,283 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useWinDrag } from "./ActivityShared";
+import { api, copyText } from "../lib/api";
+import type { TableInfo } from "../lib/types";
+import { Icon } from "./Icon";
+
+// A floating, draggable field-access explorer. Stays open across the IDE,
+// Journal and Node views (it is rendered at the App root, outside the view
+// switch). Pick a nested (JSON) source column, click any field in its tree,
+// and the right pane shows the queries to access it: the first-record [1]
+// path, the all-rows UNNEST chain, and (for arrays) the recursive one-shot.
+
+type FieldRow = {
+  depth: number;
+  name: string;
+  type: string;
+  kind: string;
+  access?: {
+    first?: string;
+    sel?: string;
+    unnests?: string[];
+    recursive?: string;
+    note?: string;
+  };
+};
+
+interface Props {
+  open: boolean;
+  onClose: () => void;
+  tables: TableInfo[];
+  onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
+  onTablesChanged?: () => void;
+}
+
+const KIND_COLOR: Record<string, string> = {
+  array: "#c98a2b",
+  "array-scalar": "#c98a2b",
+  struct: "#5b8def",
+  map: "#8a6ad6",
+};
+
+export const FieldExplorer: React.FC<Props> = ({
+  open,
+  onClose,
+  tables,
+  onToast,
+  onTablesChanged,
+}) => {
+  // nested columns across loaded tables = the selectable "JSON files"
+  const sources = useMemo(() => {
+    const out: { key: string; label: string; engine: string; table: string; column: string }[] = [];
+    for (const t of tables) {
+      if (t.remote) continue;
+      for (const c of t.columns || []) {
+        if (!c.hint) continue; // nested columns only
+        out.push({
+          key: `${t.engine}\u0000${t.name}\u0000${c.name}`,
+          label: `${t.name} › ${c.name}`,
+          engine: t.engine,
+          table: t.name,
+          column: c.name,
+        });
+      }
+    }
+    return out;
+  }, [tables]);
+
+  const [srcKey, setSrcKey] = useState("");
+  const [fields, setFields] = useState<FieldRow[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [selIdx, setSelIdx] = useState<number | null>(null);
+  const src = sources.find((s) => s.key === srcKey) || null;
+
+  // auto-pick the only source
+  useEffect(() => {
+    if (!srcKey && sources.length === 1) setSrcKey(sources[0].key);
+  }, [sources, srcKey]);
+
+  useEffect(() => {
+    if (!src) {
+      setFields(null);
+      return;
+    }
+    setBusy(true);
+    setSelIdx(null);
+    api
+      .columnFields(src.engine, src.table, src.column)
+      .then((r) => setFields((r.fields || []) as FieldRow[]))
+      .catch(() => setFields([]))
+      .finally(() => setBusy(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [srcKey]);
+
+  // ---- close: X button, and Esc anywhere while the panel is open ----
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  // ---- dragging ----
+  const { pos, startDrag, dragging, settled, winRef } =
+    useWinDrag({ x: 120, y: 90 });
+
+  // .460's clipboard-morph state. .468: these hooks MUST sit above the
+  // open guard -- they were added below `if (!open) return null`, so the
+  // moment the panel opened React saw MORE hooks than the previous
+  // render and unmounted the entire tree (the "whole app goes blank"
+  // report). Rules of Hooks: every hook, every render, same order.
+  const [copiedKey, setCopiedKey] = React.useState<string | null>(null);
+  const copiedTimer = React.useRef<number | null>(null);
+  React.useEffect(
+    () => () => {
+      if (copiedTimer.current != null)
+        window.clearTimeout(copiedTimer.current);
+    },
+    [],
+  );
+
+  if (!open) return null;
+
+  const sel = selIdx != null && fields ? fields[selIdx] : null;
+  const acc = sel?.access;
+  const tbl = src ? `"${src.table.replace(/"/g, '""')}"` : '"table"';
+  const firstSql = acc?.first ? `SELECT ${acc.first}\nFROM ${tbl};` : null;
+  const allSql = acc?.sel
+    ? `SELECT ${acc.sel}\nFROM ${tbl}${(acc.unnests || [])
+        .map((u) => `,\n     ${u}`)
+        .join("")};`
+    : null;
+  const recSql = acc?.recursive
+    ? `SELECT ${acc.recursive}\nFROM ${tbl};`
+    : null;
+
+  const copy = (label: string, text: string) => {
+    copyText(text)
+      .then(() => {
+        onToast("ok", "Copied", label);
+        setCopiedKey(label);
+        if (copiedTimer.current != null)
+          window.clearTimeout(copiedTimer.current);
+        copiedTimer.current = window.setTimeout(() => {
+          setCopiedKey(null);
+          copiedTimer.current = null;
+        }, 900);
+      })
+      .catch(() => onToast("error", "Copy failed"));
+  };
+
+  const block = (label: string, sql: string) => (
+    <div className="fx-block">
+      <div className="fx-block-head">
+        <span className="fx-block-label">{label}</span>
+        <button
+          className="btn sm ghost"
+          title="Copy SQL"
+          onClick={() => copy(label, sql)}
+        >
+          {copiedKey === label ? (
+            <span className="copy-ok">
+              <Icon.Check size={12} />
+            </span>
+          ) : (
+            <Icon.Copy size={12} />
+          )}
+        </button>
+      </div>
+      <pre className="fx-sql">{sql}</pre>
+    </div>
+  );
+
+  return (
+    <div
+      ref={winRef as React.RefObject<HTMLDivElement>}
+      className={
+        "fx-panel win-float" +
+        (dragging ? " dragging" : "") +
+        (settled ? " settle" : "")
+      }
+      style={{ left: pos.x, top: pos.y }}
+      role="dialog"
+      aria-label="Field explorer"
+    >
+      <div
+        className="fx-head"
+        onMouseDown={startDrag}
+        title="Drag to move"
+      >
+        <Icon.ListTree size={14} />
+        <span className="fx-title">Field explorer</span>
+        <span className="spacer" />
+        <button
+          className="btn sm ghost"
+          title="Close"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={onClose}
+        >
+          <Icon.X size={14} />
+        </button>
+      </div>
+      <div className="fx-body">
+        <div className="fx-left">
+          <select
+            className="fx-src"
+            value={srcKey}
+            onChange={(e) => setSrcKey(e.target.value)}
+            title="Pick a nested (JSON) column to explore"
+          >
+            <option value="">
+              {sources.length ? "Pick a JSON source…" : "No nested columns loaded"}
+            </option>
+            {sources.map((s) => (
+              <option key={s.key} value={s.key}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+          <div className="fx-tree">
+            {busy ? (
+              <div className="faint" style={{ padding: 8 }}>
+                <span className="spin" /> loading fields…
+              </div>
+            ) : !fields ? (
+              <div className="faint" style={{ padding: 8 }}>
+                Pick a source above.
+              </div>
+            ) : fields.length === 0 ? (
+              <div className="faint" style={{ padding: 8 }}>
+                No nested fields.
+              </div>
+            ) : (
+              fields.map((f, i) => (
+                <div
+                  key={i}
+                  className={"fx-row" + (i === selIdx ? " sel" : "")}
+                  style={{ paddingLeft: 6 + (f.depth - 1) * 12 }}
+                  onClick={() => setSelIdx(i)}
+                  title={f.type}
+                >
+                  <span
+                    style={{
+                      color: KIND_COLOR[f.kind] || undefined,
+                      fontStyle: f.name === "(element)" ? "italic" : undefined,
+                      opacity: f.name === "(element)" ? 0.7 : 1,
+                    }}
+                  >
+                    {f.name}
+                  </span>
+                  {(f.kind === "array" || f.kind === "array-scalar") && (
+                    <span style={{ color: "#c98a2b" }}> ⇗</span>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="fx-right">
+          {!sel ? (
+            <div className="faint" style={{ padding: 10 }}>
+              Click a field on the left to see how to query it.
+            </div>
+          ) : (
+            <>
+              <div className="fx-field-name">
+                {sel.name}
+                <span className="ctype" style={{ marginLeft: 8 }}>
+                  {sel.kind}
+                </span>
+              </div>
+              {firstSql && block("First record ([1] path)", firstSql)}
+              {allSql && block("All rows (UNNEST chain)", allSql)}
+              {recSql && block("Explode everything under it (recursive)", recSql)}
+              {acc?.note && <div className="fx-note faint">{acc.note}</div>}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};

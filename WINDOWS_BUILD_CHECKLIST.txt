@@ -1,0 +1,160 @@
+======================================================================
+SamQL - WINDOWS BUILD + LAUNCHER CHECKLIST        (added in .456)
+======================================================================
+The sandbox half of AUDIT_PLAN PASS 13 (port probe, log rotation,
+child-env scrubbing, candidate order, drift pins, defang round-trip)
+runs inside tests/run_tests.py on every build. THIS file is the other
+half: the parts that only exist on the Windows box -- PowerShell 5.1,
+PyInstaller, Edge/Chrome app windows, Citrix. Run it top to bottom
+after any packaging-adjacent change; each step names the EXPECTED
+observation so a failure is unambiguous.
+
+Conventions: PS> is PowerShell 5.1 from the repo root. "the log"
+means %TEMP%\samql\launcher.log. Before step 1 run:
+  PS> python tools\release_artifacts.py verify-tree --root .
+  PS> python tests\test_release_hardening.py
+EXPECT both commands to pass before any executable packaging begins.
+
+----------------------------------------------------------------------
+1. EXPAND + TREE FIDELITY
+----------------------------------------------------------------------
+1.1  PS> .\Expand-SamQL.ps1 -Source .\samql_full_source.txt
+     EXPECT: the declared file count and SHA256 matching the header;
+     zero warnings about skipped or partial files.
+1.2  Spot-open backend\samql_core\__init__.py: __version__ and BUILD
+     match the VERSION header lines. (The suite pins this too.)
+
+----------------------------------------------------------------------
+2. BACKEND SUITE ON THE BOX
+----------------------------------------------------------------------
+2.1  PS> python tests\run_tests.py
+     EXPECT: 0 failed. The 21 sandbox env-skips SHRINK here (duckdb
+     and pyarrow are present in the venv): expect roughly 650+ passed,
+     and specifically the duckdb-gated flatten/shred/zero-copy tests
+     to RUN, not skip.
+2.2  EXPECT the two known stderr noise lines at most ("in-engine deep
+     flatten..."), nothing else on stderr.
+
+----------------------------------------------------------------------
+3. PYINSTALLER ONEFILE BUILD
+----------------------------------------------------------------------
+3.1  PS> .\build.ps1   (or: pyinstaller backend\samql.spec)
+     EXPECT: "embedding application icon" IF backend\samql.ico is
+     present, otherwise the "default PyInstaller icon" notice -- the
+     build must SUCCEED in both cases.
+3.2  EXPECT dist\SamQL.exe to exist; size sanity: tens of MB, not
+     hundreds (a jump means a stray package rode into hiddenimports).
+3.3  PS> dist\SamQL.exe --help
+     EXPECT: the argparse help with --port, --browser, --no-server;
+     exit code 0; no console window lingering.
+
+----------------------------------------------------------------------
+4. LAUNCHER BEHAVIOR (the .456 contracts, live)
+----------------------------------------------------------------------
+4.1  COLD START. No SamQL running. Double-click SamQL.exe.
+     EXPECT: splash -> "Starting the SamQL server..." -> an app
+     window on http://127.0.0.1:8765/ within a few seconds; the log
+     gains "INFO launcher start (port 8765)".
+4.2  REUSE-BY-PORT (single instance). With 4.1 still running, launch
+     SamQL.exe again.
+     EXPECT: NO second server; a second app window opens onto the
+     SAME instance immediately (the port-open branch skips
+     start_server). Task Manager shows ONE SamQL server process.
+4.3  PORT HELD BY A STRANGER. Stop SamQL; occupy the port:
+     PS> $l=[System.Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,8765);$l.Start()
+     Launch SamQL.exe.
+     EXPECT: the launcher treats the port as live and opens the app
+     window onto it -- which will show a connection/blank page. This
+     is the documented reuse contract; recover with $l.Stop() and
+     relaunch, or launch with --port 8766.
+4.4  DEAD-SERVER TIMEOUT. Temporarily rename the server exe and the
+     backend folder so nothing can start, then launch.
+     EXPECT: "Nothing to start..." visible failure; with a startable
+     server that hangs, the 120 s AV-tolerant deadline ends in "did not come up on
+     port 8765 within 120 s" -- both leave a WARN/ERROR line in the
+     log and exit; no zombie splash.
+4.5  --no-server. PS> dist\SamQL.exe --no-server   (nothing running)
+     EXPECT: immediate visible "SamQL is not running on port 8765
+     (--no-server)." and a nonzero exit; nothing started.
+4.6  LOG ROTATION. PS> 1..250 | % { dist\SamQL.exe --no-server } is
+     overkill -- instead confirm after normal use:
+     PS> (Get-Content $env:TEMP\samql\launcher.log).Count
+     EXPECT: never above 200; newest lines present, oldest trimmed.
+4.7  CLEAN EXIT / NO MEI LITTER. Start and close the app window,
+     then: PS> Get-ChildItem $env:TEMP\_MEI* -ErrorAction SilentlyContinue
+     EXPECT: none that persist after a minute -- the .421/.456
+     clean_child_env scrub keeps the frozen child from pinning the
+     launcher's extraction ("Failed to remove temporary directory"
+     dialog must NOT appear).
+4.8  KILL + RESTART. Kill the server process from Task Manager while
+     the window is open; relaunch SamQL.exe.
+     EXPECT: fresh cold start, no port ghost (Windows releases the
+     listener); if a TIME_WAIT ghost blocks binding, the 120 s message
+     from 4.4 names it in the log.
+
+----------------------------------------------------------------------
+5. CITRIX / TD-BOX SPECIFICS
+----------------------------------------------------------------------
+5.1  AV interference: the first exe launch after a rebuild is the AV
+     scan window -- expect a one-time multi-second delay, not a hang;
+     os.replace retries in the cache layer absorb the file locks.
+5.2  Roaming profile: ~\.json_csv_sql_explorer (config, history,
+     manifest) follows the profile; %TEMP%\samql (logs, filecache)
+     does not. After a Citrix session move, EXPECT tables to
+     auto-restore from the manifest and the filecache to rebuild
+     cold -- both are designed behaviors, not faults.
+5.3  Firewall prompt: first cold start may prompt for 127.0.0.1
+     loopback; allow. No inbound rule is needed beyond loopback.
+
+----------------------------------------------------------------------
+5b. TASKBAR ICON (the .461 branding pass)
+5b.1  After launch, the taskbar button should show the green SQ mark,
+      not the Edge logo. The launcher log (Settings -> Error log)
+      should contain "AppUserModelID set" and "app icon applied".
+5b.2  If an OLD pinned shortcut still shows Edge: unpin it and re-pin
+      from the running window (pinned shortcuts cache their own icon).
+5b.3  If the icon looks stale after a rebuild, refresh the shell icon
+      cache:  PS> ie4uinit.exe -show   (then sign out/in if stubborn).
+5b.4  Both EXEs themselves should carry the SQ icon in Explorer -- the
+      spec writes backend\samql.ico from the embedded asset when the
+      file is absent; the build log prints "wrote + embedding".
+
+5c. CUSTOM BRANDING -- WHERE IMAGES GO (the .467 one-file flow)
+5c.1  ONE file is enough: frontend\public\app-icon.png. After
+      `npm run build` it rides into frontend\dist and the server
+      serves it for the tab AND derives favicon(dot)ico from it on
+      the fly -- the launcher stamps that onto the window, so the
+      TASKBAR wears your art too. public\ alone does nothing: the
+      server reads the BUILT dist (or the exe's frozen copy), never
+      the source folder.
+5c.2  Optional overrides, strongest first: a hand-tuned multi-size
+      favicon(dot)ico in public\ beats the derived one outright;
+      samql(dot)ico at the repo root or backend\ is what PyInstaller
+      embeds into the EXE files for Explorer.
+5c.3  Packaged exe without a rebuild: create a frontend_dist folder
+      NEXT TO SamQL(dot)exe and drop the built files (or just the
+      icons) there -- it now wins over the frozen bundle.
+5c.4  Seeing stale art after a swap: 5b.2 (pinned shortcuts cache
+      their icon -- unpin/re-pin) and 5b.3 (ie4uinit -show) apply.
+5c.5  WINDOW + TASKBAR icon (the Edge-logo case). An Edge --app
+      window should adopt the page favicon, but managed boxes can
+      starve the favicon service and the frame falls back to the
+      Edge logo. Both launch paths now stamp the window natively
+      (WM_SETICON + AppUserModelID, with timed restamps):
+      Start-SamQL-AppWindow(dot)ps1 and the packaged launcher.
+      Their logs print two lines worth reading when art looks
+      wrong: "window icon source: <...>" names WHOSE art the
+      server handed out (your png / derived / embedded), and
+      "window stamp: icon=... aumid=..." says whether the stamp
+      landed. If the source line says "embedded", the served dist
+      simply does not contain your app-icon(dot)png yet -- see
+      5c.1-5c.3.
+
+6. SHIP-EMAIL PIPELINE (when moving builds by mail)
+----------------------------------------------------------------------
+6.1  PS> .\Pack-SamQL.ps1 -OutputDir .\release
+     EXPECT decoded, APHEX, and release-receipt files. Record both artifact
+     SHA-256 values. Decode APHEX and compare it byte-for-byte to the decoded
+     bundle. Expand-SamQL verifies count/hash before pruning or overwriting and
+     refangs every bracketed risky extension exactly.
+======================================================================

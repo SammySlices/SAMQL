@@ -1,0 +1,68 @@
+name: Windows release and browser validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  edge-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install complete backend test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Install locked frontend dependencies
+        run: python tools/install_frontend_deps.py --frontend frontend --cache .samql-npm-cache
+
+      - name: Verify release identity and exact source tree
+        run: python tools/release_artifacts.py verify-tree --root .
+      - name: Verify deterministic package and APHEX round trip
+        run: python tests/test_release_hardening.py
+      - name: Run complete backend, HTTP, frontend, and production-build suite
+        run: python tests/run_tests.py --build
+      - name: Run SQLite and DuckDB optimization suite
+        run: python tests/test_optimizations_dual_engine.py
+      - name: Run resource, parallel-branch, and persistent-cache suite
+        run: python tests/test_nodeflow_resources.py
+      - name: Run benchmark harness self-test
+        run: python tests/benchmark_workloads.py --self-test
+
+      - name: Discover real Edge workflows
+        working-directory: frontend
+        env:
+          CI: "1"
+          SAMQL_TEST_PYTHON: python
+          PLAYWRIGHT_BROWSER_CHANNEL: msedge
+        run: npm run test:e2e -- --list
+      - name: Run real Edge workflows
+        working-directory: frontend
+        env:
+          CI: "1"
+          SAMQL_TEST_PYTHON: python
+          PLAYWRIGHT_BROWSER_CHANNEL: msedge
+        run: npm run test:e2e
+
+      - name: Upload browser diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-windows-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          if-no-files-found: ignore

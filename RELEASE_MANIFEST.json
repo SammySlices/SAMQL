@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "product": "SamQL",
+  "version": "2.16.4",
+  "build": "2026-07-12.593",
+  "phase": 10,
+  "generatedAt": "2026-07-12T23:59:00Z",
+  "sourceManifest": "SOURCE_MANIFEST.txt",
+  "sourceFileCount": 259,
+  "runtime": {
+    "pythonMinimum": "3.10",
+    "nodeMinimum": "20.19",
+    "npmMinimum": "10"
+  },
+  "savedData": {
+    "workflowEnvelope": {
+      "current": 2,
+      "oldestReadable": 0
+    },
+    "workflowPayload": {
+      "current": 1,
+      "oldestReadable": 1
+    },
+    "notebook": {
+      "current": 2,
+      "oldestReadable": 0
+    },
+    "nodeFlowGraph": {
+      "current": 3,
+      "oldestReadable": 0
+    },
+    "nodeFlowTabs": {
+      "current": 3,
+      "oldestReadable": 0
+    },
+    "browserSession": {
+      "current": 2,
+      "oldestReadable": 0
+    }
+  },
+  "qualityGates": {
+    "componentTestsMinimum": 113,
+    "edgeE2eTestsMinimum": 12,
+    "nodeFlowShellMaximumLines": 1300,
+    "requiredBrowserChannel": "msedge"
+  },
+  "sourceTransport": {
+    "format": "APHEX-1",
+    "lineLength": 128,
+    "dangerousExtensions": [
+      "exe",
+      "dll",
+      "msi",
+      "bat",
+      "cmd",
+      "scr",
+      "vbs",
+      "ps1",
+      "jar"
+    ]
+  }
+}

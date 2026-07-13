@@ -1,0 +1,205 @@
+SamQL DEEP-AUDIT MASTER PLAN
+============================
+Written at build 2026-06-25.443. This is the from-scratch program for
+auditing ALL of SamQL, subsystem by subsystem. It restarts the process
+that produced passes .438-.443 and widens it to everything.
+
+THE METHOD (every pass, no exceptions)
+--------------------------------------
+1. RECON      map the subsystem's real code paths (grep + read), list
+              its invariants and its inputs.
+2. GAUNTLET   drive it EXECUTED wherever the sandbox allows: hostile
+              inputs, live servers, real locks, real files. Static
+              grep only where execution is impossible (DuckDB-native,
+              Windows, PyInstaller) -- and say so.
+3. FIX        every unearthed bug is fixed in the same pass.
+4. ENFORCE    the gauntlet joins tests/run_tests.py permanently, with
+              exact statuses/messages/invariants pinned, so the bug
+              class cannot return silently.
+5. SHIP       one build per pass, full pipeline, changelog = the
+              audit report (finds, fixes, clean bills, tradeoffs).
+
+Severity language used in reports: BUG (wrong behavior), GAP
+(inconsistent discipline), WART (misleading but harmless), NOTE
+(deliberate tradeoff, documented).
+
+DONE SO FAR (kept for the record)
+---------------------------------
+.438  backend concurrency      BUG: dead lock-probe (.locked() absent)
+                               GAP: shrink_memory unlocked
+.439  frontend async           BUG: stale-catalog latest-wins race
+.440  resource lifecycles      BUG: launcher handle leak; bare open()
+                               banned by AST scan + allowlist
+.441  identifier quoting       BUG: rename_table raw-spliced OLD
+                               (executed hostile-name gauntlet)
+.442  HTTP boundary fuzz       BUG x4: array-body 500, non-string sql,
+                               rename TypeError, drop silent success
+.443  serialization + paging   BUG: garbage offset/limit 500; paging
+                               proven exact; saved/history hostile
+                               roundtrip proven; FE parse guards clean
+.444  PLAN PASS 1 (engines)    CLEAN x15 stations, executed: lock
+                               matrix, keepalive lifecycle, throttle
+                               restore, recycle under load
+.445  PLAN PASS 2 (loaders)    BUG x2 (silent corruption): utf-16
+                               loaded as latin-1 mojibake; dup/blank
+                               headers dropped whole columns. 24
+                               malformed fixtures now enforced
+.446  PLAN PASS 3 (planner)    BUG: projection names not CI-unique
+                               (case twins / plain-vs-leaf alias) ->
+                               CTAS BinderError at shred time. All
+                               planner branches pinned
+.447  PLAN PASS 4 (exec)       BUG x2: $$-quoted bodies split on
+                               inner semicolons; nested block
+                               comments leaked a splitting ";".
+                               Cancel executed at every stage
+.448  PLAN PASS 5 (results)    BUG: the 24-cap trim evicted PINNED
+                               results (yank-under-a-running-chain).
+                               Pushdown == predicate proven over 60
+                               seeded property trials
+.449  PLAN PASS 6 (jobs/wd)    CLEAN x13, executed: opreg math,
+                               once-per-episode dumps + recovery,
+                               live job lifecycle races incl.
+                               concurrent double-cancel
+.450  PLAN PASS 7 (cache)      CLEAN x20, executed: atomic commits,
+                               torn writes miss, temp grace both
+                               ways, manifest restart survival +
+                               corrupt-file recovery
+.451  PLAN PASS 8 (exports)    SECURITY BUG: xlsx export promoted
+                               "="-leading data to LIVE formulas
+                               (injection + text loss). Fixed +
+                               every format roundtrip pinned
+.452  PLAN PASS 9 (recon/piv)  BUG: NULL-keyed rows leaked into BOTH
+                               only-bucket drilldowns while totals
+                               excluded them. Drills aligned +
+                               null_keys made visible; pivot proven
+                               vs brute SQL for all five aggregates
+.453  PLAN PASS 10 (nodeflow)  Coverage census: 48/50 already golden
+                               (TDD paid off); profile + png closed
+                               the gap, census now an invariant.
+                               WART fixed: garbage image payload
+                               wrote a 0-byte png with ok:true
+.454  PLAN PASS 11 (fuzz-all)  BUG x14 across 11 handlers: junk-typed
+                               bodies 500ing (graphs, paths, sql,
+                               unhashables) + missing-table profile
+                               500. Fuzz now GENERATED from ROUTES
+                               on every build -- zero 500s enforced
+.455  PLAN PASS 12 (FE state)  BUG: tab-reactivation stale-page race
+                               (latest-wins fix); 2 ref-map leaks
+                               pruned. Drag/liveness/map/storage
+                               invariants enforced dir-wide
+.456  PLAN PASS 13 (package)   CLEAN x17 on the executable half:
+                               port reuse, log rotation @200,
+                               child-env scrub, drift pins, defang
+                               round-trip. Windows half scripted:
+                               WINDOWS_BUILD_CHECKLIST (file 112)
+.457  PLAN PASS 14 (perf)      The ledger: ten timed stations run on
+                               every build (page/filter/sort at 100k,
+                               catalog@60, 12-cell chain, 500-stmt
+                               split, 50k load, 20k recon, opreg@50,
+                               100 dispatches), ceilings at 10-40x
+                               headroom. PROGRAM COMPLETE: 14/14
+                               passes, ~28 bugs + 2 warts + 2 leaks
+                               fixed, 4 clean subsystems pinned,
+                               every finding enforced in-suite
+
+THE FULL PROGRAM FROM THE BEGINNING
+-----------------------------------
+Each pass is one build. Suggested order runs foundation -> data path
+-> UI, so later gauntlets can lean on audited lower layers.
+
+PASS 1  engines.py core            locks, recycle, interrupt, pool
+        Gauntlet: real-lock contention matrix (reader/writer/cancel),
+        recycle-under-load, keepalive lifecycle, throttle restore on
+        exception. Extends .438 to every engine method.
+
+PASS 2  loaders + sniffers          csv/json/parquet/xlsx ingestion
+        Gauntlet: malformed files (truncated, BOM, mixed encodings,
+        zero rows, 1-col, huge headers, dup headers, binary garbage),
+        every destination. Assert: clean error or clean load, never a
+        traceback; temp files always reclaimed.
+
+PASS 3  flatten + shred             the .422-.431 machinery
+        Gauntlet: synthetic nested fixtures covering every planner
+        branch (wrapper-only, MAP leaves, scalar arrays, empty lists,
+        nulls at every depth, name collisions after sanitize);
+        assert plans + generated SQL shapes; executed on sqlite-side
+        helpers, static-pinned for DuckDB-native SQL.
+
+PASS 4  query exec + cancel         run_query, dialects, per-run rail
+        Gauntlet: cancel at every stage (pre-exec, mid-exec via
+        sibling, post-fetch), reuse/read_only flags, dialect
+        translation fidelity, statement splitting (the .403 gap
+        rules) against pathological SQL (strings with semicolons,
+        $$ bodies, comments).
+
+PASS 5  results + filters + sort    _CachedResult and friends
+        Gauntlet: filtered_view correctness vs brute force on random
+        data (property-style), sort stability, eviction under the 24
+        cap while a grid pages, pin/refcount behavior.
+
+PASS 6  jobs + progress + watchdog  server JOBS, opreg, stall scans
+        Gauntlet: job lifecycle races (cancel-before-start,
+        double-cancel, done-then-cancel), opreg beat/advance math,
+        watchdog false-positive window with a deliberately slow op.
+
+PASS 7  filecache + manifest        parquet cache, restart survival
+        Gauntlet: CACHE_VERSION bump behavior, partial-write
+        recovery (kill mid-copy simulation), manifest add/remove
+        roundtrip, orphan sweep.
+
+PASS 8  exports                     csv/xlsx/journal/COPY paths
+        Gauntlet: hostile cell content (quotes, newlines, unicode,
+        formula-injection prefixes =+-@ for xlsx), empty results,
+        wide results; re-read every export and compare cell-exact.
+
+PASS 9  reconcile + pivot           the comparison engines
+        Gauntlet: known-answer fixtures (left-only/right-only/
+        field-diff counts), null-key semantics, dup-key behavior,
+        pivot agg correctness vs SQL brute force.
+
+PASS 10 nodeflow                    every node's SQL generation
+        Gauntlet: per-node golden tests -- tiny input table, run the
+        node, assert exact output rows; covers all 46 palette types
+        so a node regression is caught by name.
+
+PASS 11 server routes (breadth)     every route, not just the .442 set
+        Gauntlet: auto-generated fuzz from the ROUTES table itself --
+        for each route: empty body, wrong types per known field,
+        oversized strings; assert <500 + json always. New routes get
+        fuzzed automatically by construction.
+
+PASS 12 FE state machines           App/Notebook/NodeFlow reducers
+        Static-heavy (no DOM): invariant sweeps -- every setState
+        from async guarded by liveness, every ref map cleaned on
+        delete, drag/drop state can't strand (mouseup outside),
+        localStorage schema versioned on every key.
+
+PASS 13 packaging + launcher        regen, PS expand, PyInstaller
+        Sandbox-static + on-box checklist: regen byte-fidelity
+        (already enforced), defang pipeline, launcher log rotation,
+        port-in-use behavior, clean-exit signals. Produces a manual
+        on-box script for the Windows-only parts.
+
+PASS 14 performance                 the bottleneck ledger
+        Gauntlet: timed micro-benchmarks in-suite with generous
+        ceilings (paging a 100k result, filter application, catalog
+        refresh, journal chain of 20 cells) so a 10x regression
+        fails loudly while normal variance passes.
+
+EXIT CRITERIA
+-------------
+The program is done when every pass above has shipped, every BUG has
+an executed regression, and the suite's audit section reads as a
+table of enforced invariants -- at which point the audits become
+maintenance: re-run free, extended only when a subsystem grows.
+
+STATUS 2026-07-03, build .457: EXIT CRITERIA MET. Fourteen of
+fourteen passes shipped; ~28 bugs (1 security, 3 silent-corruption,
+14 route 500-classes among them), 2 warts, and 2 frontend leaks
+fixed, each with an executed regression; four subsystems certified
+clean and pinned that way (engines, jobs+watchdog, cache+manifest,
+packaging's executable half); coverage and fuzz are generated from
+the product's own tables (palette census, ROUTES fuzz), so growth is
+audited by construction; and the performance ledger times the ten
+feel-defining operations on every build. The program is now in
+maintenance.

@@ -1,0 +1,1727 @@
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { api } from "../../lib/api";
+import { paletteColors } from "../../lib/chartOption";
+import { compositeImages, renderToDataURL } from "../../lib/echart";
+import { uid } from "../../lib/ids";
+import {
+  PORTS,
+  type NbEdge,
+  type NbNode,
+} from "../../lib/nodeFlowModel";
+import { cancelAllRuns, isCancelledError, registerRun, unregisterRun } from "../../lib/runController";
+import type { ChartData } from "../../lib/types";
+import type { NodeFlowSnapshot } from "./useNodeFlowDocumentController";
+
+export type NodeFlowPreview =
+  | {
+      kind: "table";
+      title: string;
+      columns: string[];
+      rows: unknown[][];
+      total: number;
+      limited?: boolean;
+    }
+  | { kind: "chart"; title: string; data: ChartData }
+  | {
+      kind: "profile";
+      title: string;
+      total: number;
+      columns: Record<string, any>[];
+      limited?: boolean;
+    }
+  | {
+      kind: "report";
+      title: string;
+      totals: Record<string, number>;
+      fields: {
+        field: string;
+        label?: string;
+        matching: number;
+        non_matching: number;
+        a_only: number;
+        b_only: number;
+      }[];
+    };
+
+interface UseNodeFlowExecutionControllerOptions {
+  activeTabId: string;
+  nodes: NbNode[];
+  edges: NbEdge[];
+  liveRef: React.MutableRefObject<NodeFlowSnapshot>;
+  graphSig: string;
+  graphForApi: () => any;
+  graphForRun: () => any;
+  childCtx: (id: string | null) =>
+    | { groupId: string; index: number; child: NbNode }
+    | null;
+  partialGroupGraph: (groupId: string, count: number) => any;
+  patch: (id: string, config: Record<string, any>) => void;
+  setNodes: React.Dispatch<React.SetStateAction<NbNode[]>>;
+  setNodeErrors: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  setNodeWarnings: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  onToast: (
+    kind: "ok" | "error" | "warn",
+    title: string,
+    message?: string,
+  ) => void;
+  onTablesChanged?: () => void;
+  fireRipple: () => void;
+}
+
+type AuxRequestOwner = {
+  key: string;
+  generation: number;
+  scope: number;
+  controller: AbortController;
+};
+
+export function useNodeFlowExecutionController({
+  activeTabId,
+  nodes,
+  edges,
+  liveRef,
+  graphSig,
+  graphForApi,
+  graphForRun,
+  childCtx,
+  partialGroupGraph,
+  patch,
+  setNodes,
+  setNodeErrors,
+  setNodeWarnings,
+  onToast,
+  onTablesChanged,
+  fireRipple,
+}: UseNodeFlowExecutionControllerOptions) {
+  const [preview, setPreview] = useState<NodeFlowPreview | null>(null);
+  const [previewHeight, setPreviewHeight] = useState(300);
+  const [running, setRunning] = useState(false);
+  const [runId, setRunId] = useState<string | null>(null);
+  const runDepth = useRef(0);
+  const cancelRequested = useRef(false);
+  const activeRunIds = useRef<Set<string>>(new Set());
+  const runIdRef = useRef<string | null>(null);
+  const runScopesRef = useRef<Map<string, number>>(new Map());
+  const scopeVersionRef = useRef(0);
+  const previousTabRef = useRef(activeTabId);
+  const mountedRef = useRef(true);
+  const auxGenerationRef = useRef<Map<string, number>>(new Map());
+  const auxRequestsRef = useRef<Map<string, AuxRequestOwner>>(new Map());
+  const chartPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+  const cancelRecoveryTimerRef = useRef<number | null>(null);
+  const [status, setStatus] = useState<{
+    kind: "idle" | "running" | "done" | "cancelled" | "error";
+    text: string;
+  }>({ kind: "idle", text: "Ready" });
+  const [browseFolder, setBrowseFolder] = useState(false);
+  const [dirList, setDirList] = useState<{
+    folder: string;
+    files: { name: string; path: string; ext: string }[];
+    loading: boolean;
+    error?: string;
+  }>({ folder: "", files: [], loading: false });
+  const doPreviewRef = useRef<
+    ((node: NbNode, port: string, title: string) => void) | null
+  >(null);
+  const previewCache = useRef<Map<string, Extract<NodeFlowPreview, { kind: "table" }>>>(new Map());
+
+  const isRunCurrent = (id: string) =>
+    mountedRef.current && runScopesRef.current.get(id) === scopeVersionRef.current;
+
+  const abortAuxRequests = () => {
+    for (const owner of auxRequestsRef.current.values()) {
+      try {
+        owner.controller.abort();
+      } catch {
+        // Best-effort cancellation only.
+      }
+    }
+    auxRequestsRef.current.clear();
+    chartPromisesRef.current.clear();
+  };
+
+  const beginAuxRequest = (key: string): AuxRequestOwner => {
+    const previous = auxRequestsRef.current.get(key);
+    if (previous) {
+      try {
+        previous.controller.abort();
+      } catch {
+        // Best-effort replacement only.
+      }
+    }
+    const generation = (auxGenerationRef.current.get(key) || 0) + 1;
+    auxGenerationRef.current.set(key, generation);
+    const owner = {
+      key,
+      generation,
+      scope: scopeVersionRef.current,
+      controller: new AbortController(),
+    };
+    auxRequestsRef.current.set(key, owner);
+    return owner;
+  };
+
+  const finishAuxRequest = (owner: AuxRequestOwner) => {
+    if (auxRequestsRef.current.get(owner.key) === owner) {
+      auxRequestsRef.current.delete(owner.key);
+    }
+  };
+
+  const cancelAuxRequest = (key: string) => {
+    const owner = auxRequestsRef.current.get(key);
+    if (!owner) return;
+    try {
+      owner.controller.abort();
+    } catch {
+      // Best-effort cancellation only.
+    }
+    auxRequestsRef.current.delete(key);
+    chartPromisesRef.current.delete(key);
+  };
+
+  const isAuxRequestCurrent = (owner: AuxRequestOwner) =>
+    mountedRef.current &&
+    owner.scope === scopeVersionRef.current &&
+    auxGenerationRef.current.get(owner.key) === owner.generation &&
+    auxRequestsRef.current.get(owner.key) === owner;
+
+  const resetExecutionScope = (updateUi: boolean) => {
+    scopeVersionRef.current += 1;
+    const ids = [...activeRunIds.current];
+    if (ids.length) cancelAllRuns(ids);
+    abortAuxRequests();
+    activeRunIds.current.clear();
+    runScopesRef.current.clear();
+    runDepth.current = 0;
+    runIdRef.current = null;
+    cancelRequested.current = false;
+    previewCache.current.clear();
+    if (cancelRecoveryTimerRef.current != null) {
+      window.clearTimeout(cancelRecoveryTimerRef.current);
+      cancelRecoveryTimerRef.current = null;
+    }
+    if (!updateUi) return;
+    setRunning(false);
+    setRunId(null);
+    setPreview(null);
+    setStatus({ kind: "idle", text: "Ready" });
+    setChartData({});
+    chartDataRef.current = {};
+    setValidateResults({});
+    setDirList({ folder: "", files: [], loading: false });
+  };
+
+  useLayoutEffect(() => {
+    if (previousTabRef.current === activeTabId) return;
+    previousTabRef.current = activeTabId;
+    resetExecutionScope(true);
+    // resetExecutionScope intentionally reads only current refs and stable state
+    // setters; re-running for function identity would cancel active work on
+    // every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      resetExecutionScope(false);
+    };
+    // One mount lifetime owns one cancellation scope.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // run / preview -----------------------------------------------------------
+  const newRunId = () => uid() + uid();
+  const startRun = (text: string): string => {
+    if (cancelRecoveryTimerRef.current != null) {
+      window.clearTimeout(cancelRecoveryTimerRef.current);
+      cancelRecoveryTimerRef.current = null;
+    }
+    const id = newRunId();
+    if (runDepth.current === 0) cancelRequested.current = false; // fresh batch
+    runDepth.current += 1; // keep "running" true until the LAST run finishes
+    runIdRef.current = id;
+    activeRunIds.current.add(id);
+    runScopesRef.current.set(id, scopeVersionRef.current);
+    setRunId(id);
+    setRunning(true);
+    setStatus({ kind: "running", text });
+    return id;
+  };
+  const finishRun = (
+    id: string,
+    r: { error?: string; cancelled?: boolean } | null,
+    okText: string,
+  ) => {
+    if (!isRunCurrent(id)) return;
+    runScopesRef.current.delete(id);
+    activeRunIds.current.delete(id);
+    if (runDepth.current === 0) {
+      // Nothing is considered active. This is either a defensive double-finish
+      // or the late result of a run we already force-recovered from after a
+      // stalled cancel (see cancelRun). Either way, leave the idle / recovered
+      // UI untouched so a straggler can't wipe a fresh run's spinner or status.
+      return;
+    }
+    runDepth.current -= 1;
+    const stillRunning = runDepth.current > 0;
+    setRunning(stillRunning);
+    if (!stillRunning) {
+      if (cancelRecoveryTimerRef.current != null) {
+        window.clearTimeout(cancelRecoveryTimerRef.current);
+        cancelRecoveryTimerRef.current = null;
+      }
+      setRunId(null);
+      runIdRef.current = null;
+      activeRunIds.current.clear();
+    }
+    if (r?.cancelled) setStatus({ kind: "cancelled", text: "Cancelled" });
+    else if (r?.error) setStatus({ kind: "error", text: r.error });
+    else {
+      setStatus({ kind: "done", text: okText });
+      fireRipple();
+    }
+  };
+  // Pull the UI out of a stalled run/cancel without a page refresh. The backend
+  // run is interrupted (cancelRun) but a wedged DuckDB op may never return its
+  // POST; rather than leave the user stuck on "Cancelling…" forever, reset the
+  // run state to idle. Any late straggler is swallowed by finishRun's
+  // runDepth===0 guard, so this can't desync a subsequent run.
+  const forceRecoverFromCancel = () => {
+    if (runDepth.current === 0) return;
+    runDepth.current = 0;
+    runIdRef.current = null;
+    // .552: clear the cancel flag as part of recovery, so the NEXT run
+    // starts clean -- otherwise a stale `true` here survived (the next
+    // startRun only resets when runDepth===0, which it now is) and every
+    // subsequent terminal reported cancelled.
+    cancelRequested.current = false;
+    activeRunIds.current.clear();
+    runScopesRef.current.clear();
+    if (cancelRecoveryTimerRef.current != null) {
+      window.clearTimeout(cancelRecoveryTimerRef.current);
+      cancelRecoveryTimerRef.current = null;
+    }
+    setRunning(false);
+    setRunId(null);
+    setStatus({ kind: "cancelled", text: "Cancelled" });
+  };
+  const cancelRun = async () => {
+    // Stop is a global halt. First, always flag + interrupt any background tray
+    // task (loads, conversions, flattens) so it stops too -- even when nothing
+    // is running foreground in the NodeFlow (cancelAll is a harmless no-op when
+    // there is nothing to stop). Then, if a foreground run is active, hard-kill
+    // it as well and arm the grace timer.
+    const ids = [...activeRunIds.current];
+    const stuckId = runIdRef.current;
+    void api.cancelAll().catch(() => {});
+    if (!ids.length) return;
+    cancelRequested.current = true;
+    setStatus({ kind: "running", text: "Cancelling…" });
+    try {
+      // Hard kill: abort every in-flight run fetch (so no request lingers) AND
+      // interrupt every backend run in this batch (so no engine statement keeps
+      // going). cancelAllRuns aborts this controller's registered fetches and
+      // interrupts the matching backend query IDs without touching unrelated API calls.
+      cancelAllRuns(ids);
+    } catch {
+      /* best effort */
+    }
+    // If the run honours the interrupt it returns promptly and finishRun shows
+    // "Cancelled". But a wedged backend run can fail to return, which used to
+    // strand the UI on "Cancelling…" until a manual refresh. After a short
+    // grace period, recover the UI ourselves -- but only if we're still stuck
+    // on the SAME run (a new run, or a normal finish, clears runIdRef).
+    if (cancelRecoveryTimerRef.current != null) {
+      window.clearTimeout(cancelRecoveryTimerRef.current);
+    }
+    cancelRecoveryTimerRef.current = window.setTimeout(() => {
+      cancelRecoveryTimerRef.current = null;
+      if (runDepth.current > 0 && runIdRef.current === stuckId) {
+        forceRecoverFromCancel();
+      }
+    }, 4000);
+  };
+  // a run outcome counts as cancelled if the backend said so OR the user has
+  // asked to stop -- so an interrupted statement that unwinds as a plain error
+  // (e.g. a half-built temp table) is reported as "Cancelled", not a failure.
+  const wasCancelled = (
+    r: { cancelled?: boolean } | null,
+    id?: string,
+  ) =>
+    !!r?.cancelled || cancelRequested.current || (id ? !isRunCurrent(id) : false);
+
+  const doPreview = async (node: NbNode, port: string, title: string) => {
+    // reuse the last result for this (node, port) as long as the graph's
+    // structure is unchanged -- so clicking an output arrow again (or after
+    // just moving nodes around) doesn't re-run. Cheap: a preview holds <=200
+    // display rows, and the cache is capped + keyed by the structural signature
+    // (so any config/edge edit invalidates it). Cleared on tab switch.
+    const cacheKey = graphSig + "::" + node.id + "::" + port;
+    const hit = previewCache.current.get(cacheKey);
+    if (hit) {
+      setPreview(hit);
+      previewCache.current.delete(cacheKey); // refresh LRU position
+      previewCache.current.set(cacheKey, hit);
+      setStatus({
+        kind: "done",
+        text: `${(hit.total || 0).toLocaleString()} rows (cached)`,
+      });
+      return;
+    }
+    const id = startRun(`Running ${node.config.label}…`);
+    // if this is a child inside a group, preview the pipeline up to and
+    // including it by running the group's output on a truncated graph.
+    const cctx = childCtx(node.id);
+    const graph = cctx
+      ? partialGroupGraph(cctx.groupId, cctx.index + 1)
+      : graphForRun();
+    const runNode = cctx ? cctx.groupId : node.id;
+    const runPort = cctx ? "out" : port;
+    try {
+      const ctrl = new AbortController();
+      registerRun(id, ctrl); // .520: modal Cancel aborts this fetch too
+      let r;
+      try {
+        r = await api.nodeflowRun(
+          graph,
+          runNode,
+          runPort,
+          id,
+          ctrl.signal,
+          true,
+          5000,
+        );
+      } finally {
+        unregisterRun(id, ctrl);
+      }
+      if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
+      if (r.error) {
+        // the backend names the node that actually failed (r.node); fall back
+        // to the run target if it didn't attribute one.
+        const culprit = (r as { node?: string }).node || node.id;
+        setNodeErrors((p) => ({ ...p, [culprit]: r.error as string }));
+        onToast("error", "Flow error", r.error);
+        return finishRun(id, r, "");
+      }
+      setNodeErrors((p) => {
+        if (!(node.id in p)) return p;
+        const { [node.id]: _drop, ...rest } = p;
+        return rest;
+      });
+      const pv = {
+        kind: "table" as const,
+        title,
+        columns: r.columns || [],
+        rows: (r.rows || []).slice(0, 200),
+        total: r.total_rows || 0,
+        limited: !!r.preview_limited,
+      };
+      setPreview(pv);
+      previewCache.current.set(cacheKey, pv);
+      if (previewCache.current.size > 12) {
+        const oldest = previewCache.current.keys().next().value;
+        if (oldest !== undefined) previewCache.current.delete(oldest);
+      }
+      finishRun(id, 
+        r,
+        `${(r.total_rows || 0).toLocaleString()}${r.preview_limited ? "+" : ""} rows preview`,
+      );
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      setNodeErrors((p) => ({ ...p, [node.id]: e.message || String(e) }));
+      onToast("error", "Flow error", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+    }
+  };
+
+  // run a node's pipeline to completion (no Output node needed) and show the
+  // result in the drawer; returns an outcome so Run all can tally it.
+  const runLeaf = async (node: NbNode): Promise<RunOutcome> => {
+    const id = startRun(`Running ${node.config.label}…`);
+    const cctx = childCtx(node.id);
+    const graph = cctx
+      ? partialGroupGraph(cctx.groupId, cctx.index + 1)
+      : graphForRun();
+    const runNode = cctx ? cctx.groupId : node.id;
+    try {
+      const ctrl = new AbortController();
+      registerRun(id, ctrl);
+      let r;
+      try {
+        r = await api.nodeflowRun(graph, runNode, "out", id, ctrl.signal);
+      } finally {
+        unregisterRun(id, ctrl);
+      }
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      if (r.error) {
+        setNodeErrors((p) => ({ ...p, [node.id]: r.error as string }));
+        finishRun(id, r, "");
+        return { ok: false };
+      }
+      setNodeErrors((p) => {
+        if (!(node.id in p)) return p;
+        const { [node.id]: _drop, ...rest } = p;
+        return rest;
+      });
+      setPreview({
+        kind: "table",
+        title: `${node.config.label} · out`,
+        columns: r.columns || [],
+        rows: (r.rows || []).slice(0, 200),
+        total: r.total_rows || 0,
+      });
+      finishRun(id, r, `${(r.total_rows || 0).toLocaleString()} rows`);
+      return { ok: true };
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      setNodeErrors((p) => ({ ...p, [node.id]: e.message || String(e) }));
+      finishRun(id, { error: e.message || String(e) }, "");
+      return { ok: false };
+    }
+  };
+
+  // Run several top-level terminal branches through the backend's one-pass
+  // scheduler. Shared ancestors are computed once; disjoint DuckDB branches
+  // execute on separate registered child connections. Group children retain
+  // their partial-graph semantics and therefore stay on runLeaf individually.
+  const runLeafBatch = async (leaves: NbNode[]): Promise<RunOutcome[]> => {
+    const id = startRun(`Running ${leaves.length} NodeFlow branches…`);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
+    try {
+      const r = await api.nodeflowRunBatch(
+        graphForRun(),
+        leaves.map((n) => ({ node: n.id, port: "out" })),
+        id,
+        ctrl.signal,
+      );
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return leaves.map(() => ({ ok: false, cancelled: true }));
+      }
+      if (r.error || !r.ok || !r.results) {
+        finishRun(id, { error: r.error || "Batch run failed." }, "");
+        if (r.error) {
+          setNodeErrors((prev) => {
+            const next = { ...prev };
+            for (const n of leaves) next[n.id] = r.error as string;
+            return next;
+          });
+        }
+        return leaves.map(() => ({ ok: false }));
+      }
+      const byId = new Map(r.results.map((x) => [x.node, x]));
+      let lastGood: (typeof r.results)[number] | undefined;
+      const outcomes = leaves.map((n): RunOutcome => {
+        const x = byId.get(n.id);
+        if (!x || x.error) {
+          setNodeErrors((prev) => ({
+            ...prev,
+            [n.id]: x?.error || "The branch returned no result.",
+          }));
+          return { ok: false };
+        }
+        if (x.cancelled) return { ok: false, cancelled: true };
+        lastGood = x;
+        setNodeErrors((prev) => {
+          if (!(n.id in prev)) return prev;
+          const { [n.id]: _drop, ...rest } = prev;
+          return rest;
+        });
+        return { ok: true };
+      });
+      if (lastGood) {
+        const n = leaves.find((leaf) => leaf.id === lastGood?.node);
+        setPreview({
+          kind: "table",
+          title: `${n?.config.label || "NodeFlow"} · out`,
+          columns: lastGood.columns || [],
+          rows: (lastGood.rows || []).slice(0, 200),
+          total: lastGood.total_rows || 0,
+        });
+      }
+      finishRun(id, 
+        r,
+        `${outcomes.filter((x) => x.ok).length} of ${leaves.length} branches ran`,
+      );
+      return outcomes;
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return leaves.map(() => ({ ok: false, cancelled: true }));
+      }
+      const msg = e?.message || String(e);
+      setNodeErrors((prev) => {
+        const next = { ...prev };
+        for (const n of leaves) next[n.id] = msg;
+        return next;
+      });
+      finishRun(id, { error: msg }, "");
+      return leaves.map(() => ({ ok: false }));
+    } finally {
+      unregisterRun(id, ctrl);
+    }
+  };
+
+  // ---- on-canvas charts + dashboard --------------------------------------
+  // cache of rendered chart data per chart-node id (used under chart nodes and
+  // inside dashboard panes).
+  const [chartData, setChartData] = useState<
+    Record<string, { data?: ChartData; loading?: boolean; error?: string }>
+  >({});
+  const chartDataRef = useRef(chartData);
+  useLayoutEffect(() => {
+    chartDataRef.current = chartData;
+  }, [chartData]);
+  const setChartEntry = (
+    nodeId: string,
+    entry: { data?: ChartData; loading?: boolean; error?: string },
+  ) => {
+    const next = { ...chartDataRef.current, [nodeId]: entry };
+    chartDataRef.current = next;
+    setChartData(next);
+  };
+  // validate-node check results, keyed by node id
+  const [validateResults, setValidateResults] = useState<
+    Record<
+      string,
+      {
+        ok?: boolean;
+        total_rows?: number;
+        results?: { type: string; target: string; pass: boolean; detail: string }[];
+        error?: string;
+        loading?: boolean;
+      }
+    >
+  >({});
+  // the chart node feeding a given dashboard input port (if any)
+  const upstreamChartNode = (dash: NbNode, inPort: string): NbNode | null => {
+    const e = edges.find((x) => x.to.node === dash.id && x.to.port === inPort);
+    if (!e) return null;
+    const src = nodes.find((n) => n.id === e.from.node);
+    return src && src.type === "chart" ? src : null;
+  };
+  doPreviewRef.current = doPreview;
+
+  // Map a UI chart type to the data shape the backend produces. area reuses the
+  // bar (category + series) shape and donut reuses the pie (category + value)
+  // shape; the real UI type is re-attached client-side so the renderer can draw
+  // the variant. bar / line / pie / scatter / histogram pass straight through.
+  const backendChartType = (t?: string): string =>
+    t === "area" || t === "tree" ? "bar" : t === "donut" ? "pie" : t || "bar";
+  // The chart spec sent to the backend for a chart node.
+  const chartSpecOf = (node: NbNode) => ({
+    chart_type: backendChartType(node.config.chart_type) as any,
+    x: node.config.x,
+    y: node.config.y || undefined,
+    series: node.config.series || undefined,
+    agg: node.config.agg || "sum",
+    bins: node.config.bins || undefined,
+    open: node.config.open || undefined,
+    high: node.config.high || undefined,
+    low: node.config.low || undefined,
+    close: node.config.close || undefined,
+    x2: node.config.x2 || undefined,
+    y2: node.config.y2 || undefined,
+  });
+  // Re-attach the UI chart type + the node's style to the returned ChartData so
+  // the renderer sees the real variant and the chosen palette / theme / labels.
+  const styleChartData = (node: NbNode, r: any): ChartData => ({
+    ...r,
+    chart_type: node.config.chart_type || "bar",
+    style: node.config.style || undefined,
+  });
+  // patch one key of a chart node's style object. No rerun / refetch: the
+  // on-canvas chart re-renders from the already-cached data, so appearance
+  // edits are instant and only flow to downstream nodes on a full rerun.
+  const patchStyle = (node: NbNode, k: string, v: any) => {
+    const st = { ...(node.config.style || {}) };
+    if (v === undefined || v === "") delete st[k];
+    else st[k] = v;
+    patch(node.id, { style: st });
+  };
+  // set / clear a single per-element colour override
+  const patchSeriesColor = (node: NbNode, name: string, color: string | null) => {
+    const sc = { ...((node.config.style || {}).seriesColors || {}) };
+    if (color) sc[name] = color;
+    else delete sc[name];
+    patchStyle(node, "seriesColors", Object.keys(sc).length ? sc : undefined);
+  };
+  const ensureChartFor = (node: NbNode | null, force = false): Promise<void> => {
+    if (!node || node.type !== "chart") return Promise.resolve();
+    const key = `chart:${node.id}`;
+    const existing = chartPromisesRef.current.get(key);
+    if (!force && existing) return existing;
+    const cur = chartDataRef.current[node.id];
+    if (!force && cur?.data) return Promise.resolve();
+    if (!node.config.x) {
+      cancelAuxRequest(key);
+      setChartEntry(node.id, {
+        error: "Pick an X field in this chart's config.",
+      });
+      return Promise.resolve();
+    }
+
+    const owner = beginAuxRequest(key);
+    setChartEntry(node.id, { loading: true });
+    const request = (async () => {
+      try {
+        const r = await api.nodeflowChart(
+          graphForRun(),
+          node.id,
+          chartSpecOf(node),
+          undefined,
+          owner.controller.signal,
+        );
+        if (!isAuxRequestCurrent(owner)) return;
+        if (wasCancelled(r)) {
+          setChartEntry(node.id, {});
+          return;
+        }
+        if (r.error) {
+          setChartEntry(node.id, { error: r.error });
+          return;
+        }
+        setChartEntry(node.id, { data: styleChartData(node, r) });
+      } catch (e: any) {
+        if (
+          !isAuxRequestCurrent(owner) ||
+          owner.controller.signal.aborted ||
+          cancelRequested.current ||
+          isCancelledError(e)
+        ) {
+          return;
+        }
+        setChartEntry(node.id, { error: e.message || String(e) });
+      } finally {
+        finishAuxRequest(owner);
+      }
+    })();
+    chartPromisesRef.current.set(key, request);
+    void request.finally(() => {
+      if (chartPromisesRef.current.get(key) === request) {
+        chartPromisesRef.current.delete(key);
+      }
+    });
+    return request;
+  };
+  // set which input a dashboard pane shows
+  const setDashPane = (dash: NbNode, idx: number, port: string) => {
+    const panes = [...(dash.config.panes || ["in1", "in2", "in3", "in4"])];
+    panes[idx] = port;
+    patch(dash.id, { panes });
+    const cn = upstreamChartNode(dash, port);
+    if (cn) void ensureChartFor(cn);
+  };
+
+  const doChart = async (node: NbNode) => {
+    if (!node.config.x) {
+      onToast("error", "Pick an X field", "Choose what to plot.");
+      return;
+    }
+    const id = startRun(`Charting ${node.config.label}…`);
+    try {
+      const r = await api.nodeflowChart(
+        graphForApi(),
+        node.id,
+        chartSpecOf(node),
+        id,
+      );
+      if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
+      if (r.error) {
+        onToast("error", "Chart error", r.error);
+        return finishRun(id, r, "");
+      }
+      setPreview({
+        kind: "chart",
+        title: `${node.config.label} · chart`,
+        data: styleChartData(node, r),
+      });
+      finishRun(id, r, "Chart ready");
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      onToast("error", "Chart error", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+    }
+  };
+
+  const doValidate = async (node: NbNode) => {
+    const owner = beginAuxRequest(`validate:${node.id}`);
+    setValidateResults((p) => ({ ...p, [node.id]: { loading: true } }));
+    try {
+      const r = await api.nodeflowValidate(
+        graphForApi(),
+        node.id,
+        node.config.checks || [],
+        owner.controller.signal,
+      );
+      if (!isAuxRequestCurrent(owner)) return;
+      setValidateResults((p) => ({
+        ...p,
+        [node.id]: r.error ? { error: r.error } : r,
+      }));
+      if (r.error) onToast("error", "Validate failed", r.error);
+      else
+        onToast(
+          r.ok ? "ok" : "warn",
+          r.ok ? "All checks passed" : "Some checks failed",
+        );
+    } catch (e: any) {
+      if (
+        !isAuxRequestCurrent(owner) ||
+        cancelRequested.current ||
+        isCancelledError(e)
+      ) {
+        return;
+      }
+      const message = e.message || String(e);
+      setValidateResults((p) => ({
+        ...p,
+        [node.id]: { error: message },
+      }));
+      onToast("error", "Validate failed", message);
+    } finally {
+      finishAuxRequest(owner);
+    }
+  };
+
+  const doProfile = async (node: NbNode) => {
+    const id = startRun(`Profiling ${node.config.label}…`);
+    try {
+      const r = await api.nodeflowBrowse(graphForRun(), node.id, id);
+      if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
+      if (r.error) {
+        onToast("error", "Browse error", r.error);
+        return finishRun(id, r, "");
+      }
+      setPreview({
+        kind: "profile",
+        title: `${node.config.label} · profile`,
+        total: r.total_rows || 0,
+        columns: r.columns || [],
+      });
+      finishRun(id, r, `${(r.total_rows || 0).toLocaleString()} rows profiled`);
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      onToast("error", "Browse error", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+    }
+  };
+
+  const doReconcile = async (node: NbNode) => {
+    const wiredPorts = edges
+      .filter((e) => e.to.node === node.id)
+      .map((e) => e.to.port);
+    if (!wiredPorts.includes("left") || !wiredPorts.includes("right")) {
+      onToast(
+        "error",
+        "Connect two inputs",
+        "Reconcile compares two tables — wire one into the left input and one into the right.",
+      );
+      return;
+    }
+    const keys: string[] = node.config.keys || [];
+    if (!keys.length) {
+      onToast("error", "Pick a key", "Choose at least one key field to match on.");
+      return;
+    }
+    const id = startRun(`Reconciling ${node.config.label}…`);
+    try {
+      const r = await api.nodeflowReconcile(
+        graphForApi(),
+        node.id,
+        keys,
+        node.config.compare || [],
+        id,
+        node.config.balance || null,
+      );
+      if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
+      if (r.error) {
+        onToast("error", "Reconcile error", r.error);
+        return finishRun(id, r, "");
+      }
+      setPreview({
+        kind: "report",
+        title: `${node.config.label} · reconciliation`,
+        totals: r.totals || {},
+        fields: r.fields || [],
+      });
+      finishRun(id, r, "Reconciliation ready");
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      onToast("error", "Reconcile error", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+    }
+  };
+
+  type RunOutcome = { ok: boolean; cancelled?: boolean };
+  // the node feeding a sink's single input (used by the Output node to decide
+  // whether it is saving an image or data)
+  const inputNodeOf = (node: NbNode, port = "in"): NbNode | null => {
+    const e = edges.find((x) => x.to.node === node.id && x.to.port === port);
+    if (!e) return null;
+    return nodes.find((n) => n.id === e.from.node) || null;
+  };
+  // chart -> image, dashboard -> image, anything else -> data
+  const outputKind = (node: NbNode): "chart" | "dashboard" | "data" | "none" => {
+    const src = inputNodeOf(node);
+    if (!src) return "none";
+    if (src.type === "chart") return "chart";
+    if (src.type === "dashboard") return "dashboard";
+    return "data";
+  };
+  const IMAGE_FORMATS_CHART = ["png", "svg", "jpeg"];
+  const IMAGE_FORMATS_DASH = ["png", "jpeg"];
+  const DATA_FORMATS = ["csv", "tsv", "json", "ndjson", "xlsx", "parquet"];
+  // Friendlier label for the one format whose bare name isn't self-explanatory.
+  const FORMAT_LABELS: Record<string, string> = {
+    xlsx: "Excel (xlsx)",
+  };
+
+  // fetch a chart node's ChartData (for export; bypasses the on-canvas cache)
+  const fetchChartData = async (chartNode: NbNode): Promise<ChartData | null> => {
+    const scope = scopeVersionRef.current;
+    if (!chartNode || chartNode.type !== "chart" || !chartNode.config.x) return null;
+    const r = await api.nodeflowChart(graphForRun(), chartNode.id, chartSpecOf(chartNode));
+    if (scope !== scopeVersionRef.current) return null;
+    if (r.error || wasCancelled(r)) return null;
+    return styleChartData(chartNode, r);
+  };
+
+  const doExportImage = async (node: NbNode): Promise<RunOutcome> => {
+    const folder = (node.config.folder || "").trim();
+    if (!folder) {
+      onToast("error", "Pick an output folder", "Choose where to write the image.");
+      return { ok: false };
+    }
+    const kind = outputKind(node);
+    const src = inputNodeOf(node);
+    if (!src || (kind !== "chart" && kind !== "dashboard")) {
+      onToast("error", "Nothing to draw", "Connect a chart or dashboard to this Output.");
+      return { ok: false };
+    }
+    let fmt = (node.config.format || "png").toLowerCase();
+    const allowed = kind === "chart" ? IMAGE_FORMATS_CHART : IMAGE_FORMATS_DASH;
+    if (!allowed.includes(fmt)) fmt = allowed[0];
+    const id = startRun(`Rendering ${node.config.label}…`);
+    try {
+      let dataUrl = "";
+      if (kind === "chart") {
+        const cd = await fetchChartData(src);
+        if (!isRunCurrent(id)) return { ok: false, cancelled: true };
+        if (!cd) {
+          onToast("error", "Chart not ready", "Give the chart an X field and data first.");
+          finishRun(id, { error: "Chart not ready." }, "");
+          return { ok: false };
+        }
+        dataUrl = await renderToDataURL(cd, { type: fmt as any });
+        if (!isRunCurrent(id)) return { ok: false, cancelled: true };
+      } else {
+        // dashboard: render each mapped pane, then composite a 2x2 board
+        const panes = src.config.panes || ["in1", "in2", "in3", "in4"];
+        const urls: (string | null)[] = [];
+        for (let i = 0; i < 4; i++) {
+          const cn = upstreamChartNode(src, panes[i] || `in${i + 1}`);
+          if (!cn) {
+            urls.push(null);
+            continue;
+          }
+          const cd = await fetchChartData(cn);
+          if (!isRunCurrent(id)) return { ok: false, cancelled: true };
+          urls.push(cd ? await renderToDataURL(cd, { type: "png" }) : null);
+          if (!isRunCurrent(id)) return { ok: false, cancelled: true };
+        }
+        if (urls.every((u) => !u)) {
+          onToast("error", "Empty dashboard", "Wire charts into the dashboard first.");
+          finishRun(id, { error: "Empty dashboard." }, "");
+          return { ok: false };
+        }
+        dataUrl = await compositeImages(urls, { type: fmt as any });
+        if (!isRunCurrent(id)) return { ok: false, cancelled: true };
+      }
+      const r = await api.exportImage(
+        folder,
+        node.config.base_name || "chart",
+        fmt,
+        dataUrl,
+      );
+      if (!isRunCurrent(id)) return { ok: false, cancelled: true };
+      if (r.error || !r.ok) {
+        onToast("error", "Export failed", r.error || "Failed.");
+        finishRun(id, { error: r.error || "Failed." }, "");
+        return { ok: false };
+      }
+      onToast("ok", "Image saved", r.file || "");
+      finishRun(id, r, `Saved image`);
+      return { ok: true };
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      onToast("error", "Export failed", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+      return { ok: false };
+    }
+  };
+
+  const doExport = async (node: NbNode): Promise<RunOutcome> => {
+    const folder = (node.config.folder || "").trim();
+    if (!folder) {
+      onToast("error", "Pick an output folder", "Choose where to write the file.");
+      return { ok: false };
+    }
+    const id = startRun(`Exporting ${node.config.label}…`);
+    try {
+      const r = await api.nodeflowExport(
+        graphForApi(),
+        node.id,
+        folder,
+        node.config.format || "csv",
+        node.config.base_name || "output",
+        id,
+      );
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      if (r.error || !r.ok) {
+        onToast("error", "Export failed", r.error || "Failed.");
+        finishRun(id, { error: r.error || "Failed." }, "");
+        return { ok: false };
+      }
+      onToast(
+        "ok",
+        "Exported",
+        `${r.file} — ${(r.rows ?? 0).toLocaleString()} rows`,
+      );
+      finishRun(id, r, `Exported ${(r.rows ?? 0).toLocaleString()} rows`);
+      return { ok: true };
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      onToast("error", "Export failed", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+      return { ok: false };
+    }
+  };
+
+  // Run all: export several file-output nodes in ONE shared materialisation
+  // pass, so a subgraph feeding more than one of them is computed once for the
+  // batch. Falls back to exporting each node on its own if the shared build
+  // fails, so a failure still localises to a single node. Returns one
+  // RunOutcome per node in `outs`, in order.
+  const doExportBatch = async (outs: NbNode[]): Promise<RunOutcome[]> => {
+    const eachAlone = async (): Promise<RunOutcome[]> => {
+      const rr: RunOutcome[] = [];
+      for (const n of outs) rr.push(await doExport(n));
+      return rr;
+    };
+    // a node missing a folder can't be batched cleanly; run each so doExport
+    // surfaces the per-node "pick a folder" error.
+    if (outs.some((n) => !(n.config.folder || "").trim())) return eachAlone();
+    const items = outs.map((n) => ({
+      node_id: n.id,
+      folder: (n.config.folder || "").trim(),
+      fmt: n.config.format || "csv",
+      base_name: n.config.base_name || "output",
+    }));
+    const id = startRun(`Exporting ${outs.length} outputs…`);
+    let r: Awaited<ReturnType<typeof api.nodeflowExportMany>>;
+    try {
+      r = await api.nodeflowExportMany(graphForRun(), items, id);
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return outs.map(() => ({ ok: false, cancelled: true }));
+      }
+      finishRun(id, { error: e?.message || String(e) }, "");
+      return eachAlone();
+    }
+    if (wasCancelled(r, id)) {
+      finishRun(id, { cancelled: true }, "");
+      return outs.map(() => ({ ok: false, cancelled: true }));
+    }
+    if (r.error || !r.ok || !r.results) {
+      // the shared build failed -> fall back so the error points at one node
+      finishRun(id, { error: r.error || "Failed." }, "");
+      return eachAlone();
+    }
+    const byId = new Map(r.results.map((x) => [x.node_id, x]));
+    let okCount = 0;
+    const outcomes = outs.map((n): RunOutcome => {
+      const x = byId.get(n.id);
+      if (x && x.ok) {
+        okCount++;
+        onToast(
+          "ok",
+          "Exported",
+          `${x.file} — ${(x.rows ?? 0).toLocaleString()} rows`,
+        );
+        return { ok: true };
+      }
+      onToast("error", "Export failed", (x && x.error) || "Failed.");
+      return { ok: false };
+    });
+    finishRun(id, null, `Exported ${okCount} of ${outs.length}`);
+    return outcomes;
+  };
+
+  const doWriteTable = async (node: NbNode): Promise<RunOutcome> => {
+    const name = (node.config.name || "").trim();
+    if (!name) {
+      onToast("error", "Name the table", "Give the output table a name.");
+      return { ok: false };
+    }
+    const id = startRun(`Writing ${node.config.label}…`);
+    try {
+      const r = await api.nodeflowToTable(graphForRun(), node.id, name, id);
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      if (r.error || !r.ok) {
+        onToast("error", "Write failed", r.error || "Failed.");
+        finishRun(id, { error: r.error || "Failed." }, "");
+        return { ok: false };
+      }
+      onToast(
+        "ok",
+        "Table written",
+        `${r.table} (${r.engine}) — ${(r.rows ?? 0).toLocaleString()} rows`,
+      );
+      finishRun(id, r, `Wrote ${r.table}`);
+      onTablesChanged?.();
+      return { ok: true };
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      onToast("error", "Write failed", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+      return { ok: false };
+    }
+  };
+
+  // directory node: list loadable files in a folder, and read the chosen one
+  const DIR_EXTS = [
+    "csv", "tsv", "txt", "json", "ndjson", "jsonl",
+    "parquet", "pq", "xlsx", "xlsm", "xls",
+  ];
+  const loadDirList = async (folder: string) => {
+    const key = "directory-list";
+    if (!folder) {
+      cancelAuxRequest(key);
+      setDirList({ folder: "", files: [], loading: false });
+      return;
+    }
+    const owner = beginAuxRequest(key);
+    setDirList({ folder, files: [], loading: true });
+    try {
+      const r = await api.fsList(folder, owner.controller.signal);
+      if (!isAuxRequestCurrent(owner)) return;
+      const files = (r.entries || [])
+        .filter((e) => !e.is_dir && DIR_EXTS.includes((e.ext || "").toLowerCase()))
+        .map((e) => ({ name: e.name, path: e.path, ext: e.ext }));
+      setDirList({ folder, files, loading: false, error: r.error });
+    } catch (e: any) {
+      if (!isAuxRequestCurrent(owner) || isCancelledError(e)) return;
+      setDirList({
+        folder,
+        files: [],
+        loading: false,
+        error: e.message || String(e),
+      });
+    } finally {
+      finishAuxRequest(owner);
+    }
+  };
+  const doReadDirectory = async (node: NbNode, path: string, file: string) => {
+    const id = startRun(`Reading ${file}…`);
+    try {
+      const r = await api.directoryRead(path, id);
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      if (r.error || !r.ok) {
+        onToast("error", "Couldn't read file", r.error || "Failed.");
+        finishRun(id, { error: r.error || "Failed." }, "");
+        patch(node.id, { file, path, table: "", columns: [] });
+        return;
+      }
+      patch(node.id, {
+        file,
+        path,
+        table: r.table,
+        columns: r.columns || [],
+        engine: r.engine,
+      });
+      onToast(
+        "ok",
+        "File ready",
+        `${file} — ${(r.rows ?? 0).toLocaleString()} rows`,
+      );
+      finishRun(id, r, `Read ${(r.rows ?? 0).toLocaleString()} rows`);
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      onToast("error", "Couldn't read file", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+    }
+  };
+
+  const doReadFolder = async (node: NbNode, folder: string) => {
+    const id = startRun(`Reading folder…`);
+    try {
+      const r = await api.folderRead(folder, id);
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      if (r.error || !r.ok) {
+        onToast("error", "Couldn't read folder", r.error || "Failed.");
+        finishRun(id, { error: r.error || "Failed." }, "");
+        patch(node.id, { folder, table: "", columns: [], files: 0 });
+        return;
+      }
+      patch(node.id, {
+        folder,
+        table: r.table,
+        columns: r.columns || [],
+        files: r.files || 0,
+        engine: r.engine,
+      });
+      onToast(
+        "ok",
+        "Folder loaded",
+        `${r.files ?? 0} file(s) → ${(r.rows ?? 0).toLocaleString()} rows`,
+      );
+      finishRun(id, r, `Stacked ${(r.rows ?? 0).toLocaleString()} rows`);
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      onToast("error", "Couldn't read folder", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+    }
+  };
+
+  const doFetchApi = async (node: NbNode): Promise<RunOutcome> => {
+    const url = (node.config.url || "").trim();
+    if (!url) {
+      onToast("error", "Add a URL", "The API node needs a URL to fetch.");
+      return { ok: false };
+    }
+    const id = startRun(`Fetching ${node.config.label}…`);
+    try {
+      const r = await api.nodeApiFetch({
+        node_id: node.id,
+        config: node.config,
+        graph: graphForRun(),
+        query_id: id,
+      });
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false };
+      }
+      if (r.error || !r.ok) {
+        onToast("error", "Fetch failed", r.error || "Failed.");
+        finishRun(id, { error: r.error || "Failed." }, "");
+        patch(node.id, { table: "", columns: [] });
+        return { ok: false };
+      }
+      if (r.fetched === false) {
+        // continue-on-error: the failure was captured on the errors output
+        patch(node.id, {
+          table: "",
+          columns: [],
+          rows: 0,
+          err_table: r.err_table,
+          err_rows: r.err_rows ?? 1,
+          fetched_url: r.url,
+        });
+        onToast(
+          "ok",
+          "Error captured",
+          r.error_captured || "Fetch failed; routed to the errors output.",
+        );
+        finishRun(id, r, "Fetch error captured");
+        return { ok: true };
+      }
+      patch(node.id, {
+        table: r.table,
+        columns: r.columns || [],
+        rows: r.rows,
+        engine: r.engine,
+        err_table: r.err_table,
+        err_rows: r.err_rows ?? 0,
+        fetched_url: r.url,
+      });
+      onToast(
+        "ok",
+        "Fetched",
+        `${(r.rows ?? 0).toLocaleString()} row(s) · ${
+          (r.columns || []).length
+        } column(s)`,
+      );
+      finishRun(id, r, `Fetched ${(r.rows ?? 0).toLocaleString()} rows`);
+      return { ok: true };
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      onToast("error", "Fetch failed", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+      return { ok: false };
+    }
+  };
+
+  const doRunIterator = async (node: NbNode): Promise<RunOutcome> => {
+    if (!(node.config.table || "").trim()) {
+      onToast("error", "Name the output table", "Give the iterator's accumulator a table name.");
+      return { ok: false };
+    }
+    // The passes come from the wired "values" table (container) or the classic
+    // driver; the backend validates that and returns a clear error if neither
+    // is set, so we don't pre-require a loop-variable name here — a container
+    // iterator binds each values row's columns as ${vars} and uses no var name.
+    const id = startRun(`Iterating ${node.config.label}…`);
+    try {
+      const r = await api.iteratorRun({
+        node_id: node.id,
+        graph: graphForRun(),
+        query_id: id,
+      });
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false };
+      }
+      if (r.error && !r.passes) {
+        onToast("error", "Iterator failed", r.error);
+        finishRun(id, { error: r.error }, "");
+        return { ok: false };
+      }
+      const errs = r.errors || [];
+      patch(node.id, {
+        it_passes: r.passes,
+        it_attempted: r.attempted,
+        it_rows: r.rows,
+        it_errors: errs.length,
+        // Keep the user's accumulator name on a failed pass (the backend
+        // returns table: null when nothing was written). Clearing it here is
+        // what made a name "vanish" after a run and blocked a simple rerun.
+        ...(r.table ? { table: r.table } : {}),
+      });
+      if (errs.length) {
+        onToast(
+          r.ok ? "ok" : "error",
+          `Iterated ${r.passes}/${r.attempted}`,
+          `${(r.rows ?? 0).toLocaleString()} row(s); ${errs.length} value(s) failed (e.g. ${errs[0].value}: ${errs[0].error}).`,
+        );
+      } else {
+        onToast(
+          "ok",
+          `Iterated ${r.passes} pass(es)`,
+          `${(r.rows ?? 0).toLocaleString()} row(s) → ${r.table}${r.note ? ` · ${r.note}` : ""}`,
+        );
+      }
+      finishRun(id, r, `Iterated ${r.passes} pass(es)`);
+      onTablesChanged?.();
+      return { ok: !!r.ok };
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      onToast("error", "Iterator failed", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+      return { ok: false };
+    }
+  };
+
+  const doRunWhile = async (node: NbNode): Promise<RunOutcome> => {
+    if (!(node.config.table || "").trim()) {
+      onToast("error", "Name the output table", "Give the controller's accumulator a table name.");
+      return { ok: false };
+    }
+    const id = startRun(`Repeating ${node.config.label}…`);
+    try {
+      const r = await api.whileRun({
+        node_id: node.id,
+        graph: graphForRun(),
+        query_id: id,
+      });
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false };
+      }
+      if (r.error && !r.iterations) {
+        onToast("error", "Controller failed", r.error);
+        finishRun(id, { error: r.error }, "");
+        return { ok: false };
+      }
+      patch(node.id, {
+        wh_iters: r.iterations,
+        wh_converged: r.converged,
+        wh_rows: r.rows,
+        // Same as the iterator: don't wipe the user's table name on a run that
+        // wrote nothing, so a rerun works without retyping it.
+        ...(r.table ? { table: r.table } : {}),
+      });
+      onToast(
+        "ok",
+        r.converged
+          ? `Converged in ${r.iterations} iteration(s)`
+          : `Ran ${r.iterations} iteration(s)`,
+        `${(r.rows ?? 0).toLocaleString()} row(s) → ${r.table}${r.note ? ` · ${r.note}` : ""}`,
+      );
+      finishRun(id, r, `Repeated ${r.iterations} iteration(s)`);
+      onTablesChanged?.();
+      return { ok: !!r.ok };
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      onToast("error", "Controller failed", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+      return { ok: false };
+    }
+  };
+
+  const runAll = async () => {
+    const batchScope = scopeVersionRef.current;
+    // A new batch owns fresh cancellation state. Clear it before computing
+    // terminals or starting any child run so no prior Stop can poison Run all.
+    cancelRequested.current = false;
+    // Snapshot the synchronously maintained refs at click time.  This avoids
+    // sending a render-old graph when Run is clicked immediately after an
+    // inspector edit (React may not have committed the next render yet).
+    const runNodes = liveRef.current.nodes;
+    const runEdges = liveRef.current.edges;
+    // .552: a fresh Run all is a NEW user-initiated batch -- it is never
+    // pre-cancelled. Resetting the flag here (not only inside startRun's
+    // runDepth===0 branch) closes a race where a prior cancel / a
+    // forceRecoverFromCancel left cancelRequested stuck true, which made
+    // wasCancelled() report EVERY terminal as cancelled and produced the
+    // "Run all cancelled" toast with no results while the same query ran
+    // fine in the IDE.
+    const hasIn = (n: NbNode) => runEdges.some((e) => e.to.node === n.id);
+    const hasOut = (n: NbNode) => runEdges.some((e) => e.from.node === n.id);
+    // sources can run with no input; these never run as a bare leaf
+    const SOURCES = new Set([
+      "input",
+      "directory",
+      "appendfolder",
+      "createtable",
+      "sql",
+    ]);
+    const SKIP_LEAF = new Set([
+      "browse",
+      "chart",
+      "dashboard",
+      "text",
+      "output",
+      "write",
+      "iterator",
+      "while",
+    ]);
+
+    // a fresh run re-evaluates connectivity, so clear last run's soft warnings
+    setNodeWarnings({});
+
+    const exporters = runNodes.filter(
+      (n) =>
+        n.type === "output" ||
+        n.type === "write" ||
+        n.type === "iterator" ||
+        n.type === "while",
+    );
+    let runList: NbNode[] = [];
+    const danglingOut: NbNode[] = [];
+    let mode: "outputs" | "leaves" = "outputs";
+    let noConnectedOutput = false; // (badge-only since .468)
+    void noConnectedOutput;
+    if (exporters.length) {
+      // run connected exporters; an Output/Write with no input is "dangling"
+      for (const n of exporters) (hasIn(n) ? runList : danglingOut).push(n);
+    }
+    if (!runList.length) {
+      // No CONNECTED output/terminal node (none exist, or the only ones aren't
+      // wired up). Running a bare chain to preview results through the
+      // output-port arrows -- before adding an Output -- is a normal way to
+      // work, so fall back to running the end-of-chain data nodes and nudge
+      // softly (yellow), never a red error.
+      mode = "leaves";
+      noConnectedOutput = true;
+      runList = runNodes.filter(
+        (n) =>
+          (PORTS[n.type]?.outputs?.length || 0) > 0 &&
+          !hasOut(n) &&
+          !SKIP_LEAF.has(n.type) &&
+          (hasIn(n) || SOURCES.has(n.type)),
+      );
+    }
+
+    // flag any present-but-unconnected Output node yellow (a gentle nudge,
+    // not a red error)
+    const warnUnconnectedOutputs = () => {
+      if (!danglingOut.length) return;
+      setNodeWarnings((p) => {
+        const q = { ...p };
+        for (const n of danglingOut) q[n.id] = "Output node not connected";
+        return q;
+      });
+    };
+
+    const runIds = new Set(runList.map((n) => n.id));
+    // fully-unconnected nodes (excluding notes + anything we're running)
+    const isolated = runNodes.filter(
+      (n) =>
+        n.type !== "text" && !hasIn(n) && !hasOut(n) && !runIds.has(n.id),
+    );
+
+    if (!runList.length) {
+      // nothing runnable at all (e.g., only a lone, unconnected Output node)
+      warnUnconnectedOutputs();
+      // .468: retitled -- the output-node nudge lives on the node's
+      // yellow badge, not in toast titles. This toast only says WHY
+      // nothing could run.
+      onToast(
+        "warn",
+        "Nothing to run",
+        danglingOut.length
+          ? "Connect an input to your Output node, or build a chain to preview through the output arrows."
+          : "Connect a chain of nodes (or add an Output) to run.",
+      );
+      return;
+    }
+
+    const totalTerminals = runList.length;
+    // Top-level data leaves can use the backend multi-target scheduler. It
+    // keeps shared ancestors single and runs genuinely independent DuckDB
+    // branches concurrently. Child nodes need their own truncated group graph.
+    let batchOutcomes: RunOutcome[] = [];
+    if (
+      mode === "leaves" &&
+      runList.length >= 2 &&
+      runList.every((n) => !childCtx(n.id))
+    ) {
+      batchOutcomes = await runLeafBatch(runList);
+      if (batchScope !== scopeVersionRef.current) return;
+      runList = [];
+      if (batchOutcomes.some((r) => r.cancelled)) {
+        onToast("warn", "Run all cancelled", `0 of ${totalTerminals} done`);
+        return;
+      }
+    }
+
+    // Export file-output nodes (≥2) together in one shared pass so any common
+    // upstream is built once; the remaining terminals (write / chart /
+    // dashboard image, and single outputs) keep running through the pool.
+    if (mode === "outputs") {
+      const fileOuts = runList.filter(
+        (n) => n.type === "output" && outputKind(n) === "data",
+      );
+      if (fileOuts.length >= 2) {
+        const batchIds = new Set(fileOuts.map((n) => n.id));
+        runList = runList.filter((n) => !batchIds.has(n.id));
+        batchOutcomes = await doExportBatch(fileOuts);
+        if (batchScope !== scopeVersionRef.current) return;
+        if (batchOutcomes.some((r) => r.cancelled)) {
+          onToast("warn", "Run all cancelled", `0 of ${totalTerminals} done`);
+          return;
+        }
+      }
+    }
+
+    // run the terminals through a small concurrency pool. The engines
+    // serialise the heavy materialisation themselves (DuckDB holds a
+    // connection lock and already multithreads within a query; SQLite locks
+    // on writes), so this mainly overlaps file I/O with the next query and
+    // lets terminals on different engines run at once -- while per-run temp
+    // tables are uniquely named so concurrent runs can't collide.
+    const runOne = (n: NbNode): Promise<RunOutcome> => {
+      if (mode === "leaves") return runLeaf(n);
+      const kind = n.type === "output" ? outputKind(n) : "data";
+      return n.type === "iterator"
+        ? doRunIterator(n)
+        : n.type === "while"
+          ? doRunWhile(n)
+          : n.type === "write"
+            ? doWriteTable(n)
+            : kind === "chart" || kind === "dashboard"
+            ? doExportImage(n)
+            : doExport(n);
+    };
+    const CONCURRENCY = Math.min(3, runList.length || 1);
+    const results: RunOutcome[] = [...batchOutcomes];
+    let next = 0;
+    const worker = async () => {
+      while (next < runList.length) {
+        // Stop must halt the whole workflow: once cancellation is requested, no
+        // worker starts another node (the in-flight ones were already aborted +
+        // interrupted by cancelRun).
+        if (cancelRequested.current) break;
+        const n = runList[next++];
+        results.push(await runOne(n));
+      }
+    };
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+    if (batchScope !== scopeVersionRef.current) return;
+
+    if (results.some((r) => r.cancelled)) {
+      onToast("warn", "Run all cancelled", `${results.filter((r) => r.ok).length} of ${totalTerminals} done`);
+      return;
+    }
+    const ok = results.filter((r) => r.ok).length;
+    const bad = results.filter((r) => !r.ok).length;
+    warnUnconnectedOutputs();
+    const bits = [`${ok} ran`];
+    if (bad) bits.push(`${bad} failed`);
+    if (isolated.length)
+      bits.push(`${isolated.length} unconnected node(s) ignored`);
+    if (bad) {
+      // a genuine node failure is still a red error (and reds that node)
+      onToast("error", "Run all finished", bits.join(" · "));
+    } else if (isolated.length) {
+      // .468: the output-node nudge is the yellow badge on the node
+      // itself now -- no toast. Only genuinely ignored nodes still warn.
+      onToast("warn", "Run all finished", bits.join(" · "));
+    } else {
+      onToast("ok", "Run all finished", bits.join(" · "));
+    }
+  };
+
+  const doCreateTable = async (node: NbNode) => {
+    const cols = (node.config.columns || [])
+      .map((c: string) => (c || "").trim())
+      .filter(Boolean);
+    if (!cols.length) {
+      onToast("error", "Add a column", "Give the table at least one column.");
+      return;
+    }
+    const rows = (node.config.rows || []).filter((r: any[]) =>
+      (r || []).some((c) => String(c ?? "").trim() !== ""),
+    );
+    if (!rows.length) {
+      onToast("error", "Add a row", "Enter or paste at least one row of data.");
+      return;
+    }
+    const name = (node.config.label || "table").trim() || "table";
+    const id = startRun(`Creating ${name}…`);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
+    try {
+      const r = await api.tableCreate(
+        name,
+        cols,
+        rows,
+        node.config.dest || "duckdb",
+        ctrl.signal,
+      );
+      if (!isRunCurrent(id)) return;
+      if (r.error || !r.ok) {
+        onToast("error", "Create failed", r.error || "Failed.");
+        finishRun(id, { error: r.error || "Failed." }, "");
+        return;
+      }
+      const t = r.table || name;
+      onToast(
+        "ok",
+        "Table created",
+        `${t} (${r.engine}) — ${rows.length.toLocaleString()} row${rows.length === 1 ? "" : "s"}`,
+      );
+      finishRun(id, r, `Created ${t}`);
+      onTablesChanged?.();
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      const message = e.message || String(e);
+      onToast("error", "Create failed", message);
+      finishRun(id, { error: message }, "");
+    } finally {
+      unregisterRun(id, ctrl);
+    }
+  };
+
+
+
+  const setDocumentStatus = (text: string) => {
+    setStatus({ kind: "idle", text });
+  };
+
+  return {
+    preview,
+    setPreview,
+    previewHeight,
+    setPreviewHeight,
+    running,
+    runId,
+    status,
+    setDocumentStatus,
+    browseFolder,
+    setBrowseFolder,
+    dirList,
+    doPreviewRef,
+    previewCache,
+    chartData,
+    validateResults,
+    upstreamChartNode,
+    patchStyle,
+    patchSeriesColor,
+    ensureChartFor,
+    setDashPane,
+    doChart,
+    doValidate,
+    doProfile,
+    doReconcile,
+    doExport,
+    doWriteTable,
+    doReadDirectory,
+    doReadFolder,
+    doFetchApi,
+    doRunIterator,
+    doRunWhile,
+    doCreateTable,
+    doPreview,
+    outputKind,
+    IMAGE_FORMATS_CHART,
+    IMAGE_FORMATS_DASH,
+    DATA_FORMATS,
+    FORMAT_LABELS,
+    loadDirList,
+    runAll,
+    cancelRun,
+  };
+}

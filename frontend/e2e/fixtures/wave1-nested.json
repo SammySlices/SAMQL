@@ -1,0 +1,4 @@
+[
+  {"id": 1, "name": "alpha", "amount": 12.5, "meta": {"region": "US", "tags": ["new", "priority"]}},
+  {"id": 2, "name": "beta", "amount": 30.0, "meta": {"region": "CA", "tags": ["renewal"]}}
+]
