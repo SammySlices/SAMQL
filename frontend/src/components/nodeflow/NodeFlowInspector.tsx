@@ -18,6 +18,12 @@ import {
 } from "./nodeDefinitions";
 import { ColumnPicker, ReorderList } from "./InspectorControls";
 import { InspectorShell } from "./InspectorShell";
+import {
+  filterSelectFields,
+  setFieldsKept,
+  sortSelectFields,
+  type SelField,
+} from "../../lib/selectFields";
 
 export interface NodeFlowInspectorContext {
   buildFilterCond: (field: string, op: string, value: string) => string;
@@ -171,7 +177,6 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
     seedSelectFields,
     sel,
     setAggs,
-    setAllFieldsKept,
     setBrowseFolder,
     setDashPane,
     setFilterCond,
@@ -193,7 +198,49 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
   } = context;
   const [apiPwDraft, setApiPwDraft] = useState("");
   const [inspW, setInspW] = useState<number | null>(null);
+  // Select-node field list: search filters the visible rows; sort toggles
+  // A→Z / Z→A on the underlying config.fields order.
+  const [selectFieldSearch, setSelectFieldSearch] = useState("");
+  const [selectFieldSortDir, setSelectFieldSortDir] = useState<"asc" | "desc">(
+    "asc",
+  );
+  const [apiConnProfiles, setApiConnProfiles] = useState<
+    { key: string; name: string; fields: Record<string, unknown> }[]
+  >([]);
   useEffect(() => setApiPwDraft(""), [sel?.id]);
+  useEffect(() => {
+    setSelectFieldSearch("");
+    setSelectFieldSortDir("asc");
+  }, [sel?.id]);
+  useEffect(() => {
+    if (!sel || sel.type !== "apinode") {
+      setApiConnProfiles([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .connectionProfilesList()
+      .then((r) => {
+        if (cancelled) return;
+        setApiConnProfiles(
+          (r.profiles || [])
+            .filter((p) => p.kind === "api")
+            .map((p) => ({
+              key: p.key,
+              name: p.name,
+              fields: p.fields || {},
+            })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setApiConnProfiles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Reload when the selected API node changes; ignore config edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel?.id, sel?.type]);
 
   const inspectorType = sel ? getNodeInspectorType(sel.type) : null;
   const inspectorDefinition = sel ? getNodeDefinition(sel.type) : null;
@@ -513,19 +560,78 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     <div className="nb2-field-acts">
                       <button
                         className="btn ghost sm"
-                        title="Keep every field"
+                        title="Keep every visible field"
                         disabled={!(sel.config.fields || []).length}
-                        onClick={() => setAllFieldsKept(true)}
+                        data-testid="select-fields-all"
+                        onClick={() => {
+                          const all = (sel.config.fields || []) as SelField[];
+                          const visible = filterSelectFields(
+                            all,
+                            selectFieldSearch,
+                          );
+                          patch(
+                            sel.id,
+                            {
+                              fields: setFieldsKept(
+                                all,
+                                true,
+                                selectFieldSearch.trim()
+                                  ? visible.map((f) => f.name)
+                                  : null,
+                              ),
+                            },
+                          );
+                        }}
                       >
                         All
                       </button>
                       <button
                         className="btn ghost sm"
-                        title="Untick every field"
+                        title="Untick every visible field"
                         disabled={!(sel.config.fields || []).length}
-                        onClick={() => setAllFieldsKept(false)}
+                        data-testid="select-fields-none"
+                        onClick={() => {
+                          const all = (sel.config.fields || []) as SelField[];
+                          const visible = filterSelectFields(
+                            all,
+                            selectFieldSearch,
+                          );
+                          patch(
+                            sel.id,
+                            {
+                              fields: setFieldsKept(
+                                all,
+                                false,
+                                selectFieldSearch.trim()
+                                  ? visible.map((f) => f.name)
+                                  : null,
+                              ),
+                            },
+                          );
+                        }}
                       >
                         None
+                      </button>
+                      <button
+                        className="btn ghost sm"
+                        title={
+                          selectFieldSortDir === "asc"
+                            ? "Sort fields A→Z"
+                            : "Sort fields Z→A"
+                        }
+                        disabled={!(sel.config.fields || []).length}
+                        data-testid="select-fields-sort"
+                        onClick={() => {
+                          const all = (sel.config.fields || []) as SelField[];
+                          patch(sel.id, {
+                            fields: sortSelectFields(all, selectFieldSortDir),
+                          });
+                          setSelectFieldSortDir((d) =>
+                            d === "asc" ? "desc" : "asc",
+                          );
+                        }}
+                      >
+                        <Icon.SortArrows size={12} /> Sort
                       </button>
                       <button
                         className="btn ghost icon"
@@ -536,18 +642,32 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                       </button>
                     </div>
                   </div>
+                  <input
+                    className="nb2-in"
+                    type="search"
+                    data-testid="select-fields-search"
+                    placeholder="Search fields…"
+                    value={selectFieldSearch}
+                    onChange={(e) => setSelectFieldSearch(e.target.value)}
+                    disabled={!(sel.config.fields || []).length}
+                    title="Filter the field list by name or rename"
+                    style={{ marginBottom: 6 }}
+                  />
                   {!inspCols.in && (
                     <div className="nb2-note">
                       Connect an input to choose fields and types.
                     </div>
                   )}
                   <div className="nb2-fields">
-                    <ReorderList
-                      items={(sel.config.fields || []) as any[]}
-                      keyOf={(f: any) => f.name}
-                      onChange={(next) => patch(sel.id, { fields: next })}
-                      renderItem={(f: any, i: number) => (
-                        <div className="nb2-field">
+                    {(() => {
+                      const allFields = (sel.config.fields || []) as SelField[];
+                      const visible = filterSelectFields(
+                        allFields,
+                        selectFieldSearch,
+                      );
+                      const filtering = !!selectFieldSearch.trim();
+                      const renderField = (f: SelField, i: number) => (
+                        <div className="nb2-field" key={f.name}>
                           <input
                             type="checkbox"
                             checked={f.keep !== false}
@@ -584,8 +704,33 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             title="Rename this field (header) — moves with the field when reordered"
                           />
                         </div>
-                      )}
-                    />
+                      );
+                      if (filtering) {
+                        if (!visible.length) {
+                          return (
+                            <div className="nb2-note">
+                              No fields match “{selectFieldSearch.trim()}”.
+                            </div>
+                          );
+                        }
+                        return visible.map((f) => {
+                          const i = allFields.findIndex(
+                            (x) => x.name === f.name,
+                          );
+                          return renderField(f, i);
+                        });
+                      }
+                      return (
+                        <ReorderList
+                          items={allFields as any[]}
+                          keyOf={(f: any) => f.name}
+                          onChange={(next) => patch(sel.id, { fields: next })}
+                          renderItem={(f: any, i: number) =>
+                            renderField(f, i)
+                          }
+                        />
+                      );
+                    })()}
                   </div>
                   <button
                     className="btn sm primary nb2-prev"
@@ -4982,6 +5127,47 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     leave blank if the response is already a list.
                   </div>
 
+                  <label className="nb2-lbl">Saved API profile</label>
+                  <select
+                    className="nb2-in"
+                    data-testid="apinode-connection-profile"
+                    value={
+                      String(sel.config.secret_key || "").startsWith("api:")
+                        ? sel.config.secret_key
+                        : ""
+                    }
+                    onChange={(e) => {
+                      const key = e.target.value;
+                      if (!key) {
+                        patch(sel.id, {
+                          secret_key: "",
+                          secret_saved: false,
+                        });
+                        return;
+                      }
+                      const p = apiConnProfiles.find((x) => x.key === key);
+                      const fields = (p?.fields || {}) as Record<string, any>;
+                      patch(sel.id, {
+                        secret_key: key,
+                        secret_saved: true,
+                        url: fields.url ?? sel.config.url,
+                        auth_user: fields.auth_user ?? sel.config.auth_user,
+                        json_path: fields.json_path ?? sel.config.json_path,
+                      });
+                    }}
+                  >
+                    <option value="">(none — use fields below)</option>
+                    {apiConnProfiles.map((p) => (
+                      <option key={p.key} value={p.key}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="nb2-hint-sm">
+                    Reuse a profile saved under Load Data → REST API (password
+                    stays in the OS secret store).
+                  </div>
+
                   <label className="nb2-lbl">Basic auth (optional)</label>
                   <input
                     className="nb2-in"
@@ -5558,7 +5744,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   <div className="nb2-folder">
                     <input
                       className="nb2-in"
-                      placeholder="Browse to a folder…"
+                      placeholder="Downloads (default) or browse…"
                       value={sel.config.folder || ""}
                       onChange={(e) => patch(sel.id, { folder: e.target.value })}
                     />

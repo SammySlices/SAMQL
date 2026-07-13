@@ -336,6 +336,44 @@ def _prepare_expr(expr):
     return _if_to_case(_brackets_to_idents(expr))
 
 
+def _assert_single_sql_fragment(text, what):
+    """Reject multi-statement payloads in node-authored SQL fragments.
+
+    Filter conditions, formula expressions, and SQL-node queries are spliced
+    into compiled CREATE … AS SQL. SQLite's execute() splits on semicolons and
+    runs every statement, so an embedded ``; DROP TABLE …`` would otherwise
+    execute during a normal node run.
+    """
+    from .sqlutil import split_statements
+    parts = [p for p in split_statements(text or "") if p and p.strip()]
+    if len(parts) > 1:
+        raise NodeflowError(
+            "%s must be a single SQL expression (no extra statements after "
+            "a semicolon)." % what)
+    return text
+
+
+_USERNODE_EXPAND_MAX_DEPTH = 8
+
+
+def _assert_no_nested_usernode(nodes, *, where="graph"):
+    """Raise when any usernode appears at top level or inside group children."""
+    stack = list(nodes or [])
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        if node.get("type") == "usernode":
+            raise NodeflowError(
+                "Nested created nodes are not supported — expand the inner "
+                "one into the tab before creating a new node "
+                "(%s)." % where)
+        cfg = node.get("config") or {}
+        children = cfg.get("children") or []
+        if isinstance(children, list):
+            stack.extend(c for c in children if isinstance(c, dict))
+
+
 def _sqlite_split_rows(src, col, delim, name, cols):
     """SQLite has no unnest/split-to-rows, so explode a delimited string column
     with a recursive CTE: peel one piece off the front each step. Columns other
@@ -546,6 +584,7 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
         if not cond:
             raise NodeflowError(
                 "Enter a condition for the filter node (e.g. score > 50).")
+        _assert_single_sql_fragment(cond, "The filter condition")
         cond = _prepare_expr(cond)  # [Field] refs + portable IF(), like formulas
         if port == "true":
             return ("SELECT * FROM %s AS _f WHERE COALESCE((%s), FALSE)"
@@ -727,6 +766,8 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             raise NodeflowError(
                 "Add at least one formula (a column name and an expression) "
                 "to the formula node.")
+        for n, e in valid:
+            _assert_single_sql_fragment(e, 'Formula "%s"' % n)
         fnames = {n.lower() for n, _ in valid}
         incols = _cols_of_rel(cols_of, up)
         want = None if needed is None else {str(x).lower() for x in needed}
@@ -1718,6 +1759,7 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             q = q[:-1].rstrip()
         if not q:
             raise NodeflowError("Write a SELECT query in the SQL node.")
+        _assert_single_sql_fragment(q, "The SQL node query")
         low = q.lower()
         if not (low.startswith("select") or low.startswith("with")):
             raise NodeflowError(
@@ -1759,11 +1801,16 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
         children = [c for c in (cfg.get("children") or []) if c.get("type")]
         if not children:
             return "SELECT * FROM %s AS _grp" % need("in")
+        _assert_no_nested_usernode(children, where="group children")
         bindings = cfg.get("bindings") or {}
         _group_input_needs, child_needs = _group_liveness_plan(node, needed)
         cur = None  # running relation as "(...)"; None before the first child
         for idx, child in enumerate(children):
             ctype = child.get("type")
+            if ctype == "usernode":
+                raise NodeflowError(
+                    "Created Node instances cannot live inside a group — "
+                    "move them onto the canvas first.")
             cid = child.get("id")
             cnode = {"type": ctype, "config": child.get("config") or {},
                      "id": cid}
@@ -1847,18 +1894,26 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
     raise NodeflowError("This node type isn't supported yet: %s" % typ)
 
 
-def _expand_usernode(node, port, outer_get_input, cols_of, engine, needed):
+def _expand_usernode(node, port, outer_get_input, cols_of, engine, needed,
+                     _depth=0):
     """Compile one output of a user-authored macro node.
 
     The instance config embeds the authored graph plus port maps that link
     external inN/outN ports to Dynamic Input / Dynamic Output node ids.
     """
+    if _depth >= _USERNODE_EXPAND_MAX_DEPTH:
+        raise NodeflowError(
+            "Created node nesting is too deep (max %d). "
+            "Remove nested Created Node instances from the definition."
+            % _USERNODE_EXPAND_MAX_DEPTH)
     cfg = node.get("config") or {}
     label = cfg.get("label") or cfg.get("name") or "created node"
     inner = cfg.get("graph") or {}
     if not isinstance(inner, dict) or not (inner.get("nodes") or []):
         raise NodeflowError(
             'The "%s" created node has no saved graph.' % label)
+    _assert_no_nested_usernode(inner.get("nodes") or [],
+                               where='created node "%s"' % label)
 
     inputs = cfg.get("inputs") or []
     outputs = cfg.get("outputs") or []

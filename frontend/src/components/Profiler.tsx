@@ -6,6 +6,7 @@ interface Props {
   profile: TableProfile | null;
   loading: boolean;
   tableName?: string;
+  onCancel?: () => void;
 }
 
 function num(v: any): string {
@@ -23,7 +24,7 @@ const PROF_COLS = [
 ] as const;
 const PROF_DEFAULT_W = [170, 120, 130, 130, 100, 100, 100, 100, 280];
 
-const ProfilerImpl: React.FC<Props> = ({ profile, loading, tableName }) => {
+const ProfilerImpl: React.FC<Props> = ({ profile, loading, tableName, onCancel }) => {
   useRenderCount("Profiler");
   // .471: resizable columns. Widths live in state so they persist
   // across re-renders; DURING a drag the <col> element is written
@@ -78,6 +79,19 @@ const ProfilerImpl: React.FC<Props> = ({ profile, loading, tableName }) => {
       <div className="empty">
         <div className="inner">
           <span className="spin" /> <span> profiling {tableName}…</span>
+          {onCancel ? (
+            <div style={{ marginTop: 12 }}>
+              <button
+                type="button"
+                className="btn ghost sm"
+                data-testid="profile-stop"
+                title="Stop profiling"
+                onClick={onCancel}
+              >
+                ■ Stop
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
     );

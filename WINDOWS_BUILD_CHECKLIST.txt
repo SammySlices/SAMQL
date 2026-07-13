@@ -152,7 +152,8 @@ EXPECT both commands to pass before any executable packaging begins.
 
 6. SHIP-EMAIL PIPELINE (when moving builds by mail)
 ----------------------------------------------------------------------
-6.1  PS> .\Pack-SamQL.ps1 -OutputDir .\release
+6.1  PS> .\Pack-SamQL.ps1
+     (defaults to .\release; override with -OutputDir if needed)
      EXPECT decoded, APHEX, and release-receipt files. Record both artifact
      SHA-256 values. Decode APHEX and compare it byte-for-byte to the decoded
      bundle. Expand-SamQL verifies count/hash before pruning or overwriting and

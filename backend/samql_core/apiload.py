@@ -489,11 +489,16 @@ def fetch_to_file(url, dest, auth_user=None, auth_pass=None, headers=None,
                   timeout=60, max_bytes=512 * 1024 * 1024, should_cancel=None):
     """Stream an HTTP(S) JSON response straight to ``dest`` with bounded
     memory (the body is never fully held in RAM). Returns
-    (status, content_type, error, nbytes)."""
-    scheme = urllib.parse.urlparse((url or "").strip()).scheme.lower()
-    if scheme not in ("http", "https"):
-        return (None, "", "Only http:// and https:// URLs can be fetched "
-                "(got %r)." % (scheme or "no scheme"), 0)
+    (status, content_type, error, nbytes).
+
+    Uses the same outbound URL policy and redirect re-validation as
+    ``fetch_json`` so the common single-page spool path cannot SSRF
+    private/link-local/metadata targets.
+    """
+    try:
+        validate_outbound_http_url(url, purpose="fetch")
+    except ValueError as exc:
+        return (None, "", str(exc), 0)
     try:
         req = urllib.request.Request(
             url, headers={"Accept": "application/json, */*"})
@@ -507,8 +512,12 @@ def fetch_to_file(url, dest, auth_user=None, auth_pass=None, headers=None,
             req.add_header("Authorization", f"Basic {token}")
         ctx = ssl.create_default_context()
         http_err = None
+        opener = urllib.request.build_opener(
+            _SafeRedirectHandler(),
+            urllib.request.HTTPSHandler(context=ctx),
+        )
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+            resp = opener.open(req, timeout=timeout)
         except urllib.error.HTTPError as he:
             resp, http_err = he, he
         try:

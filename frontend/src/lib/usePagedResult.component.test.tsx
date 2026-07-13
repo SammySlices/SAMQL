@@ -2,6 +2,16 @@ import { act, renderHook } from "@testing-library/react";
 import { StrictMode, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { ColumnFilter, ResultPage } from "./types";
+
+vi.mock("./runController", async () => {
+  const actual = await vi.importActual<typeof import("./runController")>(
+    "./runController",
+  );
+  return {
+    ...actual,
+  };
+});
+
 import {
   usePagedResult,
   type PageRequestOptions,
@@ -48,7 +58,7 @@ function patchState(
 
 describe("shared IDE/Journal paging controller", () => {
   it("keeps only the latest rapid filter response", async () => {
-    const state = makeState();
+    const state = makeState({ queryId: "run-page-1" });
     const first = deferred<ResultPage>();
     const second = deferred<ResultPage>();
     const requests: {
@@ -85,6 +95,9 @@ describe("shared IDE/Journal paging controller", () => {
     expect(requests).toHaveLength(2);
     expect(requests[0].signal.aborted).toBe(true);
     expect(requests[1].options.filters).toEqual(filtersB);
+    // Supersede aborts the prior fetch; query_id still rides for Stop mid-send.
+    expect(requests[0].options.query_id).toBe("run-page-1");
+    expect(requests[1].options.query_id).toBe("run-page-1");
 
     await act(async () => {
       second.resolve(page([[2]], 1));

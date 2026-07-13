@@ -46,6 +46,7 @@ describe("NodeFlow canvas components", () => {
         snapped={false}
         dying={false}
         born={false}
+        denseMode={false}
         renderVersion="g1"
         chartVersion={0}
         childSelection={null}

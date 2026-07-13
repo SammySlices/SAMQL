@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../lib/api";
 import type { LoadResult } from "../../lib/types";
-import { isCancelledError } from "../../lib/runController";
+import { isCancelledError, registerRun, unregisterRun, cancelOne } from "../../lib/runController";
 import { Icon } from "../Icon";
 import {
   type SqlProfile,
@@ -134,6 +134,31 @@ export const SqlServerLoadTab: React.FC<{
     } catch {
       /* non-fatal: the profile still saved */
     }
+    // Also persist as a first-class connection profile so NodeFlow / reconnect
+    // can resolve fields + secret by key (mssql:Name).
+    try {
+      const p = currentProfile();
+      await api.connectionProfilesUpsert({
+        kind: "mssql",
+        name: nm,
+        fields: {
+          driver: p.driver,
+          server: p.server,
+          port: p.port,
+          auth: p.auth,
+          user: p.user,
+          encrypt: p.encrypt,
+          trust: p.trust,
+          multi_subnet: p.multiSubnet,
+          login_timeout: p.loginTimeout,
+          stmt_timeout: p.stmtTimeout,
+          read_only: p.readOnly,
+        },
+        password: savePass && pwd ? pwd : undefined,
+      });
+    } catch {
+      /* non-fatal */
+    }
   };
 
   const deleteProfile = async () => {
@@ -146,6 +171,11 @@ export const SqlServerLoadTab: React.FC<{
     setProfileName("");
     try {
       await api.secretDelete(key);
+    } catch {
+      /* ignore */
+    }
+    try {
+      await api.connectionProfilesDelete(key);
     } catch {
       /* ignore */
     }
@@ -313,14 +343,10 @@ export const SqlServerLoadTab: React.FC<{
       Date.now().toString(36) +
       Math.random().toString(36).slice(2, 8);
     const ctrl = new AbortController();
+    registerRun(queryId, ctrl);
     if (cancelRef)
       cancelRef.current = () => {
-        try {
-          ctrl.abort();
-        } catch {
-          /* ignore */
-        }
-        void api.cancelQuery(queryId).catch(() => {});
+        cancelOne(queryId, ctrl);
       };
     try {
       const res = await api.mssqlImport(
@@ -343,9 +369,10 @@ export const SqlServerLoadTab: React.FC<{
         `${conn.name} \u2192 ${tableName.trim()}`,
       );
     } catch (e: any) {
-      if (isCancelledError(e)) return;
+      if (isCancelledError(e, queryId)) return;
       onError(e.message || String(e));
     } finally {
+      unregisterRun(queryId, ctrl);
       if (cancelRef) cancelRef.current = null;
       setBusy(false);
     }

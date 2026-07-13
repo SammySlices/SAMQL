@@ -4,8 +4,9 @@ import { api, saveToDownloads } from "../lib/api";
 import type { ErrorLogEntry } from "../lib/types";
 
 // A debuggable history of recent server-side failures. Unexpected errors carry
-// a full Python traceback; handled (validation) errors carry their status and
-// message. The whole log can be exported to a text file.
+// a full Python traceback; handled (validation) errors and soft application
+// failures (query / load / flatten returning {error}) carry status, kind, and
+// request detail. The whole log can be exported to a text file.
 export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
   onClose,
 }) => {
@@ -53,7 +54,7 @@ export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
     const blocks = entries.map((e) => {
       const head = `[${e.ts}] ${e.status} ${e.kind} — ${e.method} ${e.path}`;
       const msg = `  ${e.error}`;
-      const det = e.detail ? `\n  request: ${e.detail}` : "";
+      const det = e.detail ? `\n  detail: ${e.detail}` : "";
       const tb = e.traceback
         ? `\n${e.traceback.replace(/^/gm, "  ")}`
         : "";
@@ -80,8 +81,9 @@ export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
       footer={
         <>
           <span className="dim" style={{ fontSize: 12 }}>
-            {entries.length} recent server-side error
-            {entries.length === 1 ? "" : "s"}
+            {entries.length} recent error
+            {entries.length === 1 ? "" : "s"} (query, load, flatten, NodeFlow,
+            and server failures)
           </span>
           <span className="spacer" />
           <button className="btn sm" onClick={load}>
@@ -117,8 +119,9 @@ export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
         <div className="error-box">{err}</div>
       ) : !entries.length ? (
         <div className="faint">
-          No errors logged. Unexpected server failures (with their tracebacks)
-          and handled errors will appear here as they happen — useful for
+          No errors logged. Failed queries, loads, flatten/shred jobs, NodeFlow
+          runs, reconciles, exports, handled API errors, and unexpected server
+          failures (with tracebacks) appear here as they happen — useful for
           tracking down a problem and attaching to a bug report.
         </div>
       ) : (
@@ -136,6 +139,9 @@ export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
                   <span className={"errlog-badge" + (sev ? " sev" : "")}>
                     {e.status}
                   </span>
+                  <span className="errlog-kind" title={e.kind}>
+                    {e.kind}
+                  </span>
                   <span className="errlog-ts">{e.ts}</span>
                   <span className="errlog-route">
                     {e.method} {e.path}
@@ -149,14 +155,15 @@ export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
                   <div className="errlog-detail">
                     {e.detail && (
                       <div className="errlog-line">
-                        <b>request:</b> {e.detail}
+                        <b>detail:</b> {e.detail}
                       </div>
                     )}
                     {e.traceback ? (
                       <pre className="errlog-tb">{e.traceback}</pre>
                     ) : (
                       <div className="errlog-line dim">
-                        No traceback (handled error).
+                        No Python traceback — application or handled error.
+                        Expand the message and detail above for the cause.
                       </div>
                     )}
                   </div>

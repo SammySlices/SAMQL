@@ -17,6 +17,7 @@ import shutil
 import tempfile
 
 from .flatten import JSONFlattener, stream_json_records
+from .nodeflow import sanitize_ident
 
 # Per-table row buffer kept in memory before the JSON flattener spills it
 # to disk. Small/medium files never reach this, so they stay fully in-memory;
@@ -91,10 +92,44 @@ except Exception:
 
 _sanitize = JSONFlattener._sanitize
 
+# Extensions load_file knows how to peel off a filename. Anything else
+# (including a raw upload stem like ``test.sam``) is kept intact so a second
+# splitext does not silently drop middle segments.
+_TABLE_NAME_EXTS = {
+    "csv", "tsv", "txt", "json", "ndjson", "jsonl",
+    "parquet", "pq", "xlsx", "xlsm", "xls",
+}
 
-def base_name_for(path):
-    stem = os.path.splitext(os.path.basename(path))[0]
-    return _sanitize(stem) or "table"
+
+def base_name_for(path_or_stem):
+    """Turn a file path, upload filename, or raw stem into a SQL-safe table name.
+
+    Always sanitizes -- uploads used to pass ``os.path.splitext(filename)[0]``
+    straight through, so names like ``Usinvestments_Monthly (1) .csv`` (trailing
+    space before the extension), ``test.sam.csv`` (embedded dots), or
+    ``my file.csv`` landed as fragile identifiers. NodeFlow then ``.strip()``s
+    the configured table name, so a trailing-space catalog name no longer
+    matched and nodes returned empty / missing-table errors. One choke point
+    collapses every weird convention to the same safe identifier used by
+    createtable / iterator (``sanitize_ident``).
+
+    Only peels a *known* data extension, so an upload stem of ``test.sam``
+    stays ``test.sam`` (→ ``test_sam``) instead of being truncated to ``test``.
+
+    A leading ``__`` (directory / append-from-folder / API hidden tables) is
+    preserved after sanitisation -- ``sanitize_ident`` strips edge underscores,
+    which would otherwise turn ``__nbfile_…`` into a visible ``nbfile_…`` and
+    leak temporary loads into the tables tree.
+    """
+    base = os.path.basename(str(path_or_stem or "")).strip()
+    root, ext = os.path.splitext(base)
+    stem = root if ext.lower().lstrip(".") in _TABLE_NAME_EXTS else base
+    stem = stem.strip()
+    keep_hidden = stem.startswith("__")
+    cleaned = sanitize_ident(stem, "table")
+    if keep_hidden and cleaned and not cleaned.startswith("__"):
+        cleaned = "__" + cleaned
+    return cleaned
 
 
 def detect_delimiter(sample):
@@ -123,7 +158,7 @@ def load_csv(db, path, base_name=None, sep=None, source=None, progress=None):
     """Stream a CSV into ``db`` (a DBManager). Returns
     {name, rows, columns, multiline, excluded}. If ``progress`` is given
     it is called periodically as progress(bytes_done, bytes_total)."""
-    base_name = base_name or base_name_for(path)
+    base_name = base_name_for(base_name or path)
     source = source or os.path.basename(path)
     try:
         total_size = os.path.getsize(path)
@@ -262,7 +297,7 @@ def load_json(db, path, base_name=None, source=None, progress=None,
     list of keys/paths to skip flattening (see JSONFlattener); skipping a heavy
     nested array removes its rows and child table entirely. Returns a list of
     {name, rows, columns, engine}."""
-    base_name = base_name or base_name_for(path)
+    base_name = base_name_for(base_name or path)
     source = source or os.path.basename(path)
 
     # Keep spill files under the per-instance temp dir so they're cleaned
@@ -348,7 +383,7 @@ def load_json(db, path, base_name=None, source=None, progress=None,
 def load_parquet(duck, path, base_name=None, source=None):
     """Register a Parquet file as a zero-copy DuckDB view. Requires
     DuckDB. Returns {name, rows, columns}."""
-    base_name = base_name or base_name_for(path)
+    base_name = base_name_for(base_name or path)
     name = duck.create_view_from_file(base_name, path, "parquet")
     cols = duck.table_columns.get(name, [])
     n = _duck_count(duck, name)
@@ -408,7 +443,12 @@ def load_excel(session, path, base_name=None, destination="sqlite",
     skip = header_row - 1
     want = str(sheet).strip() if sheet is not None else ""
     pick_all = want in ("", "__all__", "*")
-    base = base_name or base_name_for(path)
+    base = base_name_for(base_name or path)
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".xls":
+        raise RuntimeError(
+            "Legacy .xls (Excel 97-2003) isn't supported. Save the workbook "
+            "as .xlsx and try again, or drag-drop the .xlsx file.")
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     out = []
     try:
@@ -489,6 +529,10 @@ def excel_sheet_names(path):
     except Exception:
         raise RuntimeError("Reading Excel files needs the 'openpyxl' package, "
                            "which isn't installed.")
+    if os.path.splitext(path)[1].lower() == ".xls":
+        raise RuntimeError(
+            "Legacy .xls (Excel 97-2003) isn't supported. Save the workbook "
+            "as .xlsx and try again.")
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         return [str(s) for s in wb.sheetnames]
@@ -595,7 +639,7 @@ def load_file(session, path, destination="sqlite", base_name=None,
         except Exception:
             destination = "sqlite"
     ext = os.path.splitext(path)[1].lower().lstrip(".")
-    base_name = base_name or base_name_for(path)
+    base_name = base_name_for(base_name or path)
     if mode == "view" and ext not in ("xlsx", "xlsm", "xls"):
         # query-in-place: a DuckDB view over read_*. Needs DuckDB; if it's
         # unavailable we fall through to a normal materialized load.

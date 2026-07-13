@@ -17,6 +17,7 @@ import {
 } from "../lib/notebook";
 import { useRenderCount } from "../lib/renderDebug";
 import { menuPos } from "../lib/menuPos";
+import { quoteSqlIdent } from "../lib/sql";
 
 type Tab = "tables" | "history" | "saved";
 
@@ -486,7 +487,7 @@ const TablesTree: React.FC<
                 ? `${t.name}\nSQL Server table — query it in the editor (runs on the server)`
                 : `${t.name}\nClick to insert into editor`
             }
-            onClick={() => onInsertTable(t.name)}
+            onClick={() => onInsertTable(quoteSqlIdent(t.name))}
             style={{ cursor: "pointer" }}
           >
             {t.name}
@@ -556,7 +557,7 @@ const TablesTree: React.FC<
                 <React.Fragment key={c.name}>
                   <div
                     className="tree-col"
-                    onClick={() => onInsertColumn(c.name)}
+                    onClick={() => onInsertColumn(quoteSqlIdent(c.name))}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       if (t.remote) return; // catalog cols: no type ops
@@ -676,7 +677,10 @@ const TablesTree: React.FC<
                                 title={f.path || f.note || f.type}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  if (!isEl) onInsertColumn(f.path || f.name);
+                                  if (!isEl)
+                                    onInsertColumn(
+                                      quoteSqlIdent(f.path || f.name),
+                                    );
                                 }}
                               >
                                 {hasKids ? (
@@ -980,7 +984,7 @@ const TablesTree: React.FC<
             )}
             <button
               onClick={() => {
-                onInsertTable(menu.t.name);
+                onInsertTable(quoteSqlIdent(menu.t.name));
                 setMenu(null);
               }}
             >
@@ -1097,7 +1101,7 @@ const TablesTree: React.FC<
             </div>
             <button
               onClick={() => {
-                onInsertColumn(colMenu.col);
+                onInsertColumn(quoteSqlIdent(colMenu.col));
                 setColMenu(null);
               }}
             >

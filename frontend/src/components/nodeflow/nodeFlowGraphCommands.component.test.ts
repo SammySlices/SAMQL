@@ -131,6 +131,21 @@ describe("NodeFlow graph commands", () => {
     expect(invalid.edges).toBe(edges);
   });
 
+  it("refuses to nest a Created Node instance inside a group", () => {
+    const graph = [
+      node("u1", "usernode", 0, 0, {
+        definitionId: "d1",
+        graph: { nodes: [], edges: [] },
+      }),
+      node("group", "group", 200, 0, { children: [] }),
+    ];
+    const moved = moveNodeIntoContainer(graph, [], "u1", "group");
+    expect(moved.nodes).toBe(graph);
+    expect(moved.nodes.find((item) => item.id === "group")?.config.children).toEqual(
+      [],
+    );
+  });
+
   it("removes selected nodes and every incident edge atomically", () => {
     const nodes = [node("a", "input"), node("b", "filter"), node("c", "output")];
     const edges = [edge("ab", "a", "b"), edge("bc", "b", "c")];

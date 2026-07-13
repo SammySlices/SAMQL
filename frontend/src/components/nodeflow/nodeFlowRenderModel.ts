@@ -86,7 +86,10 @@ function safeConfigRevision(node: NbNode): string {
 export function buildNodeFlowRenderModel(
   nodes: readonly NbNode[],
   edges: readonly NbEdge[],
+  /** React cache key — densify() reads the shared layout flag. */
+  denseMode = false,
 ): NodeFlowRenderModel {
+  void denseMode;
   const nodeById = new Map<string, NbNode>();
   const nodeIndexById = new Map<string, number>();
   const incomingMutable: Record<string, NbEdge[]> = {};
@@ -220,7 +223,10 @@ export function selectVisibleCanvasNodes(
   forcedIds: ReadonlySet<string> = new Set<string>(),
   threshold = LARGE_GRAPH_NODE_THRESHOLD,
   overscanPx = LARGE_GRAPH_OVERSCAN_PX,
+  /** React cache key — densify() reads the shared layout flag. */
+  denseMode = false,
 ): NbNode[] {
+  void denseMode;
   if (nodes.length <= threshold) return nodes.slice();
   const bounds = nodeFlowViewBounds(viewport, zoom, overscanPx);
   if (!bounds) return nodes.slice();

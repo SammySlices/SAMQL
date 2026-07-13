@@ -22,6 +22,7 @@ interface NodeFlowCanvasShellProps {
   snap: boolean;
   wires: Wire[];
   dyingIds: Set<string>;
+  dyingEdgeIds: Set<string>;
   selectedEdge: string | null;
   onSelectEdge: (id: string) => void;
   onDeleteEdge: (id: string) => void;
@@ -50,6 +51,7 @@ export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
   snap,
   wires,
   dyingIds,
+  dyingEdgeIds,
   selectedEdge,
   onSelectEdge,
   onDeleteEdge,
@@ -97,6 +99,7 @@ export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
               <WireLayer
                 wires={wires}
                 dying={dyingIds}
+                dyingEdges={dyingEdgeIds}
                 selectedId={selectedEdge}
                 onSelect={onSelectEdge}
                 onDelete={onDeleteEdge}

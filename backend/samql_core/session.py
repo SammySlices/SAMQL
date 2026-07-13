@@ -740,6 +740,7 @@ class Session:
             pass
         self.duckdb = None
         self._secrets = None             # lazy SecretStore (DPAPI-backed)
+        self._connection_profiles = None  # lazy named profile registry
         self.connections = {}            # name -> SQLServerConnection
         self._hdfs = None                # active WebHDFSClient (or None)
         # Remote "catalog" tables: name + columns only, no data. Querying one
@@ -1125,6 +1126,14 @@ class Session:
             from .secretstore import SecretStore
             self._secrets = SecretStore()
         return self._secrets
+
+    @property
+    def connection_profiles(self):
+        """Lazy registry of named SQL/API connection profiles (no passwords)."""
+        if self._connection_profiles is None:
+            from .connection_profiles import ConnectionProfileStore
+            self._connection_profiles = ConnectionProfileStore()
+        return self._connection_profiles
 
     # ---- tables tree ------------------------------------------------
     def tables_tree(self):
@@ -2229,6 +2238,8 @@ class Session:
         cs.pop("result_id", None)
         cs["table"] = tmp
         cs["engine"] = kind
+        if query_id:
+            cs["query_id"] = query_id
         out = self.chart_data(cs)
         self._flow_cleanup(query_id, et, created)
         return out
@@ -3423,17 +3434,31 @@ class Session:
                 lock.release()
         return n
 
+    def _resolve_export_dir(self, out_dir):
+        """Empty out_dir → user's Downloads (SAMQL_DOWNLOADS_DIR in tests).
+        A non-empty path must already exist as a directory."""
+        import os
+        out = (out_dir or "").strip()
+        if out:
+            return out if os.path.isdir(out) else None
+        envd = os.environ.get("SAMQL_DOWNLOADS_DIR")
+        if envd and os.path.isdir(envd):
+            return envd
+        cand = os.path.join(os.path.expanduser("~"), "Downloads")
+        return cand if os.path.isdir(cand) else os.path.expanduser("~")
+
     def export_nodeflow(self, graph, node_id, out_dir, fmt="csv",
                         base_name=None, query_id=None):
         """Run an output node's upstream flow and write it to out_dir as CSV or
-        JSON. Returns {ok, path, file, rows} or {error}."""
+        JSON. Empty out_dir writes to the user's Downloads folder.
+        Returns {ok, path, file, rows} or {error}."""
         from . import nodeflow
         import os
         import csv as _csv
         import json as _json
         import re as _re
-        out = (out_dir or "").strip()
-        if not out or not os.path.isdir(out):
+        out = self._resolve_export_dir(out_dir)
+        if not out:
             return {"error": "Pick an output folder."}
         fmt = (fmt or "csv").lower()
         if fmt not in ("csv", "tsv", "json", "ndjson", "xlsx", "parquet"):
@@ -3488,8 +3513,8 @@ class Session:
         seen = {}
         for it in items:
             nid = it.get("node_id")
-            folder = (it.get("folder") or "").strip()
-            if not folder or not os.path.isdir(folder):
+            folder = self._resolve_export_dir(it.get("folder") or "")
+            if not folder:
                 return {"error": "Pick an output folder for every output node."}
             fmt = (it.get("fmt") or "csv").lower()
             if fmt not in ("csv", "tsv", "json", "ndjson", "xlsx",
@@ -4588,7 +4613,10 @@ class Session:
         if not rp:
             return {"error": "No file selected."}
         stem = os.path.splitext(os.path.basename(rp.rstrip("/")))[0]
-        name = base_name or stem or "hdfs_file"
+        # Always sanitize -- same rules as path/upload loads (parens, dots,
+        # spaces, etc. must not become fragile catalog identifiers).
+        from .loaders import base_name_for as _safe_table
+        name = _safe_table(base_name or stem or "hdfs_file")
         ext = os.path.splitext(rp)[1].lower() or ".csv"
         tmp = tmputil.new_tempfile("hdfs_", ext)
 
@@ -4778,7 +4806,8 @@ class Session:
                                              query_id, dialect, reuse,
                                              preview_limit=preview_limit)
             finally:
-                self._unregister_run(query_id)
+                # Keep the cancelled flag through mid-send abort (_REQ_LOCAL).
+                self._end_run_keep_cancel(query_id)
         return self._run_query_inner(sql, target, read_only, query_id,
                                      dialect, reuse,
                                      preview_limit=preview_limit)
@@ -6893,7 +6922,7 @@ class Session:
                 return {"cancelled": True}
             raise
         finally:
-            self._unregister_run(query_id)
+            self._end_run_keep_cancel(query_id)
         self._profile_cache[key] = result
         self._profile_cache_order.append(key)
         while len(self._profile_cache_order) > 16:
@@ -6904,7 +6933,30 @@ class Session:
     def profile_field(self, spec):
         """Profile a single column (field) of a result or table. Returns the
         same shape as profile_table but with a single entry in ``columns``,
-        plus ``field``. ``spec`` is {result_id|table, engine, column}."""
+        plus ``field``. ``spec`` is {result_id|table, engine, column, query_id}.
+
+        Cancel binds the same interrupt target as chart/pivot (result-store
+        connection/engine), so Stop reaches the aggregate SQL.
+        """
+        qid = spec.get("query_id") or ("pf-%s" % uuid.uuid4().hex[:10])
+        target = self._agg_interrupt_target(spec)
+        self._register_run(
+            qid, target, kind="profile", surface="profile",
+            label=str(spec.get("column") or "field"))
+        try:
+            if self._run_is_cancelled(qid):
+                return {"cancelled": True, "error": "cancelled",
+                        "table": "", "total_rows": 0, "columns": []}
+            return self._profile_field_inner(spec, qid)
+        except Exception as e:
+            if _is_interrupt(e) or self._run_is_cancelled(qid):
+                return {"cancelled": True, "error": "cancelled",
+                        "table": "", "total_rows": 0, "columns": []}
+            raise
+        finally:
+            self._end_run_keep_cancel(qid)
+
+    def _profile_field_inner(self, spec, qid=None):
         col = spec.get("column")
         if not col:
             return {"error": "No column specified."}
@@ -6915,6 +6967,9 @@ class Session:
         if col not in cols:
             return {"error": f"Unknown column: {col}"}
         ci = list(cols).index(col)
+        if qid and self._run_is_cancelled(qid):
+            return {"cancelled": True, "error": "cancelled",
+                    "table": "", "total_rows": 0, "columns": []}
 
         if ctx is not None:
             run, src, colref, castnum = ctx
@@ -6999,6 +7054,9 @@ class Session:
                 for (v, c) in top
             ],
         }
+        if qid and self._run_is_cancelled(qid):
+            return {"cancelled": True, "error": "cancelled",
+                    "table": "", "total_rows": 0, "columns": []}
         return {"table": col, "total_rows": total,
                 "columns": [stats], "field": col}
 
@@ -8123,16 +8181,28 @@ class Session:
         fmt = (fmt or "csv").lower()
         if out_path is None:
             out_path = tmputil.new_tempfile("export_", f".{fmt}")
+        # Bind the result store's engine/conn (parquet DuckDB / spill SQLite),
+        # not session.duckdb -- otherwise Stop never reaches the COPY.
+        eng = None
+        store = getattr(cr, "store", None)
+        if store is not None:
+            eng = (getattr(store, "_conn", None)
+                   or getattr(store, "_engine", None))
+        if eng is None:
+            try:
+                eng = self.get_duckdb()
+            except Exception:
+                eng = getattr(self, "db", None)
         # .533: exports register like any run, so the Activity tray shows
         # a cancellable "export" card; Stop flags the id (cooperative
         # checks in the row loops) AND interrupts the engine COPY.
-        self._register_run(query_id, getattr(self, "duckdb", None),
+        self._register_run(query_id, eng,
                            kind="export", target="%s export" % fmt)
         try:
             return self._export_inner(cr, fmt, out_path, sort_col,
                                       descending, query_id)
         finally:
-            self._unregister_run(query_id)
+            self._end_run_keep_cancel(query_id)
 
     def _export_inner(self, cr, fmt, out_path,
                       sort_col, descending, query_id):
@@ -8413,6 +8483,21 @@ class Session:
             except Exception:
                 pass
 
+    def _end_run_keep_cancel(self, query_id):
+        """Drop the in-flight binding but keep the cancelled flag.
+
+        Pivot/chart/reconcile need this so a Stop that lands after the engine
+        unwinds still reports as cancelled (not a generic failure).
+        """
+        if not query_id:
+            return
+        with self._running_lock:
+            self._running.pop(query_id, None)
+        try:
+            opreg.end(query_id)
+        except Exception:
+            pass
+
     def _run_op(self, query_id, kind, target, work):
         """Run a synchronous engine read (reconcile / pivot / chart / field
         profile) as a cancellable, dashboard-visible operation. Registers it
@@ -8437,7 +8522,7 @@ class Session:
                 return {"error": "cancelled", "cancelled": True}
             raise
         finally:
-            self._unregister_run(qid)
+            self._end_run_keep_cancel(qid)
 
     # ---- charting ---------------------------------------------------
     def _engine_kind_for_table(self, table):
@@ -8529,12 +8614,30 @@ class Session:
         """Aggregate a cached result (or table) into chart-ready series.
 
         spec = {result_id|table, engine, chart_type, x, y, agg, bins,
-                limit}. Aggregation is pushed into the engine (SQLite for a
-        spilled result, DuckDB for a Parquet result, or the table's own
-        engine) so a multi-million-row source never crosses into Python;
-        only small in-memory results take the Python path. Returns
+                limit, query_id}. Aggregation is pushed into the engine
+        (SQLite for a spilled result, DuckDB for a Parquet result, or the
+        table's own engine) so a multi-million-row source never crosses into
+        Python; only small in-memory results take the Python path. Returns
         {chart_type, labels, series:[{name, points|values}]} or {error}.
+        Cancelable via query_id like pivot -- Stop interrupts the aggregate.
         """
+        qid = spec.get("query_id") or ("chart-%s" % uuid.uuid4().hex[:10])
+        eng0 = None
+        try:
+            eng0 = (self.get_duckdb()
+                    if (spec.get("engine") or "sqlite") == "duckdb"
+                    else self.db)
+        except Exception:
+            eng0 = None
+        self._register_run(
+            qid, eng0, kind="chart", surface="chart",
+            label=str(spec.get("table") or spec.get("result_id") or "result"))
+        try:
+            return self._chart_data_inner(spec, qid)
+        finally:
+            self._end_run_keep_cancel(qid)
+
+    def _chart_data_inner(self, spec, qid=None):
         chart_type = (spec.get("chart_type") or "bar").lower()
         x = spec.get("x")
         y = spec.get("y")
@@ -8542,25 +8645,46 @@ class Session:
         agg = (spec.get("agg") or "sum").lower()
         limit = int(spec.get("limit") or 100000)
         ctx, cols = self._agg_source(spec)
+        target = self._agg_interrupt_target(spec)
+        if qid and target is not None:
+            self._register_run(
+                qid, target, kind="chart", surface="chart",
+                label=str(spec.get("table")
+                          or spec.get("result_id") or "result"))
+        if qid and self._run_is_cancelled(qid):
+            return {"error": "interrupted", "cancelled": True}
         if cols is None:
             return {"error": "result expired"}
         if x not in cols:
             return {"error": f"Unknown column: {x}"}
         xi = cols.index(x)
-        if chart_type == "candlestick":
-            return self._chart_candlestick(spec, cols, xi)
-        if chart_type in ("multix", "multi_x"):
-            return self._chart_multix(spec, cols)
-        if chart_type in ("multiy", "multi_y"):
-            return self._chart_multiy(spec, cols)
-        yi = cols.index(y) if (y in cols) else None
-        si = cols.index(s) if (s and s in cols and s != x) else None
-        if ctx is not None:
-            return self._chart_sql(ctx, chart_type, x, y, xi, yi, agg, spec, si)
-        _c, rows = self._source_rows(
-            result_id=spec.get("result_id"), table=spec.get("table"),
-            engine=spec.get("engine", "sqlite"), limit=limit)
-        return self._chart_python(rows, chart_type, x, y, xi, yi, agg, spec, si)
+        try:
+            if chart_type == "candlestick":
+                return self._chart_candlestick(spec, cols, xi)
+            if chart_type in ("multix", "multi_x"):
+                return self._chart_multix(spec, cols)
+            if chart_type in ("multiy", "multi_y"):
+                return self._chart_multiy(spec, cols)
+            yi = cols.index(y) if (y in cols) else None
+            si = cols.index(s) if (s and s in cols and s != x) else None
+            if qid and self._run_is_cancelled(qid):
+                return {"error": "interrupted", "cancelled": True}
+            if ctx is not None:
+                out = self._chart_sql(ctx, chart_type, x, y, xi, yi, agg, spec, si)
+            else:
+                _c, rows = self._source_rows(
+                    result_id=spec.get("result_id"), table=spec.get("table"),
+                    engine=spec.get("engine", "sqlite"), limit=limit)
+                if qid and self._run_is_cancelled(qid):
+                    return {"error": "interrupted", "cancelled": True}
+                out = self._chart_python(rows, chart_type, x, y, xi, yi, agg, spec, si)
+            if qid and self._run_is_cancelled(qid):
+                return {"error": "interrupted", "cancelled": True}
+            return out
+        except Exception as e:
+            if _is_interrupt(e) or (qid and self._run_is_cancelled(qid)):
+                return {"error": "interrupted", "cancelled": True}
+            return {"error": str(e)}
 
     def _finish_series(self, pairs, chart_type, x, y, yi, agg):
         """Order grouped (key, value) pairs deterministically and shape the
@@ -8924,7 +9048,43 @@ class Session:
         try:
             return self._pivot_inner(spec, qid)
         finally:
-            self._unregister_run(qid)
+            # Keep the cancelled flag so a late cancel is still reported as
+            # cancel (mid-send abort via _REQ_LOCAL).
+            self._end_run_keep_cancel(qid)
+
+    def _agg_interrupt_target(self, spec):
+        """Connection/engine that actually runs chart/pivot aggregates for cancel.
+
+        Current-result aggregates use DiskBackedRows._conn (private SQLite) or
+        ParquetResultStore._engine (DuckDB), not session.db -- cancel_query must
+        interrupt that target or Stop looks broken.
+        """
+        rid = spec.get("result_id")
+        if rid is not None:
+            cr = self._results.get(rid)
+            store = getattr(cr, "store", None) if cr is not None else None
+            if store is None:
+                return None
+            conn = getattr(store, "_conn", None)
+            if conn is not None:
+                return conn
+            eng = getattr(store, "_engine", None)
+            if eng is not None:
+                return eng
+            return None
+        table = spec.get("table")
+        if table:
+            kind = (self._engine_kind_for_table(table)
+                    or spec.get("engine") or "sqlite")
+            try:
+                return (self.get_duckdb() if kind == "duckdb" else self.db)
+            except Exception:
+                return None
+        return None
+
+    def _pivot_interrupt_target(self, spec):
+        # Back-compat alias used by older tests / call sites.
+        return self._agg_interrupt_target(spec)
 
     def _pivot_inner(self, spec, qid=None):
         """Build a pivot table over a cached result or a loaded table.
@@ -8962,8 +9122,15 @@ class Session:
                    if f and f.get("field")]
 
         ctx, cols = self._agg_source(spec)
+        # Re-bind cancel to the connection that will execute the GROUP BY.
+        target = self._agg_interrupt_target(spec)
+        if qid and target is not None:
+            self._register_run(
+                qid, target, kind="pivot", surface="pivot",
+                label=str(spec.get("table")
+                          or spec.get("result_id") or "result"))
         if qid and self._run_is_cancelled(qid):
-            return {"error": "interrupted"}
+            return {"error": "interrupted", "cancelled": True}
         if cols is None:
             return {"error": "result expired"}
         names = set(cols)
@@ -8982,15 +9149,17 @@ class Session:
         try:
             if ctx is not None:
                 return self._pivot_sql2(ctx, cols, row_dims, col_dims,
-                                        values, filters, cap)
+                                        values, filters, cap, qid=qid)
             _c, rows = self._source_rows(
                 result_id=spec.get("result_id"), table=spec.get("table"),
                 engine=spec.get("engine", "sqlite"), limit=cap)
             if qid and self._run_is_cancelled(qid):
-                return {"error": "interrupted"}
+                return {"error": "interrupted", "cancelled": True}
             return self._pivot_python2(cols, rows, row_dims, col_dims,
-                                       values, filters)
+                                       values, filters, qid=qid)
         except Exception as e:
+            if _is_interrupt(e) or (qid and self._run_is_cancelled(qid)):
+                return {"error": "interrupted", "cancelled": True}
             return {"error": str(e)}
 
     @staticmethod
@@ -9107,7 +9276,10 @@ class Session:
             return (tv is not None and tv2 is not None and tv <= nv <= tv2)
         return True
 
-    def _pivot_sql2(self, ctx, cols, row_dims, col_dims, values, filters, cap):
+    def _pivot_sql2(self, ctx, cols, row_dims, col_dims, values, filters, cap,
+                    qid=None):
+        if qid and self._run_is_cancelled(qid):
+            return {"error": "interrupted", "cancelled": True}
         run, src, colref, castnum = ctx
         cidx = {c: i for i, c in enumerate(cols)}
         dim_names = row_dims + col_dims
@@ -9133,15 +9305,20 @@ class Session:
         if cap:
             sql += f" LIMIT {int(cap)}"
         grouped = run(sql)
+        if qid and self._run_is_cancelled(qid):
+            return {"error": "interrupted", "cancelled": True}
         return self._pivot_assemble(grouped, row_dims, col_dims, values)
 
-    def _pivot_python2(self, cols, rows, row_dims, col_dims, values, filters):
+    def _pivot_python2(self, cols, rows, row_dims, col_dims, values, filters,
+                       qid=None):
         cidx = {c: i for i, c in enumerate(cols)}
         ri = [cidx[d] for d in row_dims]
         ci = [cidx[d] for d in col_dims]
         nval = len(values)
         acc, order = {}, []
-        for r in rows:
+        for i, r in enumerate(rows):
+            if qid and i % 2048 == 0 and self._run_is_cancelled(qid):
+                return {"error": "interrupted", "cancelled": True}
             if filters and not all(self._pivot_row_passes(r, cidx, f)
                                    for f in filters):
                 continue
@@ -9357,7 +9534,7 @@ class Session:
         try:
             return self._reconcile_inner(spec)
         finally:
-            self._unregister_run(qid)
+            self._end_run_keep_cancel(qid)
 
     def _reconcile_inner(self, spec):
         """Compare two tables on key columns and return a *field-level*
@@ -9658,7 +9835,7 @@ class Session:
         try:
             return self._reconcile_drilldown_inner(spec)
         finally:
-            self._unregister_run(qid)
+            self._end_run_keep_cancel(qid)
 
     def _reconcile_drilldown_inner(self, spec):
         """Materialize the underlying rows of one reconcile bucket to the
@@ -9827,21 +10004,36 @@ class Session:
     def reconcile_profile(self, spec):
         """Profile the underlying rows of one reconcile bucket. The rows are
         profiled as a subquery (never materialized as a table)."""
-        left = spec.get("left")
-        right = spec.get("right")
-        keys = list(spec.get("keys") or [])
-        bucket = spec.get("bucket")
-        field = spec.get("field")
-        balance = spec.get("balance") or None
-        colmap_a = dict(spec.get("colmap_a") or {})
-        colmap_b = dict(spec.get("colmap_b") or {})
-        if (not left or not right or not keys
-                or bucket not in ("a_only", "b_only", "matching",
-                                  "non_matching")):
-            return {"table": "", "total_rows": 0, "columns": [],
-                    "error": "left, right, keys and a valid bucket "
-                    "are required."}
+        qid = (spec.get("query_id")
+               or ("recon-pf-%s" % uuid.uuid4().hex[:10]))
+        eng0 = None
         try:
+            _t0, _k0 = self._recon_engine(spec.get("left"),
+                                          spec.get("right"))
+            eng0, _ = self._engine_obj(_t0)
+        except Exception:
+            eng0 = None
+        self._register_run(qid, eng0, kind="profile",
+                           surface="reconcile",
+                           label="profile: %s" % (spec.get("bucket"),))
+        try:
+            if self._run_is_cancelled(qid):
+                return {"cancelled": True, "error": "cancelled",
+                        "table": "", "total_rows": 0, "columns": []}
+            left = spec.get("left")
+            right = spec.get("right")
+            keys = list(spec.get("keys") or [])
+            bucket = spec.get("bucket")
+            field = spec.get("field")
+            balance = spec.get("balance") or None
+            colmap_a = dict(spec.get("colmap_a") or {})
+            colmap_b = dict(spec.get("colmap_b") or {})
+            if (not left or not right or not keys
+                    or bucket not in ("a_only", "b_only", "matching",
+                                      "non_matching")):
+                return {"table": "", "total_rows": 0, "columns": [],
+                        "error": "left, right, keys and a valid bucket "
+                        "are required."}
             target, engine_kind = self._recon_engine(left, right)
             sql = self._recon_bucket_sql(left, right, keys, bucket,
                                          field, balance,
@@ -9853,10 +10045,17 @@ class Session:
                 "matching": f"Matching · {field}",
                 "non_matching": f"Not matching · {field}",
             }.get(bucket, bucket)
-            return profile_table(eng, label, source=f"({sql}) AS _r")
+            return profile_table(
+                eng, label, source=f"({sql}) AS _r",
+                cancel=lambda: self._run_is_cancelled(qid))
         except Exception as e:
+            if _is_interrupt(e) or self._run_is_cancelled(qid):
+                return {"cancelled": True, "error": "cancelled",
+                        "table": "", "total_rows": 0, "columns": []}
             return {"table": "", "total_rows": 0, "columns": [],
                     "error": str(e)}
+        finally:
+            self._end_run_keep_cancel(qid)
     # ---- REST API loader --------------------------------------------
     def load_api(self, url, base_name="api_data", auth_user=None,
                  auth_pass=None, json_path=None, params=None,
@@ -9878,7 +10077,7 @@ class Session:
                             destination=destination, should_cancel=should)
         finally:
             if query_id:
-                self._unregister_run(query_id)
+                self._end_run_keep_cancel(query_id)
         if isinstance(res, dict) and res.get("cancelled"):
             return res
         if isinstance(res, dict) and not res.get("error"):
@@ -9933,6 +10132,13 @@ class Session:
             if destination in ("duckdb", "auto") and HAS_DUCKDB:
                 try:
                     duck = self.get_duckdb()
+                    # Re-bind interrupt to the local engine for ingest -- Stop
+                    # during add_table_streaming must reach DuckDB, not only
+                    # the remote ODBC handle that already finished execute.
+                    self._register_run(query_id, duck, kind="mssql",
+                                       target=name)
+                    if self._run_is_cancelled(query_id):
+                        return {"cancelled": True}
                     tname, n = duck.add_table_streaming(
                         bn, cols, rows, source=src)
                     cols_now = duck.table_columns.get(tname, list(cols))
@@ -9941,6 +10147,10 @@ class Session:
                     # DuckDB ingest cleaned up after itself; re-drain to SQLite.
                     tname, n, engine = None, 0, None
             if engine is None:
+                self._register_run(query_id, self.db, kind="mssql",
+                                   target=name)
+                if self._run_is_cancelled(query_id):
+                    return {"cancelled": True}
                 tname, n = self.db.add_table_streaming(
                     bn, cols, rows, source=src)
                 cols_now = self.db.table_columns.get(tname, list(cols))
@@ -9959,18 +10169,19 @@ class Session:
                 return {"cancelled": True}
             return {"error": str(e)}
         finally:
-            self._unregister_run(query_id)
+            self._end_run_keep_cancel(query_id)
 
     def write_image(self, out_dir, base_name, fmt, data_url):
         """Write a chart/dashboard image (produced client-side by ECharts'
         getDataURL) to disk. ``data_url`` is a data: URI -- base64 for
-        png/jpeg, URL-encoded for svg. Returns {ok, file} or {error}."""
+        png/jpeg, URL-encoded for svg. Empty out_dir writes to Downloads.
+        Returns {ok, file} or {error}."""
         import os
         import re
         import base64
         import urllib.parse
-        out_dir = (out_dir or "").strip()
-        if not out_dir or not os.path.isdir(out_dir):
+        out_dir = self._resolve_export_dir(out_dir)
+        if not out_dir:
             return {"error": "Pick an output folder that exists."}
         fmt = (fmt or "png").lower().lstrip(".")
         if fmt not in ("png", "jpeg", "jpg", "svg"):

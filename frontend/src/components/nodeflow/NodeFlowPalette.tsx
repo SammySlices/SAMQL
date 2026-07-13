@@ -8,6 +8,11 @@ import {
 import {
   FAVORITES_KEY,
   LEGACY_FAVORITES_KEY,
+  NB_CREATED_NODE_MIME,
+  NB_NODE_MIME,
+  createdFavoriteKey,
+  createdIdFromFavorite,
+  isCreatedFavoriteKey,
   type NodeType,
 } from "../../lib/nodeFlowModel";
 import {
@@ -17,24 +22,48 @@ import {
   isPaletteNodeType,
 } from "./nodeDefinitions";
 
+function loadFavoriteKeys(
+  created: CreatedNodeDefinition[],
+): string[] {
+  try {
+    const raw =
+      localStorage.getItem(FAVORITES_KEY) ||
+      localStorage.getItem(LEGACY_FAVORITES_KEY);
+    const value = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(value)) return [];
+    const createdIds = new Set(created.map((d) => d.id));
+    const out: string[] = [];
+    for (const item of value) {
+      if (typeof item !== "string") continue;
+      if (isCreatedFavoriteKey(item)) {
+        const id = createdIdFromFavorite(item);
+        if (id && createdIds.has(id)) out.push(createdFavoriteKey(id));
+        continue;
+      }
+      if (isPaletteNodeType(item)) out.push(item);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function isFavoriteDrag(types: readonly string[]): boolean {
+  return (
+    types.includes(NB_NODE_MIME) || types.includes(NB_CREATED_NODE_MIME)
+  );
+}
+
 export function useNodeFlowPalette(showNodeSearch?: boolean) {
   const [openCat, setOpenCat] = useState<string | null>(null);
   const [palSearch, setPalSearch] = useState("");
   const [favDrop, setFavDrop] = useState(false);
   const palRef = useRef<HTMLDivElement | null>(null);
-  const [favorites, setFavorites] = useState<NodeType[]>(() => {
-    try {
-      const raw =
-        localStorage.getItem(FAVORITES_KEY) ||
-        localStorage.getItem(LEGACY_FAVORITES_KEY);
-      const value = raw ? JSON.parse(raw) : [];
-      return Array.isArray(value) ? value.filter(isPaletteNodeType) : [];
-    } catch {
-      return [];
-    }
-  });
   const [createdNodes, setCreatedNodes] = useState<CreatedNodeDefinition[]>(
     () => loadCreatedNodes(),
+  );
+  const [favorites, setFavorites] = useState<string[]>(() =>
+    loadFavoriteKeys(loadCreatedNodes()),
   );
 
   useEffect(() => {
@@ -50,23 +79,58 @@ export function useNodeFlowPalette(showNodeSearch?: boolean) {
   }, [favorites]);
 
   useEffect(() => {
-    const refresh = () => setCreatedNodes(loadCreatedNodes());
-    window.addEventListener("samql-created-nodes-changed", refresh);
-    window.addEventListener("storage", refresh);
+    const refreshCreated = () => {
+      const next = loadCreatedNodes();
+      setCreatedNodes(next);
+      // Drop favorites that point at deleted created nodes; renamed nodes keep
+      // the same id so the Favorites label updates via createdNodes.
+      const ids = new Set(next.map((d) => d.id));
+      setFavorites((current) =>
+        current.filter(
+          (key) =>
+            !isCreatedFavoriteKey(key) ||
+            ids.has(createdIdFromFavorite(key)),
+        ),
+      );
+    };
+    const onDeleted = (event: Event) => {
+      const id = String(
+        (event as CustomEvent).detail?.definitionId || "",
+      ).trim();
+      if (!id) {
+        refreshCreated();
+        return;
+      }
+      setCreatedNodes(loadCreatedNodes());
+      setFavorites((current) =>
+        current.filter((key) => key !== createdFavoriteKey(id)),
+      );
+    };
+    window.addEventListener("samql-created-nodes-changed", refreshCreated);
+    window.addEventListener("samql-created-node-updated", refreshCreated);
+    window.addEventListener("samql-created-node-deleted", onDeleted);
+    window.addEventListener("storage", refreshCreated);
     return () => {
-      window.removeEventListener("samql-created-nodes-changed", refresh);
-      window.removeEventListener("storage", refresh);
+      window.removeEventListener("samql-created-nodes-changed", refreshCreated);
+      window.removeEventListener("samql-created-node-updated", refreshCreated);
+      window.removeEventListener("samql-created-node-deleted", onDeleted);
+      window.removeEventListener("storage", refreshCreated);
     };
   }, []);
 
-  const addFavorite = (type: NodeType) =>
-    setFavorites((current) =>
-      current.includes(type) || !NODE_BY_TYPE[type]
-        ? current
-        : [...current, type],
-    );
-  const removeFavorite = (type: NodeType) =>
-    setFavorites((current) => current.filter((item) => item !== type));
+  const addFavorite = (key: string) =>
+    setFavorites((current) => {
+      if (!key || current.includes(key)) return current;
+      if (isCreatedFavoriteKey(key)) {
+        const id = createdIdFromFavorite(key);
+        if (!id || !createdNodes.some((d) => d.id === id)) return current;
+        return [...current, createdFavoriteKey(id)];
+      }
+      if (!isPaletteNodeType(key) || !NODE_BY_TYPE[key]) return current;
+      return [...current, key];
+    });
+  const removeFavorite = (key: string) =>
+    setFavorites((current) => current.filter((item) => item !== key));
   const onPaletteWheel = (event: React.WheelEvent) => {
     const element = palRef.current;
     if (!element) return;
@@ -75,6 +139,25 @@ export function useNodeFlowPalette(showNodeSearch?: boolean) {
         ? event.deltaY
         : event.deltaX;
     if (delta) element.scrollLeft += delta;
+  };
+
+  const acceptFavoriteDrop = (event: React.DragEvent) => {
+    setFavDrop(false);
+    const createdId = event.dataTransfer.getData(NB_CREATED_NODE_MIME);
+    if (createdId) {
+      event.preventDefault();
+      addFavorite(createdFavoriteKey(createdId));
+      setOpenCat("favorites");
+      return true;
+    }
+    const type = event.dataTransfer.getData(NB_NODE_MIME) as NodeType;
+    if (type && NODE_BY_TYPE[type]) {
+      event.preventDefault();
+      addFavorite(type);
+      setOpenCat("favorites");
+      return true;
+    }
+    return false;
   };
 
   return {
@@ -87,6 +170,7 @@ export function useNodeFlowPalette(showNodeSearch?: boolean) {
     favorites,
     addFavorite,
     removeFavorite,
+    acceptFavoriteDrop,
     createdNodes,
     palRef,
     onPaletteWheel,
@@ -122,8 +206,8 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
     favDrop,
     setFavDrop,
     favorites,
-    addFavorite,
     removeFavorite,
+    acceptFavoriteDrop,
     createdNodes,
     palRef,
     onPaletteWheel,
@@ -132,7 +216,6 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
   return (
     <div className={"nb2-toolbar" + (paletteHidden ? " nb2-hidden" : "")}>
       <div className="nb2-cat-row">
-        <span className="nb2-title">NodeFlow</span>
         <div className="nb2-cats" ref={palRef} onWheel={onPaletteWheel}>
           <button
             className={
@@ -144,7 +227,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
               setOpenCat(openCat === "favorites" ? null : "favorites")
             }
             onDragOver={(event) => {
-              if (event.dataTransfer.types.includes("application/x-nb-node")) {
+              if (isFavoriteDrag(event.dataTransfer.types)) {
                 event.preventDefault();
                 event.dataTransfer.dropEffect = "copy";
                 setFavDrop(true);
@@ -152,17 +235,9 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
             }}
             onDragLeave={() => setFavDrop(false)}
             onDrop={(event) => {
-              setFavDrop(false);
-              const type = event.dataTransfer.getData(
-                "application/x-nb-node",
-              ) as NodeType;
-              if (type && NODE_BY_TYPE[type]) {
-                event.preventDefault();
-                addFavorite(type);
-                setOpenCat("favorites");
-              }
+              acceptFavoriteDrop(event);
             }}
-            title="Favorites — drag any node here to add a shortcut"
+            title="Favorites — drag any node (including Created Nodes) here"
           >
             <Icon.Star size={13} /> Favorites
             <span className="nb2-cat-caret">
@@ -182,7 +257,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
                   single
                     ? (event) => {
                         event.dataTransfer.setData(
-                          "application/x-nb-node",
+                          NB_NODE_MIME,
                           group.types[0],
                         );
                         event.dataTransfer.effectAllowed = "copy";
@@ -281,7 +356,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
         <div
           className={"nb2-cat-sub nb2-fav-sub" + (favDrop ? " dropping" : "")}
           onDragOver={(event) => {
-            if (event.dataTransfer.types.includes("application/x-nb-node")) {
+            if (isFavoriteDrag(event.dataTransfer.types)) {
               event.preventDefault();
               event.dataTransfer.dropEffect = "copy";
               setFavDrop(true);
@@ -289,23 +364,55 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
           }}
           onDragLeave={() => setFavDrop(false)}
           onDrop={(event) => {
-            setFavDrop(false);
-            const type = event.dataTransfer.getData(
-              "application/x-nb-node",
-            ) as NodeType;
-            if (type && NODE_BY_TYPE[type]) {
-              event.preventDefault();
-              addFavorite(type);
-            }
+            acceptFavoriteDrop(event);
           }}
         >
           {favorites.length === 0 ? (
             <span className="nb2-fav-empty">
-              Drag any node here to add a shortcut. Drag a favourite out (or use
-              ×) to remove it — it stays in its normal group.
+              Drag any node here (including Created Nodes) to add a shortcut.
+              Drag a favourite out (or use ×) to remove it — it stays in its
+              normal group.
             </span>
           ) : (
-            favorites.map((type) => {
+            favorites.map((key) => {
+              if (isCreatedFavoriteKey(key)) {
+                const id = createdIdFromFavorite(key);
+                const definition = createdNodes.find((d) => d.id === id);
+                if (!definition) return null;
+                const iconName = (definition.icon ||
+                  "Sparkle") as CreatedNodeIcon;
+                const NodeIcon = (Icon[iconName] || Icon.Sparkle) as React.FC<{
+                  size?: number;
+                }>;
+                return (
+                  <span key={key} className="nb2-pal-item nb2-fav-item">
+                    <button
+                      className="btn sm nb2-fav-btn"
+                      draggable
+                      onDragStart={(event) => {
+                        event.dataTransfer.setData(NB_CREATED_NODE_MIME, id);
+                        event.dataTransfer.effectAllowed = "copyMove";
+                      }}
+                      onDragEnd={(event) => {
+                        if (event.dataTransfer.dropEffect === "none") {
+                          removeFavorite(key);
+                        }
+                      }}
+                      title={`Drag ${definition.name} onto the canvas, or out of Favorites to remove`}
+                    >
+                      <NodeIcon size={13} /> {definition.name}
+                    </button>
+                    <button
+                      className="btn ghost icon nb2-fav-x xbtn"
+                      onClick={() => removeFavorite(key)}
+                      title="Remove from Favorites"
+                    >
+                      ×
+                    </button>
+                  </span>
+                );
+              }
+              const type = key as NodeType;
               const item = NODE_BY_TYPE[type];
               if (!item) return null;
               const NodeIcon = Icon[item.icon] as React.FC<{ size?: number }>;
@@ -315,7 +422,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
                     className="btn sm nb2-fav-btn"
                     draggable
                     onDragStart={(event) => {
-                      event.dataTransfer.setData("application/x-nb-node", type);
+                      event.dataTransfer.setData(NB_NODE_MIME, type);
                       event.dataTransfer.effectAllowed = "copyMove";
                     }}
                     onDragEnd={(event) => {
@@ -360,7 +467,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
                   draggable
                   onDragStart={(event) => {
                     event.dataTransfer.setData(
-                      "application/x-nb-created-node",
+                      NB_CREATED_NODE_MIME,
                       definition.id,
                     );
                     event.dataTransfer.effectAllowed = "copy";
@@ -391,7 +498,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
                     className="btn sm nb2-pal-item"
                     draggable
                     onDragStart={(event) => {
-                      event.dataTransfer.setData("application/x-nb-node", type);
+                      event.dataTransfer.setData(NB_NODE_MIME, type);
                       event.dataTransfer.effectAllowed = "copy";
                     }}
                     title={`Drag ${item.label} onto the canvas`}
@@ -432,10 +539,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
                         className="btn sm nb2-pal-item"
                         draggable
                         onDragStart={(event) => {
-                          event.dataTransfer.setData(
-                            "application/x-nb-node",
-                            item.type,
-                          );
+                          event.dataTransfer.setData(NB_NODE_MIME, item.type);
                           event.dataTransfer.effectAllowed = "copy";
                         }}
                         title={`Drag ${item.label} onto the canvas`}
@@ -456,7 +560,7 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
                         draggable
                         onDragStart={(event) => {
                           event.dataTransfer.setData(
-                            "application/x-nb-created-node",
+                            NB_CREATED_NODE_MIME,
                             definition.id,
                           );
                           event.dataTransfer.effectAllowed = "copy";

@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
-import { fieldsDiffer, reconcileSelectFields } from "../../lib/selectFields";
+import {
+  applySelectColumnsReconcile,
+  collectSelectFieldPatches,
+  fieldsDiffer,
+  listWiredSelectUpstreams,
+  reconcileSelectFields,
+} from "../../lib/selectFields";
 import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import type { NodeFlowInspectorContext } from "./NodeFlowInspector";
 
@@ -201,14 +207,81 @@ export function useNodeFlowInspectorController({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, selId, graphSig]);
 
-  // Keep a select node's field list in sync with its upstream columns. This is
-  // what makes a downstream node pick up every change made upstream: when a
-  // previous node renames a column, adds one (e.g. a formula's new column), or
-  // drops one, the select's fields follow -- new columns are added (kept by
-  // default), columns that no longer exist are removed, and the keep / rename /
-  // type the user set on surviving columns is preserved. Only runs once the
-  // upstream columns are actually known, so a momentarily-disconnected node
-  // doesn't get its fields wiped.
+  // Keep EVERY wired Select node's field list in sync whenever the graph
+  // structure/config changes -- top-level AND Selects inside group/iterator
+  // children. Changing an Input table updates graphSig while the Input is
+  // selected; without this pass nested Selects kept stale fields forever.
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+  useEffect(() => {
+    const reqs = listWiredSelectUpstreams(nodes, edges);
+    if (!reqs.length) return;
+    let cancelled = false;
+    (async () => {
+      const columnsBySelectId: Record<string, string[]> = {};
+      const batchReqs = reqs.filter(
+        (q) =>
+          (q.kind === "canvas" || q.kind === "group-input") &&
+          q.upstreamNode &&
+          q.upstreamPort,
+      );
+      try {
+        await Promise.all([
+          (async () => {
+            if (!batchReqs.length) return;
+            const r = await api.nodeflowColumnsBatch(
+              graphForApi(),
+              batchReqs.map((q) => ({
+                node: q.upstreamNode!,
+                port: q.upstreamPort!,
+              })),
+            );
+            (r.results || []).forEach((res, i) => {
+              if (res?.columns && batchReqs[i])
+                columnsBySelectId[batchReqs[i].selectId] = res.columns;
+            });
+          })(),
+          ...reqs
+            .filter(
+              (q) =>
+                q.kind === "step-above" &&
+                q.groupId &&
+                typeof q.childIndex === "number",
+            )
+            .map(async (q) => {
+              try {
+                const r = await api.nodeflowColumns(
+                  partialGroupGraph(q.groupId!, q.childIndex!),
+                  q.groupId!,
+                  "out",
+                );
+                if (r.columns) columnsBySelectId[q.selectId] = r.columns;
+              } catch {
+                /* ignore */
+              }
+            }),
+        ]);
+      } catch {
+        /* ignore */
+      }
+      if (cancelled || !Object.keys(columnsBySelectId).length) return;
+      const latest = nodesRef.current;
+      const reconciled = applySelectColumnsReconcile(latest, columnsBySelectId);
+      if (reconciled === latest) return;
+      for (const p of collectSelectFieldPatches(latest, reconciled)) {
+        patch(p.id, { fields: p.fields });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey, graphSig]);
+
+  // Also reconcile the currently selected Select from its inspector column
+  // cache (covers group-child Selects and the moment columns first arrive).
+  // Only runs once upstream columns are known, so a momentarily-disconnected
+  // node doesn't get its fields wiped.
   useEffect(() => {
     if (
       !sel ||

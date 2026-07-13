@@ -32,6 +32,66 @@ MANAGED_ROOTS = (
     "tools",
 )
 
+# Root / toolchain files that must ship in every full-source extract so an
+# Expand-SamQL destination can run ``Test-SamQL-All.ps1`` without missing pieces.
+TEST_EXTRACT_BOOTSTRAP = (
+    "Test-SamQL-All.ps1",
+    "Run-SamQLTests.ps1",
+    "Expand-SamQL.ps1",
+    "Decode-SamQL-APHEX.ps1",
+    "Pack-SamQL.ps1",
+    "VERSION",
+    "RELEASE_MANIFEST.json",
+    "SOURCE_MANIFEST.txt",
+    "RELEASE_CHECKLIST.md",
+    "requirements-test.txt",
+    "requirements-optional.txt",
+    "backend/requirements.txt",
+    "backend/server.py",
+    "backend/launcher_app.py",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/vite.config.ts",
+    "frontend/vitest.config.ts",
+    "frontend/playwright.config.ts",
+    "frontend/eslint.config.js",
+    "frontend/tsconfig.json",
+    "frontend/tsconfig.node.json",
+    "frontend/index.html",
+    "frontend/src/main.tsx",
+    "frontend/src/test/setup.ts",
+    "frontend/e2e/fixtures.ts",
+    "frontend/e2e/run-playwright-edge.mjs",
+    "frontend/e2e/workflow-smoke.spec.ts",
+    "tests/run_tests.py",
+    "tests/harness.py",
+    "tests/paths.py",
+    "tests/fixtures.py",
+    "tests/node_harnesses.py",
+    "tests/suites/__init__.py",
+    "tests/suites/backend.py",
+    "tests/suites/frontend.py",
+    "tests/suites/http_api.py",
+    "tests/test_release_hardening.py",
+    "tests/test_optimizations_dual_engine.py",
+    "tests/test_nodeflow_resources.py",
+    "tests/benchmark_workloads.py",
+    "tools/release_artifacts.py",
+    "tools/release_preflight.py",
+    "tools/package_release.py",
+    "tools/aphex_transport.py",
+    "tools/install_frontend_deps.py",
+    "tools/normalize_npm_lock.py",
+    "tools/prune_stale_source.py",
+)
+
+# Entire trees that belong in the full-source extract for a green complete suite.
+TEST_EXTRACT_TREES = (
+    "tests",
+    "tools",
+    "frontend/e2e",
+)
+
 GENERATED_PARTS = {
     "node_modules",
     "dist",
@@ -509,6 +569,134 @@ def _check_quality_and_ci(root: Path, release: dict[str, Any], checks: Checks) -
     )
 
 
+def _iter_test_tree_files(root: Path, rel_root: str) -> list[str]:
+    base = root / rel_root
+    if not base.exists():
+        return []
+    out: list[str] = []
+    for path in base.rglob("*"):
+        if not path.is_file() and not path.is_symlink():
+            continue
+        if any(part in GENERATED_PARTS for part in path.parts):
+            continue
+        out.append(_norm(path.relative_to(root)))
+    return sorted(out)
+
+
+def _check_complete_test_extract(
+    root: Path,
+    release: dict[str, Any],
+    checks: Checks,
+    manifest_entries: list[str],
+) -> None:
+    """Prove the packaged source tree is enough to run Test-SamQL-All.
+
+    The full-source / APHEX extract is named ``all_tests_ui`` for a reason: after
+    Expand-SamQL, the destination must contain the suite runner, Python and
+    frontend harnesses, Playwright specs, lockfile, and install helpers — not
+    just application code.
+    """
+    entry_set = set(manifest_entries)
+    missing_bootstrap = [
+        rel
+        for rel in TEST_EXTRACT_BOOTSTRAP
+        if rel not in entry_set or not (root / rel).is_file()
+    ]
+    checks.add(
+        "complete test extract bootstrap",
+        not missing_bootstrap,
+        (
+            f"{len(TEST_EXTRACT_BOOTSTRAP)} bootstrap files manifested"
+            if not missing_bootstrap
+            else ", ".join(missing_bootstrap[:8])
+        ),
+    )
+
+    tree_missing: list[str] = []
+    tree_counts: list[str] = []
+    for tree in TEST_EXTRACT_TREES:
+        files = _iter_test_tree_files(root, tree)
+        if not files and not (root / tree).exists():
+            tree_missing.append(f"{tree}/ (absent)")
+            continue
+        absent = [rel for rel in files if rel not in entry_set]
+        tree_missing.extend(absent)
+        tree_counts.append(f"{tree}={len(files)}")
+    checks.add(
+        "complete test extract trees",
+        not tree_missing,
+        (
+            "; ".join(tree_counts)
+            if not tree_missing
+            else ", ".join(tree_missing[:8])
+        ),
+    )
+
+    all_tests = _read(resolve_manifest_path(root, "Test-SamQL-All.ps1"))
+    suite_tokens = (
+        "tests\\run_tests.py",
+        "tests\\test_release_hardening.py",
+        "tests\\test_optimizations_dual_engine.py",
+        "tests\\test_nodeflow_resources.py",
+        "tests\\benchmark_workloads.py",
+        "tools\\install_frontend_deps.py",
+        "tools\\normalize_npm_lock.py",
+        "tools\\prune_stale_source.py",
+        "tools\\release_artifacts.py",
+        "requirements-test.txt",
+        "npm run test:e2e",
+        "frontend\\package-lock.json",
+    )
+    missing_suite = [token for token in suite_tokens if token not in all_tests]
+    checks.add(
+        "complete suite runner wiring",
+        not missing_suite,
+        "Test-SamQL-All invokes every packaged suite entry"
+        if not missing_suite
+        else ", ".join(missing_suite),
+    )
+
+    package = _json(root / "frontend/package.json")
+    scripts = package.get("scripts") or {}
+    required_scripts = {
+        "test:component": "vitest run",
+        "test:e2e": "playwright test",
+        "test:frontend": "npm run test:component && npm run check",
+        "typecheck": "tsc --noEmit -p tsconfig.json --pretty false",
+        "lint": 'eslint "src/**/*.{ts,tsx}" --max-warnings 0',
+        "build": "vite build",
+        "check": "npm run typecheck && npm run lint && npm run build",
+    }
+    missing_scripts = [
+        name
+        for name, expected in required_scripts.items()
+        if scripts.get(name) != expected
+    ]
+    checks.add(
+        "frontend test toolchain scripts",
+        not missing_scripts,
+        "package.json scripts ready for extract"
+        if not missing_scripts
+        else ", ".join(missing_scripts),
+    )
+
+    vitest = _read(root / "frontend/vitest.config.ts")
+    checks.add(
+        "vitest setup is packaged",
+        'setupFiles: ["./src/test/setup.ts"]' in vitest
+        and "frontend/src/test/setup.ts" in entry_set,
+        "src/test/setup.ts wired and manifested",
+    )
+
+    expander = _read(resolve_manifest_path(root, "Expand-SamQL.ps1"))
+    checks.add(
+        "expand points at the complete suite",
+        "Test-SamQL-All" in expander
+        and "complete suite" in expander.lower(),
+        "Expand-SamQL documents Test-SamQL-All",
+    )
+
+
 def _check_docs_and_transport(root: Path, release: dict[str, Any], checks: Checks) -> None:
     source_transport = release.get("sourceTransport") or {}
     dangerous = source_transport.get("dangerousExtensions")
@@ -604,6 +792,7 @@ def _check_docs_and_transport(root: Path, release: dict[str, Any], checks: Check
     checks.add(
         "release wrapper boundary",
         "tools\\release_artifacts.py" in pack_wrapper
+        and 'Join-Path $Root "release"' in pack_wrapper
         and "release_artifacts.py" in all_tests
         and "tests\\test_release_hardening.py" in all_tests,
         "canonical package and complete-suite wiring",
@@ -647,9 +836,10 @@ def run_preflight(root: Path) -> list[Check]:
         str(generated),
     )
     _check_identity(root, release, checks)
-    _check_manifest(root, release, checks)
+    manifest_entries = _check_manifest(root, release, checks)
     _check_saved_data(root, release, checks)
     _check_quality_and_ci(root, release, checks)
+    _check_complete_test_extract(root, release, checks, manifest_entries)
     _check_docs_and_transport(root, release, checks)
     return checks.items
 

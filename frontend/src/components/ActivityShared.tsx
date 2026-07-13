@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api, abortInflight, cancelAllBgOps } from "../lib/api";
+import { cancelAllRuns, cancelById } from "../lib/runController";
 import { deriveActivity, POLL_MS } from "../lib/activity";
 import type { ActivityStatus, TaskCard } from "../lib/types";
 import { Icon } from "./Icon";
@@ -86,7 +87,10 @@ export function purgeWorkingState(): void {
 }
 
 export function useEngineReset(onDone?: () => void) {
-  const [resetting, setResetting] = useState(false);
+  const [resetMode, setResetMode] = useState<"idle" | "soft" | "nuke">("idle");
+  const resetting = resetMode !== "idle";
+  const softResetting = resetMode === "soft";
+  const nuking = resetMode === "nuke";
   const [resetMsg, setResetMsg] = useState<string | null>(null);
   // .524: IN-APP two-step confirmation -- the first click ARMS the button
   // (native window.confirm is dialog-host dependent in the pywebview
@@ -100,6 +104,37 @@ export function useEngineReset(onDone?: () => void) {
       window.clearTimeout(armTimer.current);
       armTimer.current = null;
     }
+  };
+
+  // Soft recovery: abort client work, POST /api/engine/reset, refresh status
+  // (and tables via onDone). Keeps journal / NodeFlow and does not reload.
+  const softResetEngines = () => {
+    if (resetting) return;
+    disarm();
+    setResetMode("soft");
+    setResetMsg("Resetting engines…");
+    try {
+      abortInflight();
+      cancelAllBgOps();
+      cancelAllRuns();
+    } catch {
+      /* ignore */
+    }
+    api
+      .engineReset()
+      .then((r) => {
+        const names = (r.reset || []).join(", ") || "engines";
+        setResetMsg(
+          r.rebuilding
+            ? `Reset ${names}; rebuilding tables from the manifest…`
+            : `Reset ${names}.`,
+        );
+        onDone?.();
+      })
+      .catch((e: any) => {
+        setResetMsg(String(e?.message || e));
+      })
+      .finally(() => setResetMode("idle"));
   };
 
   const resetEngines = () => {
@@ -122,11 +157,12 @@ export function useEngineReset(onDone?: () => void) {
       return;
     }
     disarm();
-    setResetting(true);
+    setResetMode("nuke");
     setResetMsg("Nuking…");
     try {
       abortInflight();
       cancelAllBgOps();
+      cancelAllRuns();
     } catch {
       /* ignore */
     }
@@ -147,7 +183,15 @@ export function useEngineReset(onDone?: () => void) {
     window.setTimeout(boom, 4000);
   };
 
-  return { resetEngines, resetting, resetMsg, armed };
+  return {
+    softResetEngines,
+    resetEngines,
+    resetting,
+    softResetting,
+    nuking,
+    resetMsg,
+    armed,
+  };
 }
 
 // The traffic-light monitor + per-engine connection badges. This is the
@@ -637,7 +681,8 @@ export const ServerStatus: React.FC<{ embedded?: boolean }> = ({
   // renders the monitor at the top and owns Reset in its footer -- skip
   // both here or the window shows everything twice (on-box 2026-07-02).
   const { status, beat, refresh } = useActivityStatus(true);
-  const { resetEngines, resetting, resetMsg, armed } = useEngineReset(refresh);
+  const { softResetEngines, resetEngines, resetting, softResetting, nuking, resetMsg, armed } =
+    useEngineReset(refresh);
   // Foreground runs / bg ops (queries, flows, profiles, save-as-table, change
   // type, connector imports) surfaced here so they can be cancelled without
   // opening the Activity modal. Background loads have their own tray cards
@@ -669,7 +714,7 @@ export const ServerStatus: React.FC<{ embedded?: boolean }> = ({
                 className="btn ghost icon"
                 title="Cancel this operation"
                 onClick={() => {
-                  api.cancelQuery(o.id).catch(() => {});
+                  cancelById(o.id);
                   refresh();
                 }}
               >
@@ -681,17 +726,27 @@ export const ServerStatus: React.FC<{ embedded?: boolean }> = ({
       )}
       <TaskTray hideEmpty />
       {!embedded && (
-        <button
-          className="danger"
-          disabled={resetting}
-          onClick={resetEngines}
-        >
-          {resetting
-            ? "Nuking…"
-            : armed
-              ? "Click again to confirm"
-              : "Reset server"}
-        </button>
+        <>
+          <button
+            className="btn sm"
+            disabled={resetting}
+            onClick={softResetEngines}
+            title="Swap in fresh engines and rebuild loaded tables"
+          >
+            {softResetting ? "Resetting…" : "Reset engines"}
+          </button>
+          <button
+            className="danger"
+            disabled={resetting}
+            onClick={resetEngines}
+          >
+            {nuking
+              ? "Nuking…"
+              : armed
+                ? "Click again to confirm"
+                : "Reset server"}
+          </button>
+        </>
       )}
     </>
   );

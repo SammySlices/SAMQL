@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useWinDrag } from "./ActivityShared";
 import { api, copyText } from "../lib/api";
 import type { TableInfo } from "../lib/types";
@@ -9,6 +9,9 @@ import { Icon } from "./Icon";
 // switch). Pick a nested (JSON) source column, click any field in its tree,
 // and the right pane shows the queries to access it: the first-record [1]
 // path, the all-rows UNNEST chain, and (for arrays) the recursive one-shot.
+// Minimize collapses to a draggable icon that expands on click.
+
+export const FIELD_EXPLORER_STORE_KEY = "samql.fieldExplorer.v1";
 
 type FieldRow = {
   depth: number;
@@ -30,6 +33,30 @@ interface Props {
   tables: TableInfo[];
   onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
   onTablesChanged?: () => void;
+}
+
+type StoredChrome = {
+  x?: number;
+  y?: number;
+  minimized?: boolean;
+};
+
+function loadChrome(): StoredChrome {
+  try {
+    const raw = localStorage.getItem(FIELD_EXPLORER_STORE_KEY);
+    return raw ? (JSON.parse(raw) as StoredChrome) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveChrome(patch: StoredChrome) {
+  try {
+    const next = { ...loadChrome(), ...patch };
+    localStorage.setItem(FIELD_EXPLORER_STORE_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore quota / private mode */
+  }
 }
 
 const KIND_COLOR: Record<string, string> = {
@@ -65,11 +92,19 @@ export const FieldExplorer: React.FC<Props> = ({
     return out;
   }, [tables]);
 
+  const saved = useMemo(() => loadChrome(), []);
+  const [minimized, setMinimized] = useState(() => !!saved.minimized);
   const [srcKey, setSrcKey] = useState("");
   const [fields, setFields] = useState<FieldRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [selIdx, setSelIdx] = useState<number | null>(null);
   const src = sources.find((s) => s.key === srcKey) || null;
+
+  const initPos = {
+    x: typeof saved.x === "number" ? saved.x : 120,
+    y: typeof saved.y === "number" ? saved.y : 90,
+  };
+  const { pos, startDrag, dragging, settled, winRef } = useWinDrag(initPos);
 
   // auto-pick the only source
   useEffect(() => {
@@ -91,19 +126,20 @@ export const FieldExplorer: React.FC<Props> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey]);
 
-  // ---- close: X button, and Esc anywhere while the panel is open ----
+  // ---- close: X button, and Esc anywhere while the panel is open (not mini) ----
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !minimized) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, minimized, onClose]);
 
-  // ---- dragging ----
-  const { pos, startDrag, dragging, settled, winRef } =
-    useWinDrag({ x: 120, y: 90 });
+  useEffect(() => {
+    if (!open) return;
+    saveChrome({ x: pos.x, y: pos.y, minimized });
+  }, [open, pos.x, pos.y, minimized]);
 
   // .460's clipboard-morph state. .468: these hooks MUST sit above the
   // open guard -- they were added below `if (!open) return null`, so the
@@ -121,6 +157,50 @@ export const FieldExplorer: React.FC<Props> = ({
   );
 
   if (!open) return null;
+
+  if (minimized) {
+    return (
+      <button
+        ref={winRef as React.RefObject<HTMLButtonElement>}
+        type="button"
+        className={
+          "tt-mini win-float" +
+          (dragging ? " dragging" : "") +
+          (settled ? " settle" : "")
+        }
+        style={{ left: pos.x, top: pos.y }}
+        data-testid="field-explorer-mini"
+        title="Field explorer — drag to move; click to expand"
+        onMouseDown={(event) => {
+          const startX = event.clientX;
+          const startY = event.clientY;
+          let moved = false;
+          const onMove = (ev: MouseEvent) => {
+            if (
+              Math.abs(ev.clientX - startX) > 4 ||
+              Math.abs(ev.clientY - startY) > 4
+            ) {
+              moved = true;
+            }
+          };
+          const onUp = () => {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+            if (!moved) {
+              setMinimized(false);
+              saveChrome({ minimized: false });
+            }
+          };
+          window.addEventListener("mousemove", onMove);
+          window.addEventListener("mouseup", onUp);
+          startDrag(event);
+        }}
+      >
+        <Icon.ListTree size={14} />
+        <span>Fields</span>
+      </button>
+    );
+  }
 
   const sel = selIdx != null && fields ? fields[selIdx] : null;
   const acc = sel?.access;
@@ -183,6 +263,7 @@ export const FieldExplorer: React.FC<Props> = ({
       style={{ left: pos.x, top: pos.y }}
       role="dialog"
       aria-label="Field explorer"
+      data-testid="field-explorer-panel"
     >
       <div
         className="fx-head"
@@ -192,6 +273,18 @@ export const FieldExplorer: React.FC<Props> = ({
         <Icon.ListTree size={14} />
         <span className="fx-title">Field explorer</span>
         <span className="spacer" />
+        <button
+          className="btn sm ghost"
+          title="Minimize"
+          data-testid="field-explorer-minimize"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={() => {
+            setMinimized(true);
+            saveChrome({ minimized: true, x: pos.x, y: pos.y });
+          }}
+        >
+          <Icon.SquareMinus size={14} />
+        </button>
         <button
           className="btn sm ghost"
           title="Close"

@@ -62,14 +62,24 @@ else:
         "placeholder page.\n"
     )
 
-# ---- optionally fold in acceleration libraries when available ----
+# ---- required load/export stack (must be present for distribution) ----
 # tzdata / pytz are included because pyarrow and pandas import them
 # *dynamically* to handle timezone-aware timestamps, so PyInstaller's static
 # analysis misses them -- which is why a frozen build could report "pytz not
 # installed" on a query with TIMESTAMP WITH TIME ZONE columns even though it
 # was installed in the build environment.
-OPTIONAL = ["duckdb", "pyarrow", "sqlglot", "pyodbc", "openpyxl", "orjson",
-            "ijson", "tzdata", "pytz"]
+REQUIRED = ["duckdb", "pyarrow", "sqlglot", "openpyxl", "orjson",
+            "ijson", "tzdata"]
+OPTIONAL = REQUIRED + ["pyodbc", "pytz"]
+_missing_required = [pkg for pkg in REQUIRED
+                     if importlib.util.find_spec(pkg) is None]
+if _missing_required:
+    raise SystemExit(
+        "[samql.spec] refusing to package an incomplete app; missing "
+        "required dependencies: %s. Re-run build.ps1 / build.sh so "
+        "requirements-optional.txt is installed into THIS Python, then "
+        "retry." % (", ".join(_missing_required),)
+    )
 for pkg in OPTIONAL:
     if importlib.util.find_spec(pkg) is not None:
         try:
@@ -77,20 +87,42 @@ for pkg in OPTIONAL:
             datas += d
             binaries += b
             hiddenimports += h
-            print(f"[samql.spec] bundling optional dependency: {pkg}")
+            print(f"[samql.spec] bundling dependency: {pkg}")
         except Exception as exc:  # pragma: no cover - build-time only
             print(f"[samql.spec] could not fully collect {pkg}: {exc}")
+            if pkg in REQUIRED:
+                raise SystemExit(
+                    f"[samql.spec] required dependency {pkg!r} could not "
+                    f"be collected: {exc}"
+                ) from exc
 
-# pywebview (desktop window) + its win32 dependency, if installed
-for pkg in ["webview", "win32api", "win32com"]:
+# ---- native window stack (SHARED by SamQL.exe AND SamQL-AppWindow) ----
+# Collect once into the shared datas/binaries/hiddenimports so both Analysis
+# trees ship the same pywebview / WebView2 / pythonnet payload. Naming the
+# lazily-imported platform modules keeps frozen auto-detect deterministic
+# (.501/.508). Missing packages are loud but non-fatal (browser fallback).
+for pkg in ("win32api", "win32com"):
     if importlib.util.find_spec(pkg) is not None:
         hiddenimports.append(pkg)
-# .501: the WebView2 renderer's platform modules by NAME (lazily imported, so
-# the graph misses them) -- SamQL.exe --window needs them just like the
-# launcher does.
+_WINDOW_PKGS = ("webview", "clr", "clr_loader", "pythonnet", "proxy_tools")
+for _wpkg in _WINDOW_PKGS:
+    if importlib.util.find_spec(_wpkg) is None:
+        print(f"[samql.spec] native-window package MISSING (both exes): {_wpkg}")
+        continue
+    try:
+        _wd, _wb, _wh = collect_all(_wpkg)
+        datas += _wd
+        binaries += _wb
+        hiddenimports += _wh
+        print(f"[samql.spec] bundling native-window package for BOTH exes: {_wpkg}")
+    except Exception as _wexc:  # pragma: no cover - build-time only
+        print(f"[samql.spec] could not fully collect {_wpkg}: {_wexc}")
 if importlib.util.find_spec("webview") is not None:
-    hiddenimports += ["webview.platforms.edgechromium",
-                      "webview.platforms.winforms"]
+    hiddenimports += [
+        "webview",
+        "webview.platforms.edgechromium",
+        "webview.platforms.winforms",
+    ]
     if importlib.util.find_spec("clr_loader") is not None:
         hiddenimports.append("clr_loader.netfx")
 
@@ -199,41 +231,16 @@ exe = EXE(
 # PowerShell launcher: splash, server reuse/start, a NATIVE pywebview
 # window (.485), and the launcher log in the samql temp root.
 #
-# .485: bundle pywebview (+ its Windows .NET/WebView2 backend) into the
-# launcher when present, so SamQL-AppWindow opens a NATIVE window it owns
-# (its own taskbar icon -- no Edge logo) instead of a browser. Optional:
-# when pywebview is absent the launcher falls back to a chromeless Edge/
-# Chrome window at runtime, so the build still succeeds without it.
+# Payload parity with SamQL.exe: the shared Analysis inputs above already
+# carry the load stack, frontend_dist, icon, and native-window packages.
+# The launcher Analysis reuses those exact lists (+ splash logo + server
+# module) so both exes contain the same runtime surface.
 la_hidden = ["tkinter", "tkinter.ttk",
-             # .501: the WebView2 renderer's platform modules, by NAME.
-             # collect_all("webview") gathers the package, but PyInstaller's
-             # import graph can still miss the lazily-imported platform
-             # module, and then the frozen exe's auto-detect "can't find" the
-             # very backend that is installed -- and falls back to a browser
-             # (the on-box "AppWindow still opens Edge"). Naming them makes
-             # the bundle deterministic.
+             # Named again for the launcher graph (shared lists already
+             # include them; duplicates are fine / de-duped below).
              "webview.platforms.edgechromium",
              "webview.platforms.winforms",
              "clr_loader.netfx"]
-la_datas = []
-la_binaries = []
-for _wpkg in ("webview", "clr", "clr_loader", "pythonnet", "proxy_tools"):
-    if importlib.util.find_spec(_wpkg) is None:
-        # .508: say it OUT LOUD -- a missing stack here means the AppWindow
-        # exe ships browser-only no matter what is installed elsewhere.
-        print(f"[samql.spec] launcher native-window package MISSING: {_wpkg}")
-        continue
-    if importlib.util.find_spec(_wpkg) is not None:
-        try:
-            _wd, _wb, _wh = collect_all(_wpkg)
-            print(f"[samql.spec] launcher bundles native-window package: {_wpkg}")
-            la_datas += _wd
-            la_binaries += _wb
-            la_hidden += _wh
-            print(f"[samql.spec] bundling launcher window dep: {_wpkg}")
-        except Exception as _wexc:  # pragma: no cover - build-time only
-            print(f"[samql.spec] could not fully collect {_wpkg}: {_wexc}")
-
 # .535: fold the WHOLE backend into the launcher exe. A lone
 # SamQL-AppWindow.exe used to fail with "no SamQL exe or python backend
 # found" when it travelled without SamQL.exe beside it; now it carries the
@@ -241,8 +248,10 @@ for _wpkg in ("webview", "clr", "clr_loader", "pythonnet", "proxy_tools"):
 # acceleration libraries as SamQL.exe -- so it can spawn ITSELF with
 # --serve as the last-resort server candidate. One file to send.
 la_hidden = list(dict.fromkeys(la_hidden + hiddenimports + ["server"]))
-la_binaries = la_binaries + binaries
-la_datas = la_datas + datas
+la_binaries = list(binaries)
+la_datas = list(datas)
+print("[samql.spec] AppWindow payload = SamQL payload "
+      "(shared datas/binaries/hiddenimports + server + splash assets)")
 
 # .500: bundle brand assets INTO the launcher exe so the native window and the
 # startup splash carry the user's art with no dependence on the server being up

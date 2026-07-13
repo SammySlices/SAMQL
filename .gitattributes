@@ -1,0 +1,21 @@
+# Keep release manifests and managed source text LF-only so release_preflight
+# ("manifest text is canonical") stays green across Windows/macOS/Linux clones.
+SOURCE_MANIFEST.txt text eol=lf
+RELEASE_MANIFEST.json text eol=lf
+VERSION text eol=lf
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
+*.html text eol=lf
+*.svg text eol=lf
+*.txt text eol=lf

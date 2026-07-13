@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "product": "SamQL",
   "version": "2.16.4",
-  "build": "2026-07-12.593",
+  "build": "2026-07-13.594",
   "phase": 10,
-  "generatedAt": "2026-07-12T23:59:00Z",
+  "generatedAt": "2026-07-13T14:20:00Z",
   "sourceManifest": "SOURCE_MANIFEST.txt",
-  "sourceFileCount": 264,
+  "sourceFileCount": 290,
   "runtime": {
     "pythonMinimum": "3.10",
     "nodeMinimum": "20.19",
@@ -39,8 +39,8 @@
     }
   },
   "qualityGates": {
-    "componentTestsMinimum": 113,
-    "edgeE2eTestsMinimum": 12,
+    "componentTestsMinimum": 133,
+    "edgeE2eTestsMinimum": 15,
     "nodeFlowShellMaximumLines": 1300,
     "requiredBrowserChannel": "msedge"
   },

@@ -812,11 +812,31 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         eq(st, 200, "export-many (dup names) status")
         files = {r.get("file") for r in (d2.get("results") or []) if r.get("ok")}
         eq(len(files), 2, "same base name de-collided into two files")
-        # a missing folder is rejected up front
-        st, d3 = c.js("POST", "/api/nodeflow/export-many",
+        # empty folder defaults to Downloads; a non-existent path is rejected
+        dl = tempfile.mkdtemp()
+        old_env = os.environ.get("SAMQL_DOWNLOADS_DIR")
+        os.environ["SAMQL_DOWNLOADS_DIR"] = dl
+        try:
+            st, d3 = c.js("POST", "/api/nodeflow/export-many",
+                          {"graph": g, "items": [
+                              {"node_id": "o1", "folder": "", "fmt": "csv",
+                               "base_name": "dlmany"}]})
+            eq(st, 200, "export-many empty folder status")
+            need(d3.get("ok"),
+                 "empty folder exports to Downloads: %s" % d3.get("error"))
+            need(os.path.isfile(os.path.join(dl, "dlmany.csv")),
+                 "Downloads file from export-many")
+        finally:
+            if old_env is None:
+                os.environ.pop("SAMQL_DOWNLOADS_DIR", None)
+            else:
+                os.environ["SAMQL_DOWNLOADS_DIR"] = old_env
+        st, d4 = c.js("POST", "/api/nodeflow/export-many",
                       {"graph": g, "items": [
-                          {"node_id": "o1", "folder": "", "fmt": "csv"}]})
-        need(d3.get("error"), "missing folder rejected")
+                          {"node_id": "o1",
+                           "folder": "/definitely/missing/folder",
+                           "fmt": "csv"}]})
+        need(d4.get("error"), "missing folder rejected")
 
     def t_nodeflow_columns_batch_http():
         g = {"nodes": [
@@ -1103,6 +1123,20 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         need(e0.get("ts") and e0.get("error"),
              "log entry carries a timestamp + message")
         need(e0.get("method") == "GET", "log entry records the HTTP method")
+        # Soft application errors (HTTP 200 + {error}) also land in the log.
+        st, bad = c.js("POST", "/api/query",
+                       {"sql": "SELECT * FROM __samql_no_such_table_xyz__",
+                        "target": "duckdb"})
+        eq(st, 200, "bad query still returns HTTP 200")
+        need(bad.get("error"), "bad query payload carries error")
+        st, d3 = c.js("GET", "/api/errors")
+        soft = [e for e in (d3.get("errors") or [])
+                if e.get("kind") == "QueryError"
+                and "/api/query" in (e.get("path") or "")]
+        need(soft, "soft query errors are logged: %s"
+             % [(e.get("kind"), e.get("error"))
+                for e in (d3.get("errors") or [])[:5]])
+        need(soft[0].get("detail"), "soft query log keeps request detail")
         st, dc = c.js("DELETE", "/api/errors")
         eq(st, 200, "DELETE /api/errors status")
         st, d2 = c.js("GET", "/api/errors")
@@ -1252,6 +1286,42 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         st, d = c.js("POST", "/api/secrets/delete", {"key": "__t_http_k"})
         eq(st, 200, "secrets/delete status")
         need("ok" in d, "delete returns ok over HTTP")
+
+    def t_connection_profiles_http():
+        # Named connection profiles over HTTP: fields in the registry, password
+        # only via the DPAPI secret store (never in the profile JSON).
+        key = "api:__t_http_profile"
+        st, d = c.js("POST", "/api/connection-profiles/list", {})
+        eq(st, 200, "connection-profiles/list status")
+        need("profiles" in d and "secrets_available" in d,
+             "list shape: %s" % d)
+        st, d = c.js("POST", "/api/connection-profiles/upsert", {
+            "kind": "api",
+            "name": "__t_http_profile",
+            "fields": {"url": "https://example.test/data", "auth_user": "u"},
+            "password": "pw-http-test",
+        })
+        eq(st, 200, "connection-profiles/upsert status")
+        need(d.get("ok") is True and (d.get("profile") or {}).get("key") == key,
+             "upsert returns profile key: %s" % d)
+        avail = bool(d.get("secrets_available"))
+        if avail:
+            need(d.get("has_secret") is True,
+                 "password stored when secrets available")
+        st, d = c.js("POST", "/api/connection-profiles/get", {"key": key})
+        eq(st, 200, "connection-profiles/get status")
+        fields = (d.get("profile") or {}).get("fields") or {}
+        eq(fields.get("url"), "https://example.test/data", "get returns fields")
+        need("pw-http-test" not in str(d),
+             "get payload never includes the password")
+        st, d = c.js("POST", "/api/connection-profiles/list", {})
+        names = [p.get("key") for p in (d.get("profiles") or [])]
+        need(key in names, "list includes the upserted profile")
+        st, d = c.js("POST", "/api/connection-profiles/delete", {"key": key})
+        eq(st, 200, "connection-profiles/delete status")
+        need(d.get("ok") is True, "delete ok")
+        st, d = c.js("POST", "/api/connection-profiles/get", {"key": key})
+        eq(st, 404, "get after delete is 404")
 
     def t_nodeflow_validate_http():
         g = {"nodes": [
@@ -1680,6 +1750,8 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
              t_nodeflow_export_http),
             ("POST /api/iterator/run (over HTTP)", t_iterator_run_http),
             ("POST /api/secrets/* (store over HTTP)", t_secrets_http),
+            ("POST /api/connection-profiles/* (named profiles over HTTP)",
+             t_connection_profiles_http),
             ("POST /api/nodeflow/validate (over HTTP)", t_nodeflow_validate_http),
             ("POST /api/nodeflow/chart (over HTTP)", t_nodeflow_chart_http),
             ("POST /api/nodeflow/reconcile (over HTTP)",

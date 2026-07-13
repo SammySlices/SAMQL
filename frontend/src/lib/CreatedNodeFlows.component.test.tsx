@@ -6,10 +6,12 @@ import {
   ExportCreatedNodeModal,
   LoadCreatedNodeModal,
 } from "../components/CreatedNodeModals";
+import { useCreatedNodesSettings } from "../components/CreatedNodesSettings";
 import {
   CREATED_NODES_KEY,
   buildCreatedNodeDefinition,
   loadCreatedNodes,
+  registerActiveEditingDefinitionGetter,
   registerActiveNodeFlowGraphGetter,
   serializeCreatedNodeFile,
   upsertCreatedNode,
@@ -46,11 +48,17 @@ function sampleGraph(): { nodes: NbNode[]; edges: NbEdge[] } {
   };
 }
 
+function SettingsMenuHost() {
+  const ui = useCreatedNodesSettings(toast);
+  return <div>{ui.menu(() => {})}</div>;
+}
+
 describe("Created Node modals — save / export / load", () => {
   beforeEach(() => {
     localStorage.clear();
     toast.mockReset();
     registerActiveNodeFlowGraphGetter(() => sampleGraph());
+    registerActiveEditingDefinitionGetter(null);
   });
 
   it("saves the active tab graph as a created node", async () => {
@@ -77,43 +85,38 @@ describe("Created Node modals — save / export / load", () => {
     );
   });
 
-  it("exports a saved created node as JSON download payload", () => {
+  it("exports a saved created node as JSON into Downloads via saveToDownloads", async () => {
     const { nodes, edges } = sampleGraph();
     const built = buildCreatedNodeDefinition("Pack", "Beaker", nodes, edges);
     expect(built.ok).toBe(true);
     if (!built.ok) return;
     upsertCreatedNode(built.definition);
 
-    const clicks: { download?: string }[] = [];
-    const createObjectURL = vi.fn(() => "blob:mock");
-    const revoke = vi.fn();
-    vi.stubGlobal("URL", {
-      createObjectURL,
-      revokeObjectURL: revoke,
-    });
-    const realCreate = document.createElement.bind(document);
-    vi.spyOn(document, "createElement").mockImplementation((tag: string) => {
-      const el = realCreate(tag);
-      if (tag === "a") {
-        const anchor = el as HTMLAnchorElement;
-        anchor.click = () => {
-          clicks.push({ download: anchor.download });
-        };
-      }
-      return el;
-    });
+    const saveToDownloads = vi.fn(
+      async (filename: string, _data: { text?: string; b64?: string }) => ({
+        path: `C:\\Users\\me\\Downloads\\${filename}`,
+        filename,
+      }),
+    );
+    const api = await import("../lib/api");
+    vi.spyOn(api, "saveToDownloads").mockImplementation(saveToDownloads);
 
+    const onClose = vi.fn();
     render(
-      <ExportCreatedNodeModal onClose={vi.fn()} onToast={toast} />,
+      <ExportCreatedNodeModal onClose={onClose} onToast={toast} />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Export…" }));
 
-    expect(createObjectURL).toHaveBeenCalled();
-    expect(clicks[0]?.download).toMatch(/Pack\.samql-node\.json/);
+    await waitFor(() => expect(saveToDownloads).toHaveBeenCalled());
+    expect(saveToDownloads.mock.calls[0]?.[0]).toMatch(/Pack\.samql-node\.json/);
+    expect(saveToDownloads.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ text: expect.stringContaining("Pack") }),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(toast).toHaveBeenCalledWith(
       "ok",
       "Exported",
-      expect.stringContaining("Pack"),
+      expect.stringContaining("Downloads"),
     );
   });
 
@@ -146,6 +149,65 @@ describe("Created Node modals — save / export / load", () => {
       "ok",
       "Created node loaded",
       expect.stringContaining("Imported"),
+    );
+  });
+
+  it("Save node updates the opened created-node definition ports", () => {
+    const { nodes, edges } = sampleGraph();
+    const built = buildCreatedNodeDefinition("Editable", "Layers", nodes, edges);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    upsertCreatedNode(built.definition);
+
+    const edited = {
+      nodes: [
+        ...nodes,
+        {
+          id: "di2",
+          type: "dyn_input" as const,
+          x: 0,
+          y: 90,
+          config: { label: "in2" },
+        },
+        {
+          id: "do2",
+          type: "dyn_output" as const,
+          x: 160,
+          y: 90,
+          config: { label: "out2" },
+        },
+      ],
+      edges: [
+        ...edges,
+        {
+          id: "e3",
+          from: { node: "di2", port: "out" },
+          to: { node: "sel", port: "in" },
+        },
+        {
+          id: "e4",
+          from: { node: "sel", port: "out" },
+          to: { node: "do2", port: "in" },
+        },
+      ],
+    };
+    registerActiveNodeFlowGraphGetter(() => edited);
+    registerActiveEditingDefinitionGetter(() => ({
+      id: built.definition.id,
+      name: built.definition.name,
+      icon: built.definition.icon,
+    }));
+
+    render(<SettingsMenuHost />);
+    fireEvent.click(screen.getByTestId("save-node-menu"));
+
+    const saved = loadCreatedNodes().find((d) => d.id === built.definition.id);
+    expect(saved?.inputs).toHaveLength(2);
+    expect(saved?.outputs).toHaveLength(2);
+    expect(toast).toHaveBeenCalledWith(
+      "ok",
+      "Node saved",
+      expect.stringContaining("Editable"),
     );
   });
 });

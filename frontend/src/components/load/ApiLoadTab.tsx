@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api } from "../../lib/api";
 import type { LoadResult } from "../../lib/types";
-import { isCancelledError } from "../../lib/runController";
+import { isCancelledError, registerRun, unregisterRun, cancelOne } from "../../lib/runController";
 import { sanitizeProfileName } from "../../lib/sqlProfiles";
 import { Icon } from "../Icon";
 import {
@@ -141,6 +141,24 @@ export const ApiLoadTab: React.FC<{
     } catch {
       /* non-fatal: the profile still saved */
     }
+    try {
+      const p = currentProfile();
+      await api.connectionProfilesUpsert({
+        kind: "api",
+        name: nm,
+        fields: {
+          url: p.url,
+          auth_user: p.user,
+          json_path: p.jsonPath,
+          params: p.params,
+          table_name: p.tableName,
+          destination: p.destination,
+        },
+        password: savePass && pass ? pass : undefined,
+      });
+    } catch {
+      /* non-fatal */
+    }
   };
 
   const deleteProfile = async () => {
@@ -153,6 +171,11 @@ export const ApiLoadTab: React.FC<{
     setProfileName("");
     try {
       await api.secretDelete(key);
+    } catch {
+      /* ignore */
+    }
+    try {
+      await api.connectionProfilesDelete(key);
     } catch {
       /* ignore */
     }
@@ -202,14 +225,10 @@ export const ApiLoadTab: React.FC<{
       Date.now().toString(36) +
       Math.random().toString(36).slice(2, 8);
     const ctrl = new AbortController();
+    registerRun(queryId, ctrl);
     if (cancelRef)
       cancelRef.current = () => {
-        try {
-          ctrl.abort();
-        } catch {
-          /* ignore */
-        }
-        void api.cancelQuery(queryId).catch(() => {});
+        cancelOne(queryId, ctrl);
       };
     try {
       const res = await api.apiFetch(
@@ -240,9 +259,10 @@ export const ApiLoadTab: React.FC<{
       }
       onLoaded(res as unknown as LoadResult, composedUrl);
     } catch (e: any) {
-      if (isCancelledError(e)) return;
+      if (isCancelledError(e, queryId)) return;
       onError(e.message || String(e));
     } finally {
+      unregisterRun(queryId, ctrl);
       if (cancelRef) cancelRef.current = null;
       setBusy(false);
     }

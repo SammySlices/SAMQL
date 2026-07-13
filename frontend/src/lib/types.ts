@@ -264,6 +264,8 @@ export interface ChartSpec {
   // multiple-x: a second independent (x2, y2) series on its own top axis
   x2?: string;
   y2?: string;
+  /** Names the run for dashboard registration + precise cancel. */
+  query_id?: string;
 }
 
 export interface ChartSeries {
@@ -342,6 +344,7 @@ export interface ReconcileResult {
   totals: ReconcileTotals;
   fields: ReconcileFieldRow[];
   error?: string;
+  cancelled?: boolean;
 }
 
 export type ReconBucket = "a_only" | "b_only" | "matching" | "non_matching";
@@ -351,6 +354,7 @@ export interface ReconcileDrill {
   columns: string[];
   count: number;
   error?: string;
+  cancelled?: boolean;
 }
 
 export interface FormatResult {

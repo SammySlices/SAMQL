@@ -108,8 +108,23 @@ export const AboutModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             </div>
             <div className="about-sec">Packages</div>
             {info.packages.map((p) => (
-              <div className="about-row" key={p.name} title={p.role}>
-                <span>{p.name}</span>
+              <div
+                className="about-row"
+                key={p.name}
+                title={p.role}
+                data-testid={`about-package-${p.name}`}
+                data-installed={p.installed ? "true" : "false"}
+              >
+                <span>
+                  {p.name}
+                  <span
+                    className={
+                      "about-pkg-status" + (p.installed ? " on" : " off")
+                    }
+                  >
+                    {p.installed ? "active" : "inactive"}
+                  </span>
+                </span>
                 <span className={p.installed ? "" : "faint"}>
                   {p.installed ? p.version : "not installed"}
                 </span>

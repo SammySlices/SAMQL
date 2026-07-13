@@ -4,6 +4,8 @@ import { Icon } from "../Icon";
 export interface NodeFlowTab {
   id: string;
   name: string;
+  /** When set, this tab is editing that Created Node definition. */
+  editingDefinitionId?: string;
 }
 
 interface NodeFlowTabBarProps {

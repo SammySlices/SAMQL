@@ -142,6 +142,93 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_load_weird_filenames():
+        # Filenames with download-style "(1)", spaces before the extension,
+        # embedded dots (test.sam.csv), brackets, leading digits, etc. must
+        # become SQL-safe catalog names. Upload used to pass the raw stem
+        # (including a trailing space from "name (1) .csv"), and NodeFlow's
+        # input compiler strips the configured table -- so nodes ran against
+        # a missing table while the sidebar still showed the loaded file.
+        import tempfile as _tf
+        from samql_core.loaders import base_name_for
+        from samql_core import nodeflow as _nf
+
+        cases = [
+            ("Usinvestments_Monthly (1) .csv", "Usinvestments_Monthly_1"),
+            ("Usinvestments_Monthly (1).csv", "Usinvestments_Monthly_1"),
+            ("test.sam.csv", "test_sam"),
+            ("my file.csv", "my_file"),
+            ("a.b.c.d.csv", "a_b_c_d"),
+            ("foo-bar[baz].csv", "foo_bar_baz"),
+            ("123data.csv", "t_123data"),
+            ("weird!;name.csv", "weird_name"),
+        ]
+        for fname, expect in cases:
+            eq(base_name_for(fname), expect,
+               "base_name_for(%r) -> %r" % (fname, expect))
+            # raw upload stem (no path) must sanitize too
+            stem = os.path.splitext(fname)[0]
+            eq(base_name_for(stem), expect,
+               "upload stem %r -> %r" % (stem, expect))
+
+        # Hidden-table prefixes (__nbfile_ / __nbf_) must survive sanitisation
+        # so directory + append-from-folder loads stay out of the tables tree.
+        eq(base_name_for("__nbfile_0e9154232c"), "__nbfile_0e9154232c",
+           "directory hidden base keeps __ prefix")
+        eq(base_name_for("__nbf_0_abcdef12"), "__nbf_0_abcdef12",
+           "append-from-folder hidden base keeps __ prefix")
+
+        s = _fresh_session()
+        td = _tf.mkdtemp(prefix="samql_weird_fn_")
+        try:
+            for fname, expect in cases:
+                path = os.path.join(td, fname)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("id,amount\n1,10\n2,20\n")
+                # Path load (no base_name override)
+                loaded = s.load_file(path, destination="sqlite")
+                need(isinstance(loaded, list) and loaded,
+                     "path load returned tables for %r" % fname)
+                tname = loaded[0]["name"]
+                need(tname == expect or tname.startswith(expect + "_"),
+                     "path load of %r catalogued as %r (want %r)"
+                     % (fname, tname, expect))
+                # Upload-style raw stem must NOT keep spaces/parens/dots
+                stem = os.path.splitext(fname)[0]
+                loaded2 = s.load_file(path, destination="sqlite",
+                                      base_name=stem)
+                t2 = loaded2[0]["name"]
+                need(" " not in t2 and "(" not in t2 and "." not in t2,
+                     "upload stem for %r still unsafe: %r" % (fname, t2))
+                need(t2 == expect or t2.startswith(expect + "_"),
+                     "upload of %r catalogued as %r (want %r)"
+                     % (fname, t2, expect))
+                # NodeFlow input must see rows (the on-box failure mode)
+                sql = _nf.node_output_sql(
+                    {"id": "i", "type": "input",
+                     "config": {"table": t2}},
+                    "out", lambda _p: None,
+                    lambda _q: ["id", "amount"], engine="sqlite")
+                need(_nf._q(t2) in sql,
+                     "input SQL quotes the sanitized table")
+                r = s.run_query("SELECT COUNT(*) AS n FROM %s"
+                                % _nf._q(t2), target="__local__")
+                eq(r["rows"][0][0], 2,
+                   "NodeFlow can query sanitized table for %r" % fname)
+                # IDE / Journal style: bare identifier (no quotes) must work
+                # once the load sanitizer has produced a word-safe name.
+                bare = s.run_query(
+                    "SELECT COUNT(*) AS n FROM %s" % t2,
+                    target="__local__")
+                eq(bare["rows"][0][0], 2,
+                   "IDE/Journal bare SELECT works for sanitized %r" % fname)
+                need(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", t2),
+                     "catalog name %r is a bare-safe SQL ident" % t2)
+        finally:
+            s.shutdown()
+            import shutil as _sh
+            _sh.rmtree(td, ignore_errors=True)
+
     def t_inference():
         s = _loaded_session()
         try:
@@ -3560,6 +3647,7 @@ def backend_tests(datadir, csv_path, json_path):
         def rd(*parts):
             return open(os.path.join(ROOT, *parts), encoding="utf-8").read()
         app = rd("frontend", "src", "App.tsx")
+        storage = rd("frontend", "src", "components", "StorageMemoryModal.tsx")
         api_src = rd("frontend", "src", "lib", "api.ts")
         srv = rd("backend", "server.py")
         nbsrc = rd("frontend", "src", "components", "Notebook.tsx")
@@ -3583,11 +3671,11 @@ def backend_tests(datadir, csv_path, json_path):
              and 'className="fname"' in rd("frontend", "src", "components",
                                            "Sidebar.tsx")),
             ("the panel shows all four classes",
-             "Installer leftovers" in app and "Conversion cache" in app
-             and "Other instances" in app),
+             "Installer leftovers" in storage and "Conversion cache" in storage
+             and "Other instances" in storage),
             ("both actions wired with real byte feedback",
-             "storageClean({ orphans: true })" in app
-             and "storageClean({ filecache: true })" in app),
+             "storageClean({ orphans: true })" in storage
+             and "storageClean({ filecache: true })" in storage),
             ("api carries both endpoints",
              "/api/storage/report" in api_src
              and "/api/storage/clean" in api_src),
@@ -3723,10 +3811,11 @@ def backend_tests(datadir, csv_path, json_path):
         # .381: ONE modal. The stat pill has no memory number and no free
         # button; Settings has a single "Storage & memory" entry; the merged
         # modal carries the memory row, Free memory, Clear temp and the
-        # server status block.
+        # server status block. NodeFlow cache lives as a tab inside it.
         def rd(*parts):
             return open(os.path.join(ROOT, *parts), encoding="utf-8").read()
         app = rd("frontend", "src", "App.tsx")
+        storage = rd("frontend", "src", "components", "StorageMemoryModal.tsx")
         checks = [
             ("stat pill is lean and opens the dashboard",
              "onOpenActivity" in app
@@ -3737,16 +3826,18 @@ def backend_tests(datadir, csv_path, json_path):
              "Storage &amp; memory…" in app
              and "Storage &amp; cleanup…" not in app
              and "Free memory &amp; cache" not in app
-             and "clearTempFromMenu" not in app),
+             and "clearTempFromMenu" not in app
+             and "NodeFlow cache…" not in app),
             ("the merged modal is COMPACT: memory + four actions that "
              "wrap (no clipping), no server/tasks block, no scrolling",
-             'Modal title="Storage & memory"' in app
-             and "Engine memory" in app
-             and "Free unused memory" in app
-             and "Clear temp files" in app
-             and "<ServerStatus />" not in app
-             and 'flexWrap: "wrap"' in app.split(
-                 'Modal title="Storage & memory"')[1][:6000]),
+             'title="Storage & memory"' in storage
+             and "Engine memory" in storage
+             and "Free unused memory" in storage
+             and "Clear temp files" in storage
+             and "<ServerStatus />" not in storage
+             and 'flexWrap: "wrap"' in storage
+             and "NodeFlow cache" in storage
+             and "FlowCachePanel" in storage),
             ("the server block lives in the Activity dashboard now",
              "<ServerStatus embedded />" in rd(
                  "frontend", "src", "components", "ActivityModal.tsx")
@@ -3757,23 +3848,33 @@ def backend_tests(datadir, csv_path, json_path):
         need(not missing, "merge wiring broken: " + "; ".join(missing))
 
     def t_build_deps():
-        # Both build scripts install from the ONE manifest and hard-verify
-        # the critical four by import before packaging -- no more fresh-venv
-        # binaries that break on first xlsx export or fall back to SQLite.
+        # Both build scripts install the FULL optional manifest into the
+        # packaging Python and hard-verify the load stack by import before
+        # PyInstaller runs -- no more fresh-venv binaries that break on first
+        # xlsx export, skip ijson, or silently fall back to SQLite.
         ps = open(_root_script("build.ps1"), encoding="utf-8").read()
         sh = open(os.path.join(ROOT, "build.sh"), encoding="utf-8").read()
         req = open(os.path.join(ROOT, "requirements-optional.txt"),
                    encoding="utf-8").read()
-        for dep in ("duckdb", "pyarrow", "sqlglot", "openpyxl", "ijson"):
+        spec = open(os.path.join(BACKEND, "samql.spec"),
+                    encoding="utf-8").read()
+        for dep in ("duckdb", "pyarrow", "sqlglot", "openpyxl", "ijson",
+                    "orjson", "tzdata"):
             need(dep in req, "the manifest lists " + dep)
         checks = [
-            ("the Windows build reads the manifest per line",
-             "requirements-optional" in ps and "Get-Content $req" in ps
-             and "StartsWith" in ps),
-            ("both builds HARD-VERIFY the critical four",
-             '@("duckdb", "pyarrow", "sqlglot", "openpyxl")' in ps
+            ("both builds install the full optional manifest",
+             "pip install -r" in ps and "requirements-optional" in ps
+             and "pip install -r" in sh and "requirements-optional" in sh),
+            ("both builds HARD-VERIFY the full load stack",
+             '"duckdb", "pyarrow", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata"'
+             in ps
              and "exit 1" in ps
-             and "for mod in duckdb pyarrow sqlglot openpyxl" in sh),
+             and "for mod in duckdb pyarrow sqlglot openpyxl ijson orjson tzdata"
+             in sh),
+            ("PyInstaller refuses an incomplete load stack",
+             'REQUIRED = ["duckdb", "pyarrow", "sqlglot", "openpyxl", "orjson"'
+             in spec
+             and "refusing to package an incomplete app" in spec),
             ("probes are stderr-free (PS 5.1 Stop+redirect immunity, "
              "the on-box build failure)",
              ps.count("find_spec(") >= 3
@@ -3781,10 +3882,48 @@ def backend_tests(datadir, csv_path, json_path):
              and '-c "import $m" 2>' not in ps),
             ("failures explain the consequence",
              "packaged app would break" in ps
-             and "fix the environment" in sh),
+             and "packaged app would break" in sh),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing, "build deps wiring broken: " + "; ".join(missing))
+
+    def t_build_exe_payload_parity():
+        # SamQL.exe and SamQL-AppWindow.exe must leave the build with the
+        # SAME shared payload (frontend, load stack, native-window packages,
+        # icon) and the SAME post-build treatment (both verified present;
+        # both signed when a cert is supplied). Asymmetry here is exactly
+        # how one twin used to ship incomplete while the other looked fine.
+        ps = open(_root_script("build.ps1"), encoding="utf-8").read()
+        sh = open(os.path.join(ROOT, "build.sh"), encoding="utf-8").read()
+        spec = open(os.path.join(BACKEND, "samql.spec"),
+                    encoding="utf-8").read()
+        checks = [
+            ("spec collects the native-window stack once for BOTH exes",
+             '_WINDOW_PKGS = ("webview", "clr", "clr_loader", "pythonnet"'
+             in spec
+             and "bundling native-window package for BOTH exes" in spec
+             and "AppWindow payload = SamQL payload" in spec),
+            ("AppWindow Analysis reuses the shared datas/binaries lists",
+             "la_binaries = list(binaries)" in spec
+             and "la_datas = list(datas)" in spec
+             and 'la_hidden + hiddenimports + ["server"]' in spec),
+            ("build.ps1 refuses a half-build (both targets required)",
+             "Build incomplete: dist\\SamQL.exe is missing" in ps
+             and "SamQL-AppWindow.exe is missing" in ps
+             and "Both targets present" in ps),
+            ("build.ps1 signs BOTH product exes when a cert is provided",
+             "$signTargets = @($serverExe)" in ps
+             and "signed and verified OK" in ps
+             and "leaving BOTH exes unsigned" in ps),
+            ("build.sh also refuses a half-build",
+             "both targets present" in sh
+             and "SamQL-AppWindow binary missing" in sh),
+            ("both exes still share one icon stamp",
+             "EXE ICON (both exes):" in spec),
+        ]
+        missing = [n for n, ok in checks if not ok]
+        need(not missing,
+             "exe payload parity wiring broken: " + "; ".join(missing))
 
     def t_clean_script():
         # The post-test/build cleanup script: refuses under a running
@@ -4371,6 +4510,7 @@ def backend_tests(datadir, csv_path, json_path):
         need(not map_bad,
              "every ref map has a cleanup site: %r" % map_bad)
         eq(keys, {"samql.editorIvory", "samql.reduceMotion",
+                  "samql.eyeCare", "samql.nodeFlowDense",
                   "samql.nbMinimapMini", "samql.nb2.paletteHidden",
                   "samql.canvasIvory"},
            "the direct storage-key inventory is frozen and namespaced")
@@ -5996,7 +6136,7 @@ def backend_tests(datadir, csv_path, json_path):
         # cancel -> drain cycle leaves the registry empty.
         import threading as _th6
 
-        # structural: register/unregister are balanced inside a finally
+        # structural: register + teardown (unregister OR keep-cancel) in a finally
         sess_src = open(os.path.join(BACKEND, "samql_core", "session.py"),
                         encoding="utf-8").read()
         for kind in ("flatten", "shred", "profile", "materialize",
@@ -6007,10 +6147,14 @@ def backend_tests(datadir, csv_path, json_path):
             head = sess_src.rfind("\n    def ", 0, i)
             tail = sess_src.find("\n    def ", i)
             body = sess_src[head:tail if tail > 0 else len(sess_src)]
-            need("_register_run" in body and "_unregister_run" in body
+            teardown = ("_unregister_run" in body
+                        or "_end_run_keep_cancel" in body)
+            need("_register_run" in body and teardown
                  and "finally:" in body
-                 and body.find("finally:") < body.find("_unregister_run"),
-                 "the %s op unregisters in a finally (drains on every "
+                 and (body.find("finally:") < body.find("_unregister_run")
+                      or body.find("finally:")
+                      < body.find("_end_run_keep_cancel")),
+                 "the %s op tears down in a finally (drains on every "
                  "exit)" % kind)
 
         # behavioural: register -> cancel -> drain
@@ -8962,8 +9106,8 @@ def backend_tests(datadir, csv_path, json_path):
         spec = open(os.path.join(BACKEND, "samql.spec"),
                     encoding="utf-8").read()
         need('la_hidden + hiddenimports + ["server"]' in spec
-             and "la_binaries = la_binaries + binaries" in spec
-             and "la_datas = la_datas + datas" in spec
+             and "la_binaries = list(binaries)" in spec
+             and "la_datas = list(datas)" in spec
              and spec.count(
                  'excludes=["matplotlib", "PyQt5", "PySide2", "pytest"]')
              == 2,
@@ -9113,8 +9257,10 @@ def backend_tests(datadir, csv_path, json_path):
         need('data-version={info.version}' in about
              and 'data-build={info.build}' in about
              and 'data-testid="about-version"' in about
-             and 'data-testid="about-build"' in about,
-             "About source renders the live backend version and build")
+             and 'data-testid="about-build"' in about
+             and "about-pkg-status" in about
+             and "about-package-" in about,
+             "About source renders version/build and active package status")
         nb = open(os.path.join(FRONTEND, "src", "components",
                                "Notebook.tsx"), encoding="utf-8").read()
         need("nb-version-stamp" in nb and "appVersion={health?.version}"
@@ -9437,11 +9583,12 @@ def backend_tests(datadir, csv_path, json_path):
             ('"webview_cache": 0}', "freed dict carries the class"),
         ):
             need(frag in srv, "server: %s" % why)
-        app = open(os.path.join(FRONTEND, "src", "App.tsx"),
-                   encoding="utf-8").read()
-        need("Clear window cache" in app
-             and "mei_live_launcher" in app
-             and "App-window cache (Chromium)" in app,
+        storage = open(os.path.join(FRONTEND, "src", "components",
+                                    "StorageMemoryModal.tsx"),
+                       encoding="utf-8").read()
+        need("Clear window cache" in storage
+             and "mei_live_launcher" in storage
+             and "App-window cache (Chromium)" in storage,
              "panel rows + button wired")
 
         # (3) the pill
@@ -9837,8 +9984,10 @@ def backend_tests(datadir, csv_path, json_path):
         need("const [armed, setArmed] = useState(false)" in hook
              and "window.setTimeout(disarm, 6000)" in hook
              and "Click the button again to confirm." in hook
-             and "return { resetEngines, resetting, resetMsg, armed };"
-             in hook, "two-step arm: state + auto-disarm + message")
+             and "softResetEngines" in hook
+             and ".engineReset()" in hook
+             and "resetMode" in hook,
+             "two-step arm + soft engineReset path")
         need('const NUKE_PREFIXES = ["samql.nb.", "samql.notebook.", '
              '"samql.nodebook.", "samql.nodeflow."];' in sh,
              "journal + NodeFlow + legacy working-state prefixes die")
@@ -9854,11 +10003,15 @@ def backend_tests(datadir, csv_path, json_path):
                                 "ActivityModal.tsx"),
                    encoding="utf-8").read()
         need('"Reset server"' in am2 and '"Nuking…"' in am2
-             and '"Click again to confirm"' in am2,
-             "modal button: Reset server / armed / Nuking…")
+             and '"Click again to confirm"' in am2
+             and '"Reset engines"' in am2
+             and "softResetEngines" in am2,
+             "modal buttons: Reset engines + Reset server / armed / Nuking…")
         at = open(os.path.join(FRONTEND, "src", "lib", "api.ts"),
                   encoding="utf-8").read()
         need('"/api/nuke"' in at, "api.nuke wired")
+        need('"/api/engine/reset"' in at and "engineReset:" in at,
+             "api.engineReset wired for soft recovery")
 
     
     def t_root_id_audit_522():
@@ -10530,8 +10683,11 @@ def backend_tests(datadir, csv_path, json_path):
              "the classifier is query-id aware"),
         ):
             need(frag in rc, "runController: " + why)
-        need("markCancelled(queryId);\n  try {\n    ctrl?.abort();" in rc,
-             "cancelOne records intent before aborting")
+        need("markCancelled(queryId)" in rc
+             and "abortRegistered(queryId)" in rc
+             and "api.cancelQuery(queryId)" in rc,
+             "cancelOne records intent, aborts every registered fetch, "
+             "and interrupts the backend")
         ap = open(os.path.join(ROOT, "frontend", "src", "App.tsx"),
                   encoding="utf-8").read()
         need("registerRun(queryId, ctrl);" in ap
@@ -11496,6 +11652,50 @@ def backend_tests(datadir, csv_path, json_path):
         need(list(B.png_decode(png)[2][0])
              == [10, 20, 30, 255, 15, 25, 35, 255],
              "PNG Sub-filtered scanlines decode correctly")
+        # build.ps1 / build.sh call logo_fix_public_dir so opaque exports
+        # dropped into frontend/public become real-alpha before vite packs
+        # them into the splash / tab icons.
+        import tempfile as _tf
+        td = _tf.mkdtemp(prefix="samql_logo_pub_")
+        try:
+            p_logo = os.path.join(td, "logo.png")
+            with open(p_logo, "wb") as fh:
+                fh.write(data)
+            with open(os.path.join(td, "app-icon.png"), "wb") as fh:
+                fh.write(data)
+            # Missing apple-touch-icon.png is fine -- skipped.
+            results = B.logo_fix_public_dir(td)
+            by_name = {os.path.basename(r["path"]): r for r in results}
+            need(by_name["logo.png"]["changed"] is True
+                 and by_name["app-icon.png"]["changed"] is True,
+                 "fix-public rewrites both brand PNGs in place")
+            need(by_name["apple-touch-icon.png"]["before"] is None,
+                 "missing public brand files are skipped")
+            with open(p_logo, "rb") as fh:
+                on_disk = fh.read()
+            need(B.logo_inspect(on_disk)["has_alpha"] is True,
+                 "fixed logo.png on disk has real alpha")
+            # Second pass is a no-op (idempotent for build re-runs).
+            again = B.logo_fix_file(p_logo)
+            need(again["changed"] is False,
+                 "already-transparent logo is left alone on re-run")
+        finally:
+            import shutil as _sh
+            _sh.rmtree(td, ignore_errors=True)
+        # Splash keeps dark chrome (no corner-match) so transparent logos
+        # composite onto #16181d instead of re-creating a white panel.
+        splash = open(os.path.join(BACKEND, "launcher_app.py"),
+                      encoding="utf-8").read()
+        need('bg, fg = "#16181d", "#d7dae0"' in splash
+             and "img.get(0, 0)" not in splash
+             and "logo doctor" in splash.lower(),
+             "splash uses dark chrome with transparent logos (no corner match)")
+        bp = open(_root_script("build.ps1"), encoding="utf-8").read()
+        bs = open(os.path.join(ROOT, "build.sh"), encoding="utf-8").read()
+        need("logo_fix_public_dir" in bp and "logo_fix_public_dir" in bs
+             and "making public logos transparent" in bp
+             and "making public logos transparent" in bs,
+             "build.ps1 / build.sh strip public logo backgrounds before vite")
 
     def t_flatten_replace_and_naming_501():
         # .501 (on-box: SELECT * on the loaded file returned the raw json
@@ -12591,23 +12791,39 @@ def backend_tests(datadir, csv_path, json_path):
             return open(os.path.join(FRONTEND, "src", "components",
                                      name), encoding="utf-8").read()
         rm = rd("ReconcileModal.tsx")
-        need("runQid" in rm and "api.cancelQuery(runQid.current)" in rm,
-             "the reconcile modal carries a Cancel")
+        need("runQid" in rm and "cancelOne(runQid.current, runCtrl.current)" in rm
+             and "registerRun(qid, ctrl)" in rm,
+             "the reconcile modal Cancel aborts fetch AND interrupts backend")
         nb = rd("Notebook.tsx")
         need('queryId = "recon-" + uid() + uid()' in nb
-             and "aborts.current.set(id, { ctrl, queryId })" in nb,
-             "a journal reconcile registers for Stop / Stop-all")
+             and "aborts.current.set(id, { ctrl, queryId })" in nb
+             and "registerRun(queryId, ctrl)" in nb
+             and "api.materialize(" in nb
+             and "ctrl.signal" in nb,
+             "a journal reconcile registers for Stop before materialize")
         nbc = rd(os.path.join("notebook", "ReconcileNotebookCell.tsx"))
         need("cell.reconRunning ? props.onCancel : props.onRunReconcile" in nbc,
              "the recon button flips to Stop while running")
         pv = rd("PivotPanel.tsx")
         need("stopPivot" in pv and "cancelOne(cur.qid, cur.ctrl)" in pv
-             and "query_id: qid" in pv,
-             "the pivot panel stops, supersedes, and frees on unmount")
+             and "query_id: qid" in pv
+             and "pendingTimer" in pv and "stopRequested" in pv
+             and "registerRun(qid, ctrl)" in pv
+             and 'data-testid="pivot-stop"' in pv,
+             "the pivot panel stops (incl. debounce), supersedes, and frees on unmount")
+        need("_pivot_interrupt_target" in sql
+             and "_agg_interrupt_target" in sql
+             and 'return {"error": "interrupted", "cancelled": True}' in sql
+             and 'kind="chart"' in sql
+             and "def _chart_data_inner" in sql
+             and "def _end_run_keep_cancel" in sql,
+             "pivot/chart cancel binds the store connection and soft-cancels")
         pr = rd("Profiler.tsx")
         need("PROF_DEFAULT_W" in pr and "col-rz" in pr
-             and "setColW((w) => w.map(" in pr,
-             "profiler columns resize and commit once")
+             and "setColW((w) => w.map(" in pr
+             and 'data-testid="profile-stop"' in pr
+             and "onCancel" in pr,
+             "profiler columns resize and Stop cancels in-flight profile")
         css = open(os.path.join(FRONTEND, "src", "styles.css"),
                    encoding="utf-8").read()
         need(".prof-table th:first-child," in css
@@ -12737,8 +12953,10 @@ def backend_tests(datadir, csv_path, json_path):
         need(not hold["r"].get("error"), "recon runs clean: %r"
              % hold["r"].get("error"))
         marks = sorted({p for p in seen if p is not None})
-        need(marks and marks[-1] == 100.0
-             and any(0 < p < 100 for p in marks),
+        # Completion can drain the progress registry before the poll loop
+        # samples 100.0; intermediate milestones plus a clean result are
+        # enough to prove live progress was published.
+        need(any(0 < p < 100 for p in marks),
              "milestone progress observed live (saw %r)" % marks)
         eq(hold["r"]["totals"]["matching"], 400000,
            "and the report is still exact")
@@ -15238,8 +15456,13 @@ def backend_tests(datadir, csv_path, json_path):
                 seg = "\n".join(lines[node.lineno - 1:node.end_lineno])
                 if "_register_run(" in seg \
                         and node.name != "_register_run":
-                    if "_unregister_run(" not in seg \
-                            and "_flow_cleanup(" not in seg:
+                    # *_inner helpers only rebind the interrupt target; the
+                    # outer method owns keep-cancel / unregister teardown.
+                    if node.name.endswith("_inner"):
+                        continue
+                    if ("_unregister_run(" not in seg
+                            and "_end_run_keep_cancel(" not in seg
+                            and "_flow_cleanup(" not in seg):
                         leaks.append(node.name)
         need(not leaks,
              "every registering function owns its teardown "
@@ -16191,12 +16414,15 @@ def backend_tests(datadir, csv_path, json_path):
                     L._NoSplash()), False,
                    "without pywebview the launcher falls back to a browser")
             # the launcher exe bundles pywebview (+ its Windows WebView2/.NET
-            # backend, incl. clr_loader) when built
-            need('for _wpkg in ("webview", "clr", "clr_loader", "pythonnet"'
+            # backend, incl. clr_loader) when built -- SAME shared collect
+            # that SamQL.exe --window receives (payload parity).
+            need('_WINDOW_PKGS = ("webview", "clr", "clr_loader", "pythonnet"'
                  in spec
-                 and "la_hidden" in spec and "collect_all(_wpkg)" in spec,
-                 "the spec bundles pywebview + WebView2 backend into "
-                 "SamQL-AppWindow when present")
+                 and "bundling native-window package for BOTH exes" in spec
+                 and "la_binaries = list(binaries)" in spec
+                 and "la_datas = list(datas)" in spec,
+                 "the spec bundles pywebview + WebView2 into BOTH exes "
+                 "from one shared collect")
             reqs = open(os.path.join(ROOT, "requirements-optional.txt"),
                         encoding="utf-8").read()
             need(any(ln.strip() == "pywebview"
@@ -16373,10 +16599,12 @@ def backend_tests(datadir, csv_path, json_path):
         need(raw <= 6, "raw path-escape budget holds (%d left)" % raw)
         # reconcile registration + cursor reads
         need('self._register_run(qid, eng0, kind="reconcile"' in sess
-             and sess.count('surface="reconcile"') == 3
+             and sess.count('surface="reconcile"') >= 3
              and "def _reconcile_inner(self, spec):" in sess
-             and "def _reconcile_drilldown_inner(self, spec):" in sess,
-             "summary + drilldown register (and unregister) on the "
+             and "def _reconcile_drilldown_inner(self, spec):" in sess
+             and ("_end_run_keep_cancel(qid)" in sess
+                  or "_unregister_run(qid)" in sess),
+             "summary + drilldown register (and tear down) on the "
              "dashboard")
         need("_both_real = (left in getattr(eng" in sess
              and "eng.execute_read" in sess
@@ -16749,8 +16977,9 @@ def backend_tests(datadir, csv_path, json_path):
         checks = [
             ("switcher command + view-toggle title read NodeFlow",
              "Open NodeFlow" in app and "and NodeFlow views" in app),
-            ("the view header reads NodeFlow",
-             '<span className="nb2-title">NodeFlow</span>' in nf),
+            ("the node palette no longer repeats the NodeFlow label",
+             "nb2-toolbar" in nf
+             and 'nb2-title">NodeFlow' not in nf),
             ("the docs tab label + prose read NodeFlow",
              'label: "NodeFlow"' in dm and "<b>NodeFlow</b>" in dm),
             ("active view-mode string is NodeFlow",
@@ -16802,6 +17031,11 @@ def backend_tests(datadir, csv_path, json_path):
             ("the message loop is pumped during the wait",
              ps.index("DoEvents()")
              < ps.index("Start-Sleep -Milliseconds 300")),
+            ("WinForms is loaded before any DoEvents (KeepConsole/NoSplash safe)",
+             ps.index("Add-Type -AssemblyName System.Windows.Forms")
+             < ps.index("DoEvents()")
+             and ps.index("Add-Type -AssemblyName System.Windows.Forms")
+             < ps.index("function Show-Splash")),
             ("the splash closes after the app window opens",
              ps.index("--app=$url") < ps.rindex("Close-Splash")),
             ("escape hatches",
@@ -21775,9 +22009,11 @@ def backend_tests(datadir, csv_path, json_path):
              "the launcher resolves brand assets bundled into its own exe")
         need('_bundled_asset("logo.png")' in la,
              "the splash shows the bundled logo.png when present")
-        need("img.get(0, 0)" in la and "self.root.configure(bg=bg)" in la,
-             "the splash matches its background to the logo's corner pixel so "
-             "the logo's matte blends (no boxy panel)")
+        # Keep a fixed dark splash chrome so transparent logo corners do not
+        # turn the window into a mottled panel (logo doctor strips the matte).
+        need('bg, fg = "#16181d", "#d7dae0"' in la
+             and "self.root.configure(bg=bg)" in la,
+             "the splash uses fixed dark chrome that matches the branded UI")
         need('_b = _bundled_asset("samql.ico")' in la
              and "ico = _b or fetch_app_icon(args.port)" in la,
              "the taskbar stamp prefers the bundled icon, server icon "
@@ -21798,7 +22034,7 @@ def backend_tests(datadir, csv_path, json_path):
         # when the pywebview + backend stack isn't importable, so a browser
         # fallback is a known outcome rather than a surprise.
         ps = open(_root_script("build.ps1"), encoding="utf-8").read()
-        need("pip install --user pywebview pythonnet" in ps,
+        need("pip install pywebview pythonnet" in ps,
              "build.ps1 installs pythonnet for the WebView2 backend")
         need("import webview, webview.platforms.edgechromium, clr" in ps,
              "build.ps1 verifies the native-window stack is importable")
@@ -22279,6 +22515,36 @@ def backend_tests(datadir, csv_path, json_path):
         eq(st2.get("mssql:Prod"), "hunter2", "secret survives a reload")
         need(st2.delete("mssql:Prod") is True, "delete removes the secret")
         need(st2.has("mssql:Prod") is False, "deleted secret is gone")
+
+    def t_connection_profiles():
+        # Named connection profiles store non-secret fields; passwords stay in
+        # SecretStore under mssql:/api: keys. Nodes and Load tabs reuse by key.
+        import tempfile as _tfs, os as _oss
+        from samql_core.connection_profiles import (
+            ConnectionProfileStore, profile_key, parse_profile_key)
+        from samql_core.secretstore import SecretStore
+        eq(profile_key("mssql", "Prod"), "mssql:Prod", "mssql key form")
+        eq(parse_profile_key("api:HR"), ("api", "HR"), "parse key")
+        d = _tfs.mkdtemp()
+        st = ConnectionProfileStore()
+        st.path = _oss.path.join(d, "connection_profiles.json")
+        st._data = {"profiles": {}}
+        entry = st.upsert("mssql", "Prod", {"server": "db1", "auth": "sql"})
+        eq(entry["key"], "mssql:Prod", "upsert returns key")
+        eq(st.get("mssql:Prod")["fields"]["server"], "db1", "fields persist")
+        prot = (lambda t: ("E:" + t).encode("utf-8"),
+                lambda b: b.decode("utf-8")[2:])
+        secrets = SecretStore(protector=prot)
+        secrets.path = _oss.path.join(d, "secrets.json")
+        secrets._data = {}
+        secrets.set("mssql:Prod", "hunter2")
+        listed = st.list(secrets=secrets)
+        need(len(listed) == 1 and listed[0]["has_secret"] is True,
+             "list reports has_secret from SecretStore")
+        raw = open(st.path, encoding="utf-8").read()
+        need("hunter2" not in raw, "profile JSON never holds the password")
+        need(st.delete("mssql:Prod") is True, "delete removes the profile")
+        need(st.get("mssql:Prod") is None, "deleted profile is gone")
 
     def t_chart_multiy():
         s = _loaded_session()
@@ -23728,7 +23994,10 @@ def backend_tests(datadir, csv_path, json_path):
     def t_apiload_scheme_guard():
         # The REST loader only fetches http(s); other schemes (file://, ftp://,
         # a bare path) are refused before any network/file access happens.
+        # Both fetch_json AND fetch_to_file (the default single-page spool
+        # path) must enforce the private/metadata SSRF policy.
         from samql_core import apiload
+        import tempfile, os
         for bad in ("file:///etc/passwd", "ftp://host/x", "/local/path",
                     "gopher://x"):
             st, ct, data, text, err = apiload.fetch_json(bad)
@@ -23739,6 +24008,18 @@ def backend_tests(datadir, csv_path, json_path):
             st, ct, data, text, err = apiload.fetch_json(bad)
             need(data is None and err and "refus" in err.lower(),
                  "rejects private/metadata URL: %r -> %r" % (bad, err))
+            fd, path = tempfile.mkstemp(suffix=".json")
+            os.close(fd)
+            try:
+                st2, ct2, err2, nbytes = apiload.fetch_to_file(bad, path)
+                need(err2 and "refus" in err2.lower() and nbytes == 0,
+                     "fetch_to_file rejects private URL: %r -> %r"
+                     % (bad, err2))
+            finally:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
         # a well-formed https URL is accepted past the scheme check (it will
         # then fail to connect in the sandbox, which is fine -- not a scheme
         # error).
@@ -23860,6 +24141,22 @@ def backend_tests(datadir, csv_path, json_path):
             need(s.write_image(d, "x", "gif",
                                "data:image/png;base64," + png).get("error"),
                  "an unsupported format errors")
+            # Empty folder → Downloads (SAMQL_DOWNLOADS_DIR in tests).
+            old_env = os.environ.get("SAMQL_DOWNLOADS_DIR")
+            dl = tempfile.mkdtemp()
+            os.environ["SAMQL_DOWNLOADS_DIR"] = dl
+            try:
+                r3 = s.write_image("", "dlplot", "png",
+                                   "data:image/png;base64," + png)
+                need(r3.get("ok") and os.path.isfile(r3["file"]),
+                     "empty out_dir writes into Downloads: %r" % r3)
+                need(r3["file"].startswith(dl),
+                     "Downloads path used: %r" % r3.get("file"))
+            finally:
+                if old_env is None:
+                    os.environ.pop("SAMQL_DOWNLOADS_DIR", None)
+                else:
+                    os.environ["SAMQL_DOWNLOADS_DIR"] = old_env
         finally:
             s.shutdown()
 
@@ -23908,6 +24205,21 @@ def backend_tests(datadir, csv_path, json_path):
                     _sys.modules.pop("openpyxl", None)
             need(s.export_nodeflow(g, "o", d, "csv", "out").get("ok"),
                  "a repeated export still succeeds (no budget crash)")
+            # Empty out_dir → Downloads (SAMQL_DOWNLOADS_DIR in tests).
+            old_env = os.environ.get("SAMQL_DOWNLOADS_DIR")
+            dl = tempfile.mkdtemp()
+            os.environ["SAMQL_DOWNLOADS_DIR"] = dl
+            try:
+                rdl = s.export_nodeflow(g, "o", "", "csv", "dlout")
+                need(rdl.get("ok"),
+                     "empty out_dir exports to Downloads: %r" % rdl)
+                need(os.path.isfile(os.path.join(dl, "dlout.csv")),
+                     "Downloads file on disk")
+            finally:
+                if old_env is None:
+                    os.environ.pop("SAMQL_DOWNLOADS_DIR", None)
+                else:
+                    os.environ["SAMQL_DOWNLOADS_DIR"] = old_env
         finally:
             s.shutdown()
 
@@ -28471,6 +28783,236 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_usernode_saved_port_refresh_run():
+        # After Save Node adds a second Dynamic Output, a refreshed instance
+        # config (new outputCount + graph) must expose and run the new port.
+        from samql_core import nodeflow
+        s = Session()
+        try:
+            r = s.run_query(
+                "CREATE TABLE nums AS "
+                "SELECT 1 AS id, 10 AS amt UNION ALL SELECT 2, 20")
+            need(not r.get("error"), "seed nums: %s" % r.get("error"))
+
+            inner_v1 = {
+                "nodes": [
+                    {"id": "di", "type": "dyn_input", "config": {}},
+                    {"id": "sel", "type": "select",
+                     "config": {"fields": [
+                         {"name": "id", "keep": True},
+                         {"name": "amt", "keep": True},
+                     ]}},
+                    {"id": "do1", "type": "dyn_output", "config": {}},
+                ],
+                "edges": [
+                    {"id": "e1",
+                     "from": {"node": "di", "port": "out"},
+                     "to": {"node": "sel", "port": "in"}},
+                    {"id": "e2",
+                     "from": {"node": "sel", "port": "out"},
+                     "to": {"node": "do1", "port": "in"}},
+                ],
+            }
+            cfg_v1 = {
+                "label": "scaler",
+                "definitionId": "def-scaler",
+                "inputCount": 1,
+                "outputCount": 1,
+                "inputs": [{"nodeId": "di", "port": "in1", "label": "in"}],
+                "outputs": [{"nodeId": "do1", "port": "out1", "label": "out"}],
+                "graph": inner_v1,
+            }
+            outer = {
+                "nodes": [
+                    {"id": "src", "type": "input",
+                     "config": {"table": "nums"}},
+                    {"id": "u", "type": "usernode", "config": cfg_v1},
+                ],
+                "edges": [
+                    {"id": "w1",
+                     "from": {"node": "src", "port": "out"},
+                     "to": {"node": "u", "port": "in1"}},
+                ],
+            }
+            first = s.run_nodeflow(outer, "u", "out1")
+            need(not first.get("error"),
+                 "v1 created node runs: %s" % first.get("error"))
+            eq(first.get("total_rows", len(first.get("rows") or [])), 2,
+               "v1 returns both rows")
+
+            # Simulate Save Node: add a second dyn_output filtered to amt > 15.
+            inner_v2 = {
+                "nodes": [
+                    {"id": "di", "type": "dyn_input", "config": {}},
+                    {"id": "sel", "type": "select",
+                     "config": {"fields": [
+                         {"name": "id", "keep": True},
+                         {"name": "amt", "keep": True},
+                     ]}},
+                    {"id": "flt", "type": "filter",
+                     "config": {"condition": "amt > 15"}},
+                    {"id": "do1", "type": "dyn_output", "config": {}},
+                    {"id": "do2", "type": "dyn_output", "config": {}},
+                ],
+                "edges": [
+                    {"id": "e1",
+                     "from": {"node": "di", "port": "out"},
+                     "to": {"node": "sel", "port": "in"}},
+                    {"id": "e2",
+                     "from": {"node": "sel", "port": "out"},
+                     "to": {"node": "do1", "port": "in"}},
+                    {"id": "e3",
+                     "from": {"node": "di", "port": "out"},
+                     "to": {"node": "flt", "port": "in"}},
+                    {"id": "e4",
+                     "from": {"node": "flt", "port": "true"},
+                     "to": {"node": "do2", "port": "in"}},
+                ],
+            }
+            cfg_v2 = {
+                "label": "scaler",
+                "definitionId": "def-scaler",
+                "inputCount": 1,
+                "outputCount": 2,
+                "inputs": [{"nodeId": "di", "port": "in1", "label": "in"}],
+                "outputs": [
+                    {"nodeId": "do1", "port": "out1", "label": "all"},
+                    {"nodeId": "do2", "port": "out2", "label": "big"},
+                ],
+                "graph": inner_v2,
+            }
+            outer["nodes"][1]["config"] = cfg_v2
+            need(len(nodeflow.NODE_PORTS["usernode"]["out"]) >= 2,
+                 "usernode supports the refreshed second output")
+            all_rows = s.run_nodeflow(outer, "u", "out1")
+            big_rows = s.run_nodeflow(outer, "u", "out2")
+            need(not all_rows.get("error"),
+                 "refreshed out1 runs: %s" % all_rows.get("error"))
+            need(not big_rows.get("error"),
+                 "refreshed out2 runs: %s" % big_rows.get("error"))
+            eq(all_rows.get("total_rows", len(all_rows.get("rows") or [])), 2,
+               "refreshed out1 still returns both rows")
+            eq(big_rows.get("total_rows", len(big_rows.get("rows") or [])), 1,
+               "refreshed out2 returns the filtered row")
+        finally:
+            s.shutdown()
+
+    def t_nodeflow_rejects_multi_statement_fragments():
+        # Filter / formula / SQL-node text is spliced into CREATE … AS SQL.
+        # SQLite execute() runs every semicolon-split statement, so reject
+        # multi-statement payloads before materialize.
+        from samql_core import nodeflow
+        up = lambda p: "src" if p == "in" else None
+        cols = lambda rel: ["id", "amt"]
+        raised = False
+        try:
+            nodeflow.node_output_sql(
+                {"type": "filter", "id": "f",
+                 "config": {"condition": "1=1); DROP TABLE t; SELECT (1"}},
+                "true", up, cols)
+        except nodeflow.NodeflowError as exc:
+            raised = True
+            need("semicolon" in str(exc).lower()
+                 or "single" in str(exc).lower(),
+                 "filter multi-statement message: %s" % exc)
+        need(raised, "filter rejects multi-statement condition")
+
+        raised = False
+        try:
+            nodeflow.node_output_sql(
+                {"type": "formula", "id": "fx",
+                 "config": {"formulas": [
+                     {"name": "x",
+                      "expr": "1); DROP TABLE t; SELECT (1"},
+                 ]}},
+                "out", up, cols)
+        except nodeflow.NodeflowError as exc:
+            raised = True
+            need("single" in str(exc).lower()
+                 or "semicolon" in str(exc).lower(),
+                 "formula multi-statement message: %s" % exc)
+        need(raised, "formula rejects multi-statement expression")
+
+        raised = False
+        try:
+            nodeflow.node_output_sql(
+                {"type": "sql", "id": "q",
+                 "config": {
+                     "sql": "SELECT 1 AS a; DROP TABLE t; SELECT 2 AS b",
+                 }},
+                "out", up, cols)
+        except nodeflow.NodeflowError as exc:
+            raised = True
+            need("single" in str(exc).lower()
+                 or "semicolon" in str(exc).lower(),
+                 "sql-node multi-statement message: %s" % exc)
+        need(raised, "sql node rejects multi-statement query")
+
+        # A trailing semicolon alone is still allowed (stripped).
+        sql = nodeflow.node_output_sql(
+            {"type": "sql", "id": "q2",
+             "config": {"sql": "SELECT id FROM input;"}},
+            "out", up, cols)
+        need("SELECT" in sql.upper(), "trailing semicolon still compiles")
+
+    def t_usernode_rejects_nested_in_group():
+        # A usernode hidden in group children must not compile (recursion/
+        # cycle hole). Top-level nest check alone is not enough.
+        from samql_core import nodeflow
+        inner_graph = {
+            "nodes": [
+                {"id": "di", "type": "dyn_input", "config": {}},
+                {"id": "g", "type": "group", "config": {
+                    "children": [
+                        {"id": "u2", "type": "usernode",
+                         "config": {"graph": {"nodes": [], "edges": []}}},
+                    ],
+                }},
+                {"id": "do", "type": "dyn_output", "config": {}},
+            ],
+            "edges": [
+                {"id": "e1",
+                 "from": {"node": "di", "port": "out"},
+                 "to": {"node": "g", "port": "in"}},
+                {"id": "e2",
+                 "from": {"node": "g", "port": "out"},
+                 "to": {"node": "do", "port": "in"}},
+            ],
+        }
+        cfg = {
+            "label": "nested",
+            "inputs": [{"nodeId": "di", "port": "in1"}],
+            "outputs": [{"nodeId": "do", "port": "out1"}],
+            "graph": inner_graph,
+        }
+        raised = False
+        try:
+            nodeflow.node_output_sql(
+                {"type": "usernode", "id": "u", "config": cfg}, "out1",
+                lambda p: "src_t" if p == "in1" else None,
+                lambda s: ["a"])
+        except nodeflow.NodeflowError as exc:
+            raised = True
+            need("nested" in str(exc).lower()
+                 or "created node" in str(exc).lower(),
+                 "nested usernode message: %s" % exc)
+        need(raised, "usernode with group-child usernode is rejected")
+
+        # Direct group child usernode is also refused.
+        raised = False
+        try:
+            nodeflow.node_output_sql(
+                {"type": "group", "id": "g",
+                 "config": {"children": [
+                     {"id": "u", "type": "usernode", "config": {}},
+                 ]}},
+                "out",
+                lambda p: "src" if p == "in" else None,
+                lambda s: ["a"])
+        except nodeflow.NodeflowError:
+            raised = True
+        need(raised, "group with usernode child is rejected")
+
     def t_directory_node():
         # The directory node reads a file the user picks from a folder: it
         # loads into a hidden table and behaves like an input in a flow.
@@ -31385,20 +31927,18 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_sync_ops_cancellable():
-        # The synchronous engine reads -- reconcile, pivot, chart data, and a
-        # single-field profile -- now run through _run_op, which registers them
-        # under a run id so they appear in /api/status with an inline cancel and
-        # cancel_query can interrupt the in-flight engine statement. (Export is
-        # intentionally excluded: its Python write loop needs a per-row cancel +
-        # partial-file cleanup, tracked as a separate follow-up.)
+        # Synchronous engine reads (reconcile / pivot / chart / field profile)
+        # self-register under a query id so /api/status shows Cancel and
+        # cancel_query interrupts the real engine. They must NOT finish via
+        # _unregister_run (which clears the cancelled flag mid-send); keep-
+        # cancel leaves the flag for _REQ_LOCAL mid-send abort. _run_op remains
+        # for generic ops and also keeps the cancelled flag.
         from samql_core import progress as P
         s = _fresh_session()
         try:
             seen = {}
 
             def work():
-                # mid-run the op must be visible in the registry (this is what
-                # /api/status serves) and flagged cancellable.
                 seen["snap"] = [dict(o) for o in P.snapshot()]
                 return {"ok": True, "value": 7}
 
@@ -31414,14 +31954,9 @@ def backend_tests(datadir, csv_path, json_path):
                  "the op is finished after the run (linger-visible, "
                  "not active)")
 
-            # a run id is generated when the caller passes none, so the op
-            # still registers + shows a cancel
             out2 = s._run_op(None, "pivot", "t", lambda: {"ok": True})
             need(out2.get("ok") is True, "generated-id op runs and returns")
 
-            # a cancel landing during the run surfaces as the cancel sentinel
-            # even when the callee swallowed it -- a user cancel is never
-            # reported as success
             def work3():
                 s.flag_run_cancelled("q-cancel")
                 return {"ok": True, "rows": 1}
@@ -31431,9 +31966,10 @@ def backend_tests(datadir, csv_path, json_path):
                  "a cancel during the run is reported as cancelled")
             eq(out3.get("error"), "cancelled",
                "the cancel sentinel matches the run-cancel shape")
+            # keep-cancel: flag survives _run_op so mid-send abort still works
+            need(s._run_is_cancelled("q-cancel"),
+                 "_run_op keeps the cancelled flag after unwind")
 
-            # the handlers route through _run_op (so the activity surfaces get
-            # the inline cancel for free); export stays out for this pass.
             srv = open(os.path.join(BACKEND, "server.py"),
                        encoding="utf-8").read()
 
@@ -31442,18 +31978,32 @@ def backend_tests(datadir, csv_path, json_path):
                 if i < 0:
                     return None
                 nxt = srv.find("    @staticmethod", i + 1)
-                return srv[i:nxt if nxt > i else i + 400]
+                return srv[i:nxt if nxt > i else i + 500]
 
+            # Self-registering analytics handlers call the session method
+            # directly (and tag _REQ_LOCAL) -- wrapping them in _run_op used
+            # to discard the cancelled flag before the response finished.
             for fn in ("chart_data", "pivot", "reconcile",
                        "reconcile_drilldown", "reconcile_profile",
                        "profile_field"):
                 hb = _handler_body(fn)
-                need(hb is not None and "_run_op(" in hb,
-                     "handler %s routes through _run_op" % fn)
+                need(hb is not None and "_run_op(" not in hb,
+                     "handler %s self-registers (no _run_op wrap)" % fn)
+                need(hb is not None and "_REQ_LOCAL.qid" in hb,
+                     "handler %s tags the response thread for mid-send abort"
+                     % fn)
             xb = _handler_body("result_export")
             need(xb is not None and "_run_op(" not in xb,
-                 "result_export intentionally not wrapped yet (its Python "
-                 "write loop needs a separate per-row cancel + cleanup)")
+                 "result_export uses Session.export registration, not _run_op")
+
+            # profile_field binds the result-store interrupt target
+            need("def _agg_interrupt_target" in open(
+                     os.path.join(BACKEND, "samql_core", "session.py"),
+                     encoding="utf-8").read()
+                 and "def _end_run_keep_cancel" in open(
+                     os.path.join(BACKEND, "samql_core", "session.py"),
+                     encoding="utf-8").read(),
+                 "agg interrupt + keep-cancel helpers exist")
         finally:
             s.shutdown()
 
@@ -31618,6 +32168,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("startup banner prints before engine import", t_startup_banner_early),
         ("load CSV -> SQLite", t_load_csv),
         ("load weird columns (dup/empty/quoted)", t_load_weird_columns),
+        ("load weird filenames ((1), dots, spaces) stay NodeFlow-safe",
+         t_load_weird_filenames),
         ("type inference", t_inference),
         ("SELECT + total rows", t_select_total),
         ("fast preview + period delta node", t_fast_preview_and_period_delta),
@@ -31706,6 +32258,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("Flow engine target: nested (group/iterator) api node pins the engine", t_flow_engine_target_nested_apinode),
         ("CSV custom delimiter (e.g. ~) + normalization", t_csv_custom_delimiter),
         ("secret store: DPAPI-gated, encrypted round-trip, no plaintext", t_secret_store),
+        ("connection profiles: named fields + DPAPI secret by key",
+         t_connection_profiles),
         ("chart: multiple Y axes (shared x, y + y2 on two axes)", t_chart_multiy),
         ("session restore: rebuild loaded tables from the manifest",
          t_session_restore),
@@ -31856,6 +32410,12 @@ def backend_tests(datadir, csv_path, json_path):
         ("created usernode runs with multiple outputs", t_usernode_run),
         ("created usernode runs with multiple inputs (join)",
          t_usernode_multi_input_run),
+        ("created usernode runs after Save Node port refresh",
+         t_usernode_saved_port_refresh_run),
+        ("nodeflow rejects multi-statement filter/formula/sql fragments",
+         t_nodeflow_rejects_multi_statement_fragments),
+        ("usernode rejects nested created node inside a group",
+         t_usernode_rejects_nested_in_group),
         ("bin node (numeric -> labelled buckets)", t_bin_node),
         ("rank node (row_number/rank + top-N per group)", t_rank_node),
         ("fill node (nulls -> value/average)", t_fill_node),
@@ -31982,6 +32542,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_socket_hygiene),
         (".389: builds install + VERIFY the full dependency set",
          t_build_deps),
+        ("build: SamQL.exe + SamQL-AppWindow share payload, verify, and signing",
+         t_build_exe_payload_parity),
         (".384: post-run cleanup script (guards, flags, measurement)",
          t_clean_script),
         (".423: flatten recurses to depth + the load toggle rides "

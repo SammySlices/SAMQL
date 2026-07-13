@@ -107,6 +107,22 @@ def main() -> int:
         )
         require(len(sections) == len(manifest), "bundle section count differs from manifest")
         require(first.file_count == len(manifest), "package result count differs from manifest")
+        from tools.release_preflight import TEST_EXTRACT_BOOTSTRAP, TEST_EXTRACT_TREES
+
+        logical_manifest_set = set(logical_manifest)
+        missing_bootstrap = [
+            rel for rel in TEST_EXTRACT_BOOTSTRAP if rel not in logical_manifest_set
+        ]
+        require(
+            not missing_bootstrap,
+            "packaged extract is missing test bootstrap files: "
+            + ", ".join(missing_bootstrap[:8]),
+        )
+        for tree in TEST_EXTRACT_TREES:
+            require(
+                any(path == tree or path.startswith(tree + "/") for path in logical_manifest),
+                f"packaged extract is missing test tree {tree}/",
+            )
         dangerous_extension = re.compile(
             rb"(?i)\.(?:exe|dll|msi|bat|cmd|scr|vbs|ps1|jar)(?=$|[^A-Za-z0-9])"
         )
@@ -127,7 +143,7 @@ def main() -> int:
         )
 
         receipt = json.loads(first_receipt)
-        require(receipt["build"] == "2026-07-12.593", "receipt build is wrong")
+        require(receipt["build"] == "2026-07-13.594", "receipt build is wrong")
         require(receipt["version"] == "2.16.4", "receipt version is wrong")
         require(receipt["sourceFiles"] == len(manifest), "receipt source count is wrong")
         require(receipt["decodedBundle"]["sha256"] == first.bundle_sha256, "receipt bundle SHA is wrong")

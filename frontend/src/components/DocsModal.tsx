@@ -61,11 +61,11 @@ const NODE_DOCS: Record<string, string> = {
   reconcile: "Compares two inputs (matched / left-only / right-only, per-field).",
   group: "A visual container that groups nodes on the canvas.",
   sql: "Free-form SQL over the node's inputs (each input is a named relation).",
-  output: "Publishes the flow's result under a stable table name.",
+  output: "Exports the upstream result to a file. Leave the folder blank to write into your Downloads folder, or browse to another location.",
   createtable: "Materializes its input as a permanent table you name.",
   write: "Exports its input to a file (CSV / Parquet / Excel).",
   text: "A text / markdown annotation on the canvas.",
-  png: "Renders an upstream chart to a PNG image file.",
+  png: "Renders an upstream chart to a PNG image file (Downloads when no folder is set).",
   variable: "A named value other nodes can reference in expressions.",
   iterator: "Repeats its subflow once per row/value of its input.",
   while: "Loops its subflow while a condition stays true.",
@@ -73,6 +73,9 @@ const NODE_DOCS: Record<string, string> = {
   directory: "Lists a folder's files as a table (name, size, dates).",
   appendfolder: "Loads and stacks every matching file in a folder.",
   apinode: "Fetches an HTTP API response into a table.",
+  dyn_input: "Marks an entry port when authoring a Created Node from a tab.",
+  dyn_output: "Marks an exit port when authoring a Created Node from a tab.",
+  usernode: "A reusable Created Node — expand, Open Node to edit, or Export/Load the definition as JSON into Downloads.",
 };
 
 type Tab = "joins" | "journal" | "json" | "nodeflow" | "functions";
@@ -389,15 +392,18 @@ JOIN identifier AS i
               Cell types from the toolbar: <b>+SQL</b>, <b>+Note</b>{" "}
               (markdown text), <b>Chart</b>, <b>Pivot</b>, and{" "}
               <b>Reconcile</b> — the last three consume the cell above
-              them.
+              them. Chart, Pivot, and Reconcile each expose <b>Stop</b>{" "}
+              while they run (same cancel rail as the IDE).
             </li>
             <li>
               Drag the corner grip to resize a cell; long lines scroll
               horizontally inside the editor.
             </li>
             <li>
-              Cell results are session-scoped working sets — export or{" "}
-              <code>CREATE TABLE … AS</code> to keep one.
+              Cell results are session-scoped working sets — export
+              (Downloads folder) or <code>CREATE TABLE … AS</code> to keep
+              one. Reconcile failure CSVs also land in Downloads and can be
+              cancelled from the Activity tray.
             </li>
           </ul>
         </div>

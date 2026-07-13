@@ -36,9 +36,11 @@ test("runs a query and opens live flow-cache telemetry", async ({ page }) => {
   await expect(grid.locator(".grid-rows")).toContainText("ok");
 
   await page.getByTestId("settings-button").click();
+  await page.getByTestId("storage-memory-menu").click();
+  await expect(page.getByTestId("storage-memory-modal")).toBeVisible();
   const [cacheResponse] = await Promise.all([
     waitForJsonResponse(page, "/api/settings/flow-cache", "GET"),
-    page.getByTestId("flow-cache-menu").click(),
+    page.getByTestId("flow-cache-tab").click(),
   ]);
   const cachePayload = await readJsonOrText(cacheResponse);
   expect(

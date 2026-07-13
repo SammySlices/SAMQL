@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { registerRun, unregisterRun } from "./runController";
 import type { ColumnFilter, ResultPage } from "./types";
 
 export type PagedResultOperation =
@@ -142,9 +143,18 @@ export function usePagedResult<T extends PagedResultSnapshot>(
   const abortFor = useCallback((id: string) => {
     const set = controllers.current.get(id);
     if (set) {
-      for (const controller of set) controller.abort();
+      for (const controller of set) {
+        try {
+          controller.abort();
+        } catch {
+          /* ignore */
+        }
+      }
       controllers.current.delete(id);
     }
+    // Do NOT cancelQuery(item.queryId) here: sort/filter supersede would flag
+    // the shared run id and poison later page sends (_REQ_LOCAL mid-send abort).
+    // User Stop still reaches these fetches via registerRun + cancelById.
   }, []);
 
   const invalidate = useCallback(
@@ -164,15 +174,21 @@ export function usePagedResult<T extends PagedResultSnapshot>(
     const set = controllers.current.get(id) || new Set<AbortController>();
     set.add(controller);
     controllers.current.set(id, set);
+    // Activity Stop / surface Stop can abort this page fetch too.
+    const qid = optionsRef.current.getItem(id)?.queryId;
+    if (qid) registerRun(qid, controller);
     return controller;
   }, []);
 
   const unregisterController = useCallback(
     (id: string, controller: AbortController) => {
       const set = controllers.current.get(id);
-      if (!set) return;
-      set.delete(controller);
-      if (set.size === 0) controllers.current.delete(id);
+      if (set) {
+        set.delete(controller);
+        if (set.size === 0) controllers.current.delete(id);
+      }
+      const qid = optionsRef.current.getItem(id)?.queryId;
+      if (qid) unregisterRun(qid, controller);
     },
     [],
   );
@@ -460,7 +476,13 @@ export function usePagedResult<T extends PagedResultSnapshot>(
     return () => {
       mounted.current = false;
       for (const set of controllerMap.values()) {
-        for (const controller of set) controller.abort();
+        for (const controller of set) {
+          try {
+            controller.abort();
+          } catch {
+            /* ignore */
+          }
+        }
       }
       controllerMap.clear();
       loadingSet.clear();

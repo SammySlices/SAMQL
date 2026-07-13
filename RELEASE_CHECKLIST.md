@@ -16,7 +16,9 @@ python tools/release_artifacts.py verify-tree --root .
 The command must report zero failures. It delegates to `tools/release_preflight.py` and cross-checks
 `RELEASE_MANIFEST.json`, `VERSION`, the backend constants, `package.json`, the
 npm lockfile, saved-data schema constants, the source manifest, CI wiring, test
-inventory, and the final `NodeFlow.tsx` composition bound.
+inventory, the complete test-extract bootstrap (suite runner, `tests/`,
+`tools/`, Playwright e2e, Vitest setup, install helpers), and the final
+`NodeFlow.tsx` composition bound.
 
 ## 2. Exercise migration compatibility
 
@@ -57,6 +59,12 @@ Follow `WINDOWS_BUILD_CHECKLIST.txt`, including the one-file PyInstaller build,
 cold start, single-instance reuse, taskbar/window branding, cancel/recovery,
 and clean-exit checks. Confirm `/api/health` reports the exact release version
 and build from `RELEASE_MANIFEST.json`.
+
+`build.ps1` / `build.sh` install the full `requirements-optional.txt` set into
+the packaging Python (DuckDB, pyarrow, openpyxl, ijson, orjson, sqlglot,
+tzdata, …), hard-fail if any of those imports are missing, and `samql.spec`
+refuses to package an incomplete load stack. Recipients of the built exe
+therefore get the same engines and format support as the builder.
 
 ## 5. Package both complete source transports
 

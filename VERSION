@@ -2,12 +2,24 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-12.593
+Current build:   2026-07-13.594
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-13.594  (v2.16.4)
+
+SOFT ENGINE RESET, CREATED-NODE REFRESH, SOFT CANCEL, ICON PALETTE.
+Activity & connections gains a soft Reset engines path (POST /api/engine/reset)
+that aborts client work, swaps engines, and refreshes tables without wiping
+journal/NodeFlow or hard-reloading; nuclear Reset server remains. Saving a
+Created Node now refreshes instances on never-opened tabs by loading them from
+storage. Chart, reconcile drill/profile, and Excel peek abort superseded
+fetches via AbortSignal. Create-a-node icon choices expand across the existing
+Icon set. Packaging and APHEX round-trip remain the release contract.
 
 ----------------------------------------------------------------------
 build 2026-07-12.593  (v2.16.4)

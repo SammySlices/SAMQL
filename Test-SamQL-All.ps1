@@ -112,9 +112,20 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Step "Verifying release identity, compatibility, and source manifest"
-& $VenvPython (Join-Path $Root "tools\release_artifacts.py") verify-tree --root $Root
-if ($LASTEXITCODE -ne 0) {
-  throw "SamQL release preflight failed."
+$preflightOut = & $VenvPython (Join-Path $Root "tools\release_artifacts.py") verify-tree --root $Root 2>&1
+$preflightCode = $LASTEXITCODE
+if ($preflightOut) { Write-Host ($preflightOut | Out-String) }
+if ($preflightCode -ne 0) {
+  $failLines = @($preflightOut | Where-Object { $_ -match '\[FAIL\]' })
+  if ($failLines.Count -gt 0) {
+    Write-Host "Release preflight failures:" -ForegroundColor Red
+    $failLines | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+  }
+  throw ("SamQL release preflight failed. Common causes: SOURCE_MANIFEST.txt " +
+    "and RELEASE_MANIFEST.json sourceFileCount out of sync; a managed source " +
+    "file listed in the manifest but missing on disk (incomplete copy/sync); " +
+    "or CRLF/BOM line endings in a manifested text file (must be LF, no BOM, " +
+    "trailing newline). Re-run: python tools/release_artifacts.py verify-tree --root .")
 }
 
 if (-not $SkipInstall) {

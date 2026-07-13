@@ -276,8 +276,8 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   },
   output: {
     title: "Output",
-    what: "The end of a flow — exports the input to a file or marks it as the result.",
-    use: "Pick the format (CSV / Parquet / Excel / JSON) and run it to produce the output.",
+    what: "The end of a flow — exports the input to a file (or an image from a chart/dashboard).",
+    use: "Pick the format. Leave the folder blank to write into Downloads, or browse to another folder, then run.",
   },
   variable: {
     title: "Variables",
@@ -302,7 +302,7 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   usernode: {
     title: "Created node",
     what: "A reusable macro built from a full NodeFlow tab graph.",
-    use: "Wire its inputs and preview any output port. The embedded graph runs in place — export/load Created Nodes to share with others.",
+    use: "Wire its inputs and preview any output port. Export/Load from Settings writes a shareable JSON file into Downloads.",
   },
 };
 

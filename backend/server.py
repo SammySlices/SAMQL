@@ -229,9 +229,139 @@ except Exception:
 
 def _fail_job(job, msg):
     """Mark a background-job dict as failed with ``msg`` (the
-    state/error pair set together at every job failure site)."""
+    state/error pair set together at every job failure site).
+
+    Also records the failure in the Settings error log once per job so load /
+    flatten / optimize failures are inspectable after the toast fades.
+    """
     job["state"] = "error"
     job["error"] = msg
+    try:
+        jid = str(job.get("id") or "")
+        if not jid or job.get("_error_logged"):
+            return
+        job["_error_logged"] = True
+        kind = str(job.get("kind") or "job")
+        name = str(job.get("name") or "")
+        detail_bits = []
+        if name:
+            detail_bits.append("name=%s" % name)
+        if job.get("engine"):
+            detail_bits.append("engine=%s" % job.get("engine"))
+        if job.get("stage"):
+            detail_bits.append("stage=%s" % job.get("stage"))
+        log_server_error(
+            "JOB",
+            "/job/%s/%s" % (kind, jid),
+            400,
+            "%sError" % "".join(p.title() for p in kind.replace("-", "_").split("_")),
+            str(msg),
+            detail="; ".join(detail_bits),
+        )
+    except Exception:
+        pass
+
+
+def _log_soft_result_error(method, path, result, body, ctx):
+    """Record HTTP-200 payloads that still carry an application error.
+
+    Query, load, flatten, shred, reconcile and NodeFlow handlers often return
+    ``{error: "..."}`` (sometimes with a traceback) instead of raising. Those
+    used to vanish from the Settings error log.
+    """
+    if not isinstance(result, dict):
+        return
+    err = result.get("error")
+    if not isinstance(err, str) or not err.strip():
+        return
+    if result.get("cancelled") or result.get("state") == "cancelled":
+        return
+    path = path or ""
+    interesting = (
+        path.startswith("/api/query")
+        or path.startswith("/api/nodeflow/")
+        or path.startswith("/api/load/")
+        or path.startswith("/api/flatten")
+        or path.startswith("/api/shred")
+        or path.startswith("/api/reconcile")
+        or path.startswith("/api/export")
+        or path.startswith("/api/optimize")
+    )
+    if not interesting:
+        return
+    # Progress polls only matter once the job has failed (or a sync call
+    # returned an error without a state field).
+    if "/progress/" in path:
+        if result.get("state") != "error":
+            return
+        jid = str(result.get("id") or "")
+        if jid:
+            # Prefer the one-shot _fail_job path; skip duplicate poll noise.
+            job = JOBS.get(jid)
+            if job and job.get("_error_logged"):
+                return
+    kind = "AppError"
+    if path.startswith("/api/query"):
+        kind = "QueryError"
+    elif path.startswith("/api/load"):
+        kind = "LoadError"
+    elif path.startswith("/api/flatten") or path.startswith("/api/shred"):
+        kind = "FlattenError"
+    elif path.startswith("/api/nodeflow"):
+        kind = "NodeFlowError"
+    elif path.startswith("/api/reconcile"):
+        kind = "ReconcileError"
+    elif path.startswith("/api/export"):
+        kind = "ExportError"
+    elif path.startswith("/api/optimize"):
+        kind = "OptimizeError"
+    tb = result.get("traceback") if isinstance(result.get("traceback"), str) else ""
+    detail = _request_detail(body, ctx)
+    # Prefer richer server-side detail when present.
+    for key in ("detail", "message", "hint", "sqlstate"):
+        extra = result.get(key)
+        if isinstance(extra, str) and extra.strip() and extra.strip() != err.strip():
+            detail = (detail + "; " if detail else "") + "%s=%s" % (key, extra[:400])
+            break
+    log_server_error(method, path, 400, kind, err.strip(), tb=tb or "",
+                     detail=detail)
+
+
+def _request_detail(body, ctx):
+    """A short, size-capped summary of the request, useful for debugging
+    without dumping huge payloads. Prefers a SQL string / node-flow target /
+    load path if present, else the body's top-level keys."""
+    try:
+        if isinstance(body, dict):
+            for k in ("sql", "expression", "condition"):
+                if isinstance(body.get(k), str) and body[k].strip():
+                    return "%s=%s" % (k, body[k][:400])
+            bits = []
+            for k in ("path", "json_path", "table", "engine", "target",
+                      "out_dir", "output_dir", "base_name", "node", "node_id",
+                      "port", "job_id"):
+                v = body.get(k)
+                if isinstance(v, str) and v.strip():
+                    bits.append("%s=%s" % (k, v.strip()[:200]))
+                elif isinstance(v, (int, float, bool)):
+                    bits.append("%s=%s" % (k, v))
+            files = body.get("files")
+            if isinstance(files, list) and files:
+                bits.append("files=%d" % len(files))
+            if bits:
+                return "; ".join(bits)[:400]
+            keys = ", ".join(sorted(body.keys()))[:200]
+            return "keys: " + keys if keys else ""
+        if ctx and ctx.get("fields"):
+            return "fields: " + ", ".join(sorted(ctx["fields"].keys()))[:200]
+        files = (ctx or {}).get("files") or []
+        if files:
+            names = [getattr(f, "filename", None) or getattr(f, "name", "") or "?"
+                     for f in files[:5]]
+            return "upload=%s" % ", ".join(str(n) for n in names)[:400]
+    except Exception:
+        pass
+    return ""
 
 
 def _task_card(j):
@@ -1031,26 +1161,6 @@ def _tail_text(path, max_bytes=64 * 1024):
         return {"path": path, "size": 0, "text": ""}
 
 
-def _request_detail(body, ctx):
-    """A short, size-capped summary of the request, useful for debugging
-    without dumping huge payloads. Prefers a SQL string / node-flow target if
-    present, else the body's top-level keys."""
-    try:
-        if isinstance(body, dict):
-            for k in ("sql", "expression", "condition"):
-                if isinstance(body.get(k), str) and body[k].strip():
-                    return "%s=%s" % (k, body[k][:400])
-            node = body.get("node") or body.get("node_id")
-            keys = ", ".join(sorted(body.keys()))[:200]
-            base = "keys: " + keys if keys else ""
-            return ("node=%s; %s" % (node, base)) if node else base
-        if ctx and ctx.get("fields"):
-            return "fields: " + ", ".join(sorted(ctx["fields"].keys()))[:200]
-    except Exception:
-        pass
-    return ""
-
-
 # A single process-wide session shared across worker threads. The Session
 # itself serializes mutating DB work with internal locks.
 SESSION = None
@@ -1276,6 +1386,43 @@ def _flag_all_jobs():
         for j in JOBS.values():
             if j.get("state") not in ("done", "error", "cancelled"):
                 j["cancel"] = True
+
+
+def _normalize_user_path(path):
+    """Clean a path pasted from Explorer / a browser before os.path checks.
+
+    Strips wrapping quotes, ``file:`` URLs, and expands ``~`` / ``%VARS%`` so a
+    coworker who pastes ``\"C:\\Users\\...\\file.csv\"`` or
+    ``file:///C:/Users/.../file.csv`` gets the same result as Browse….
+    """
+    if not isinstance(path, str):
+        return path
+    p = path.strip().strip('"').strip("'").strip()
+    if not p:
+        return p
+    lower = p[:8].lower()
+    if lower.startswith("file:"):
+        try:
+            from urllib.parse import unquote, urlparse
+            parsed = urlparse(p)
+            raw = unquote(parsed.path or "")
+            if os.name == "nt":
+                # file:///C:/Users/... -> /C:/Users/... ; file://server/share
+                if parsed.netloc and parsed.netloc not in ("localhost", "127.0.0.1"):
+                    p = "\\\\" + parsed.netloc + raw.replace("/", "\\")
+                else:
+                    if raw.startswith("/") and len(raw) >= 3 and raw[2] == ":":
+                        raw = raw[1:]
+                    p = raw.replace("/", "\\")
+            else:
+                p = raw or p
+        except Exception:
+            pass
+    try:
+        p = os.path.expandvars(os.path.expanduser(p))
+    except Exception:
+        pass
+    return p
 
 
 def _list_dir(path):
@@ -1548,6 +1695,7 @@ class Api:
     def table_profile(s, m, body, ctx):
         name = unquote(m.group("name"))
         engine = (body or {}).get("engine", "sqlite")
+        _REQ_LOCAL.qid = (body or {}).get("query_id")
         try:
             return s.profile(name, engine=engine,
                              query_id=(body or {}).get("query_id"))
@@ -1560,9 +1708,11 @@ class Api:
 
     @staticmethod
     def profile_field(s, m, body, ctx):
+        # profile_field self-registers against the agg interrupt target
+        # (result-store conn/engine) -- do not wrap with _run_op (None eng).
         b = body or {}
-        return s._run_op(b.get("query_id"), "profile", b.get("column"),
-                         lambda: s.profile_field(b))
+        _REQ_LOCAL.qid = b.get("query_id")
+        return s.profile_field(b)
 
     @staticmethod
     def table_rename(s, m, body, ctx):
@@ -2117,7 +2267,7 @@ class Api:
     def excel_sheets(s, m, body, ctx):
         """List the sheet names of a workbook already on the server's disk."""
         b = body or {}
-        path = b.get("path")
+        path = _normalize_user_path(b.get("path"))
         if not path or not os.path.isfile(path):
             raise ApiError(400, f"File not found: {path}")
         from samql_core.loaders import excel_sheet_names
@@ -2133,7 +2283,7 @@ class Api:
         checkbox per field. Time-boxed: on a huge file it scans as far as the
         budget allows and reports whether it finished."""
         b = body or {}
-        path = b.get("path")
+        path = _normalize_user_path(b.get("path"))
         if not path or not os.path.isfile(path):
             raise ApiError(400, f"File not found: {path}")
         ext = os.path.splitext(path)[1].lower().lstrip(".")
@@ -2191,7 +2341,7 @@ class Api:
     @staticmethod
     def load_start(s, m, body, ctx):
         b = body or {}
-        path = b.get("path")
+        path = _normalize_user_path(b.get("path"))
         if not path or not os.path.isfile(path):
             raise ApiError(400, f"File not found: {path}")
         dest = b.get("destination") or "auto"
@@ -2283,7 +2433,7 @@ class Api:
     @staticmethod
     def load_folder_start(s, m, body, ctx):
         b = body or {}
-        path = b.get("path") or b.get("dir")
+        path = _normalize_user_path(b.get("path") or b.get("dir"))
         if not path or not os.path.isdir(path):
             raise ApiError(400, f"Folder not found: {path}")
         dest = b.get("destination") or "auto"
@@ -3116,33 +3266,35 @@ class Api:
     # ---- analytics: chart / pivot / reconcile ----------------------
     @staticmethod
     def chart_data(s, m, body, ctx):
-        b = body or {}
+        b = dict(body or {})
         if not isinstance(b.get("table", ""), str):
             raise ApiError(400, "table must be a string.")
-        return s._run_op(b.get("query_id"), "chart", b.get("table"),
-                         lambda: s.chart_data(b))
+        # chart_data self-registers against the agg interrupt target -- do
+        # not wrap with _run_op (would discard the cancelled flag mid-send).
+        if not b.get("query_id"):
+            b["query_id"] = "chart-%s" % uuid.uuid4().hex[:10]
+        _REQ_LOCAL.qid = b.get("query_id")
+        return s.chart_data(b)
 
     @staticmethod
     def pivot(s, m, body, ctx):
         b = body or {}
         if not isinstance(b.get("table", ""), str):
             raise ApiError(400, "table must be a string.")
-        return s._run_op(b.get("query_id"), "pivot", b.get("table"),
-                         lambda: s.pivot(b))
+        _REQ_LOCAL.qid = b.get("query_id")
+        return s.pivot(b)
 
     @staticmethod
     def reconcile(s, m, body, ctx):
         b = body or {}
-        return s._run_op(b.get("query_id"), "reconcile",
-                         b.get("left") or b.get("name"),
-                         lambda: s.reconcile(b))
+        _REQ_LOCAL.qid = b.get("query_id")
+        return s.reconcile(b)
 
     @staticmethod
     def reconcile_drilldown(s, m, body, ctx):
         b = body or {}
-        return s._run_op(b.get("query_id"), "reconcile",
-                         b.get("left") or b.get("name"),
-                         lambda: s.reconcile_drilldown(b))
+        _REQ_LOCAL.qid = b.get("query_id")
+        return s.reconcile_drilldown(b)
 
     @staticmethod
     def reconcile_failures(s, m, body, ctx):
@@ -3176,10 +3328,10 @@ class Api:
 
     @staticmethod
     def reconcile_profile(s, m, body, ctx):
+        # reconcile_profile self-registers -- do not wrap with _run_op.
         b = body or {}
-        return s._run_op(b.get("query_id"), "reconcile",
-                         b.get("left") or b.get("name"),
-                         lambda: s.reconcile_profile(b))
+        _REQ_LOCAL.qid = b.get("query_id")
+        return s.reconcile_profile(b)
 
     # ---- REST API loader -------------------------------------------
     @staticmethod
@@ -3189,6 +3341,7 @@ class Api:
         sk = b.get("secret_key")
         if not pwd and sk:
             pwd = s.secrets.get(sk)
+        _REQ_LOCAL.qid = b.get("query_id")
         return s.load_api(b.get("url", ""),
                           base_name=b.get("base_name", "api_data"),
                           auth_user=b.get("auth_user"),
@@ -3259,6 +3412,50 @@ class Api:
         return {"available": s.secrets.available,
                 "saved": {k: s.secrets.has(k) for k in keys}}
 
+    # ---- named connection profiles (fields + DPAPI secret by key) ----
+    @staticmethod
+    def connection_profiles_list(s, m, body, ctx):
+        return {"profiles": s.connection_profiles.list(secrets=s.secrets),
+                "secrets_available": s.secrets.available}
+
+    @staticmethod
+    def connection_profiles_upsert(s, m, body, ctx):
+        b = body or {}
+        kind = b.get("kind") or ""
+        name = b.get("name") or ""
+        fields = b.get("fields") if isinstance(b.get("fields"), dict) else {}
+        try:
+            entry = s.connection_profiles.upsert(kind, name, fields)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+        key = entry.get("key")
+        password = b.get("password")
+        if password is not None and password != "" and key:
+            s.secrets.set(key, password)
+        return {"ok": True, "profile": entry,
+                "has_secret": bool(key and s.secrets.has(key)),
+                "secrets_available": s.secrets.available}
+
+    @staticmethod
+    def connection_profiles_delete(s, m, body, ctx):
+        b = body or {}
+        key = b.get("key") or ""
+        ok = s.connection_profiles.delete(key)
+        if key:
+            s.secrets.delete(key)
+        return {"ok": ok}
+
+    @staticmethod
+    def connection_profiles_get(s, m, body, ctx):
+        b = body or {}
+        key = b.get("key") or ""
+        entry = s.connection_profiles.get(key)
+        if not entry:
+            raise ApiError(404, "No connection profile named %r." % key)
+        return {"profile": entry,
+                "has_secret": s.secrets.has(key),
+                "secrets_available": s.secrets.available}
+
     # ---- MSSQL (optional) ------------------------------------------
     @staticmethod
     def mssql_drivers(s, m, body, ctx):
@@ -3273,7 +3470,20 @@ class Api:
                                       classify_mssql_error, HAS_PYODBC)
         if not HAS_PYODBC:
             raise ApiError(400, "pyodbc is not installed on the server.")
-        b = body or {}
+        b = dict(body or {})
+        # Named profile: merge stored non-secret fields, then pull password
+        # from DPAPI via secret_key / profile_key.
+        pk = b.get("profile_key") or ""
+        if pk:
+            prof = s.connection_profiles.get(pk)
+            if prof:
+                for k, v in (prof.get("fields") or {}).items():
+                    if b.get(k) in (None, ""):
+                        b[k] = v
+                if not b.get("secret_key"):
+                    b["secret_key"] = pk
+                if not b.get("name"):
+                    b["name"] = prof.get("name") or pk
         name = b.get("name") or b.get("server") or "mssql"
         auth = b.get("auth", "windows")
         # Password: use the one supplied, else fall back to a DPAPI-saved
@@ -3606,6 +3816,7 @@ class Api:
     @staticmethod
     def mssql_import(s, m, body, ctx):
         b = body or {}
+        _REQ_LOCAL.qid = b.get("query_id")
         return s.import_from_connection(
             b.get("name"), b.get("query", ""), b.get("base_name", "import"),
             destination=b.get("destination", "duckdb"),
@@ -3883,6 +4094,10 @@ ROUTES = [
     ("POST", r"^/api/secrets/set$", Api.secrets_set),
     ("POST", r"^/api/secrets/delete$", Api.secrets_delete),
     ("POST", r"^/api/secrets/status$", Api.secrets_status),
+    ("POST", r"^/api/connection-profiles/list$", Api.connection_profiles_list),
+    ("POST", r"^/api/connection-profiles/upsert$", Api.connection_profiles_upsert),
+    ("POST", r"^/api/connection-profiles/delete$", Api.connection_profiles_delete),
+    ("POST", r"^/api/connection-profiles/get$", Api.connection_profiles_get),
     ("GET", r"^/api/mssql/drivers$", Api.mssql_drivers),
     ("POST", r"^/api/mssql/connect$", Api.mssql_connect),
     ("POST", r"^/api/mssql/tables$", Api.mssql_tables),
@@ -4427,6 +4642,10 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(result, FileDownload):
                 self._send_file_download(result)
             else:
+                try:
+                    _log_soft_result_error(method, path, result, body, ctx)
+                except Exception:
+                    pass
                 self._send_json(200, result)
             return
         # Do not send the 404 until streamed multipart spools are gone.

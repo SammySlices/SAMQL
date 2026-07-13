@@ -27,6 +27,12 @@ Decode APHEX with `Decode-SamQL-APHEX.ps1` or the `decode` command in
 expander verifies the declared file count and section-body SHA-256 before any
 destination file is changed. APHEX is encoding, not cryptographic encryption.
 
+Release preflight rejects any extract that omits the complete test bootstrap:
+`Test-SamQL-All.ps1`, Python suite trees (`tests/`, `tools/`), Playwright
+specs (`frontend/e2e/`), `frontend/package-lock.json`, Vitest setup, and the
+install helpers the all-tests runner invokes. After expand, the destination is
+meant to run `.\Test-SamQL-All.ps1` with the declared Python/Node floors.
+
 ---
 
 ## Two packaging modes
@@ -99,5 +105,10 @@ No Python. No Node.js. No admin rights needed to run.
 - The two modes are independent; the single-exe `SamQL.exe` server target
   is built the same way in both. Onedir only changes how the AppWindow
   is laid out.
+- **Payload parity:** `SamQL.exe` and `SamQL-AppWindow` are built from the
+  same PyInstaller shared lists — same frontend, DuckDB/openpyxl/ijson
+  load stack, icon, and native-window (pywebview) packages. The build
+  refuses to finish if either target is missing, and signs **both** when
+  a code-signing certificate is supplied.
 - If your organization allows it, adding an AV exclusion for the install
   folder makes the first launch faster still.

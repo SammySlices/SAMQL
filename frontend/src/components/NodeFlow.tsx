@@ -4,6 +4,8 @@ import {
   NODE_W,
   type NbEdge,
   type NbNode,
+  nodeFlowDenseActive,
+  setNodeFlowDenseMode,
 } from "../lib/nodeFlowModel";
 import type { TableInfo } from "../lib/types";
 import { useStableEvent } from "../lib/useStableEvent";
@@ -11,6 +13,7 @@ import { wfFileName } from "../lib/workflowFile";
 import { FileBrowser } from "./LoadDataModal";
 import { NodeFlowMenus, type CanvasMenuState, type DeleteConfirmState, type NodeMenuState } from "./nodeflow/NodeFlowMenus";
 import { NodeFlowPalette, useNodeFlowPalette } from "./nodeflow/NodeFlowPalette";
+import { ToolsTablesPanel } from "./ToolsTablesPanel";
 import { NodeFlowPreviewDrawer } from "./nodeflow/NodeFlowPreviewDrawer";
 import { NodeFlowScene } from "./nodeflow/NodeFlowScene";
 import { NodeFlowStatusBar } from "./nodeflow/NodeFlowStatusBar";
@@ -27,7 +30,12 @@ import { useNodeFlowGraphSnapshot } from "./nodeflow/useNodeFlowGraphSnapshot";
 import { useNodeFlowKeyboardShortcuts } from "./nodeflow/useNodeFlowKeyboardShortcuts";
 import { useNodeFlowViewport } from "./nodeflow/useNodeFlowViewport";
 import { findChildNode } from "./nodeflow/nodeFlowGraphCommands";
-import { registerActiveNodeFlowGraphGetter } from "../lib/createdNodes";
+import {
+  loadCreatedNodes,
+  registerActiveEditingDefinitionGetter,
+  registerActiveNodeFlowGraphGetter,
+  type CreatedNodeIcon,
+} from "../lib/createdNodes";
 
 export const NodeFlow: React.FC<{
   tables: TableInfo[];
@@ -53,7 +61,36 @@ export const NodeFlow: React.FC<{
   // the in-canvas button stay in sync
   paletteHidden?: boolean;
   onTogglePalette?: () => void;
-}> = ({ tables, onToast, onTablesChanged, showTables, inspectorHost, onSelectionChange, showNodeSearch, loadRequest, onLoadConsumed, onWorkflowsChanged, command, paletteHidden, onTogglePalette }) => {
+  /** Tools & Tables floating window (App-owned open flag; NodeFlow-only UI). */
+  toolsTablesOpen?: boolean;
+  onToolsTablesOpenChange?: (open: boolean) => void;
+  onOpenLoad?: () => void;
+  /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
+  denseMode?: boolean;
+}> = ({
+  tables,
+  onToast,
+  onTablesChanged,
+  showTables,
+  inspectorHost,
+  onSelectionChange,
+  showNodeSearch,
+  loadRequest,
+  onLoadConsumed,
+  onWorkflowsChanged,
+  command,
+  paletteHidden,
+  onTogglePalette,
+  toolsTablesOpen,
+  onToolsTablesOpenChange,
+  onOpenLoad,
+  denseMode = false,
+}) => {
+  // Keep densify() aligned with App Settings before Scene paints (also syncs
+  // a lazy-chunk module copy if Rollup ever duplicates nodeFlowModel).
+  if (nodeFlowDenseActive() !== denseMode) {
+    setNodeFlowDenseMode(denseMode);
+  }
   const [nodes, setNodes] = useState<NbNode[]>([]);
   // node-type whose help window is open (the inspector "?" button), or null
   const [helpFor, setHelpFor] = useState<string | null>(null);
@@ -73,14 +110,6 @@ export const NodeFlow: React.FC<{
   useLayoutEffect(() => {
     edgesRef.current = edges;
   }, [edges]);
-
-  useEffect(() => {
-    registerActiveNodeFlowGraphGetter(() => ({
-      nodes: nodesRef.current,
-      edges: edgesRef.current,
-    }));
-    return () => registerActiveNodeFlowGraphGetter(null);
-  }, []);
 
   // nodes that errored on their last preview/run (id -> message) for inline
   // error badges on the canvas
@@ -105,10 +134,12 @@ export const NodeFlow: React.FC<{
   const {
     ripple,
     dyingIds,
+    dyingEdgeIds,
     bornId,
     fireRipple,
     fireBorn,
     withImplosion,
+    withEdgeRetract,
   } = useNodeFlowAnimations();
   const [nodeMenu, setNodeMenu] = useState<NodeMenuState | null>(null);
   // in-canvas confirmations are rendered by NodeFlowMenus.
@@ -151,6 +182,10 @@ export const NodeFlow: React.FC<{
     commitRenameTab,
     undo,
     redo,
+    openGraphInNewTab,
+    activeEditingDefinitionId,
+    refreshUsernodesFromDefinition,
+    stripUsernodesByDefinitionId,
     onPickNodeFile,
   } = useNodeFlowDocumentController({
     nodes,
@@ -172,6 +207,83 @@ export const NodeFlow: React.FC<{
     command,
     onDocumentStatus: (text) => documentStatusRef.current(text),
   });
+
+  useEffect(() => {
+    registerActiveNodeFlowGraphGetter(() => ({
+      nodes: nodesRef.current,
+      edges: edgesRef.current,
+    }));
+    return () => registerActiveNodeFlowGraphGetter(null);
+  }, []);
+
+  useEffect(() => {
+    registerActiveEditingDefinitionGetter(() => {
+      const id = activeEditingDefinitionId();
+      if (!id) return null;
+      const catalog = loadCreatedNodes().find((item) => item.id === id);
+      const tab = tabs.find((item) => item.id === activeTabId);
+      const icon = (catalog?.icon || "Sparkle") as CreatedNodeIcon;
+      return {
+        id,
+        name: catalog?.name || tab?.name || "Created node",
+        icon,
+      };
+    });
+    return () => registerActiveEditingDefinitionGetter(null);
+  }, [activeEditingDefinitionId, activeTabId, tabs]);
+
+  useEffect(() => {
+    const onUpdated = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      const definition = detail?.definition;
+      if (!definition || typeof definition.id !== "string") return;
+      refreshUsernodesFromDefinition(definition);
+    };
+    const onDeleted = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      const definitionId = detail?.definitionId;
+      if (!definitionId || typeof definitionId !== "string") return;
+      stripUsernodesByDefinitionId(definitionId);
+    };
+    window.addEventListener("samql-created-node-updated", onUpdated);
+    window.addEventListener("samql-created-node-deleted", onDeleted);
+    return () => {
+      window.removeEventListener("samql-created-node-updated", onUpdated);
+      window.removeEventListener("samql-created-node-deleted", onDeleted);
+    };
+  }, [refreshUsernodesFromDefinition, stripUsernodesByDefinitionId]);
+
+  const openCreatedNode = useCallback(
+    (nodeId: string) => {
+      const top = nodesRef.current.find((node) => node.id === nodeId) || null;
+      const nested = top ? null : findChildNode(nodesRef.current, nodeId);
+      const node = top || nested?.child || null;
+      if (!node || node.type !== "usernode") {
+        onToast("warn", "Open Node", "Select a Created Node instance.");
+        return;
+      }
+      const definitionId = String(node.config?.definitionId || "").trim();
+      const embedded = node.config?.graph;
+      const catalog = definitionId
+        ? loadCreatedNodes().find((item) => item.id === definitionId)
+        : undefined;
+      const graph = catalog?.graph || embedded;
+      if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
+        onToast("error", "Open Node", "This Created Node has no editable graph.");
+        return;
+      }
+      const name =
+        catalog?.name ||
+        String(node.config?.name || node.config?.label || "Created node");
+      openGraphInNewTab(graph, name, {
+        editingDefinitionId:
+          definitionId ||
+          (catalog?.id ? catalog.id : undefined),
+      });
+      onToast("ok", "Opened node", name);
+    },
+    [onToast, openGraphInNewTab],
+  );
 
   // A selection can be a top-level node or a child living inside a container.
   // Child lookup is shared with graph commands so every editor path resolves
@@ -216,10 +328,12 @@ export const NodeFlow: React.FC<{
 
   const onDeleteEdge = useCallback(
     (id: string) => {
-      setEdges((current) => current.filter((edge) => edge.id !== id));
       setSelEdge((current) => (current === id ? null : current));
+      withEdgeRetract(id, () => {
+        setEdges((current) => current.filter((edge) => edge.id !== id));
+      });
     },
-    [],
+    [withEdgeRetract],
   );
 
   const { canPaste, copySelection, pasteClipboard } = useNodeFlowClipboard({
@@ -421,6 +535,14 @@ export const NodeFlow: React.FC<{
         resetZoom={resetZoom}
         model={paletteModel}
       />
+      <ToolsTablesPanel
+        open={!!toolsTablesOpen}
+        onClose={() => onToolsTablesOpenChange?.(false)}
+        tables={tables}
+        onRefreshTables={onTablesChanged}
+        onOpenLoad={onOpenLoad}
+        palette={paletteModel}
+      />
 
       <div className="nb2-body">
         <NodeFlowScene
@@ -439,6 +561,7 @@ export const NodeFlow: React.FC<{
           zoom={zoom}
           snap={snap}
           dyingIds={dyingIds}
+          dyingEdgeIds={dyingEdgeIds}
           selectedEdge={selEdge}
           setSelectedEdge={setSelEdge}
           deleteEdge={onDeleteEdge}
@@ -471,6 +594,7 @@ export const NodeFlow: React.FC<{
           startWire={startWire}
           setHoveredInput={setHoveredInput}
           setNodeMenu={setNodeMenu}
+          denseMode={denseMode}
         />
 
         {/* inspector — floats over the canvas, or (when the tables panel is
@@ -563,6 +687,21 @@ export const NodeFlow: React.FC<{
         pasteClipboard={pasteClipboard}
         deleteMany={deleteMany}
         removeNode={removeNode}
+        canOpenCreatedNode={(() => {
+          if (!nodeMenu) return false;
+          const top =
+            nodes.find((node) => node.id === nodeMenu.id) || null;
+          const nested = top ? null : findChildNode(nodes, nodeMenu.id);
+          const node = top || nested?.child || null;
+          return !!(
+            node &&
+            node.type === "usernode" &&
+            (node.config?.graph || node.config?.definitionId)
+          );
+        })()}
+        onOpenCreatedNode={
+          nodeMenu ? () => openCreatedNode(nodeMenu.id) : undefined
+        }
         deleteConfirm={delConfirm}
         setDeleteConfirm={setDelConfirm}
         doRemoveNode={doRemoveNode}
@@ -576,7 +715,12 @@ export const NodeFlow: React.FC<{
         runAll={() => { void runAll(); }}
         addTypeAt={(type, point) => {
           const group = groupAtContentPoint(point.x, point.y);
-          if (group && type !== "group" && type !== "iterator") {
+          if (
+            group &&
+            type !== "group" &&
+            type !== "iterator" &&
+            type !== "usernode"
+          ) {
             groupAddChild(group.id, type);
           } else {
             addNodeAt(type, point.x - NODE_W / 2, point.y - HEAD_H);

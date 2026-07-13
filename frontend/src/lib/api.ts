@@ -3,7 +3,7 @@ import type {
   HistoryEntry, SavedQuery, ChartSpec, ChartData, PivotResult, ErrorLogEntry,
   ReconcileResult, FormatResult, StatementSpan, Cell, MemInfo,
   LoadedTable, FsListing, LoadProgress, JobSummary, ColumnFilter,
-  ReconcileDrill, ActivityStatus,
+  ReconcileDrill, ActivityStatus, EngineResetResult,
   TaskCard, DiagnosticsList, DiagnosticRun,
 } from "./types";
 import { buildLoadForm } from "./loadForm";
@@ -14,14 +14,33 @@ import type { ReconcileDetailRequest } from "./reconcileRequest";
 const BASE = "";
 
 let _apiToken: string | null | undefined;
+let _warnedMissingDevToken = false;
 export function getApiToken(): string {
   if (_apiToken !== undefined) return _apiToken || "";
   // Dev/Vite can inject a token. Production delivers the capability via an
   // HttpOnly cookie (credentials: same-origin); the HTML shell no longer
-  // embeds the secret in a scrapeable meta tag.
+  // embeds the secret in a scrapeable meta tag. Under Vite the proxy also
+  // injects X-SamQL-Token when SAMQL_API_TOKEN / VITE_SAMQL_API_TOKEN is set.
   const fromDev =
     ((import.meta as any).env?.VITE_SAMQL_API_TOKEN as string | undefined)?.trim() ||
     "";
+  if (
+    !fromDev &&
+    typeof import.meta !== "undefined" &&
+    (import.meta as any).env?.DEV &&
+    !_warnedMissingDevToken
+  ) {
+    _warnedMissingDevToken = true;
+    try {
+      console.warn(
+        "[SamQL] VITE_SAMQL_API_TOKEN is unset. In Vite, API calls need " +
+          "SAMQL_API_TOKEN and VITE_SAMQL_API_TOKEN set to the same value " +
+          "(or rely on the Vite proxy injecting SAMQL_API_TOKEN).",
+      );
+    } catch {
+      // Non-browser.
+    }
+  }
   _apiToken = fromDev || null;
   return _apiToken || "";
 }
@@ -312,6 +331,14 @@ export const api = {
       { method: "POST", body: JSON.stringify({ on }) },
     ),
   // Toggle "flatten JSON on load"; POST {on} sets it, returns resulting state.
+  // Soft recovery: swap in fresh engines and rebuild loaded tables from the
+  // manifest. Does not wipe journal/NodeFlow or reload the page.
+  engineReset: (which: "all" | "duckdb" | "sqlite" = "all") =>
+    jsonFetch<EngineResetResult>("/api/engine/reset", {
+      method: "POST",
+      body: JSON.stringify({ which }),
+      timeoutMs: 30000,
+    }),
   // .523: the nuclear reset -- kill + wipe everything server-side; the
   // caller hard-reloads the page right after (startup state, both sides).
   nuke: () =>
@@ -438,10 +465,13 @@ export const api = {
     }),
 
   // list the sheet names of an uploaded (dropped) workbook without loading it
-  excelPeek: async (file: File): Promise<{ sheets: string[] }> => {
+  excelPeek: async (
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<{ sheets: string[] }> => {
     const fd = new FormData();
     fd.append("files", file, file.name);
-    return formFetch<{ sheets: string[] }>("/api/excel/peek", fd);
+    return formFetch<{ sheets: string[] }>("/api/excel/peek", fd, { signal });
   },
 
   // browse the server's local filesystem (localhost-only tool)
@@ -584,12 +614,15 @@ export const api = {
       error?: string;
     }>("/api/api-preview", { method: "POST", body: JSON.stringify(body) }),
 
-  nodeApiFetch: (body: {
-    node_id: string;
-    config: unknown;
-    graph?: unknown;
-    query_id?: string;
-  }) =>
+  nodeApiFetch: (
+    body: {
+      node_id: string;
+      config: unknown;
+      graph?: unknown;
+      query_id?: string;
+    },
+    signal?: AbortSignal,
+  ) =>
     jsonFetch<{
       ok?: boolean;
       fetched?: boolean;
@@ -605,6 +638,7 @@ export const api = {
       status?: number;
       error?: string;
     }>("/api/node-api-fetch", {
+      signal,
       method: "POST",
       body: JSON.stringify(body),
     }),
@@ -658,6 +692,51 @@ export const api = {
       "/api/secrets/status",
       { method: "POST", body: JSON.stringify({ keys }) },
     ),
+
+  // --- named connection profiles (fields + DPAPI secret by key) ---
+  connectionProfilesList: () =>
+    jsonFetch<{
+      profiles: Array<{
+        key: string;
+        kind: string;
+        name: string;
+        fields: Record<string, unknown>;
+        has_secret?: boolean;
+      }>;
+      secrets_available: boolean;
+    }>("/api/connection-profiles/list", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  connectionProfilesUpsert: (body: {
+    kind: string;
+    name: string;
+    fields: Record<string, unknown>;
+    password?: string;
+  }) =>
+    jsonFetch<{
+      ok: boolean;
+      profile: Record<string, unknown>;
+      has_secret: boolean;
+      secrets_available: boolean;
+    }>("/api/connection-profiles/upsert", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  connectionProfilesDelete: (key: string) =>
+    jsonFetch<{ ok: boolean }>("/api/connection-profiles/delete", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
+  connectionProfilesGet: (key: string) =>
+    jsonFetch<{
+      profile: Record<string, unknown>;
+      has_secret: boolean;
+      secrets_available: boolean;
+    }>("/api/connection-profiles/get", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
 
   // --- query / results ---
   query: (
@@ -882,17 +961,34 @@ export const api = {
     spec: any,
     exportId: string,
   ): Promise<{ path?: string; rows?: number; cancelled?: boolean }> => {
-    const data = await jsonFetch<{
-      ok: boolean;
-      path?: string;
-      rows?: number;
-      cancelled?: boolean;
-    }>("/api/reconcile/failures", {
-      method: "POST",
-      body: JSON.stringify({ ...spec, export_id: exportId }),
-    });
-    if (data.cancelled) return { cancelled: true };
-    return { path: data.path, rows: data.rows };
+    const {
+      registerRun,
+      unregisterRun,
+      isCancelledError,
+      wasCancelled,
+    } = await import("./runController");
+    const ctrl = new AbortController();
+    registerRun(exportId, ctrl);
+    try {
+      const data = await jsonFetch<{
+        ok: boolean;
+        path?: string;
+        rows?: number;
+        cancelled?: boolean;
+      }>("/api/reconcile/failures", {
+        method: "POST",
+        signal: ctrl.signal,
+        body: JSON.stringify({ ...spec, export_id: exportId }),
+      });
+      if (data.cancelled || wasCancelled(exportId)) return { cancelled: true };
+      return { path: data.path, rows: data.rows };
+    } catch (e: any) {
+      if (isCancelledError(e, exportId) || wasCancelled(exportId))
+        return { cancelled: true };
+      throw e;
+    } finally {
+      unregisterRun(exportId, ctrl);
+    }
   },
   // .539: write the lineage workbook server-side into Downloads (the
   // blob anchor is a no-op in the native window -- the .510 class).
@@ -1098,10 +1194,11 @@ export const api = {
     }),
 
   // --- analytics ---
-  chart: (spec: ChartSpec) =>
+  chart: (spec: ChartSpec, signal?: AbortSignal) =>
     jsonFetch<ChartData>("/api/chart/data", {
       method: "POST",
       body: JSON.stringify(spec),
+      signal,
     }),
 
   pivot: (spec: {
@@ -1147,16 +1244,18 @@ export const api = {
       signal,
     }),
 
-  reconcileDrilldown: (spec: ReconcileDetailRequest) =>
+  reconcileDrilldown: (spec: ReconcileDetailRequest, signal?: AbortSignal) =>
     jsonFetch<ReconcileDrill>("/api/reconcile/drilldown", {
       method: "POST",
       body: JSON.stringify(spec),
+      signal,
     }),
 
-  reconcileProfile: (spec: ReconcileDetailRequest) =>
+  reconcileProfile: (spec: ReconcileDetailRequest, signal?: AbortSignal) =>
     jsonFetch<TableProfile>("/api/reconcile/profile", {
       method: "POST",
       body: JSON.stringify(spec),
+      signal,
     }),
 
   // --- mssql (optional) ---
@@ -1374,13 +1473,19 @@ export const api = {
         body: JSON.stringify({ graph, node, spec, query_id: queryId }),
       },
     ),
-  nodeflowBrowse: (graph: unknown, node: string, queryId?: string) =>
+  nodeflowBrowse: (
+    graph: unknown,
+    node: string,
+    queryId?: string,
+    signal?: AbortSignal,
+  ) =>
     jsonFetch<{
       total_rows?: number;
       columns?: Record<string, any>[];
       error?: string;
       cancelled?: boolean;
     }>("/api/nodeflow/browse", {
+      signal,
       method: "POST",
       body: JSON.stringify({ graph, node, query_id: queryId }),
     }),
@@ -1391,6 +1496,7 @@ export const api = {
     compare: string[],
     queryId?: string,
     balance?: string | null,
+    signal?: AbortSignal,
   ) =>
     jsonFetch<{
       totals?: Record<string, number>;
@@ -1405,6 +1511,7 @@ export const api = {
       error?: string;
       cancelled?: boolean;
     }>("/api/nodeflow/reconcile", {
+      signal,
       method: "POST",
       body: JSON.stringify({ graph, node, keys, compare, balance, query_id: queryId }),
     }),
@@ -1584,7 +1691,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ graph, node, name, query_id: queryId }),
     }),
-  directoryRead: (path: string, query_id?: string) =>
+  directoryRead: (path: string, query_id?: string, signal?: AbortSignal) =>
     jsonFetch<{
       ok?: boolean;
       table?: string;
@@ -1594,10 +1701,11 @@ export const api = {
       error?: string;
       cancelled?: boolean;
     }>("/api/directory/read", {
+      signal,
       method: "POST",
       body: JSON.stringify({ path, query_id }),
     }),
-  folderRead: (folder: string, query_id?: string) =>
+  folderRead: (folder: string, query_id?: string, signal?: AbortSignal) =>
     jsonFetch<{
       ok?: boolean;
       table?: string;
@@ -1608,6 +1716,7 @@ export const api = {
       error?: string;
       cancelled?: boolean;
     }>("/api/folder/read", {
+      signal,
       method: "POST",
       body: JSON.stringify({ folder, query_id }),
     }),
@@ -1634,16 +1743,18 @@ export const api = {
     node: string,
     checks: unknown,
     signal?: AbortSignal,
+    queryId?: string,
   ) =>
     jsonFetch<{
       ok?: boolean;
       total_rows?: number;
       results?: { type: string; target: string; pass: boolean; detail: string }[];
       error?: string;
+      cancelled?: boolean;
     }>("/api/nodeflow/validate", {
       signal,
       method: "POST",
-      body: JSON.stringify({ graph, node, checks }),
+      body: JSON.stringify({ graph, node, checks, query_id: queryId }),
     }),
 };
 
@@ -1706,25 +1817,44 @@ export async function exportResultToFile(
   fmt: string,
   sort: { sortCol?: string | null; descending?: boolean } = {},
 ): Promise<{ path?: string; cancelled?: boolean }> {
+  // Dynamic import avoids a static cycle (runController imports api).
+  const {
+    registerRun,
+    unregisterRun,
+    isCancelledError,
+    wasCancelled,
+  } = await import("./runController");
   const exportId =
     "exp-" +
     (typeof crypto !== "undefined" && (crypto as any).randomUUID
       ? (crypto as any).randomUUID()
       : Math.random().toString(36).slice(2));
-  const data = await jsonFetch<{
-    ok: boolean;
-    path?: string;
-    cancelled?: boolean;
-  }>(`/api/result/${encodeURIComponent(resultId)}/export`, {
-    method: "POST",
-    body: JSON.stringify({
-      fmt,
-      save: true,
-      sort_col: sort.sortCol ?? null,
-      descending: !!sort.descending,
-      export_id: exportId,
-    }),
-  });
-  if (data.cancelled) return { cancelled: true };
-  return { path: data.path };
+  const ctrl = new AbortController();
+  registerRun(exportId, ctrl);
+  try {
+    const data = await jsonFetch<{
+      ok: boolean;
+      path?: string;
+      cancelled?: boolean;
+    }>(`/api/result/${encodeURIComponent(resultId)}/export`, {
+      method: "POST",
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        fmt,
+        save: true,
+        sort_col: sort.sortCol ?? null,
+        descending: !!sort.descending,
+        export_id: exportId,
+      }),
+    });
+    if (data.cancelled || wasCancelled(exportId)) return { cancelled: true };
+    return { path: data.path };
+  } catch (e: any) {
+    if (isCancelledError(e, exportId) || wasCancelled(exportId))
+      return { cancelled: true };
+    throw e;
+  } finally {
+    unregisterRun(exportId, ctrl);
+  }
 }
+

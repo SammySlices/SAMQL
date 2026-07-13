@@ -132,6 +132,8 @@ export function useResultController(toast: ToastFn, pageSize: number) {
       toast("error", title, message);
     },
     pageSize,
+    // Match Journal: keep scrolling from retaining every row forever.
+    maxRetainedRows: 50000,
   });
 
   // Release inactive result rows to keep browser memory bounded. Metadata,

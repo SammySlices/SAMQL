@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Modal } from "./Modal";
 import { Icon } from "./Icon";
+import { saveToDownloads } from "../lib/api";
 import {
   CREATED_NODE_ICON_CHOICES,
   analyzeCreatedNodePorts,
@@ -8,6 +9,8 @@ import {
   getActiveNodeFlowGraph,
   loadCreatedNodes,
   parseCreatedNodeFile,
+  removeCreatedNode,
+  renameCreatedNode,
   serializeCreatedNodeFile,
   upsertCreatedNode,
   type CreatedNodeDefinition,
@@ -19,18 +22,6 @@ type ToastFn = (
   title: string,
   msg?: string,
 ) => void;
-
-function downloadJson(filename: string, data: unknown) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 export const CreateCreatedNodeModal: React.FC<{
   onClose: () => void;
@@ -154,16 +145,31 @@ export const ExportCreatedNodeModal: React.FC<{
   const [defs] = useState(() => loadCreatedNodes());
   const [selected, setSelected] = useState(defs[0]?.id || "");
 
-  const exportOne = () => {
+  const exportOne = async () => {
     const def = defs.find((d) => d.id === selected);
     if (!def) {
       onToast("error", "Export", "Pick a created node to export.");
       return;
     }
     const safe = def.name.replace(/[^\w\-]+/g, "_") || "created-node";
-    downloadJson(`${safe}.samql-node.json`, serializeCreatedNodeFile(def));
-    onToast("ok", "Exported", `"${def.name}" saved as a shareable JSON file.`);
-    onClose();
+    const filename = `${safe}.samql-node.json`;
+    try {
+      const saved = await saveToDownloads(filename, {
+        text: JSON.stringify(serializeCreatedNodeFile(def), null, 2),
+      });
+      onToast(
+        "ok",
+        "Exported",
+        `"${def.name}" saved to Downloads: ${saved.path}`,
+      );
+      onClose();
+    } catch (e: unknown) {
+      onToast(
+        "error",
+        "Export failed",
+        e instanceof Error ? e.message : String(e),
+      );
+    }
   };
 
   return (
@@ -273,6 +279,187 @@ export const LoadCreatedNodeModal: React.FC<{
           e.target.value = "";
         }}
       />
+    </Modal>
+  );
+};
+
+export const ManageCreatedNodesModal: React.FC<{
+  onClose: () => void;
+  onToast: ToastFn;
+}> = ({ onClose, onToast }) => {
+  const [defs, setDefs] = useState(() => loadCreatedNodes());
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  const refresh = () => setDefs(loadCreatedNodes());
+
+  const startRename = (def: CreatedNodeDefinition) => {
+    setConfirmDeleteId(null);
+    setRenameId(def.id);
+    setRenameValue(def.name);
+  };
+
+  const commitRename = () => {
+    if (!renameId) return;
+    const result = renameCreatedNode(renameId, renameValue);
+    if (!result.ok) {
+      onToast("error", "Rename", result.error);
+      return;
+    }
+    onToast("ok", "Renamed", `"${result.definition.name}" updated.`);
+    setRenameId(null);
+    setRenameValue("");
+    refresh();
+  };
+
+  const commitDelete = (id: string) => {
+    const target = defs.find((d) => d.id === id);
+    removeCreatedNode(id);
+    onToast(
+      "ok",
+      "Deleted",
+      target
+        ? `"${target.name}" removed from Created Nodes and the canvas.`
+        : "Created node removed.",
+    );
+    setConfirmDeleteId(null);
+    if (renameId === id) {
+      setRenameId(null);
+      setRenameValue("");
+    }
+    refresh();
+  };
+
+  return (
+    <Modal
+      title="Created Nodes"
+      onClose={onClose}
+      testId="manage-created-nodes-modal"
+      footer={
+        <button className="btn ghost" onClick={onClose}>
+          Close
+        </button>
+      }
+    >
+      {defs.length === 0 ? (
+        <p className="muted" data-testid="manage-created-nodes-empty">
+          No created nodes yet. Use Create a node… to save one.
+        </p>
+      ) : (
+        <ul
+          className="created-nodes-manage-list"
+          data-testid="manage-created-nodes-list"
+          style={{ listStyle: "none", margin: 0, padding: 0 }}
+        >
+          {defs.map((def) => {
+            const Ico = (Icon[def.icon] || Icon.Sparkle) as React.FC<{
+              size?: number;
+            }>;
+            const renaming = renameId === def.id;
+            const confirming = confirmDeleteId === def.id;
+            return (
+              <li
+                key={def.id}
+                data-testid={`manage-created-node-${def.id}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 0",
+                  borderBottom: "1px solid var(--border, #ddd)",
+                }}
+              >
+                <Ico size={14} />
+                {renaming ? (
+                  <input
+                    data-testid={`rename-created-node-input-${def.id}`}
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRename();
+                      if (e.key === "Escape") {
+                        setRenameId(null);
+                        setRenameValue("");
+                      }
+                    }}
+                    autoFocus
+                    style={{ flex: 1 }}
+                  />
+                ) : (
+                  <span style={{ flex: 1 }}>
+                    {def.name}{" "}
+                    <span className="muted">
+                      ({def.inputs.length} in · {def.outputs.length} out)
+                    </span>
+                  </span>
+                )}
+                {renaming ? (
+                  <>
+                    <button
+                      className="btn sm primary"
+                      data-testid={`rename-created-node-save-${def.id}`}
+                      onClick={commitRename}
+                    >
+                      Save
+                    </button>
+                    <button
+                      className="btn sm ghost"
+                      onClick={() => {
+                        setRenameId(null);
+                        setRenameValue("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : confirming ? (
+                  <>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      Delete permanently?
+                    </span>
+                    <button
+                      className="btn sm danger"
+                      data-testid={`delete-created-node-confirm-${def.id}`}
+                      onClick={() => commitDelete(def.id)}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      className="btn sm ghost"
+                      onClick={() => setConfirmDeleteId(null)}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      className="btn sm ghost"
+                      data-testid={`rename-created-node-${def.id}`}
+                      onClick={() => startRename(def)}
+                      title="Rename"
+                    >
+                      <Icon.Edit size={13} /> Rename
+                    </button>
+                    <button
+                      className="btn sm ghost"
+                      data-testid={`delete-created-node-${def.id}`}
+                      onClick={() => {
+                        setRenameId(null);
+                        setConfirmDeleteId(def.id);
+                      }}
+                      title="Delete"
+                    >
+                      <Icon.Trash size={13} /> Delete
+                    </button>
+                  </>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </Modal>
   );
 };

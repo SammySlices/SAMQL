@@ -31,6 +31,46 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
+# Resolve the build Python early -- brand PNG surgery runs BEFORE the
+# frontend build so vite packages (and the launcher splash bundles) the
+# transparent logos, not the opaque matte exports dropped in public/.
+$py = if ($env:PYTHON) { $env:PYTHON } else { "python" }
+try {
+  $pyExe = & $py -c "import sys; print(sys.executable)"
+} catch {
+  Write-Error "Python not found. Install Python 3.10+ or set `$env:PYTHON."
+  exit 1
+}
+
+# .506 / splash: strip baked-in backgrounds from public brand PNGs
+# (logo.png splash mark, app-icon.png tab/PWA icon). The logo doctor keeps
+# interior whites and only clears border-connected background. Missing
+# files are skipped so a text-only extract still builds.
+Write-Host "==> brand: making public logos transparent"
+$env:PYTHONPATH = (Join-Path $Root "backend")
+& $py -c @"
+import json, sys
+from samql_core import _brand
+results = _brand.logo_fix_public_dir(r'frontend\public')
+for r in results:
+    path = r.get('path') or ''
+    if r.get('before') is None:
+        print('    skip (missing):', path)
+        continue
+    before, after = r['before'], r['after']
+    if r.get('changed'):
+        print('    fixed:', path,
+              'alpha', before.get('has_alpha'), '->', after.get('has_alpha'),
+              'border', before.get('border_colors'), '->', after.get('border_colors'))
+    else:
+        print('    ok (already clean):', path,
+              'alpha=', after.get('has_alpha'),
+              'border=', after.get('border_colors'))
+"@
+if ($LASTEXITCODE -ne 0) {
+  Write-Warning "brand PNG transparency pass failed; continuing with source art as-is"
+}
+
 # .526: ONE source of truth for the mark. The repo-root SamQL.ico is
 # propagated into frontend/public/favicon.ico BEFORE the frontend build, so
 # the vite dist can never ship a stale favicon again -- that stale file is
@@ -57,44 +97,71 @@ npm run build
 Pop-Location
 
 Write-Host "==> 2/4  Ensuring Python dependencies (engines, formats, build)"
-$py = if ($env:PYTHON) { $env:PYTHON } else { "python" }
-# Install everything the packaged app can use from the SAME manifest the
-# Linux build uses (requirements-optional.txt) -- one source of truth, no
-# drift. Each line is independent/best-effort; then the CRITICAL set is
-# verified by import and the build STOPS if any is missing, because a
-# binary without them fails on first use (the on-box openpyxl incident,
-# 2026-07-02) or silently falls back to SQLite.
+Write-Host "    build Python: $pyExe"
+
+# Install EVERYTHING the packaged app can use from the ONE manifest
+# (requirements-optional.txt). This must land in the SAME interpreter that
+# runs PyInstaller -- never a different --user site -- or the exe ships
+# without DuckDB/openpyxl/ijson and loads fail on other machines.
 $req = Join-Path $PSScriptRoot "requirements-optional.txt"
-if (Test-Path $req) {
-    Get-Content $req | ForEach-Object {
-        $pkg = $_.Trim()
-        if ($pkg -eq "" -or $pkg.StartsWith("#")) { return }
-        $mod = ($pkg -split "[<>=]")[0].Trim()
-        & $py -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$mod') else 1)"
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "    installing: $pkg"
-            & $py -m pip install --user $pkg
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warning "    skipped $pkg (no compatible wheel?)"
-            }
-        }
-    }
-} else {
-    Write-Warning "$req not found; the build may fall back to SQLite."
+if (-not (Test-Path $req)) {
+  Write-Error "requirements-optional.txt not found; refusing an incomplete build."
+  exit 1
 }
-foreach ($m in @("duckdb", "pyarrow", "sqlglot", "openpyxl")) {
-    & $py -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$m') else 1)"
+Write-Host "    installing full dependency set from requirements-optional.txt"
+& $py -m pip install --upgrade pip
+& $py -m pip install -r $req
+if ($LASTEXITCODE -ne 0) {
+  Write-Warning "bulk install reported errors; retrying each package individually..."
+  Get-Content $req | ForEach-Object {
+    $pkg = $_.Trim()
+    if ($pkg -eq "" -or $pkg.StartsWith("#")) { return }
+    Write-Host "    installing: $pkg"
+    & $py -m pip install $pkg
     if ($LASTEXITCODE -ne 0) {
-        Write-Error ("critical dependency '$m' is not importable after " +
-                     "install -- the packaged app would break. Fix the " +
-                     "environment (venv active? proxy?) and re-run.")
-        exit 1
+      Write-Warning "    pip could not install $pkg"
     }
+  }
 }
+
+# CRITICAL load/export stack -- a binary without these fails on first use or
+# silently falls back to SQLite (the on-box openpyxl incident, 2026-07-02).
+$critical = @(
+  "duckdb", "pyarrow", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata"
+)
+foreach ($m in $critical) {
+  & $py -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$m') else 1)"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error ("critical dependency '$m' is not importable after " +
+                 "install -- the packaged app would break. Fix the " +
+                 "environment (venv active? proxy?) and re-run: " +
+                 "$py -m pip install -r requirements-optional.txt")
+    exit 1
+  }
+}
+Write-Host ("    OK: load stack importable (" + ($critical -join ", ") + ")")
+
+# Windows SQL Server connector -- install is required on Windows; warn (do not
+# abort) if the machine has no ODBC driver toolchain for pyodbc.
+if ($env:OS -eq "Windows_NT") {
+  & $py -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('pyodbc') else 1)"
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning ("pyodbc is not importable -- SQL Server load will be " +
+                   "unavailable in this build. Install the Microsoft ODBC " +
+                   "Driver for SQL Server, then: $py -m pip install pyodbc")
+  } else {
+    Write-Host "    OK: pyodbc importable (SQL Server load enabled)"
+  }
+}
+
 & $py -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('PyInstaller') else 1)"
 if ($LASTEXITCODE -ne 0) {
   Write-Host "    installing pyinstaller..."
-  & $py -m pip install --user pyinstaller
+  & $py -m pip install pyinstaller
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error "PyInstaller is required to package SamQL."
+    exit 1
+  }
 }
 
 # .498: the NATIVE window (SamQL-AppWindow.exe / SamQL.exe --window) uses
@@ -112,7 +179,7 @@ if ($LASTEXITCODE -ne 0) {
 & $py -c "import importlib.util as u, sys; sys.exit(0 if (u.find_spec('webview') and u.find_spec('clr')) else 1)"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "    installing pywebview + pythonnet (native window stack)..."
-    & $py -m pip install --user pywebview pythonnet
+    & $py -m pip install pywebview pythonnet
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "    pywebview/pythonnet did not install; the native window will fall back to a browser."
     }
@@ -168,7 +235,28 @@ else {
   catch { Write-Host "    WARN could not write dist\SamQL.ico" }
 }
 
-# --- 4/4  Optional code signing -------------------------------------------
+# --- 4/4  Verify BOTH outputs, then optional code signing -----------------
+# SamQL.exe (console server) and SamQL-AppWindow.exe (windowed launcher)
+# are produced by the SAME spec from the SAME shared payload. Refuse a
+# half-build: if either target is missing, distribution is incomplete.
+$serverExe = Join-Path $Root "dist\SamQL.exe"
+$appExeOnefile = Join-Path $Root "dist\SamQL-AppWindow.exe"
+$appExeOnedir = Join-Path $Root "dist\SamQL-AppWindow\SamQL-AppWindow.exe"
+if (-not (Test-Path $serverExe)) {
+  Write-Error "Build incomplete: dist\SamQL.exe is missing."
+  exit 1
+}
+if ($OneDir) {
+  if (-not (Test-Path $appExeOnedir)) {
+    Write-Error "Build incomplete: dist\SamQL-AppWindow\SamQL-AppWindow.exe is missing."
+    exit 1
+  }
+} elseif (-not (Test-Path $appExeOnefile)) {
+  Write-Error "Build incomplete: dist\SamQL-AppWindow.exe is missing."
+  exit 1
+}
+Write-Host "==> 4/4  Both targets present (SamQL.exe + SamQL-AppWindow)"
+
 function Find-SignTool {
   $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
@@ -186,47 +274,50 @@ function Find-SignTool {
   return $null
 }
 
-$exe = Join-Path $Root "dist\SamQL.exe"
+# Sign BOTH product exes with the same cert/timestamp policy. Onedir signs
+# the AppWindow exe inside the folder; the later SamQL.exe folder copy
+# inherits the already-signed server binary.
+$signTargets = @($serverExe)
+if ($OneDir) { $signTargets += $appExeOnedir } else { $signTargets += $appExeOnefile }
+
 if ($NoSign) {
-  Write-Host "==> 4/4  Skipping code signing (-NoSign)."
+  Write-Host "    Skipping code signing (-NoSign)."
 }
 elseif (-not ($CertThumbprint -or $CertPath)) {
-  Write-Host "==> 4/4  No signing certificate provided; leaving the .exe unsigned."
+  Write-Host "    No signing certificate provided; leaving BOTH exes unsigned."
   Write-Host "         To sign, re-run with -CertThumbprint <thumb> or -CertPath <pfx>."
 }
 else {
-  Write-Host "==> 4/4  Signing $exe"
-  if (-not (Test-Path $exe)) { Write-Error "Build output not found: $exe" }
   $signtool = Find-SignTool
   if (-not $signtool) {
     Write-Error "signtool.exe not found. Install the Windows 10/11 SDK, or add signtool to PATH."
   }
-  $signArgs = @("sign", "/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256")
+  $signBase = @("sign", "/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256")
   if ($CertThumbprint) {
-    $signArgs += @("/sha1", $CertThumbprint)
+    $signBase += @("/sha1", $CertThumbprint)
   }
   else {
     if (-not (Test-Path $CertPath)) { Write-Error "Certificate file not found: $CertPath" }
-    $signArgs += @("/f", $CertPath)
-    if ($CertPassword) { $signArgs += @("/p", $CertPassword) }
+    $signBase += @("/f", $CertPath)
+    if ($CertPassword) { $signBase += @("/p", $CertPassword) }
   }
-  $signArgs += $exe
-  & $signtool @signArgs
-  if ($LASTEXITCODE -ne 0) { Write-Error "Signing failed (signtool exit $LASTEXITCODE)." }
-  Write-Host "    verifying signature..."
-  & $signtool verify /pa /v $exe
-  if ($LASTEXITCODE -ne 0) { Write-Error "Signature verification failed." }
-  Write-Host "    signed and verified OK."
+  foreach ($exe in $signTargets) {
+    Write-Host "    Signing $exe"
+    & $signtool @($signBase + $exe)
+    if ($LASTEXITCODE -ne 0) { Write-Error "Signing failed for $exe (signtool exit $LASTEXITCODE)." }
+    Write-Host "    verifying signature..."
+    & $signtool verify /pa /v $exe
+    if ($LASTEXITCODE -ne 0) { Write-Error "Signature verification failed for $exe." }
+    Write-Host "    signed and verified OK: $(Split-Path $exe -Leaf)"
+  }
 }
 
 if ($OneDir) {
   $folder = Join-Path $Root "dist\\SamQL-AppWindow"
   if (Test-Path $folder) {
-    # ship the server exe + shortcut icon INSIDE the folder too, so the
-    # one folder is fully self-contained for a colleague.
-    if (Test-Path "$Root\\dist\\SamQL.exe") {
-      Copy-Item "$Root\\dist\\SamQL.exe" $folder -Force
-    }
+    # ship the (already signed) server exe + shortcut icon INSIDE the folder
+    # too, so the one folder is fully self-contained for a colleague.
+    Copy-Item $serverExe $folder -Force
     if (Test-Path "$Root\\dist\\SamQL.ico") {
       Copy-Item "$Root\\dist\\SamQL.ico" $folder -Force
     }
@@ -243,9 +334,12 @@ if ($OneDir) {
 }
 Write-Host ""
 Write-Host "Done. Your build is in:  $Root\dist\"
-Get-ChildItem dist -ErrorAction SilentlyContinue
+Write-Host "  SamQL.exe            -- console server (+ --window native UI)"
 if ($OneDir) {
+  Write-Host "  SamQL-AppWindow\     -- windowed launcher folder (same payload)"
   Write-Host "Onedir: extract SamQL-AppWindow.zip and run the exe inside the folder."
 } else {
-  Write-Host "Run SamQL.exe to launch."
+  Write-Host "  SamQL-AppWindow.exe  -- windowed launcher (same payload as SamQL.exe)"
+  Write-Host "Run either exe to launch; both ship the same frontend + load stack."
 }
+Get-ChildItem dist -ErrorAction SilentlyContinue

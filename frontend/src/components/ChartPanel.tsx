@@ -1,5 +1,12 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import {
+  cancelOne,
+  isCancelledError,
+  registerRun,
+  unregisterRun,
+  wasCancelled,
+} from "../lib/runController";
 import type {
   ChartData,
   ChartType,
@@ -76,6 +83,17 @@ const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOu
   const [data, setData] = useState<ChartData | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const inflight = useRef<{ qid: string; ctrl: AbortController } | null>(null);
+  const cancelInflight = useCallback(() => {
+    const cur = inflight.current;
+    if (!cur) return;
+    inflight.current = null;
+    cancelOne(cur.qid, cur.ctrl);
+  }, []);
+  const stopChart = useCallback(() => {
+    cancelInflight();
+    setLoading(false);
+  }, [cancelInflight]);
 
   // initialise the pickers when columns change
   useEffect(() => {
@@ -96,40 +114,62 @@ const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOu
       setData(null);
       return;
     }
-    let cancelled = false;
+    cancelInflight();
+    const ctrl = new AbortController();
+    const qid = "chart-" + Math.random().toString(36).slice(2, 12);
+    inflight.current = { qid, ctrl };
+    registerRun(qid, ctrl);
     setLoading(true);
     setErr(null);
     const isCandle = type === "candlestick";
     const isMultiX = type === "multix";
     const isMultiY = type === "multiy";
     api
-      .chart({
-        result_id: resultId,
-        chart_type: type,
-        x,
-        y: type === "histogram" || isCandle ? undefined : y,
-        agg,
-        bins,
-        open: isCandle ? cOpen : undefined,
-        high: isCandle ? cHigh : undefined,
-        low: isCandle ? cLow : undefined,
-        close: isCandle ? cClose : undefined,
-        x2: isMultiX ? x2 : undefined,
-        y2: isMultiX || isMultiY ? y2 : undefined,
-      })
+      .chart(
+        {
+          result_id: resultId,
+          chart_type: type,
+          x,
+          y: type === "histogram" || isCandle ? undefined : y,
+          agg,
+          bins,
+          open: isCandle ? cOpen : undefined,
+          high: isCandle ? cHigh : undefined,
+          low: isCandle ? cLow : undefined,
+          close: isCandle ? cClose : undefined,
+          x2: isMultiX ? x2 : undefined,
+          y2: isMultiX || isMultiY ? y2 : undefined,
+          query_id: qid,
+        },
+        ctrl.signal,
+      )
       .then((d) => {
-        if (cancelled) return;
+        if (ctrl.signal.aborted || wasCancelled(qid)) return;
         if (d.error) {
+          if (/interrupt|cancel/i.test(d.error) || wasCancelled(qid)) {
+            // Soft cancel: keep the previous chart (matches pivot / reconcile).
+            return;
+          }
           setErr(d.error);
           setData(null);
           if (d.error === "result expired") onExpired?.();
         } else setData(d);
       })
-      .catch((e) => !cancelled && setErr(String(e.message || e)))
-      .finally(() => !cancelled && setLoading(false));
+      .catch((e) => {
+        if (ctrl.signal.aborted || isCancelledError(e, qid) || wasCancelled(qid))
+          return;
+        setErr(String(e.message || e));
+      })
+      .finally(() => {
+        unregisterRun(qid, ctrl);
+        if (inflight.current && inflight.current.qid === qid)
+          inflight.current = null;
+        if (!ctrl.signal.aborted) setLoading(false);
+      });
     return () => {
-      cancelled = true;
+      cancelInflight();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resultId, type, x, y, agg, bins, cOpen, cHigh, cLow, cClose, x2, y2, onExpired]);
 
   const needsY = type !== "histogram" && type !== "candlestick";
@@ -290,6 +330,16 @@ const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOu
         >
           {showStyle ? "Hide style" : "Style"}
         </button>
+        {loading && (
+          <button
+            className="btn ghost sm"
+            data-testid="chart-stop"
+            title="Cancel this chart (interrupts the backend aggregate)"
+            onClick={stopChart}
+          >
+            ■ Stop
+          </button>
+        )}
         {onPopOut && (
           <button
             className="btn ghost sm chart-popout"

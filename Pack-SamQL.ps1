@@ -21,7 +21,8 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $OutputDir) {
-  $OutputDir = Join-Path (Split-Path -Parent $Root) "samql-release"
+  # Canonical publish folder inside the repo (README / DISTRIBUTION / checklist).
+  $OutputDir = Join-Path $Root "release"
 }
 
 if (-not $Python) {

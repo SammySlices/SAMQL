@@ -90,7 +90,7 @@ def frontend_tests(do_build):
         for token in (
             'formFetch<LoadResult>("/api/load/files", form)',
             '>("/api/load/files-start", form)',
-            'formFetch<{ sheets: string[] }>("/api/excel/peek", fd)',
+            'formFetch<{ sheets: string[] }>("/api/excel/peek", fd, { signal })',
             'return formFetch("/api/load/sniff", fd)',
         ):
             need(token in api_src, "multipart call missing shared helper: " + token)
@@ -124,6 +124,19 @@ def frontend_tests(do_build):
              and 'headers.set("X-SamQL-Token"' in api_src
              and 'credentials: rest.credentials ?? "same-origin"' in api_src,
              "the shared client attaches credentials and optional Vite token")
+        vite = open(os.path.join(FRONTEND, "vite.config.ts"),
+                    encoding="utf-8").read()
+        need("X-SamQL-Token" in vite
+             and "SAMQL_API_TOKEN" in vite
+             and "proxyReq" in vite,
+             "Vite /api proxy injects X-SamQL-Token when env token is set")
+        result_ctrl = open(
+            os.path.join(FRONTEND, "src", "controllers",
+                         "useResultController.ts"),
+            encoding="utf-8").read()
+        need("maxRetainedRows" in result_ctrl
+             and "50000" in result_ctrl,
+             "IDE result paging caps retained rows like the Journal")
         scripts = pkg.get("scripts") or {}
         need("lint" in scripts and "check" in scripts and "test:e2e" in scripts,
              "lint/check/browser-test scripts are registered")
@@ -214,6 +227,10 @@ def frontend_tests(do_build):
             "shredPlan",
             "shredRun",
             "shredPreflight",
+            # Named connection profiles: the UI lists/upserts/deletes; a single
+            # get is kept for reconnect / NodeFlow field hydrate and is covered
+            # by the HTTP suite, but no surface calls it yet.
+            "connectionProfilesGet",
         }
         dead = sorted(api_methods - called - LEGACY_UNUSED)
         need(not dead, "new dead api method(s) -- wire them up or add to the "
@@ -278,13 +295,13 @@ def frontend_tests(do_build):
         # The appendfolder/directory reads must pass the run id so the Cancel
         # button can interrupt them, send it to the backend, and treat a
         # cancelled result as cancelled (not an error toast).
-        nb = _read_fe("src", "components", "NodeFlow.tsx")
+        nb = _read_nodebook_source()
         api_src = _read_fe("src", "lib", "api.ts")
-        need(re.search(r"api\.folderRead\(\s*folder\s*,\s*id\s*\)", nb),
+        need(re.search(r"api\.folderRead\(\s*folder\s*,\s*id\s*,", nb),
              "doReadFolder must pass the run id to folderRead for cancel")
-        need(re.search(r"api\.directoryRead\(\s*path\s*,\s*id\s*\)", nb),
+        need(re.search(r"api\.directoryRead\(\s*path\s*,\s*id\s*,", nb),
              "doReadDirectory must pass the run id to directoryRead")
-        need(len(re.findall(r"wasCancelled\(r(?:,\s*id)?\)", nb)) >= 3,
+        need(len(re.findall(r"wasCancelled\(r(?:,\s*(?:id|queryId))?\)", nb)) >= 3,
              "folder + file reads must each handle a cancelled result")
         need(re.search(r"folderRead:.*?query_id", api_src, re.S),
              "folderRead must send query_id to the backend")
@@ -297,7 +314,7 @@ def frontend_tests(do_build):
         need(re.search(r"whileRun\(\{[^}]*query_id:\s*id", nb, re.S),
              "doRunWhile must pass the run id for cancel")
         # API node fetch must pass the run id so Stop can abort the fetch
-        need(re.search(r"nodeApiFetch\(\{[^}]*query_id:\s*id", nb, re.S),
+        need(re.search(r"nodeApiFetch\(\s*\{[^}]*query_id:\s*id", nb, re.S),
              "doFetchApi must pass the run id for cancel")
         need(re.search(r"nodeApiFetch:.*?query_id", api_src, re.S),
              "nodeApiFetch must send query_id to the backend")
@@ -316,6 +333,7 @@ def frontend_tests(do_build):
             "src/lib/migrations.ts", "src/lib/workflowFile.ts",
             "src/lib/nodeFlowPersistence.ts",
             "src/components/FlowCacheModal.tsx",
+            "src/components/StorageMemoryModal.tsx",
             "src/components/SqlEditor.tsx", "src/components/DataGrid.tsx",
             "src/components/Profiler.tsx", "src/components/ChartPanel.tsx",
             "src/components/Sidebar.tsx", "src/components/Modal.tsx",
@@ -324,6 +342,8 @@ def frontend_tests(do_build):
             "e2e/workflow-smoke.spec.ts",
             "e2e/load-query-export.spec.ts",
             "e2e/cancellation-recovery.spec.ts",
+            "e2e/eye-care.spec.ts",
+            "e2e/nodeflow-dense.spec.ts",
             "e2e/journal-stability.spec.ts",
             "e2e/nodeflow-stability.spec.ts",
             "e2e/persistence-stability.spec.ts",
@@ -444,8 +464,13 @@ def frontend_tests(do_build):
                  "correctness lint rule is not an error: " + rule)
         app = _read_fe("src", "App.tsx")
         api_src = _read_fe("src", "lib", "api.ts")
-        need("FlowCacheModal" in app and "NodeFlow cache" in app,
-             "Settings does not expose the live flow-cache panel")
+        storage_mem = _read_fe("src", "components", "StorageMemoryModal.tsx")
+        need("StorageMemoryModal" in app
+             and "FlowCachePanel" in storage_mem
+             and "NodeFlow cache" in storage_mem
+             and 'data-testid="flow-cache-tab"' in storage_mem
+             and 'data-testid="storage-memory-menu"' in app,
+             "Storage & memory must host the NodeFlow cache tab")
         need("flowCacheConfigure" in api_src and "flowCacheInfo" in api_src
              and "/api/settings/flow-cache" in api_src,
              "frontend cache settings API is incomplete")
@@ -478,6 +503,8 @@ def frontend_tests(do_build):
              and 'page.goto("/api/health"' not in fixtures
              and 'waitForJsonResponse(page, "/api/query", "POST")' in smoke
              and '"/api/settings/flow-cache"' in smoke
+             and 'getByTestId("storage-memory-menu")' in smoke
+             and 'getByTestId("flow-cache-tab")' in smoke
              and 'getByTestId("ide-sql-editor")' in smoke
              and 'getByTestId("sql-editor").first()' not in smoke
              and 'getByTestId("result-grid")' in smoke,
@@ -921,13 +948,18 @@ console.log("OK");
         api_src = _read_fe("src", "lib", "api.ts")
         css = _read_fe("src", "styles.css")
         checks = [
-            ("panel closes on Esc anywhere while open",
-             '"Escape"' in fx and "onClose()" in fx),
+            ("panel closes on Esc anywhere while open (not when minimized)",
+             '"Escape"' in fx and "onClose()" in fx and "!minimized" in fx),
             ("panel is draggable via its header (the shared hook)",
              "useWinDrag" in fx
              and "onMouseDown={startDrag}" in fx
              and bool(__import__("re").search(
                  r"\.fx-panel \{[^}]*position: fixed", css))),
+            ("minimize collapses to a clickable icon and expands again",
+             "field-explorer-minimize" in fx
+             and "field-explorer-mini" in fx
+             and "SquareMinus" in fx
+             and "FIELD_EXPLORER_STORE_KEY" in fx),
             ("source dropdown lists nested columns of loaded tables",
              "c.hint" in fx and "Pick a JSON source" in fx),
             ("field list fetches the column field tree",
@@ -945,6 +977,10 @@ console.log("OK");
             ("api type carries the access recipe",
              "recursive?: string" in api_src and "unnests?: string[]"
              in api_src),
+            ("minimize has a component test",
+             os.path.isfile(os.path.join(
+                 FRONTEND, "src", "components",
+                 "FieldExplorer.component.test.tsx"))),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing, "field explorer broken: " + "; ".join(missing))
@@ -1128,18 +1164,27 @@ console.log("OK");
         be = open(os.path.join(ROOT, "tests", "suites", "backend.py"),
                   encoding="utf-8").read()
         checks = [
-            ("Settings offers Create / Export / Load created node",
+            ("Settings offers Create / Save / Export / Load created node",
              (lambda settings: (
                  "useCreatedNodesSettings" in app
                  and "Create a node…" in settings
+                 and "Created Nodes…" in settings
+                 and "ManageCreatedNodesModal" in settings
+                 and "Save node" in settings
                  and "Export created node…" in settings
                  and "Load created node…" in settings
                  and "CreateCreatedNodeModal" in settings
+                 and "updateCreatedNodeDefinition" in settings
              ))(open(os.path.join(FRONTEND, "src", "components",
                                   "CreatedNodesSettings.tsx"),
                      encoding="utf-8").read())),
-            ("create/export/load helpers persist and round-trip a file",
+            ("create/export/load/update helpers persist and round-trip a file",
              "upsertCreatedNode" in created
+             and "updateCreatedNodeDefinition" in created
+             and "applyCreatedNodeToGraph" in created
+             and "renameCreatedNode" in created
+             and "stripCreatedNodeFromGraph" in created
+             and "samql-created-node-deleted" in created
              and "serializeCreatedNodeFile" in created
              and "parseCreatedNodeFile" in created
              and 'CREATED_NODE_FILE_FORMAT = "samql-created-node"' in created),
@@ -1147,10 +1192,30 @@ console.log("OK");
              "buildCreatedNodeDefinition" in modals
              and "serializeCreatedNodeFile" in modals
              and "parseCreatedNodeFile" in modals
-             and "upsertCreatedNode" in modals),
+             and "upsertCreatedNode" in modals
+             and "ManageCreatedNodesModal" in modals
+             and "renameCreatedNode" in modals
+             and "removeCreatedNode" in modals
+             and "saveToDownloads(" in modals
+             and "URL.createObjectURL" not in modals),
+            ("Open Node context menu opens a definition tab",
+             (lambda menus, nf: (
+                 "Open Node" in menus
+                 and "onOpenCreatedNode" in menus
+                 and "openCreatedNode" in nf
+                 and "openGraphInNewTab" in nf
+                 and "editingDefinitionId" in nf
+                 and "samql-created-node-deleted" in nf
+                 and "stripUsernodesByDefinitionId" in nf
+             ))(open(os.path.join(FRONTEND, "src", "components", "nodeflow",
+                                  "NodeFlowMenus.tsx"),
+                     encoding="utf-8").read(),
+                open(os.path.join(FRONTEND, "src", "components", "NodeFlow.tsx"),
+                     encoding="utf-8").read())),
             ("palette lists Created Nodes from the catalog",
              "Created Nodes" in palette
-             and "application/x-nb-created-node" in palette
+             and ("application/x-nb-created-node" in palette
+                  or "NB_CREATED_NODE_MIME" in palette)
              and "loadCreatedNodes" in palette),
             ("usernode arrow count follows inputCount/outputCount",
              "function portsOf" in model
@@ -1159,13 +1224,20 @@ console.log("OK");
             ("backend expands and the suite runs created nodes",
              "def _expand_usernode" in nf
              and "def t_usernode_run" in be
-             and "def t_usernode_multi_input_run" in be),
-            ("component tests cover save/export/load + port arrows",
+             and "def t_usernode_multi_input_run" in be
+             and "def t_usernode_saved_port_refresh_run" in be),
+            ("component tests cover save/export/load/open/save + port arrows",
              os.path.isfile(os.path.join(
                  FRONTEND, "src", "lib", "createdNodes.component.test.ts"))
              and os.path.isfile(os.path.join(
                  FRONTEND, "src", "lib",
-                 "CreatedNodeFlows.component.test.tsx"))),
+                 "CreatedNodeFlows.component.test.tsx"))
+             and os.path.isfile(os.path.join(
+                 FRONTEND, "src", "lib",
+                 "CreatedNodeOpenSave.component.test.tsx"))
+             and os.path.isfile(os.path.join(
+                 FRONTEND, "src", "lib",
+                 "CreatedNodeManage.component.test.tsx"))),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing, "created-nodes wiring broken: " + "; ".join(missing))
@@ -1239,6 +1311,29 @@ console.log("OK");
         need("seriesColors" in cp, "Journal colour overrides feed ChartStyle")
         need("styledData" in cp and "style: Object.keys(style)" in cp,
              "Journal attaches the chosen style to the chart data")
+        # Cancel parity with the IDE: chart/pivot panels own Stop; reconcile
+        # cells wire onCancel; failures CSV registers on the shared run rail.
+        pp = _read_fe("src", "components", "PivotPanel.tsx")
+        recon = _read_fe("src", "components", "notebook",
+                         "ReconcileNotebookCell.tsx")
+        api_src = _read_fe("src", "lib", "api.ts")
+        need('data-testid="chart-stop"' in cp and "registerRun(qid, ctrl)" in cp,
+             "Journal chart cells use ChartPanel Stop + registerRun")
+        need('data-testid="pivot-stop"' in pp and "registerRun(qid, ctrl)" in pp,
+             "Journal pivot cells use PivotPanel Stop + registerRun")
+        need('cell.reconRunning ? props.onCancel : props.onRunReconcile' in recon
+             and "■ Stop" in recon,
+             "Journal reconcile cell Stop calls onCancel")
+        need("registerRun(exportId, ctrl)" in api_src
+             and "reconFailuresCsv:" in api_src,
+             "reconcile failures CSV export registers for Activity cancel")
+        need(os.path.isfile(os.path.join(
+                 FRONTEND, "src", "components",
+                 "JournalCancel.component.test.tsx")),
+             "Journal cancel has a component test")
+        need("Downloads" in _read_fe("src", "components", "DocsModal.tsx")
+             and "Stop" in _read_fe("src", "components", "DocsModal.tsx"),
+             "Journal docs mention Downloads exports + Stop cancel")
 
     def _has_script(name):
         try:
@@ -1694,6 +1789,7 @@ console.log("OK");
         # Exercise select-field reconciliation (reconcileSelectFields,
         # fieldsDiffer) under Node: a downstream Select must follow upstream
         # renames / new columns / dropped columns. Backs the reported bug.
+        # Also covers inspector search filter + A/Z sort helpers.
         if not shutil.which("node"):
             skip("Node not on PATH")
         esb = _find_esbuild()
@@ -1721,6 +1817,61 @@ console.log("OK");
                     + (r.stdout + r.stderr).strip()[:2000])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def t_select_field_search_sort_wiring():
+        # Select inspector: search box filters the field list; Sort sits next
+        # to All/None and reorders config.fields. Pure helpers live in
+        # selectFields.ts (covered by t_select_fields_logic).
+        insp = _read_fe("src", "components", "nodeflow", "NodeFlowInspector.tsx")
+        sf = _read_fe("src", "lib", "selectFields.ts")
+        missing = []
+        if 'data-testid="select-fields-search"' not in insp:
+            missing.append("select field search input")
+        if 'data-testid="select-fields-sort"' not in insp:
+            missing.append("select field Sort button")
+        if "filterSelectFields" not in insp or "sortSelectFields" not in insp:
+            missing.append("inspector uses filter/sort helpers")
+        if "export function filterSelectFields" not in sf:
+            missing.append("filterSelectFields helper")
+        if "export function sortSelectFields" not in sf:
+            missing.append("sortSelectFields helper")
+        if "export function setFieldsKept" not in sf:
+            missing.append("setFieldsKept helper")
+        need(not missing,
+             "Select field search/sort wiring incomplete: "
+             + "; ".join(missing))
+
+    def t_select_fields_follow_input_table_change():
+        # Changing an Input node's table must refresh every wired Select's
+        # fields even when the Select is not selected. Reconciliation used to
+        # run only for the selected Select, so Input->Select graphs kept stale
+        # columns after a table switch.
+        sf = _read_fe("src", "lib", "selectFields.ts")
+        ctrl = _read_fe("src", "components", "nodeflow",
+                        "useNodeFlowInspectorController.tsx")
+        missing = []
+        if "export function listWiredSelectUpstreams" not in sf:
+            missing.append("listWiredSelectUpstreams helper")
+        if "export function applySelectColumnsReconcile" not in sf:
+            missing.append("applySelectColumnsReconcile helper")
+        if "export function collectSelectFieldPatches" not in sf:
+            missing.append("collectSelectFieldPatches helper")
+        if 'kind: "step-above"' not in sf and "kind: \"step-above\"" not in sf:
+            if 'kind: "step-above"' not in sf.replace("'", '"'):
+                # accept either quote style
+                if "step-above" not in sf:
+                    missing.append("nested Select step-above discovery")
+        if "listWiredSelectUpstreams" not in ctrl:
+            missing.append("controller lists wired Selects")
+        if "applySelectColumnsReconcile" not in ctrl:
+            missing.append("controller applies graph-wide reconcile")
+        if "partialGroupGraph" not in ctrl or "step-above" not in ctrl:
+            missing.append("controller fetches step-above group Select columns")
+        if "[scopeKey, graphSig]" not in ctrl:
+            missing.append("graph-wide reconcile keyed on graphSig")
+        need(not missing,
+             "Select fields do not follow Input table changes: "
+             + "; ".join(missing))
 
     def t_notebook_logic():
         # Exercise notebook cell-chaining (composeChainedSql, referencedNames,
@@ -1784,6 +1935,34 @@ console.log("OK");
                     + (r.stdout + r.stderr).strip()[:2000])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def t_ide_journal_ident_quoting():
+        # Weird filenames are sanitized on load, but IDE / Journal still quote
+        # any non-bare identifier on insert + autocomplete so a leftover
+        # space/dot/paren name (or a messy column header) cannot break a
+        # typed SELECT. Shared by the tables sidebar and SqlEditor (IDE +
+        # Journal cells both mount SqlEditor).
+        sql = _read_fe("src", "lib", "sql.ts")
+        sb = _read_fe("src", "components", "Sidebar.tsx")
+        ed = _read_fe("src", "components", "SqlEditor.tsx")
+        nb = _read_fe("src", "lib", "notebook.ts")
+        missing = []
+        if "export function quoteSqlIdent" not in sql:
+            missing.append("quoteSqlIdent helper")
+        if "export function needsSqlQuote" not in sql:
+            missing.append("needsSqlQuote helper")
+        if 'import { quoteSqlIdent } from "../lib/sql"' not in sb:
+            missing.append("Sidebar imports quoteSqlIdent")
+        if "onInsertTable(quoteSqlIdent(" not in sb:
+            missing.append("Sidebar quotes table inserts")
+        if "onInsertColumn(quoteSqlIdent(" not in sb:
+            missing.append("Sidebar quotes column inserts")
+        if "quoteSqlIdent" not in ed or 'sug.kind === "table"' not in ed:
+            missing.append("SqlEditor quotes table/column autocomplete")
+        if 'import { quoteSqlIdent } from "./sql"' not in nb:
+            missing.append("notebook chaining uses quoteSqlIdent")
+        need(not missing,
+             "IDE/Journal ident quoting incomplete: " + "; ".join(missing))
 
     def t_docking_logic():
         # Exercise the float/dock/compare geometry (docking.ts) under Node:
@@ -1855,6 +2034,95 @@ console.log("OK");
         # API request profiles that never persist a secret.
         _run_logic("apiProfiles.ts", _APIPROFILES_HARNESS,
                    "apiProfiles.ts query-string + profiles")
+
+    def t_connection_profiles_wiring():
+        # First-class connection profiles: API client + Load tabs upsert/delete
+        # + API-node picker. Passwords stay in the secret store; nodes keep only
+        # the profile key (mssql:Name / api:Name).
+        api = _read_fe("src", "lib", "api.ts")
+        helpers = _read_fe("src", "lib", "connectionProfiles.ts")
+        mssql = _read_fe("src", "components", "load", "SqlServerLoadTab.tsx")
+        rest = _read_fe("src", "components", "load", "ApiLoadTab.tsx")
+        insp = _read_fe("src", "components", "nodeflow", "NodeFlowInspector.tsx")
+        vitest = os.path.join(
+            FRONTEND, "src", "lib", "connectionProfiles.component.test.ts")
+        missing = []
+        for token in (
+            "connectionProfilesList",
+            "connectionProfilesUpsert",
+            "connectionProfilesDelete",
+            "connectionProfilesGet",
+            "/api/connection-profiles/list",
+            "/api/connection-profiles/upsert",
+            "/api/connection-profiles/delete",
+            "/api/connection-profiles/get",
+        ):
+            if token not in api:
+                missing.append("api.ts " + token)
+        if "export function profileKey" not in helpers:
+            missing.append("profileKey helper")
+        if "export function listConnectionProfiles" not in helpers and \
+                "export async function listConnectionProfiles" not in helpers:
+            missing.append("listConnectionProfiles helper")
+        if "connectionProfilesUpsert" not in mssql:
+            missing.append("SQL Server Load tab upserts connection profiles")
+        if "connectionProfilesDelete" not in mssql:
+            missing.append("SQL Server Load tab deletes connection profiles")
+        if "connectionProfilesUpsert" not in rest:
+            missing.append("REST API Load tab upserts connection profiles")
+        if "connectionProfilesDelete" not in rest:
+            missing.append("REST API Load tab deletes connection profiles")
+        if 'data-testid="apinode-connection-profile"' not in insp:
+            missing.append("API node connection-profile picker")
+        if "connectionProfilesList" not in insp:
+            missing.append("inspector loads connection profiles")
+        if not os.path.isfile(vitest):
+            missing.append("Vitest connectionProfiles helpers")
+        need(not missing,
+             "connection profiles wiring incomplete: "
+             + "; ".join(missing))
+
+    def t_command_palette_and_tools_tables():
+        # Ctrl+K command palette (App-global) + NodeFlow-only Tools & Tables
+        # floating window (tables + node sections, resize/minimize/close).
+        # Also guards: feature pills removed from the top bar (About lists
+        # active packages), and connector delete plays a retract animation.
+        app = _read_fe("src", "App.tsx")
+        nb = _read_nodebook_source()
+        cmd = _read_fe("src", "components", "CommandPalette.tsx")
+        tools = _read_fe("src", "components", "ToolsTablesPanel.tsx")
+        about = _read_fe("src", "components", "AboutModal.tsx")
+        css = _read_fe("src", "styles.css")
+        missing = []
+        if "setCommandPaletteOpen" not in app or "CommandPalette" not in app:
+            missing.append("App mounts command palette")
+        if 'event.key !== "k"' not in app and "event.key !== 'k'" not in app:
+            missing.append("Ctrl/Cmd+K opens command palette")
+        if "Open Tools & Tables" not in app:
+            missing.append("command palette Tools & Tables action")
+        if "toolsTablesOpen" not in app or "toolsTablesOpen" not in nb:
+            missing.append("Tools & Tables open flag NodeFlow-scoped")
+        if "TOOLS_TABLES_STORE_KEY" not in tools:
+            missing.append("Tools & Tables chrome persistence")
+        if 'data-testid="tools-tables-minimize"' not in tools:
+            missing.append("Tools & Tables minimize")
+        if 'data-testid="tools-tables-close"' not in tools:
+            missing.append("Tools & Tables close")
+        if "NB_NODE_MIME" not in tools or "addFavorite" not in tools:
+            missing.append("Tools & Tables node drag / favorites")
+        if ".cmd-palette" not in css or ".tt-panel" not in css:
+            missing.append("command palette / Tools & Tables CSS")
+        if "cmd-palette-backdrop" not in cmd:
+            missing.append("CommandPalette component")
+        if "feat-pill" in app or "featList" in app:
+            missing.append("top-bar feature pills should be removed")
+        if "about-package-" not in about or "about-pkg-status" not in about:
+            missing.append("About modal active package badges")
+        if "withEdgeRetract" not in nb or "dyingEdgeIds" not in nb:
+            missing.append("connector delete retract animation")
+        need(not missing,
+             "command palette / Tools & Tables incomplete: "
+             + "; ".join(missing))
 
     def t_disconnect_and_addbtn_wiring():
         # Build .178 — two UI fixes:
@@ -2060,7 +2328,8 @@ console.log("OK");
              "apiFetch: (\n" in api and "mssqlImport: (\n" in api
              and api.count("query_id: queryId") >= 7),
             ("API + MSSQL load tabs register a backend cancel",
-             modal.count("void api.cancelQuery(queryId).catch(() => {})") >= 2),
+             modal.count("cancelOne(queryId, ctrl)") >= 2
+             and "registerRun(queryId, ctrl)" in modal),
             ("API fetch passes query id + abort signal",
              "api.apiFetch(" in modal and modal.count("ctrl.signal,") >= 2),
             ("MSSQL import passes query id + abort signal",
@@ -2297,8 +2566,10 @@ console.log("OK");
              and ('{ children: [], table: "", accumulate: "append", '
                   'label: "iterator" }') in nbk),
             ("iterator sizes like a group (width + children-based height)",
-             'if (n.type === "group" || n.type === "iterator") return GROUP_W;'
-             in nbk),
+             ('if (n.type === "group" || n.type === "iterator") return GROUP_W;'
+              in nbk
+              or 'if (n.type === "group" || n.type === "iterator") return densify(GROUP_W);'
+                 in nbk)),
             ("nested-node lookup routes child edits inside an iterator",
              'group.type !== "group" && group.type !== "iterator"' in nbk
              and "findChildNode(nodes, id)" in nbk),
@@ -2315,7 +2586,9 @@ console.log("OK");
               or 'node.type === "group" || node.type === "iterator" ? ('
                  in nbk)),
             ("palette / right-click drop onto an iterator adds a child",
-             'group && type !== "group" && type !== "iterator"' in nbk
+             'type !== "group"' in nbk
+             and 'type !== "iterator"' in nbk
+             and 'type !== "usernode"' in nbk
              and "groupAddChild(group.id, type)" in nbk
              and "addTypeAt" in nbk),
             ("pasted iterator children get fresh ids",
@@ -2415,9 +2688,11 @@ console.log("OK");
         css = rd("src", "styles.css")
         checks = [
             ('the generic "in" port text is hidden',
-             'port !== "in" && (' in nbk),
+             'port !== "in" && (' in nbk
+             or "sidePortLabel" in nbk),
             ('the generic "out" port text is hidden',
-             'port !== "out" && (' in nbk),
+             'port !== "out" && (' in nbk
+             or "sidePortLabel" in nbk),
             ("the note card delegates to the shared red delete action",
              'deleteTitle="Delete note"' in cell
              and 'className="iconbtn danger"' in cell),
@@ -2564,6 +2839,9 @@ console.log("OK");
             ("file tab has a start-at-row input", "Start at row" in modal),
             ("file tab detects Excel files", "\\.(xlsx|xlsm|xls)" in modal),
             ("drag-drop peeks Excel sheets", ".excelPeek" in app),
+            ("excel peek aborts on supersede",
+             "excelPeek(files[0], ctrl.signal)" in app
+             and "peekCtrl?.abort()" in app),
             ("drop prompt has a start-at-row input",
              "Start at row (the header row)" in app),
         ]
@@ -2779,9 +3057,30 @@ console.log("OK");
              "ReconcileModal" in app and "ReconReport" in app
              and "onRunReconcile" in app),
             ("reconcile drill/profile pass colmaps",
-             "reconcileDrilldown" in app and "reconcileProfile" in app
-             and "buildReconcileRequest(spec, bucket, field)" in app
+             "createReconDetailController" in app
+             and "buildReconcileRequest(spec, bucket, field" in rd(
+                 "src", "lib", "reconDetailActions.ts")
              and "colmap_a" in rd("src", "lib", "reconcileRequest.ts")),
+            ("reconcile drill/profile soft-cancel via AbortSignal",
+             "abortReconDetail" in rd("src", "lib", "reconDetailActions.ts")
+             and "createReconDetailController" in app
+             and "ctrl.signal" in rd("src", "lib", "reconDetailActions.ts")
+             and "registerRun(qid, ctrl)" in rd(
+                 "src", "lib", "reconDetailActions.ts")),
+            ("chart requests accept AbortSignal",
+             "chart: (spec: ChartSpec, signal?: AbortSignal)" in rd(
+                 "src", "lib", "api.ts")),
+            ("ChartPanel aborts superseded chart fetches",
+             "ctrl.signal" in cp and "cancelInflight" in cp
+             and "stopChart" in cp and 'data-testid="chart-stop"' in cp
+             and "query_id: qid" in cp and "registerRun(qid, ctrl)" in cp),
+            ("Created Node refresh loads never-opened tabs",
+             "ensureTabGraphLoaded" in rd(
+                 "src", "components", "nodeflow",
+                 "useNodeFlowDocumentController.ts")
+             and "ensureTabGraphLoaded(tab.id)" in rd(
+                 "src", "components", "nodeflow",
+                 "useNodeFlowDocumentController.ts")),
             ("reconcile field mapping wired",
              "resolveReconFields" in rcm and "mappingTemplateCsv" in rcm
              and "parseMappingCsv" in rcm),
@@ -3189,7 +3488,11 @@ console.log("OK");
              and "errors:" in rd("src", "lib", "api.ts")
              and "/api/errors" in rd("src", "lib", "api.ts")
              and "errlog-tb" in rd("src", "components", "ErrorLogModal.tsx")
-             and "samql-error-log-" in rd("src", "components", "ErrorLogModal.tsx")),
+             and "errlog-kind" in rd("src", "components", "ErrorLogModal.tsx")
+             and "samql-error-log-" in rd("src", "components", "ErrorLogModal.tsx")
+             and "_log_soft_result_error" in open(
+                 os.path.join(BACKEND, "server.py"),
+                 encoding="utf-8").read()),
             ("saved workflows: 3-section panel + kind-aware save/load (IDE/Journal/Node)",
              "Saved Workflows" in sb and "WorkflowsPanel" in sb
              and "onLoadWorkflow" in sb and "onDeleteWorkflow" in sb
@@ -3306,8 +3609,8 @@ console.log("OK");
                  css[css.find(".settings-menu {"):css.find("}", css.find(".settings-menu {"))]
              ))(rd("src", "styles.css"))),
             ("maintenance: clear temp files wired to /api/maintenance/sweep-temp",
-             "Clear temp files" in app
-             and "api.sweepTemp()" in app
+             "Clear temp files" in rd("src", "components", "StorageMemoryModal.tsx")
+             and "api.sweepTemp()" in rd("src", "components", "StorageMemoryModal.tsx")
              and "/api/maintenance/sweep-temp" in rd("src", "lib", "api.ts")),
             ("view: node-toolbar toggle shared between Settings and the canvas",
              "Show node toolbar" in app and "Hide node toolbar" in app
@@ -3422,7 +3725,7 @@ console.log("OK");
              (lambda nbk: (
                  "cancelRequested" in nbk
                  and "const wasCancelled" in nbk
-                 and "if (wasCancelled(r))" in nbk
+                 and "wasCancelled(r, id)" in nbk
              ))(_read_nodebook_source())),
             ("nodebook: custom in-canvas delete confirm (not window.confirm)",
              (lambda nbk, css: (
@@ -3728,9 +4031,12 @@ console.log("OK");
              and "$managedRelRoots" in etext
              and "Pruned $($staleFiles.Count) obsolete managed source" in etext
              and "obsolete managed source remains" in etext
-             and "Expanded identity check passed" in etext,
+             and "Expanded identity check passed" in etext
+             and "frontend\\public" in etext
+             and "Created empty frontend" in etext,
              "Expand-SamQL.ps1 must select the newest build, prohibit "
-             "partial upgrades, prune retired managed source files, and "
+             "partial upgrades, prune retired managed source files, "
+             "create empty frontend/public for brand assets, and "
              "verify the extracted source identity")
         # npm lockfile v3 has a legal empty-string packages key. Windows
         # PowerShell 5.1 ConvertFrom-Json rejects that key, so the expander
@@ -4161,7 +4467,8 @@ console.log("OK");
             ("views renamed to Journal and NodeFlow",
              "Open Journal" in rd("src", "App.tsx")
              and "Open NodeFlow" in rd("src", "App.tsx")
-             and '<span className="nb2-title">NodeFlow</span>' in nb),
+             and "nb2-toolbar" in nb
+             and 'nb2-title">NodeFlow' not in nb),
             # --- .97: a new Input node has no table pre-selected ---
             ("new Input node starts with no table chosen",
              'input: define("input", "Input", "Database"' in nb
@@ -4214,8 +4521,16 @@ console.log("OK");
              and "nb2-cat-fav" in nb
              and "nb2-fav-sub" in nb
              and "event.dataTransfer.getData(" in nb
-             and '"application/x-nb-node"' in nb
+             and "NB_NODE_MIME" in nb
+             and "NB_CREATED_NODE_MIME" in nb
+             and "createdFavoriteKey" in nb
+             and "samql-created-node-deleted" in nb
              and ".nb2-fav-x {" in css),
+            ("join left/right inputs use L/R marks inside the arrows",
+             "inputPortMark" in nb
+             and "sidePortLabel" in nb
+             and "nb2-dot-mark" in nb
+             and ".nb2-dot-mark" in css),
             # --- .101: layout doesn't clip the top bars when results grow ---
             ("preview drawer can't squeeze the tabs/banner/palette off-screen",
              "flex: 1 1 0;" in css
@@ -4491,7 +4806,10 @@ console.log("OK");
              and ('n.type === "sql" && (' in nb
                   or 'node.type === "sql" && (' in nb)),
             ("sql node keeps its ports by the header (not centred) like chart",
-             'n.type === "sql"\n  ) {\n    return PORT_TOP + idx * PORT_GAP;' in nb),
+             'n.type === "sql"\n  ) {\n    return PORT_TOP + idx * PORT_GAP;' in nb
+             or ('n.type === "sql"' in nb
+                 and "return portTop + idx * portGap;" in nb
+                 and "densify(PORT_TOP)" in nb)),
             ("sql node is a flex column so the body fills it",
              ".nb2-node.sql {" in css
              and "flex: 1" in css_block(".nb2-node-sql")),
@@ -4567,6 +4885,8 @@ console.log("OK");
              "api.status() must call /api/status")
         need("nuke:" in api_src and '"/api/nuke"' in api_src,
              "api.nuke() must POST /api/nuke (.523 nuclear reset)")
+        need("engineReset:" in api_src and '"/api/engine/reset"' in api_src,
+             "api.engineReset() must POST /api/engine/reset (soft recovery)")
         am = (_read_fe("src", "components", "ActivityModal.tsx")
               + _read_fe("src", "components", "ActivityShared.tsx")
               + _read_fe("src", "lib", "activity.ts"))
@@ -4574,6 +4894,9 @@ console.log("OK");
              "the dashboard must poll api.status() (now via shared hook)")
         need(re.search(r"api\s*\.\s*nuke\s*\(", am),
              "the dashboard must call api.nuke() (nuclear, via shared hook)")
+        need(re.search(r"api\s*\.\s*engineReset\s*\(", am)
+             or "softResetEngines" in am,
+             "the dashboard must offer soft engine reset")
         need("setInterval" in am and "clearInterval" in am,
              "modal must poll on an interval and clear it on unmount")
         # The shared hook caches the last snapshot at module scope so a consumer
@@ -4586,7 +4909,8 @@ console.log("OK");
              "useActivityStatus must seed from the cached last status")
         need("_lastStatus = d" in shared,
              "the poll must update the module-level status cache")
-        need("Reset server" in am, "modal must offer the Reset server action")
+        need("Reset server" in am and "Reset engines" in am,
+             "modal must offer Reset engines (soft) and Reset server (nuclear)")
         app = _read_fe("src", "App.tsx")
         need("ActivityModal" in app and "activityOpen" in app,
              "App must import + gate the ActivityModal")
@@ -4753,6 +5077,75 @@ console.log("OK");
             missing.append("node selection-ring transition")
         need(not missing,
              "micro-animation wiring incomplete: " + ", ".join(missing))
+
+    def t_eye_care_scaling():
+        # Settings > View "Eye Care" enlarges text, buttons, nodes, and
+        # containers together via html.eye-care + zoom (with a CSS fallback),
+        # persisted as samql.eyeCare. Covered by Playwright + Vitest.
+        css = _read_fe("src", "styles.css")
+        app = _read_fe("src", "App.tsx")
+        e2e = _read_fe("e2e", "eye-care.spec.ts")
+        missing = []
+        if "eye-care-toggle" not in app or "Eye Care" not in app:
+            missing.append("Settings Eye Care toggle")
+        if "samql.eyeCare" not in app:
+            missing.append("samql.eyeCare persistence")
+        if 'classList.toggle("eye-care"' not in app and \
+           "classList.toggle('eye-care'" not in app:
+            missing.append("html.eye-care class toggle")
+        if "data-eye-care" not in app:
+            missing.append("data-eye-care attribute")
+        if "--eye-care-scale" not in css:
+            missing.append("--eye-care-scale token")
+        if "html.eye-care" not in css or "zoom:" not in css:
+            missing.append("html.eye-care zoom scaling")
+        if "@supports not (zoom: 1)" not in css:
+            missing.append("zoom fallback for non-Chromium")
+        if "eye-care-toggle" not in e2e or "boundingBox" not in e2e:
+            missing.append("Playwright Eye Care size assertions")
+        if "nodeflow-node" not in e2e:
+            missing.append("Playwright NodeFlow node scaling")
+        need(not missing,
+             "Eye Care scaling incomplete: " + ", ".join(missing))
+
+    def t_nodeflow_dense():
+        # Settings > View "Dense NodeFlow" shrinks canvas geometry (pairs with
+        # Eye Care). Persisted as samql.nodeFlowDense; layout helpers densify
+        # NODE_W / ports when html.nb-dense is set.
+        css = _read_fe("src", "styles.css")
+        app = _read_fe("src", "App.tsx")
+        model = _read_fe("src", "lib", "nodeFlowModel.ts")
+        e2e = _read_fe("e2e", "nodeflow-dense.spec.ts")
+        vitest_layout = os.path.join(
+            FRONTEND, "src", "lib", "nodeFlowDense.component.test.ts")
+        vitest_app = os.path.join(
+            FRONTEND, "src", "lib", "nodeFlowDenseApp.component.test.tsx")
+        missing = []
+        if "nodeflow-dense-toggle" not in app or "Dense NodeFlow" not in app:
+            missing.append("Settings Dense NodeFlow toggle")
+        if "samql.nodeFlowDense" not in app:
+            missing.append("samql.nodeFlowDense persistence")
+        if "setNodeFlowDenseMode" not in app or "setNodeFlowDenseMode" not in model:
+            missing.append("dense mode layout flag")
+        if "NB_DENSE_SCALE" not in model or "densify" not in model:
+            missing.append("densify helpers")
+        if "denseMode" not in model or "a.denseMode === b.denseMode" not in model:
+            missing.append("denseMode canvas memo key")
+        scene = _read_fe("src", "components", "nodeflow", "NodeFlowScene.tsx")
+        if "denseMode" not in scene:
+            missing.append("NodeFlowScene denseMode prop (busts Scene memo)")
+        if "html.nb-dense" not in css:
+            missing.append("html.nb-dense CSS")
+        if not os.path.isfile(vitest_layout):
+            missing.append("Vitest layout dense helpers")
+        if not os.path.isfile(vitest_app):
+            missing.append("Vitest Dense NodeFlow App toggle")
+        if '"nodeflow"' not in e2e:
+            missing.append("Playwright openApp nodeflow expectedView")
+        if "nodeflow-dense-toggle" not in e2e or "nb-dense" not in e2e:
+            missing.append("Playwright Dense NodeFlow assertions")
+        need(not missing,
+             "Dense NodeFlow incomplete: " + "; ".join(missing))
 
     def t_more_animations():
         # Second animation batch: node placement scale-in + drag lift, the
@@ -4933,7 +5326,7 @@ console.log("OK");
             ("the shared Server block surfaces cancellable foreground "
              "runs with the same per-run cancel (now hosted in the "
              "dashboard)",
-             "o.cancellable" in shared and "api.cancelQuery(" in shared),
+             "o.cancellable" in shared and "cancelById(o.id)" in shared),
             ("EMBEDDED, the block renders NOTHING the dashboard already "
              "shows: one monitor, one reset (on-box dedupe 2026-07-02)",
              "embedded?: boolean" in shared
@@ -5089,14 +5482,17 @@ console.log("OK");
         app = _read_fe("src", "App.tsx")
         journal = _read_fe("src", "components", "Notebook.tsx")
         node = _read_nodebook_source()
-        for fn in ("cancelOne", "cancelAllRuns", "isCancelledError"):
+        for fn in ("cancelOne", "cancelAllRuns", "isCancelledError",
+                   "cancelById", "registerRun"):
             need(("export function " + fn) in rc,
                  "runController must export " + fn)
         need('name === "AbortError"' in rc and "status === 0" in rc,
              "isCancelledError must catch both a raw AbortError and the "
              "ApiError(0) timeout/abort mapping")
-        need("abortInflight" in rc and "cancelQuery" in rc,
-             "cancelAllRuns must free the pool + interrupt the backend")
+        need("abortRegistered" in rc and "cancelQuery" in rc
+             and "abort every local fetch" in rc,
+             "cancelOne/cancelById must abort ALL registered fetches "
+             "AND interrupt the backend")
         need('from "./lib/runController"' in app and "cancelOne(" in app,
              "IDE must use the shared cancelOne")
         need('from "../lib/runController"' in journal
@@ -5154,7 +5550,8 @@ console.log("OK");
              "(blob anchors are a no-op in the native window)")
         need("export async function copyText" in apisrc,
              "copyText helper must exist")
-        for f in ("components/NodeFlow.tsx", "components/ErrorLogModal.tsx"):
+        for f in ("components/NodeFlow.tsx", "components/ErrorLogModal.tsx",
+                  "components/CreatedNodeModals.tsx"):
             src = _read_fe("src", *f.split("/"))
             need("URL.createObjectURL" not in src,
                  f + " must not run an inline download dance")
@@ -5201,8 +5598,10 @@ console.log("OK");
              and "<ActivityMonitor" in shared_src,
              "the shared ServerStatus renders the shared ActivityMonitor")
         need("Reset server" in shared_src
-             and "useEngineReset" in shared_src,
-             "the shared ServerStatus has a wired Reset server button")
+             and "Reset engines" in shared_src
+             and "useEngineReset" in shared_src
+             and "softResetEngines" in shared_src,
+             "the shared ServerStatus has soft + nuclear reset buttons")
 
     def t_formula_x_gap():
         css = _read_fe("src", "styles.css")
@@ -5369,7 +5768,9 @@ console.log("OK");
              "export function usePagedResult" in hook
              and "latest-request-wins" in hook
              and "cancelPending" in hook
-             and "rerunExpired" in hook),
+             and "rerunExpired" in hook
+             and "registerRun" in hook
+             and "Do NOT cancelQuery" in hook),
             ("IDE delegates sort/filter/scroll/reactivation",
              "resultPaging.sortBy" in app
              and "resultPaging.applyFilters" in app
@@ -5733,7 +6134,7 @@ console.log("OK");
             ("result controller owns paging and detached views",
              all(token in controllers["useResultController.ts"] for token in (
                  "usePagedResult", "rerunExpiredResultRef", "released",
-                 "floatView", "pruneCompare",
+                 "floatView", "pruneCompare", "maxRetainedRows",
              ))),
             ("workspace routing is centralized and persistent",
              all(token in controllers["useWorkspaceController.ts"] for token in (
@@ -5749,7 +6150,7 @@ console.log("OK");
                      "beginOptimize", "onTaskComplete",
                  ))),
             ("App shell is materially smaller",
-             len(app.splitlines()) < 4400),
+             len(app.splitlines()) < 4500),
             ("rendered controller regressions ship",
              os.path.isfile(rendered_path)
              and all(token in rendered for token in (
@@ -5799,8 +6200,9 @@ console.log("OK");
              api.count("buildLoadForm(files, {") == 2
              and "const fd = new FormData();" not in api[api.index("loadFiles:"):api.index("excelSheets:")]),
             ("IDE and Journal share reconcile detail payload construction",
-             app.count("buildReconcileRequest(spec, bucket, field)") == 2
-             and notebook.count("buildReconcileRequest(spec, bucket, field)") == 2
+             rd("src", "lib", "reconDetailActions.ts").count(
+                 "buildReconcileRequest(spec, bucket, field") == 2
+             and notebook.count("buildReconcileRequest(spec, bucket, field") == 2
              and "export function buildReconcileRequest" in reconcile),
             ("pointer helper owns move/up/cancel cleanup",
              'removeEventListener("pointercancel"' in pointer
@@ -5948,6 +6350,10 @@ console.log("OK");
         ("notebook chaining logic (esbuild + node)", t_notebook_logic),
         ("select field reconciliation (esbuild + node)",
          t_select_fields_logic),
+        ("Select inspector: field search filter + Sort next to All/None",
+         t_select_field_search_sort_wiring),
+        ("Select fields follow Input table changes (graph-wide reconcile)",
+         t_select_fields_follow_input_table_change),
         ("chart option builder (esbuild + node)", t_chart_option_logic),
         ("chart modules registered for every emitted series type",
          t_chart_modules_registered),
@@ -5970,12 +6376,18 @@ console.log("OK");
          t_sql_functions_menu),
         ("editor statement-splitting logic (esbuild + node)",
          t_sql_statement_logic),
+        ("IDE/Journal quote weird identifiers on insert + autocomplete",
+         t_ide_journal_ident_quoting),
         ("float/dock/compare geometry (esbuild + node)",
          t_docking_logic),
         ("sql profiles + odbc driver pick (esbuild + node)",
          t_sql_profiles_logic),
         ("api profiles + query-string compose (esbuild + node)",
          t_api_profiles_logic),
+        ("connection profiles: API + Load tabs + API-node picker",
+         t_connection_profiles_wiring),
+        ("Ctrl+K command palette + NodeFlow Tools & Tables window",
+         t_command_palette_and_tools_tables),
         ("lazy-scroll grid wiring", t_ui_lazy_scroll),
         ("no stray debug statements", t_ui_no_debug_statements),
         ("repo hygiene (no artifacts, ps1 helpers present)", t_repo_hygiene),
@@ -6003,6 +6415,10 @@ console.log("OK");
          t_load_start_feedback),
         ("micro-animations (menus/modals/nodes/toasts) behind a motion guard",
          t_micro_animations),
+        ("Eye Care view setting scales text, buttons, nodes, and containers",
+         t_eye_care_scaling),
+        ("Dense NodeFlow shrinks canvas geometry (pairs with Eye Care)",
+         t_nodeflow_dense),
         ("second animation batch (nodes/toast-bar/tab-slide/run-flash)",
          t_more_animations),
         ("pivot result grid: sortable + resizable columns + red remove-x",

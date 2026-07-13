@@ -15,12 +15,14 @@ import {
 // rows processed and how long since each last made progress), which engine
 // connections are busy, the background thread count, and the most recent stall
 // the watchdog recorded. It polls while open so a hang becomes visible instead
-// of a mystery, and offers a one-click engine reset to recover without
-// restarting the app. The traffic-light monitor, engine badges, status polling,
-// and reset logic are shared with the memory widget (see ActivityShared).
-export const ActivityModal: React.FC<{ onClose: () => void }> = ({
-  onClose,
-}) => {
+// of a mystery, and offers a soft engine reset to recover without restarting
+// the app (plus a nuclear Reset server). The traffic-light monitor, engine
+// badges, status polling, and reset logic are shared with the memory widget
+// (see ActivityShared).
+export const ActivityModal: React.FC<{
+  onClose: () => void;
+  onTablesChanged?: () => void;
+}> = ({ onClose, onTablesChanged }) => {
   const { status, err, beat, refresh } = useActivityStatus(true);
   // a floating, draggable, resizable, always-on-top window -- watch runs
   // while working underneath (no backdrop), resize from the corner
@@ -28,7 +30,12 @@ export const ActivityModal: React.FC<{ onClose: () => void }> = ({
     x: Math.max(20, window.innerWidth - 760),
     y: 64,
   });
-  const { resetEngines, resetting, resetMsg, armed } = useEngineReset(refresh);
+  const afterSoftReset = () => {
+    refresh();
+    onTablesChanged?.();
+  };
+  const { softResetEngines, resetEngines, resetting, softResetting, nuking, resetMsg, armed } =
+    useEngineReset(afterSoftReset);
 
   const ops = status?.operations || [];
   const stall = status?.last_stall || null;
@@ -216,11 +223,19 @@ export const ActivityModal: React.FC<{ onClose: () => void }> = ({
           Refresh
         </button>
         <button
+          className="btn sm"
+          onClick={softResetEngines}
+          disabled={resetting}
+          title="Swap in fresh engines and rebuild loaded tables"
+        >
+          {softResetting ? "Resetting…" : "Reset engines"}
+        </button>
+        <button
           className="btn sm danger"
           onClick={resetEngines}
           disabled={resetting}
         >
-          {resetting
+          {nuking
             ? "Nuking…"
             : armed
               ? "Click again to confirm"

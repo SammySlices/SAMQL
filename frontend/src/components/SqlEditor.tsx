@@ -6,7 +6,7 @@ import React, {
   useState,
 } from "react";
 import { copyText } from "../lib/api";
-import { tokenize, toggleLineComment } from "../lib/sql";
+import { tokenize, toggleLineComment, quoteSqlIdent } from "../lib/sql";
 import { menuPos } from "../lib/menuPos";
 import { SQL_FUNCTION_GROUPS, applySnippet } from "../lib/sqlFunctions";
 import type { TableInfo } from "../lib/types";
@@ -352,8 +352,15 @@ export const SqlEditor: React.FC<Props> = ({
       const before = val.slice(0, pos);
       const m = before.match(/(\w+)$/);
       const start = m ? pos - m[1].length : pos;
-      const next = val.slice(0, start) + sug.text + val.slice(pos);
-      const caret = start + sug.text.length;
+      // Tables/columns that aren't bare-safe (spaces, dots, parens, …) must
+      // land quoted so IDE + Journal autocomplete never produce broken SQL.
+      // Keywords stay as typed (already uppercased identifiers).
+      const inserted =
+        sug.kind === "table" || sug.kind === "col"
+          ? quoteSqlIdent(sug.text)
+          : sug.text;
+      const next = val.slice(0, start) + inserted + val.slice(pos);
+      const caret = start + inserted.length;
       setMenu(null);
       onChange(next);
       requestAnimationFrame(() => {

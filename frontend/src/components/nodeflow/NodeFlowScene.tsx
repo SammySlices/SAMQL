@@ -5,11 +5,13 @@ import {
   NODE_W,
   PORTS,
   PORT_LABEL,
+  inputPortMark,
   isTopInput,
   nodeShowsBody,
   portsOf,
   portTopOffset,
   portXY,
+  sidePortLabel,
   type NbEdge,
   type NbNode,
   type NodeType,
@@ -64,6 +66,7 @@ interface NodeFlowSceneProps {
   zoom: number;
   snap: boolean;
   dyingIds: Set<string>;
+  dyingEdgeIds: Set<string>;
   selectedEdge: string | null;
   setSelectedEdge: React.Dispatch<React.SetStateAction<string | null>>;
   deleteEdge: (id: string) => void;
@@ -99,6 +102,8 @@ interface NodeFlowSceneProps {
   startWire: (event: React.PointerEvent, node: NbNode, port: string) => void;
   setHoveredInput: (nodeId: string, port: string | null) => void;
   setNodeMenu: React.Dispatch<React.SetStateAction<NodeMenuState | null>>;
+  /** Dense NodeFlow — prop so memo'd Scene re-renders when Settings toggles it. */
+  denseMode: boolean;
 }
 
 export const NodeFlowScene = React.memo(function NodeFlowScene({
@@ -117,6 +122,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   zoom,
   snap,
   dyingIds,
+  dyingEdgeIds,
   selectedEdge,
   setSelectedEdge,
   deleteEdge,
@@ -149,6 +155,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   startWire,
   setHoveredInput,
   setNodeMenu,
+  denseMode,
 }: NodeFlowSceneProps) {
   useRenderCount("NodeFlowScene");
   const groupDnd = useRef<{
@@ -159,9 +166,10 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   const chartObjectIds = useRef(new WeakMap<object, number>());
   const nextChartObjectId = useRef(1);
 
+  // densify() reads html.nb-dense / module flag; denseMode prop busts Scene memo.
   const renderModel = useMemo(
-    () => buildNodeFlowRenderModel(nodes, edges),
-    [nodes, edges],
+    () => buildNodeFlowRenderModel(nodes, edges, denseMode),
+    [nodes, edges, denseMode],
   );
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const forcedNodeIds = useMemo(() => {
@@ -176,8 +184,9 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   }, [bornId, dyingIds, groupHover, pendingWire?.node, selectedId, selectedIds, snapId]);
 
   const visibleNodes = useMemo(
-    () => selectVisibleCanvasNodes(nodes, viewport, zoom, forcedNodeIds),
-    [forcedNodeIds, nodes, viewport, zoom],
+    () =>
+      selectVisibleCanvasNodes(nodes, viewport, zoom, forcedNodeIds, undefined, undefined, denseMode),
+    [forcedNodeIds, nodes, viewport, zoom, denseMode],
   );
   const visibleWires = useMemo(
     () =>
@@ -282,6 +291,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
       snap={snap}
       wires={visibleWires}
       dyingIds={dyingIds}
+      dyingEdgeIds={dyingEdgeIds}
       selectedEdge={selectedEdge}
       onSelectEdge={(id) => {
         setSelectedEdge(id);
@@ -322,6 +332,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             snapped={snapId === node.id}
             dying={dyingIds.has(node.id)}
             born={bornId === node.id}
+            denseMode={denseMode}
             renderVersion={renderModel.renderVersionByNode[node.id] || "-"}
             chartVersion={chartVersionByNode[node.id] ?? null}
             childSelection={childSelection}
@@ -682,37 +693,51 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             {ports.inputs
               .slice(0, visibleInputCount)
               .filter((port) => !isTopInput(node.type, port))
-              .map((port, index, leftPorts) => (
-                <div
-                  key={`i${port}`}
-                  className="nb2-port in"
-                  style={{
-                    top: portTopOffset(
-                      node,
-                      "in",
-                      index,
-                      leftPorts.length,
-                    ),
-                  }}
-                  onPointerEnter={() => setHoveredInput(node.id, port)}
-                  onPointerLeave={() => setHoveredInput(node.id, null)}
-                >
-                  <span className="nb2-dot" />
-                  {node.type === "union" ? (
-                    <span className="nb2-port-lbl in">
-                      {renderModel.incomingCountByNode[node.id] > 0
-                        ? `stack inputs (${renderModel.incomingCountByNode[node.id]}/10)`
-                        : "stack inputs"}
+              .map((port, index, leftPorts) => {
+                const mark = inputPortMark(port);
+                const label =
+                  node.type === "union"
+                    ? renderModel.incomingCountByNode[node.id] > 0
+                      ? `stack inputs (${renderModel.incomingCountByNode[node.id]}/10)`
+                      : "stack inputs"
+                    : sidePortLabel(port);
+                return (
+                  <div
+                    key={`i${port}`}
+                    className={
+                      "nb2-port in" + (mark ? ` port-${port}` : "")
+                    }
+                    style={{
+                      top: portTopOffset(
+                        node,
+                        "in",
+                        index,
+                        leftPorts.length,
+                      ),
+                    }}
+                    onPointerEnter={() => setHoveredInput(node.id, port)}
+                    onPointerLeave={() => setHoveredInput(node.id, null)}
+                    title={
+                      mark
+                        ? mark === "L"
+                          ? "Left input"
+                          : "Right input"
+                        : undefined
+                    }
+                  >
+                    <span className="nb2-dot">
+                      {mark && (
+                        <span className="nb2-dot-mark" aria-hidden>
+                          {mark}
+                        </span>
+                      )}
                     </span>
-                  ) : (
-                    port !== "in" && (
-                      <span className="nb2-port-lbl in">
-                        {PORT_LABEL[port] || port}
-                      </span>
-                    )
-                  )}
-                </div>
-              ))}
+                    {label && (
+                      <span className="nb2-port-lbl in">{label}</span>
+                    )}
+                  </div>
+                );
+              })}
 
             {ports.inputs
               .slice(0, visibleInputCount)
@@ -732,22 +757,23 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
                 </div>
               ))}
 
-            {ports.outputs.map((port, index) => (
-              <div
-                key={`o${port}`}
-                className={`nb2-port out ${port}`}
-                style={{ top: portTopOffset(node, "out", index) }}
-                onPointerDown={(event) => startWire(event, node, port)}
-                title="Drag to an input to connect · click to preview this output"
-              >
-                {port !== "out" && (
-                  <span className="nb2-port-lbl out">
-                    {PORT_LABEL[port] || port}
-                  </span>
-                )}
-                <span className="nb2-dot" />
-              </div>
-            ))}
+            {ports.outputs.map((port, index) => {
+              const label = sidePortLabel(port);
+              return (
+                <div
+                  key={`o${port}`}
+                  className={`nb2-port out ${port}`}
+                  style={{ top: portTopOffset(node, "out", index) }}
+                  onPointerDown={(event) => startWire(event, node, port)}
+                  title="Drag to an input to connect · click to preview this output"
+                >
+                  {label && (
+                    <span className="nb2-port-lbl out">{label}</span>
+                  )}
+                  <span className="nb2-dot" />
+                </div>
+              );
+            })}
           </CanvasNodeFrame>
         );
       })}

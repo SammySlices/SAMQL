@@ -7,7 +7,7 @@
 
   Recommended upgrade command:
       powershell -ExecutionPolicy Bypass -File .\Expand-SamQL[.]ps1 `
-        -Source .\samql_full_source_all_tests_ui_2026-07-12.593.txt `
+        -Source .\samql_full_source_all_tests_ui_2026-07-13.594.txt `
         -Dest C:\SamQL\samql -Force
 
   When -Source is omitted, the script examines every *full_source*.txt beside
@@ -318,6 +318,16 @@ foreach ($managedRel in $managedRelRoots) {
     }
 }
 
+# Brand drop-in folder. Binary logo assets (logo.png / app-icon.png /
+# samql.ico) are not in SOURCE_MANIFEST, so a fresh expand would otherwise
+# leave nowhere for the builder to put them. Create an empty frontend/public
+# AFTER managed empty-dir pruning so it is never swept away.
+$publicDir = Join-Path $destRoot 'frontend\public'
+if (-not (Test-Path -LiteralPath $publicDir)) {
+  New-Item -ItemType Directory -Path $publicDir -Force | Out-Null
+  Write-Host "==> Created empty frontend\public (drop logo.png / app-icon.png here)"
+}
+
 # --- verify one exact source identity after extraction ---------------------
 $issues = New-Object System.Collections.Generic.List[string]
 $leftoverManaged = New-Object System.Collections.Generic.List[string]
@@ -431,6 +441,11 @@ Write-Host ""
 Write-Host "Done. Wrote $written files into: $destRoot"
 Write-Host "Expanded identity check passed: SamQL v$productVersion build $currentBuild"
 Write-Host "Source bundle used: $Source"
+Write-Host "This is a complete source + tests + UI extract (harnesses, Playwright,"
+Write-Host "lockfile, and Test-SamQL-All). For a packaged exe with the full load"
+Write-Host "stack (DuckDB, openpyxl, ijson, ...), run .\build[.]ps1 - it installs"
+Write-Host "requirements-optional.txt into the build Python and refuses to ship"
+Write-Host "without those imports."
 Write-Host "Run the complete suite from this exact destination:"
 Write-Host "    cd `"$destRoot`""
 Write-Host "    .\Test-SamQL-All[.]ps1"

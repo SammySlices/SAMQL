@@ -2,15 +2,22 @@ import React, { useCallback, useEffect, useState } from "react";
 import { api, type FlowCacheInfo } from "../lib/api";
 import { Modal } from "./Modal";
 
-interface Props {
-  onClose: () => void;
-  onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
-}
+type ToastFn = (
+  kind: "ok" | "error" | "warn",
+  title: string,
+  msg?: string,
+) => void;
 
 const pct = (v: number | null) =>
   v == null ? "—" : `${Math.round(v * 1000) / 10}%`;
 
-export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
+/** Live NodeFlow cache controls + telemetry (standalone modal or embedded tab). */
+export const FlowCachePanel: React.FC<{
+  onToast: ToastFn;
+  /** When true, action buttons render inline instead of a Modal footer. */
+  embedded?: boolean;
+  onClose?: () => void;
+}> = ({ onToast, embedded = false, onClose }) => {
   const [info, setInfo] = useState<FlowCacheInfo | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [maxEntries, setMaxEntries] = useState("32");
@@ -33,7 +40,13 @@ export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
     setParallel(!!next.parallel_nodeflows);
     setParallelWorkers(String(next.parallel_workers_configured ?? 1));
     setPersistentEnabled(!!next.persistent_enabled);
-    setPersistentMaxMb(String(Math.round(next.persistent_configured_mb_max ?? next.persistent?.mb_max ?? 0)));
+    setPersistentMaxMb(
+      String(
+        Math.round(
+          next.persistent_configured_mb_max ?? next.persistent?.mb_max ?? 0,
+        ),
+      ),
+    );
     setPersistentDays(String(next.persistent?.max_age_days ?? 14));
     setError(next.error || "");
   }, []);
@@ -78,10 +91,21 @@ export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
     const workers = Number.parseInt(parallelWorkers, 10);
     const persistMb = Number.parseInt(persistentMaxMb, 10);
     const days = Number.parseInt(persistentDays, 10);
-    if (!Number.isFinite(entries) || entries < 0 || !Number.isFinite(mb) || mb < 0 ||
-        !Number.isFinite(workers) || workers < 1 || !Number.isFinite(persistMb) || persistMb < 0 ||
-        !Number.isFinite(days) || days < 0) {
-      setError("Cache limits and retention must be non-negative integers; workers must be at least one.");
+    if (
+      !Number.isFinite(entries) ||
+      entries < 0 ||
+      !Number.isFinite(mb) ||
+      mb < 0 ||
+      !Number.isFinite(workers) ||
+      workers < 1 ||
+      !Number.isFinite(persistMb) ||
+      persistMb < 0 ||
+      !Number.isFinite(days) ||
+      days < 0
+    ) {
+      setError(
+        "Cache limits and retention must be non-negative integers; workers must be at least one.",
+      );
       return;
     }
     const next = await update({
@@ -95,7 +119,12 @@ export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
       persistent_max_mb: persistMb,
       persistent_days: days,
     });
-    if (next) onToast("ok", "Flow cache updated", `${next.size} entries · ${next.mb} MB in use`);
+    if (next)
+      onToast(
+        "ok",
+        "Flow cache updated",
+        `${next.size} entries · ${next.mb} MB in use`,
+      );
   };
 
   const clear = async (resetStats = false) => {
@@ -118,27 +147,54 @@ export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
       );
   };
 
-  const footer = (
-    <>
+  const actions = (
+    <div
+      className={
+        embedded ? "flow-cache-actions" : undefined
+      }
+      style={
+        embedded
+          ? {
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              marginTop: 12,
+              alignItems: "center",
+            }
+          : undefined
+      }
+    >
       <button className="btn" disabled={busy} onClick={() => void clear(false)}>
         Clear memory cache
       </button>
-      <button className="btn" disabled={busy} onClick={() => void clearPersistent()}>
+      <button
+        className="btn"
+        disabled={busy}
+        onClick={() => void clearPersistent()}
+      >
         Clear persistent cache
       </button>
       <button className="btn" disabled={busy} onClick={() => void clear(true)}>
         Reset counters
       </button>
       <span className="spacer" />
-      <button className="btn" onClick={onClose}>Close</button>
-      <button className="btn primary" disabled={busy} onClick={() => void apply()}>
+      {onClose && !embedded ? (
+        <button className="btn" onClick={onClose}>
+          Close
+        </button>
+      ) : null}
+      <button
+        className="btn primary"
+        disabled={busy}
+        onClick={() => void apply()}
+      >
         {busy ? "Applying…" : "Apply"}
       </button>
-    </>
+    </div>
   );
 
-  return (
-    <Modal title="NodeFlow cache" onClose={onClose} footer={footer} wide>
+  const body = (
+    <>
       <div data-testid="flow-cache-modal" className="settings-grid">
         <label className="check-row">
           <input
@@ -169,32 +225,58 @@ export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
           />
         </label>
         <label className="check-row">
-          <input type="checkbox" checked={adaptive} onChange={(e) => setAdaptive(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={adaptive}
+            onChange={(e) => setAdaptive(e.target.checked)}
+          />
           Adapt cache and worker budgets to available RAM and temp-disk space
         </label>
         <label className="check-row">
-          <input type="checkbox" checked={parallel} onChange={(e) => setParallel(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={parallel}
+            onChange={(e) => setParallel(e.target.checked)}
+          />
           Run independent NodeFlow branches in parallel on DuckDB
         </label>
         <label>
           Parallel branch worker ceiling
-          <input type="number" min={1} max={16} value={parallelWorkers}
-            onChange={(e) => setParallelWorkers(e.target.value)} />
+          <input
+            type="number"
+            min={1}
+            max={16}
+            value={parallelWorkers}
+            onChange={(e) => setParallelWorkers(e.target.value)}
+          />
         </label>
         <label className="check-row">
-          <input type="checkbox" checked={persistentEnabled}
-            onChange={(e) => setPersistentEnabled(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={persistentEnabled}
+            onChange={(e) => setPersistentEnabled(e.target.checked)}
+          />
           Reuse safe, deterministic intermediates after restart
         </label>
         <label>
           Persistent cache ceiling (MB)
-          <input type="number" min={0} max={1048576} value={persistentMaxMb}
-            onChange={(e) => setPersistentMaxMb(e.target.value)} />
+          <input
+            type="number"
+            min={0}
+            max={1048576}
+            value={persistentMaxMb}
+            onChange={(e) => setPersistentMaxMb(e.target.value)}
+          />
         </label>
         <label>
           Persistent retention (days; 0 = no age expiry)
-          <input type="number" min={0} max={3650} value={persistentDays}
-            onChange={(e) => setPersistentDays(e.target.value)} />
+          <input
+            type="number"
+            min={0}
+            max={3650}
+            value={persistentDays}
+            onChange={(e) => setPersistentDays(e.target.value)}
+          />
         </label>
       </div>
 
@@ -203,26 +285,83 @@ export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
       {info && (
         <>
           <div className="diag-cards flow-cache-cards">
-            <div><b>{info.size}</b><span>entries</span></div>
-            <div><b>{info.mb.toLocaleString()} MB</b><span>of {info.mb_max.toLocaleString()} MB</span></div>
-            <div><b>{pct(info.hit_rate)}</b><span>hit rate</span></div>
-            <div><b>{info.hits.toLocaleString()}</b><span>hits</span></div>
-            <div><b>{info.misses.toLocaleString()}</b><span>misses</span></div>
-            <div><b>{info.evictions.toLocaleString()}</b><span>evictions</span></div>
-            <div><b>{info.oversized.toLocaleString()}</b><span>oversized skipped</span></div>
-            <div><b>{info.stale.toLocaleString()}</b><span>stale removed</span></div>
-            <div><b>{info.parallel_workers_effective}</b><span>effective branch workers</span></div>
-            <div><b>{info.resource_budget.engine_memory_mb.toLocaleString()} MB</b><span>effective DuckDB ceiling</span></div>
-            <div><b>{info.persistent.mb.toLocaleString()} MB</b><span>persistent cache</span></div>
-            <div><b>{info.persistent.hits.toLocaleString()}</b><span>restart-cache hits</span></div>
-            <div><b>{info.persistent.oversized.toLocaleString()}</b><span>persistent oversized skipped</span></div>
-            <div><b>{info.persistent.skips.toLocaleString()}</b><span>unsafe graphs kept session-only</span></div>
-            <div><b>{info.persistent.errors.toLocaleString()}</b><span>persistent cache errors</span></div>
-            <div><b>{info.persistent.pinned.toLocaleString()}</b><span>persistent reads pinned</span></div>
+            <div>
+              <b>{info.size}</b>
+              <span>entries</span>
+            </div>
+            <div>
+              <b>{info.mb.toLocaleString()} MB</b>
+              <span>of {info.mb_max.toLocaleString()} MB</span>
+            </div>
+            <div>
+              <b>{pct(info.hit_rate)}</b>
+              <span>hit rate</span>
+            </div>
+            <div>
+              <b>{info.hits.toLocaleString()}</b>
+              <span>hits</span>
+            </div>
+            <div>
+              <b>{info.misses.toLocaleString()}</b>
+              <span>misses</span>
+            </div>
+            <div>
+              <b>{info.evictions.toLocaleString()}</b>
+              <span>evictions</span>
+            </div>
+            <div>
+              <b>{info.oversized.toLocaleString()}</b>
+              <span>oversized skipped</span>
+            </div>
+            <div>
+              <b>{info.stale.toLocaleString()}</b>
+              <span>stale removed</span>
+            </div>
+            <div>
+              <b>{info.parallel_workers_effective}</b>
+              <span>effective branch workers</span>
+            </div>
+            <div>
+              <b>{info.resource_budget.engine_memory_mb.toLocaleString()} MB</b>
+              <span>effective DuckDB ceiling</span>
+            </div>
+            <div>
+              <b>{info.persistent.mb.toLocaleString()} MB</b>
+              <span>persistent cache</span>
+            </div>
+            <div>
+              <b>{info.persistent.hits.toLocaleString()}</b>
+              <span>restart-cache hits</span>
+            </div>
+            <div>
+              <b>{info.persistent.oversized.toLocaleString()}</b>
+              <span>persistent oversized skipped</span>
+            </div>
+            <div>
+              <b>{info.persistent.skips.toLocaleString()}</b>
+              <span>unsafe graphs kept session-only</span>
+            </div>
+            <div>
+              <b>{info.persistent.errors.toLocaleString()}</b>
+              <span>persistent cache errors</span>
+            </div>
+            <div>
+              <b>{info.persistent.pinned.toLocaleString()}</b>
+              <span>persistent reads pinned</span>
+            </div>
           </div>
 
           <p className="muted">
-            Resource pressure: <b>{info.resource_budget.pressure}</b> · available memory {info.resource_budget.memory_available_mb.toLocaleString()} MB · temp disk free {info.resource_budget.disk_free_gb.toLocaleString()} GB. Effective DuckDB ceiling: {info.resource_budget.engine_memory_mb.toLocaleString()} MB; in-memory cache: {info.resource_budget.flow_cache_mb.toLocaleString()} MB; persistent cache: {info.resource_budget.persistent_cache_mb.toLocaleString()} MB.
+            Resource pressure: <b>{info.resource_budget.pressure}</b> · available
+            memory {info.resource_budget.memory_available_mb.toLocaleString()}{" "}
+            MB · temp disk free{" "}
+            {info.resource_budget.disk_free_gb.toLocaleString()} GB. Effective
+            DuckDB ceiling:{" "}
+            {info.resource_budget.engine_memory_mb.toLocaleString()} MB;
+            in-memory cache:{" "}
+            {info.resource_budget.flow_cache_mb.toLocaleString()} MB; persistent
+            cache: {info.resource_budget.persistent_cache_mb.toLocaleString()}{" "}
+            MB.
           </p>
 
           <h3>Largest cached intermediates</h3>
@@ -232,14 +371,23 @@ export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
             <div className="table-wrap">
               <table className="plain-table">
                 <thead>
-                  <tr><th>Table</th><th>Engine</th><th>Fingerprint</th><th>Approx. size</th></tr>
+                  <tr>
+                    <th>Table</th>
+                    <th>Engine</th>
+                    <th>Fingerprint</th>
+                    <th>Approx. size</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {info.largest.map((entry) => (
                     <tr key={`${entry.engine}:${entry.table}`}>
-                      <td><code>{entry.table}</code></td>
+                      <td>
+                        <code>{entry.table}</code>
+                      </td>
                       <td>{entry.engine}</td>
-                      <td><code>{entry.fingerprint}</code></td>
+                      <td>
+                        <code>{entry.fingerprint}</code>
+                      </td>
                       <td>{entry.mb.toLocaleString()} MB</td>
                     </tr>
                   ))}
@@ -248,11 +396,30 @@ export const FlowCacheModal: React.FC<Props> = ({ onClose, onToast }) => {
             </div>
           )}
           <p className="muted">
-            Limits persist in SamQL settings. Adaptive mode treats them as ceilings.
-            Environment variables <code>SAMQL_FLOW_CACHE_MB</code>, <code>SAMQL_PERSISTENT_FLOW_CACHE_MB</code>, and <code>SAMQL_NODEFLOW_WORKERS</code> supply initial defaults.
+            Limits persist in SamQL settings. Adaptive mode treats them as
+            ceilings. Environment variables <code>SAMQL_FLOW_CACHE_MB</code>,{" "}
+            <code>SAMQL_PERSISTENT_FLOW_CACHE_MB</code>, and{" "}
+            <code>SAMQL_NODEFLOW_WORKERS</code> supply initial defaults.
           </p>
         </>
       )}
+      {embedded ? actions : null}
+    </>
+  );
+
+  if (embedded) return body;
+
+  return (
+    <Modal title="NodeFlow cache" onClose={onClose!} footer={actions} wide>
+      {body}
     </Modal>
   );
 };
+
+/** Standalone modal wrapper kept for packaging/tests that import this module. */
+export const FlowCacheModal: React.FC<{
+  onClose: () => void;
+  onToast: ToastFn;
+}> = ({ onClose, onToast }) => (
+  <FlowCachePanel onClose={onClose} onToast={onToast} />
+);

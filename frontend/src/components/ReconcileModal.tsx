@@ -2,6 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Modal } from "./Modal";
 import { Icon } from "./Icon";
 import { api, saveToDownloads } from "../lib/api";
+import {
+  cancelOne,
+  isCancelledError,
+  registerRun,
+  unregisterRun,
+} from "../lib/runController";
 import type { TableInfo, ReconcileResult } from "../lib/types";
 import {
   resolveReconFields,
@@ -60,6 +66,7 @@ export const ReconcileModal: React.FC<Props> = ({
   const [progress, setProgress] = useState<number | null>(null);
   const pollTimer = React.useRef<number | null>(null);
   const runQid = React.useRef<string | null>(null);
+  const runCtrl = React.useRef<AbortController | null>(null);
   const stopPoll = () => {
     if (pollTimer.current != null) {
       window.clearInterval(pollTimer.current);
@@ -180,7 +187,10 @@ export const ReconcileModal: React.FC<Props> = ({
     if (!canRun || running) return;
     setRunning(true);
     const qid = "recon-" + Math.random().toString(36).slice(2, 12);
+    const ctrl = new AbortController();
     runQid.current = qid;
+    runCtrl.current = ctrl;
+    registerRun(qid, ctrl);
     startPoll(qid);
     const used = fields.filter(
       (f) =>
@@ -199,11 +209,12 @@ export const ReconcileModal: React.FC<Props> = ({
       colmap_b: colmapB,
     };
     try {
-      const report = await api.reconcile({ ...spec, query_id: qid });
+      const report = await api.reconcile({ ...spec, query_id: qid }, ctrl.signal);
       stopPoll();
       runQid.current = null;
+      runCtrl.current = null;
       if (report.error) {
-        if (/interrupt|cancel/i.test(report.error)) {
+        if (/interrupt|cancel/i.test(report.error) || report.cancelled) {
           onToast("warn", "Reconcile cancelled", "Stopped at your request.");
         } else {
           onToast("error", "Reconcile failed", report.error);
@@ -214,8 +225,17 @@ export const ReconcileModal: React.FC<Props> = ({
       onRun(report, spec);
     } catch (e: any) {
       stopPoll();
+      runQid.current = null;
+      runCtrl.current = null;
+      if (isCancelledError(e, qid)) {
+        onToast("warn", "Reconcile cancelled", "Stopped at your request.");
+        setRunning(false);
+        return;
+      }
       onToast("error", "Reconcile failed", e?.message);
       setRunning(false);
+    } finally {
+      unregisterRun(qid, ctrl);
     }
   };
 
@@ -241,7 +261,7 @@ export const ReconcileModal: React.FC<Props> = ({
               title="Cancel this reconcile (interrupts the backend run)"
               onClick={() => {
                 if (runQid.current)
-                  api.cancelQuery(runQid.current).catch(() => {});
+                  cancelOne(runQid.current, runCtrl.current);
               }}
             >
               ■ Cancel

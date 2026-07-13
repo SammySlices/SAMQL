@@ -19,6 +19,11 @@ import {
 import { persistNodeFlowSnapshot } from "../../lib/nodeFlowPersistence";
 import { serializeGraph } from "../../lib/nodegraph";
 import { wfEnvelope, parseWfFile } from "../../lib/workflowFile";
+import {
+  applyCreatedNodeToGraph,
+  stripCreatedNodeFromGraph,
+  type CreatedNodeDefinition,
+} from "../../lib/createdNodes";
 import type { DeleteConfirmState, NodeMenuState } from "./NodeFlowMenus";
 import type { NodeFlowTab } from "./NodeFlowTabBar";
 import { useNodeFlowAutosave } from "./useNodeFlowAutosave";
@@ -124,6 +129,46 @@ export function useNodeFlowDocumentController({
     },
     [],
   );
+
+  // Load a tab graph into the cache (and from localStorage when never opened).
+  // Does not activate the tab — used by refresh of Created Node instances on
+  // inactive / never-selected tabs.
+  const ensureTabGraphLoaded = useCallback((id: string): NodeFlowSnapshot => {
+    const cached = tabGraphsRef.current[id];
+    if (cached) return cached;
+    const key = TAB_KEY(id);
+    const legacyKey = LEGACY_TAB_KEY(id);
+    let sourceKey = key;
+    let raw: string | null = null;
+    let graph: NodeFlowSnapshot;
+    try {
+      const canonicalRaw = window.localStorage?.getItem(key);
+      raw = canonicalRaw || window.localStorage?.getItem(legacyKey) || null;
+      sourceKey = canonicalRaw ? key : legacyKey;
+      const parsed = parseNodeFlowGraph(raw ? JSON.parse(raw) : {});
+      if (raw && (parsed.migratedFrom !== undefined || sourceKey !== key)) {
+        backupLocalStorageValue(sourceKey, raw);
+        window.localStorage?.setItem(
+          key,
+          JSON.stringify(serializeNodeFlowGraph(parsed.nodes, parsed.edges)),
+        );
+      }
+      graph = { nodes: parsed.nodes, edges: parsed.edges };
+    } catch {
+      if (raw) backupLocalStorageValue(sourceKey, raw);
+      graph = { nodes: [], edges: [] };
+      try {
+        window.localStorage?.setItem(
+          key,
+          JSON.stringify(serializeNodeFlowGraph(graph.nodes, graph.edges)),
+        );
+      } catch {
+        // The recovered blank graph remains usable in memory.
+      }
+    }
+    tabGraphsRef.current[id] = graph;
+    return graph;
+  }, []);
 
   useEffect(() => {
     let list: NodeFlowTab[] = [];
@@ -281,39 +326,7 @@ export function useNodeFlowDocumentController({
 
   const loadTabIntoState = useCallback(
     (id: string) => {
-      let graph = tabGraphsRef.current[id];
-      if (!graph) {
-        const key = TAB_KEY(id);
-        const legacyKey = LEGACY_TAB_KEY(id);
-        let sourceKey = key;
-        let raw: string | null = null;
-        try {
-          const canonicalRaw = window.localStorage?.getItem(key);
-          raw = canonicalRaw || window.localStorage?.getItem(legacyKey);
-          sourceKey = canonicalRaw ? key : legacyKey;
-          const parsed = parseNodeFlowGraph(raw ? JSON.parse(raw) : {});
-          if (raw && (parsed.migratedFrom !== undefined || sourceKey !== key)) {
-            backupLocalStorageValue(sourceKey, raw);
-            window.localStorage?.setItem(
-              key,
-              JSON.stringify(serializeNodeFlowGraph(parsed.nodes, parsed.edges)),
-            );
-          }
-          graph = { nodes: parsed.nodes, edges: parsed.edges };
-        } catch {
-          if (raw) backupLocalStorageValue(sourceKey, raw);
-          graph = { nodes: [], edges: [] };
-          try {
-            window.localStorage?.setItem(
-              key,
-              JSON.stringify(serializeNodeFlowGraph(graph.nodes, graph.edges)),
-            );
-          } catch {
-            // The recovered blank graph remains usable in memory.
-          }
-        }
-        tabGraphsRef.current[id] = graph;
-      }
+      const graph = ensureTabGraphLoaded(id);
       const tabHistory =
         tabHistoryRef.current[id] ||
         ({ past: [], future: [], prev: graph } satisfies TabHistory);
@@ -334,6 +347,7 @@ export function useNodeFlowDocumentController({
       refreshHistory();
     },
     [
+      ensureTabGraphLoaded,
       refreshHistory,
       setEdges,
       setNodeErrors,
@@ -520,7 +534,25 @@ export function useNodeFlowDocumentController({
   }, [activeTabName, fullGraph, onToast, onWorkflowsChanged]);
 
   const openGraphInNewTab = useCallback(
-    (graphLike: { nodes?: NbNode[]; edges?: any[] }, requestedName: string) => {
+    (
+      graphLike: { nodes?: NbNode[]; edges?: any[] },
+      requestedName: string,
+      options?: { editingDefinitionId?: string },
+    ) => {
+      const editingDefinitionId = options?.editingDefinitionId?.trim() || "";
+      if (editingDefinitionId) {
+        const existing = tabs.find(
+          (tab) => tab.editingDefinitionId === editingDefinitionId,
+        );
+        if (existing) {
+          if (existing.id !== activeTabRef.current) {
+            saveActiveTab();
+            loadTabIntoState(existing.id);
+          }
+          onDocumentStatus?.(`Opened “${existing.name}”`);
+          return existing.id;
+        }
+      }
       saveActiveTab();
       const id = uid();
       const parsed = parseNodeFlowGraph(graphLike);
@@ -542,12 +574,167 @@ export function useNodeFlowDocumentController({
           while (taken.has(`${name} (${suffix})`)) suffix += 1;
           name = `${name} (${suffix})`;
         }
-        return [...current, { id, name }];
+        return [
+          ...current,
+          {
+            id,
+            name,
+            ...(editingDefinitionId ? { editingDefinitionId } : {}),
+          },
+        ];
       });
       loadTabIntoState(id);
       onDocumentStatus?.(`Loaded “${requestedName}” in a new tab`);
+      return id;
     },
-    [loadTabIntoState, onDocumentStatus, saveActiveTab],
+    [loadTabIntoState, onDocumentStatus, saveActiveTab, tabs],
+  );
+
+  const activeEditingDefinitionId = useCallback((): string | null => {
+    const tab = tabs.find((item) => item.id === activeTabRef.current);
+    const id = tab?.editingDefinitionId?.trim();
+    return id || null;
+  }, [tabs]);
+
+  const refreshUsernodesFromDefinition = useCallback(
+    (definition: CreatedNodeDefinition) => {
+      saveActiveTab();
+      let activeChanged = false;
+      let anyChanged = false;
+      for (const tab of tabs) {
+        const snap =
+          tab.id === activeTabRef.current
+            ? {
+                nodes: nodesRef.current || [],
+                edges: edgesRef.current || [],
+              }
+            : ensureTabGraphLoaded(tab.id);
+        const next = applyCreatedNodeToGraph(snap.nodes, snap.edges, definition);
+        if (!next.changed) continue;
+        anyChanged = true;
+        const updated = { nodes: next.nodes, edges: next.edges };
+        tabGraphsRef.current[tab.id] = updated;
+        persistGraphNow(tab.id, updated);
+        if (tab.id === activeTabRef.current) {
+          activeChanged = true;
+          histApplyingRef.current = true;
+          setNodes(updated.nodes);
+          setEdges(updated.edges);
+          liveRef.current = updated;
+          histPrevRef.current = updated;
+        }
+      }
+      if (activeChanged) {
+        onDocumentStatus?.(`Updated “${definition.name}” on the canvas`);
+      } else if (anyChanged) {
+        onDocumentStatus?.(
+          `Updated “${definition.name}” on other tabs`,
+        );
+      }
+      setTabs((current) => {
+        let touched = false;
+        const next = current.map((tab) => {
+          if (tab.editingDefinitionId !== definition.id) return tab;
+          if (tab.name === definition.name) return tab;
+          touched = true;
+          return { ...tab, name: definition.name };
+        });
+        return touched ? next : current;
+      });
+    },
+    [
+      edgesRef,
+      ensureTabGraphLoaded,
+      nodesRef,
+      onDocumentStatus,
+      persistGraphNow,
+      saveActiveTab,
+      setEdges,
+      setNodes,
+      tabs,
+    ],
+  );
+
+  const stripUsernodesByDefinitionId = useCallback(
+    (definitionId: string) => {
+      const id = definitionId.trim();
+      if (!id) return;
+      saveActiveTab();
+      let activeChanged = false;
+      for (const tab of tabs) {
+        const snap =
+          tab.id === activeTabRef.current
+            ? {
+                nodes: nodesRef.current || [],
+                edges: edgesRef.current || [],
+              }
+            : ensureTabGraphLoaded(tab.id);
+        const next = stripCreatedNodeFromGraph(snap.nodes, snap.edges, id);
+        if (!next.changed) continue;
+        const updated = { nodes: next.nodes, edges: next.edges };
+        tabGraphsRef.current[tab.id] = updated;
+        persistGraphNow(tab.id, updated);
+        if (tab.id === activeTabRef.current) {
+          activeChanged = true;
+          histApplyingRef.current = true;
+          setNodes(updated.nodes);
+          setEdges(updated.edges);
+          liveRef.current = updated;
+          histPrevRef.current = updated;
+          setSelectedId(null);
+          setSelectedIds([]);
+        }
+      }
+      // Close Open Node editing tabs for the deleted definition.
+      setTabs((current) => {
+        const remaining = current.filter(
+          (tab) => tab.editingDefinitionId !== id,
+        );
+        if (remaining.length === current.length) return current;
+        if (!remaining.length) {
+          const freshId = uid();
+          const blank = { nodes: [] as NbNode[], edges: [] as NbEdge[] };
+          tabGraphsRef.current[freshId] = blank;
+          persistGraphNow(freshId, blank);
+          activeTabRef.current = freshId;
+          histApplyingRef.current = true;
+          setNodes([]);
+          setEdges([]);
+          liveRef.current = blank;
+          histPrevRef.current = blank;
+          setActiveTabId(freshId);
+          return [{ id: freshId, name: "Tab 1" }];
+        }
+        if (!remaining.some((tab) => tab.id === activeTabRef.current)) {
+          const nextActive = remaining[0].id;
+          activeTabRef.current = nextActive;
+          setActiveTabId(nextActive);
+          const graph = ensureTabGraphLoaded(nextActive);
+          histApplyingRef.current = true;
+          setNodes(graph.nodes);
+          setEdges(graph.edges);
+          liveRef.current = graph;
+          histPrevRef.current = graph;
+        }
+        return remaining;
+      });
+      if (activeChanged) {
+        onDocumentStatus?.("Removed deleted Created Node from the canvas");
+      }
+    },
+    [
+      edgesRef,
+      ensureTabGraphLoaded,
+      nodesRef,
+      onDocumentStatus,
+      persistGraphNow,
+      saveActiveTab,
+      setEdges,
+      setNodes,
+      setSelectedId,
+      setSelectedIds,
+      tabs,
+    ],
   );
 
   const lastLoadReq = useRef(0);
@@ -658,6 +845,9 @@ export function useNodeFlowDocumentController({
     saveWorkflow,
     exportLineage,
     openGraphInNewTab,
+    activeEditingDefinitionId,
+    refreshUsernodesFromDefinition,
+    stripUsernodesByDefinitionId,
     onPickNodeFile,
   };
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import { api, registerBgCancel } from "../lib/api";
 import type { RootIdChoice } from "../lib/api";
+import { cancelOne, registerRun, unregisterRun } from "../lib/runController";
 import type { TaskCard } from "../lib/types";
 import type { ToastFn } from "./appTypes";
 import { uid } from "../lib/ids";
@@ -33,25 +34,21 @@ export function useBackgroundOperations({
     const queryId = uid();
     const ctrl = new AbortController();
     operations.current.set(queryId, ctrl);
+    registerRun(queryId, ctrl);
     return { queryId, ctrl };
   }, []);
 
   const endBgOp = useCallback((queryId: string) => {
+    const ctrl = operations.current.get(queryId);
     operations.current.delete(queryId);
+    unregisterRun(queryId, ctrl);
   }, []);
 
   const cancelBgOp = useCallback((queryId?: string | null) => {
     if (!queryId) return;
     const ctrl = operations.current.get(queryId);
-    if (ctrl) {
-      try {
-        ctrl.abort();
-      } catch {
-        // AbortController.abort is idempotent; old browser shims may throw.
-      }
-    }
     operations.current.delete(queryId);
-    void api.cancelQuery(queryId).catch(() => {});
+    cancelOne(queryId, ctrl);
   }, []);
 
   const cancelAllBgOps = useCallback(() => {

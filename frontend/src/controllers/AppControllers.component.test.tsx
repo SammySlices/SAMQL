@@ -36,6 +36,8 @@ vi.mock("../lib/api", () => ({
 
 vi.mock("../lib/runController", () => ({
   cancelOne: cancelOneMock,
+  registerRun: vi.fn(),
+  unregisterRun: vi.fn(),
 }));
 
 function deferred<T>() {

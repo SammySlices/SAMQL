@@ -18,12 +18,14 @@ export interface ReconcileDetailRequest {
   balance: string | null;
   colmap_a: Record<string, string>;
   colmap_b: Record<string, string>;
+  query_id?: string;
 }
 
 export function buildReconcileRequest(
   spec: ReconcileSourceSpec,
   bucket: ReconBucket,
   field: string | null,
+  queryId?: string,
 ): ReconcileDetailRequest {
   return {
     left: spec.left,
@@ -34,5 +36,6 @@ export function buildReconcileRequest(
     balance: spec.balance ?? null,
     colmap_a: { ...(spec.colmap_a || {}) },
     colmap_b: { ...(spec.colmap_b || {}) },
+    ...(queryId ? { query_id: queryId } : {}),
   };
 }

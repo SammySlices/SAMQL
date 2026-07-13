@@ -844,8 +844,7 @@ export const Notebook: React.FC<Props> = ({
     // supersede any in-flight run of this cell
     const prev = aborts.current.get(id);
     if (prev) {
-      prev.ctrl.abort();
-      api.cancelQuery(prev.queryId).catch(() => {});
+      cancelOne(prev.queryId, prev.ctrl);
     }
     const ctrl = new AbortController();
     const queryId = uid() + uid();
@@ -1034,7 +1033,7 @@ export const Notebook: React.FC<Props> = ({
       cancelOne(a.queryId, a.ctrl);
       aborts.current.delete(id);
     }
-    patch(id, { running: false });
+    patch(id, { running: false, reconRunning: false });
   };
   // Stop a Run-all sweep: halt the loop (cancelAllRef) and cancel any cell that
   // is currently in flight so the backend stops too.
@@ -1184,6 +1183,16 @@ export const Notebook: React.FC<Props> = ({
     dropReconTemps(id); // clear any tables staged by a previous run
     const created: { name: string; engine: string }[] = [];
 
+    // Register cancel before materialize so Stop works during staging.
+    const prevA = aborts.current.get(id);
+    if (prevA) {
+      cancelOne(prevA.queryId, prevA.ctrl);
+    }
+    const ctrl = new AbortController();
+    const queryId = "recon-" + uid() + uid();
+    aborts.current.set(id, { ctrl, queryId });
+    registerRun(queryId, ctrl); // .519: modal Cancel reaches this fetch
+
     const resolve = async (
       src: string,
       slot: "l" | "r",
@@ -1210,10 +1219,14 @@ export const Notebook: React.FC<Props> = ({
         `__nb_${safe}_${slot}`,
         sql,
         target,
-        undefined,
-        undefined,
+        queryId,
+        ctrl.signal,
         isCellFresh(sc) ? (sc.resultId as string) : undefined,
       );
+      if (r.cancelled || ctrl.signal.aborted) {
+        patch(id, { reconRunning: false, reconError: "Cancelled." });
+        return null;
+      }
       if (r.error || !r.name) {
         patch(id, {
           reconRunning: false,
@@ -1246,17 +1259,6 @@ export const Notebook: React.FC<Props> = ({
         colmap_a: {},
         colmap_b: {},
       };
-      // .471: a running reconcile is cancellable exactly like a query
-      // cell -- register the run so cancelCell (and Stop-all) can
-      // interrupt the backend statement and abort the HTTP wait.
-      const prevA = aborts.current.get(id);
-      if (prevA) {
-        cancelOne(prevA.queryId, prevA.ctrl);
-      }
-      const ctrl = new AbortController();
-      const queryId = "recon-" + uid() + uid();
-      aborts.current.set(id, { ctrl, queryId });
-    registerRun(queryId, ctrl); // .519: modal Cancel reaches this fetch
       let report: Awaited<ReturnType<typeof api.reconcile>>;
       try {
         report = await api.reconcile(
@@ -1266,12 +1268,15 @@ export const Notebook: React.FC<Props> = ({
       } catch (e: any) {
         patch(id, {
           reconRunning: false,
-          reconError: ctrl.signal.aborted ? "Cancelled." : e?.message,
+          reconError: ctrl.signal.aborted || isCancelledError(e, queryId)
+            ? "Cancelled."
+            : e?.message,
         });
         return;
-      } finally {
-        const cur = aborts.current.get(id);
-        if (cur && cur.queryId === queryId) aborts.current.delete(id);
+      }
+      if (report.cancelled || report.error === "cancelled") {
+        patch(id, { reconRunning: false, reconError: "Cancelled." });
+        return;
       }
       if (report.error) {
         patch(id, { reconRunning: false, reconError: report.error });
@@ -1289,9 +1294,13 @@ export const Notebook: React.FC<Props> = ({
     } catch (e: any) {
       patch(id, {
         reconRunning: false,
-        reconError: e?.message || "Reconcile failed.",
+        reconError:
+          isCancelledError(e, queryId) ? "Cancelled." : e?.message || "Reconcile failed.",
       });
     } finally {
+      unregisterRun(queryId, ctrl);
+      const cur = aborts.current.get(id);
+      if (cur && cur.queryId === queryId) aborts.current.delete(id);
       reconRunningRef.current.delete(id);
     }
   };
@@ -1311,8 +1320,18 @@ export const Notebook: React.FC<Props> = ({
     patch(id, {
       reconDetail: { kind: "drill", title, loading: true, page: null },
     });
+    const ctrl = new AbortController();
+    const queryId = "recon-d-" + uid();
+    registerRun(queryId, ctrl);
     try {
-      const d = await api.reconcileDrilldown(buildReconcileRequest(spec, bucket, field));
+      const d = await api.reconcileDrilldown(
+        buildReconcileRequest(spec, bucket, field, queryId),
+        ctrl.signal,
+      );
+      if (d.cancelled || ctrl.signal.aborted) {
+        patch(id, { reconDetail: null });
+        return;
+      }
       if (d.error || d.result_id == null || d.count === 0) {
         patch(id, {
           reconDetail: {
@@ -1322,16 +1341,31 @@ export const Notebook: React.FC<Props> = ({
             page: { columns: [], rows: [], total_rows: 0 },
           },
         });
-        if (d.error) onToast("error", "Drill-down failed", d.error);
+        if (d.error && !/interrupt|cancel/i.test(d.error))
+          onToast("error", "Drill-down failed", d.error);
         return;
       }
-      const pg = await api.page(d.result_id, { offset: 0, limit: LAZY_CHUNK });
+      const pg = await api.page(
+        d.result_id,
+        { offset: 0, limit: LAZY_CHUNK, query_id: queryId },
+        ctrl.signal,
+      );
+      if (ctrl.signal.aborted) {
+        patch(id, { reconDetail: null });
+        return;
+      }
       patch(id, {
         reconDetail: { kind: "drill", title, loading: false, page: pg },
       });
     } catch (e: any) {
+      if (isCancelledError(e, queryId)) {
+        patch(id, { reconDetail: null });
+        return;
+      }
       patch(id, { reconDetail: null });
       onToast("error", "Drill-down failed", e?.message);
+    } finally {
+      unregisterRun(queryId, ctrl);
     }
   };
 
@@ -1346,19 +1380,40 @@ export const Notebook: React.FC<Props> = ({
     patch(id, {
       reconDetail: { kind: "profile", title, loading: true, profile: null },
     });
+    const ctrl = new AbortController();
+    const queryId = "recon-pf-" + uid();
+    registerRun(queryId, ctrl);
     try {
-      const pr = await api.reconcileProfile(buildReconcileRequest(spec, bucket, field));
-      if ((pr as { error?: string }).error) {
+      const pr = await api.reconcileProfile(
+        buildReconcileRequest(spec, bucket, field, queryId),
+        ctrl.signal,
+      );
+      if ((pr as { cancelled?: boolean }).cancelled || ctrl.signal.aborted) {
         patch(id, { reconDetail: null });
-        onToast("error", "Profile failed", (pr as { error?: string }).error);
+        return;
+      }
+      if ((pr as { error?: string }).error) {
+        const err = (pr as { error?: string }).error || "";
+        if (/interrupt|cancel/i.test(err)) {
+          patch(id, { reconDetail: null });
+          return;
+        }
+        patch(id, { reconDetail: null });
+        onToast("error", "Profile failed", err);
         return;
       }
       patch(id, {
         reconDetail: { kind: "profile", title, loading: false, profile: pr },
       });
     } catch (e: any) {
+      if (isCancelledError(e, queryId)) {
+        patch(id, { reconDetail: null });
+        return;
+      }
       patch(id, { reconDetail: null });
       onToast("error", "Profile failed", e?.message);
+    } finally {
+      unregisterRun(queryId, ctrl);
     }
   };
 

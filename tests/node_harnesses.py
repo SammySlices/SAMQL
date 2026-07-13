@@ -393,7 +393,7 @@ console.log("OK");
 """
 
 _SELECT_FIELDS_HARNESS = r"""
-import { reconcileSelectFields, fieldsDiffer } from "./selectFields.mjs";
+import { reconcileSelectFields, fieldsDiffer, filterSelectFields, sortSelectFields, setFieldsKept, listWiredSelectUpstreams, applySelectColumnsReconcile, collectSelectFieldPatches } from "./selectFields.mjs";
 
 function assert(c, m) { if (!c) { console.error("FAIL: " + m); process.exit(1); } }
 function eq(a, b, m) {
@@ -448,6 +448,92 @@ assert(fieldsDiffer([{ name: "a" }], [{ name: "a" }]) === false, "same -> no dif
 assert(fieldsDiffer([{ name: "a" }], [{ name: "b" }]) === true, "rename -> diff");
 assert(fieldsDiffer([{ name: "a" }], [{ name: "a" }, { name: "b" }]) === true, "length -> diff");
 assert(fieldsDiffer([{ name: "a" }, { name: "b" }], [{ name: "b" }, { name: "a" }]) === true, "reorder -> diff");
+
+// 8. Inspector search filters by name and rename.
+const sample = [
+  { name: "amount", keep: true },
+  { name: "region", keep: true, rename: "geo_area" },
+  { name: "id", keep: false },
+];
+eq(filterSelectFields(sample, "").map(f => f.name), ["amount", "region", "id"],
+  "empty search keeps all");
+eq(filterSelectFields(sample, "am").map(f => f.name), ["amount"],
+  "substring match on name");
+eq(filterSelectFields(sample, "GEO").map(f => f.name), ["region"],
+  "case-insensitive match on rename");
+eq(filterSelectFields(sample, "zzz").map(f => f.name), [],
+  "no match -> empty");
+
+// 9. Sort A-Z / Z-A by field name; settings travel with the field.
+eq(sortSelectFields(sample, "asc").map(f => f.name), ["amount", "id", "region"],
+  "sort asc");
+eq(sortSelectFields(sample, "desc").map(f => f.name), ["region", "id", "amount"],
+  "sort desc");
+eq(sortSelectFields(sample, "asc")[2].rename, "geo_area",
+  "sort preserves rename/keep");
+
+// 10. All/None while filtered only touches the visible names.
+eq(setFieldsKept(sample, false, ["amount", "id"]).map(f => f.keep),
+  [false, true, false], "filtered None leaves region alone");
+eq(setFieldsKept(sample, true).map(f => f.keep),
+  [true, true, true], "unfiltered All keeps every field");
+
+// 11. Changing an Input table must refresh wired Select fields even when the
+//     Select is not selected (graph-wide reconcile helpers).
+eq(listWiredSelectUpstreams(
+     [{ id: "in1", type: "input" }, { id: "sel", type: "select" },
+      { id: "orphan", type: "select" }],
+     [{ to: { node: "sel", port: "in" }, from: { node: "in1", port: "out" } }]),
+   [{ selectId: "sel", kind: "canvas", upstreamNode: "in1", upstreamPort: "out" }],
+   "only wired Selects are listed");
+
+const stale = [{
+  id: "sel", type: "select",
+  config: { fields: [{ name: "order_id", keep: true }, { name: "amount", keep: false }] },
+}];
+const refreshed = applySelectColumnsReconcile(stale, {
+  sel: ["customer_id", "name"],
+});
+eq(refreshed[0].config.fields,
+   [{ name: "customer_id", keep: true }, { name: "name", keep: true }],
+   "Input table change replaces Select fields");
+assert(applySelectColumnsReconcile(refreshed, {
+  sel: ["customer_id", "name"],
+}) === refreshed, "no-op when fields already match");
+
+// 12. Nested Selects inside a group (bound first step + step-above).
+eq(listWiredSelectUpstreams(
+     [{ id: "in1", type: "input" },
+      { id: "g", type: "group", config: {
+          children: [
+            { id: "sel1", type: "select", config: { fields: [] } },
+            { id: "sel2", type: "select", config: { fields: [] } },
+          ],
+          bindings: {},
+        }}],
+     [{ to: { node: "g", port: "in" }, from: { node: "in1", port: "out" } }]),
+   [{ selectId: "sel1", kind: "group-input", upstreamNode: "in1",
+      upstreamPort: "out", groupId: "g", groupPort: "in" },
+    { selectId: "sel2", kind: "step-above", groupId: "g", childIndex: 1 }],
+   "group Selects are discovered for graph-wide sync");
+
+const nestedBefore = [{
+  id: "g", type: "group",
+  config: { children: [{
+    id: "nested", type: "select",
+    config: { fields: [{ name: "old", keep: true }] },
+  }] },
+}];
+const nestedAfter = applySelectColumnsReconcile(nestedBefore, {
+  nested: ["a", "b"],
+});
+eq(nestedAfter[0].config.children[0].config.fields,
+   [{ name: "a", keep: true }, { name: "b", keep: true }],
+   "nested Select fields reconcile inside group.children");
+eq(collectSelectFieldPatches(nestedBefore, nestedAfter),
+   [{ id: "nested", fields: [
+      { name: "a", keep: true }, { name: "b", keep: true }] }],
+   "collectSelectFieldPatches surfaces nested Select ids for patch()");
 
 console.log("OK");
 """
@@ -887,7 +973,7 @@ console.log("OK");
 """
 
 _SQL_HARNESS = r"""
-import { statementSpans, statementAt, tokenize } from "./sql.mjs";
+import { statementSpans, statementAt, tokenize, quoteSqlIdent, needsSqlQuote } from "./sql.mjs";
 
 function assert(c, m) { if (!c) { console.error("FAIL: " + m); process.exit(1); } }
 function eq(a, b, m) {
@@ -986,6 +1072,19 @@ eq(kindOf("a , b", ","), "punct", "comma is punctuation");
 // the whole stream round-trips back to the original text
 const orig = "SELECT a, COUNT(*) /* c */ FROM t -- x\nWHERE a = 'z;'";
 eq(tokenize(orig).map(x => x.text).join(""), orig, "tokens reconstruct the input");
+
+// ===== IDE / Journal identifier quoting ====================================
+// Sanitized load names stay bare; weird legacy / column names get quotes.
+eq(quoteSqlIdent("test_sam"), "test_sam", "safe table stays bare");
+eq(quoteSqlIdent("Usinvestments_Monthly_1"), "Usinvestments_Monthly_1",
+  "sanitized (1) name stays bare");
+eq(quoteSqlIdent("test.sam"), '"test.sam"', "embedded dot is quoted");
+eq(quoteSqlIdent("Usinvestments_Monthly (1) "),
+  '"Usinvestments_Monthly (1) "', "parens + trailing space are quoted");
+eq(quoteSqlIdent('a"b'), '"a""b"', "embedded quote is doubled");
+eq(quoteSqlIdent("123data"), '"123data"', "leading digit is quoted");
+assert(needsSqlQuote("my file") === true, "space needs quote");
+assert(needsSqlQuote("ok_name") === false, "safe name needs no quote");
 
 console.log("OK");
 """
@@ -1335,6 +1434,7 @@ function state(node, extra = {}) {
   return {
     node, index: 0, selected: false, dropHover: false,
     ripple: false, snapped: false, dying: false, born: false,
+    denseMode: false,
     renderVersion: "g1", chartVersion: null, childSelection: null,
     ...extra,
   };
@@ -1359,6 +1459,8 @@ assert(!sameCanvasNodeMemoState(base, state(input, { selected: true })),
   "selection rerenders");
 assert(!sameCanvasNodeMemoState(base, state(input, { renderVersion: "g2" })),
   "config/wiring version rerenders");
+assert(!sameCanvasNodeMemoState(base, state(input, { denseMode: true })),
+  "dense layout mode rerenders");
 const chart = {};
 assert(!sameCanvasNodeMemoState(state(input, { chartVersion: null }),
                                 state(input, { chartVersion: chart })),

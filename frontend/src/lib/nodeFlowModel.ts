@@ -178,6 +178,40 @@ export const PORT_LABEL: Record<string, string> = {
   vars: "values",
 };
 
+/** Letter drawn inside a left/right input arrow (join, reconcile, …). */
+export function inputPortMark(port: string): "L" | "R" | null {
+  if (port === "left") return "L";
+  if (port === "right") return "R";
+  return null;
+}
+
+/**
+ * Side-port caption next to the arrow. Plain in/out (and numbered inN/outN)
+ * and left/right are suppressed — left/right use {@link inputPortMark} instead.
+ * Semantic captions (True/False, only L, inner, errors, …) still show.
+ */
+export function sidePortLabel(port: string): string | null {
+  if (port === "in" || port === "out") return null;
+  if (port === "left" || port === "right") return null;
+  if (/^in\d+$/.test(port) || /^out\d+$/.test(port)) return null;
+  return PORT_LABEL[port] || port;
+}
+
+/** Favorites may be a built-in NodeType or `created:<definitionId>`. */
+export const CREATED_FAVORITE_PREFIX = "created:";
+
+export function createdFavoriteKey(definitionId: string): string {
+  return CREATED_FAVORITE_PREFIX + String(definitionId || "").trim();
+}
+
+export function isCreatedFavoriteKey(key: string): boolean {
+  return String(key || "").startsWith(CREATED_FAVORITE_PREFIX);
+}
+
+export function createdIdFromFavorite(key: string): string {
+  return String(key || "").slice(CREATED_FAVORITE_PREFIX.length);
+}
+
 // Some inputs render on the TOP edge of the node (pointing down) rather than on
 // the left. Today only the iterator's "vars" driver does this: it takes a table
 // whose rows produce the loop's scalar values, while the optional "in" (the
@@ -387,7 +421,7 @@ export function serializeNodeFlowGraph(
 
 export interface NodeFlowTabsFile {
   version: number;
-  tabs: Array<{ id: string; name: string }>;
+  tabs: Array<{ id: string; name: string; editingDefinitionId?: string }>;
   activeTabId: string;
   migratedFrom?: number;
 }
@@ -413,6 +447,12 @@ function validateNodeFlowTabsFile(value: any): asserts value is NodeFlowTabsFile
   for (const tab of value.tabs) {
     if (!tab || typeof tab.id !== "string" || !tab.id || typeof tab.name !== "string")
       throw new Error("NodeFlow tab state contains an invalid tab.");
+    if (
+      tab.editingDefinitionId !== undefined &&
+      typeof tab.editingDefinitionId !== "string"
+    ) {
+      throw new Error("NodeFlow tab state contains an invalid editing definition id.");
+    }
     if (ids.has(tab.id))
       throw new Error(`NodeFlow tab state contains duplicate tab id “${tab.id}”.`);
     ids.add(tab.id);
@@ -434,10 +474,20 @@ export function parseNodeFlowTabs(input: any): NodeFlowTabsFile {
 }
 
 export function serializeNodeFlowTabs(
-  tabs: Array<{ id: string; name: string }>,
+  tabs: Array<{ id: string; name: string; editingDefinitionId?: string }>,
   activeTabId: string,
 ): NodeFlowTabsFile {
-  return { version: NODEFLOW_TABS_VERSION, tabs, activeTabId };
+  return {
+    version: NODEFLOW_TABS_VERSION,
+    tabs: tabs.map((tab) => ({
+      id: tab.id,
+      name: tab.name,
+      ...(tab.editingDefinitionId
+        ? { editingDefinitionId: tab.editingDefinitionId }
+        : {}),
+    })),
+    activeTabId,
+  };
 }
 export const NODE_W = 184;
 export const DASH_W = 470;
@@ -450,6 +500,44 @@ export const HEAD_H = 30;
 export const PORT_TOP = 46;
 export const PORT_GAP = 24;
 
+/** Dense NodeFlow scale (Settings > View). Eye Care zooms chrome; dense
+ *  shrinks canvas geometry so more nodes fit. Composes with Eye Care. */
+export const NB_DENSE_SCALE = 0.85;
+
+// React sets this via setNodeFlowDenseMode so layout helpers see the flag
+// during the same render that toggles Settings (classList alone would lag
+// one frame behind useEffect).
+let _denseMode = false;
+
+export function setNodeFlowDenseMode(on: boolean): void {
+  _denseMode = !!on;
+  if (typeof document !== "undefined") {
+    document.documentElement.classList.toggle("nb-dense", _denseMode);
+    document.documentElement.setAttribute(
+      "data-nb-dense",
+      _denseMode ? "on" : "off",
+    );
+  }
+}
+
+export function nodeFlowDenseActive(): boolean {
+  // Prefer the document class so React.lazy NodeFlow chunks share one truth
+  // with App (module-level _denseMode is per-chunk after code split).
+  if (typeof document !== "undefined") {
+    return document.documentElement.classList.contains("nb-dense");
+  }
+  return _denseMode;
+}
+
+function denseScale(): number {
+  return nodeFlowDenseActive() ? NB_DENSE_SCALE : 1;
+}
+
+function densify(n: number): number {
+  const s = denseScale();
+  return s === 1 ? n : Math.max(1, Math.round(n * s));
+}
+
 export const STORE_KEY = "samql.nodeflow.v1";
 export const LEGACY_STORE_KEY = "samql.nodebook.v1";
 // tabbed canvases: an index of tabs + a per-tab graph key
@@ -460,6 +548,11 @@ export const LEGACY_TAB_KEY = (id: string) => "samql.nodebook.tab." + id;
 export const FAVORITES_KEY = "samql.nodeflow.favorites.v1";
 export const LEGACY_FAVORITES_KEY = "samql.nodebook.favorites.v1";
 
+/** Drop MIME for palette → canvas / favorites (built-in nodes). */
+export const NB_NODE_MIME = "application/x-nb-node";
+/** Drop MIME for created-node definitions. */
+export const NB_CREATED_NODE_MIME = "application/x-nb-created-node";
+
 // charts render under the node when expanded; dashboards are wider so their
 // 2x2 board has room. Charts are hidden unless explicitly shown; dashboards
 // show unless explicitly collapsed.
@@ -469,17 +562,21 @@ export function nodeShowsBody(n: NbNode) {
   return false;
 }
 export function nodeWidth(n: NbNode) {
-  if (n.type === "group" || n.type === "iterator") return GROUP_W;
+  if (n.type === "group" || n.type === "iterator") return densify(GROUP_W);
   if ((n.type === "chart" || n.type === "dashboard") && nodeShowsBody(n)) {
-    const def = n.type === "dashboard" ? DASH_W : NODE_W;
+    const def = densify(n.type === "dashboard" ? DASH_W : NODE_W);
     const w = n.config.bodyW;
-    return typeof w === "number" ? Math.max(NODE_W, Math.min(1100, w)) : def;
+    return typeof w === "number"
+      ? Math.max(densify(NODE_W), Math.min(1100, densify(w)))
+      : def;
   }
   if (n.type === "sql") {
     const w = n.config.bodyW;
-    return typeof w === "number" ? Math.max(NODE_W, Math.min(1100, w)) : SQL_W;
+    return typeof w === "number"
+      ? Math.max(densify(NODE_W), Math.min(1100, densify(w)))
+      : densify(SQL_W);
   }
-  return NODE_W;
+  return densify(NODE_W);
 }
 /** Effective ports for layout (usernode trims to configured counts). */
 export function portsOf(n: NbNode): { inputs: string[]; outputs: string[] } {
@@ -500,33 +597,39 @@ export function portsOf(n: NbNode): { inputs: string[]; outputs: string[] } {
 }
 
 export function nodeHeight(n: NbNode) {
+  const head = densify(HEAD_H);
+  const portTop = densify(PORT_TOP);
+  const portGap = densify(PORT_GAP);
   if (n.type === "text") {
     const lines = String(n.config.text || "")
       .split("\n")
       .reduce((a, ln) => a + Math.max(1, Math.ceil(ln.length / 26)), 0);
-    return Math.max(58, Math.min(40 + lines * 16, 240));
+    return densify(Math.max(58, Math.min(40 + lines * 16, 240)));
   }
   if (n.type === "variable") {
     const k = ((n.config && n.config.vars) || []).filter(
       (v: any) => v && v.name,
     ).length;
-    return Math.max(58, Math.min(46 + Math.max(1, k) * 22, 260));
+    return densify(Math.max(58, Math.min(46 + Math.max(1, k) * 22, 260)));
   }
   const p = portsOf(n);
   const leftIns = p.inputs.filter((port) => !isTopInput(n.type, port));
   const rows = Math.max(leftIns.length, p.outputs.length, 1);
-  const base = PORT_TOP + rows * PORT_GAP + 8;
+  const base = portTop + rows * portGap + densify(8);
   const bodyH = (def: number) =>
     typeof n.config.bodyH === "number"
-      ? Math.max(110, Math.min(820, n.config.bodyH))
-      : def;
+      ? Math.max(110, Math.min(820, densify(n.config.bodyH)))
+      : densify(def);
   if (n.type === "chart" && nodeShowsBody(n)) return base + bodyH(CHART_BODY_H);
   if (n.type === "dashboard" && nodeShowsBody(n))
     return base + bodyH(DASH_BODY_H);
   if (n.type === "sql") return base + bodyH(SQL_BODY_H);
   if (n.type === "group" || n.type === "iterator") {
     const k = ((n.config && n.config.children) || []).length;
-    return Math.max(base, HEAD_H + 10 + Math.max(50, k * 30 + 36) + 10);
+    return Math.max(
+      base,
+      head + densify(10) + Math.max(densify(50), k * densify(30) + densify(36)) + densify(10),
+    );
   }
   return base;
 }
@@ -568,19 +671,21 @@ export function portTopOffset(
   idx: number,
   total?: number,
 ) {
+  const portTop = densify(PORT_TOP);
+  const portGap = densify(PORT_GAP);
   if (
     ((n.type === "chart" || n.type === "dashboard") && nodeShowsBody(n)) ||
     n.type === "sql"
   ) {
-    return PORT_TOP + idx * PORT_GAP;
+    return portTop + idx * portGap;
   }
   const t =
     total ??
     (side === "in"
       ? portsOf(n).inputs.length
       : portsOf(n).outputs.length);
-  const span = (t - 1) * PORT_GAP;
-  return nodeHeight(n) / 2 - span / 2 + idx * PORT_GAP;
+  const span = (t - 1) * portGap;
+  return nodeHeight(n) / 2 - span / 2 + idx * portGap;
 }
 export function portXY(
   n: NbNode,
@@ -626,6 +731,8 @@ export interface CanvasNodeMemoState {
   snapped: boolean;
   dying: boolean;
   born: boolean;
+  /** Dense NodeFlow layout flag — module densify() is not visible to React.memo. */
+  denseMode: boolean;
   renderVersion: string;
   chartVersion: unknown;
   childSelection: string | null;
@@ -646,6 +753,7 @@ export function sameCanvasNodeMemoState(
     a.snapped === b.snapped &&
     a.dying === b.dying &&
     a.born === b.born &&
+    a.denseMode === b.denseMode &&
     a.renderVersion === b.renderVersion &&
     a.chartVersion === b.chartVersion &&
     a.childSelection === b.childSelection

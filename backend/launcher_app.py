@@ -153,27 +153,17 @@ class Splash:
         # present; fall back to the plain text splash otherwise.
         self._logo = None
         logo_path = _bundled_asset("logo.png")
-        # tkinter can't drop a PNG's matte, so instead of showing the logo's
-        # background as a boxy panel on a dark splash (on-box: a white square
-        # around the mark), MATCH the splash background to the logo's own corner
-        # pixel -- its background then blends seamlessly. Text-only splash (no
-        # logo) keeps the dark look.
+        # build.ps1 / build.sh run the logo doctor so public/logo.png ships
+        # with REAL alpha (border-connected background cleared). Keep the
+        # dark splash chrome -- matching the corner pixel was only a
+        # workaround for opaque mattes, and with transparent logos it would
+        # sample the (still-white) RGB under alpha 0 and paint a white box
+        # again. Tk composites PNG alpha onto this Label background.
         bg, fg = "#16181d", "#d7dae0"
         img = None
         if logo_path:
             try:
                 img = tk.PhotoImage(file=logo_path)
-                bg, fg = "#ffffff", "#202020"   # a logo present: assume light matte
-                try:
-                    px = img.get(0, 0)
-                    r, g, b = ([int(v) for v in px.split()]
-                               if isinstance(px, str) else list(px)[:3])
-                    bg = "#%02x%02x%02x" % (r, g, b)
-                    fg = ("#202020"
-                          if (0.299 * r + 0.587 * g + 0.114 * b) > 140
-                          else "#e8e8e8")
-                except Exception:
-                    pass
                 factor = max(1, img.width() // 320, img.height() // 96)
                 if factor > 1:
                     img = img.subsample(factor, factor)
@@ -181,7 +171,6 @@ class Splash:
             except Exception:
                 self._logo = None
                 img = None
-                bg, fg = "#16181d", "#d7dae0"
         w, h = 380, (200 if self._logo else 118)
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
@@ -194,7 +183,7 @@ class Splash:
         self.label = tk.Label(self.root, text="Starting SamQL...",
                               fg=fg, bg=bg, font=("Segoe UI", 11))
         self.label.pack(pady=(8 if self._logo else 26, 8))
-        self._fg = fg   # remember for set_text (a light matte needs dark text)
+        self._fg = fg
         self.bar = ttk.Progressbar(self.root, mode="indeterminate",
                                    length=300)
         self.bar.pack()

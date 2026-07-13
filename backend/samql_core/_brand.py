@@ -1272,11 +1272,63 @@ def logo_resize(data, max_side):
     return png_encode(nw, nh, out)
 
 
+_PUBLIC_LOGO_NAMES = ("logo.png", "app-icon.png", "apple-touch-icon.png")
+
+
+def logo_fix_file(path, *, tol=24, colors=None):
+    """Strip a baked-in background from a PNG on disk (in place).
+
+    Returns ``{path, before, after, changed}``. Used by ``build.ps1`` /
+    ``build.sh`` so splash / tab icons ship with real alpha instead of a
+    boxy matte. No-op (``changed=False``) when the file is already clean or
+    missing.
+    """
+    import os as _os
+    if not path or not _os.path.isfile(path):
+        return {"path": path, "before": None, "after": None, "changed": False}
+    with open(path, "rb") as fh:
+        data = fh.read()
+    before = logo_inspect(data)
+    fixed = logo_make_transparent(data, colors=colors, tol=tol)
+    after = logo_inspect(fixed)
+    changed = fixed != data
+    if changed:
+        # Atomic-ish replace so a killed build never leaves a half-written PNG.
+        tmp = path + ".samql-tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(fixed)
+        _os.replace(tmp, path)
+    return {"path": path, "before": before, "after": after, "changed": changed}
+
+
+def logo_fix_public_dir(public_dir, *, tol=24):
+    """Fix every known brand PNG under ``frontend/public`` (or any folder)."""
+    import os as _os
+    results = []
+    for name in _PUBLIC_LOGO_NAMES:
+        results.append(
+            logo_fix_file(_os.path.join(public_dir, name), tol=tol))
+    return results
+
+
 def _brand_cli(argv):
     import json as _json
     if len(argv) >= 2 and argv[0] == "inspect":
         with open(argv[1], "rb") as fh:
             print(_json.dumps(logo_inspect(fh.read()), indent=2))
+        return 0
+    if len(argv) >= 2 and argv[0] == "fix-public":
+        # build.ps1 / build.sh: strip opaque mattes from public brand PNGs
+        # before the frontend (and therefore the frozen splash) is packaged.
+        tol = 24
+        i = 2
+        while i < len(argv):
+            if argv[i] == "--tol":
+                tol = int(argv[i + 1]); i += 2
+            else:
+                i += 1
+        results = logo_fix_public_dir(argv[1], tol=tol)
+        print(_json.dumps(results, indent=2))
         return 0
     if len(argv) >= 3 and argv[0] == "fix":
         with open(argv[1], "rb") as fh:
@@ -1307,7 +1359,8 @@ def _brand_cli(argv):
     print("usage: python -m samql_core._brand inspect LOGO.png\n"
           "       python -m samql_core._brand fix LOGO.png OUT.png "
           "[--tol N] [--color RRGGBB[,RRGGBB]] [--flatten RRGGBB] "
-          "[--resize N]")
+          "[--resize N]\n"
+          "       python -m samql_core._brand fix-public DIR [--tol N]")
     return 2
 
 

@@ -42,6 +42,13 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $self = $MyInvocation.MyCommand.Path
 $url = "http://127.0.0.1:$Port"
 
+# WinForms is required for message-loop pumping during port / browser
+# waits. Load it before any path that may call Application.DoEvents --
+# including -KeepConsole / -NoSplash which skip Show-Splash (where
+# Add-Type used to live).
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
 # ---- 0) shed the console: relaunch hidden, forwarding every option ----
 if (-not $HiddenRelaunch -and -not $KeepConsole) {
     $fwd = @("-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -63,8 +70,6 @@ $script:SplashLabel = $null
 
 function Show-Splash {
     if ($NoSplash -or $KeepConsole) { return }
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
     $f = New-Object System.Windows.Forms.Form
     $f.FormBorderStyle = "None"
     $f.StartPosition = "CenterScreen"

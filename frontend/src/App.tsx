@@ -3,6 +3,8 @@ import React, {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -24,7 +26,7 @@ import type {
   StatementEntry,
   Health, TableInfo, HistoryEntry, SavedQuery, ResultPage,
   TableProfile, EngineKind, MemInfo, LoadProgress, ColumnFilter, FilterOp,
-  ReconcileResult, ReconBucket, TaskCard,
+  ReconcileResult, TaskCard,
 } from "./lib/types";
 import { Icon } from "./components/Icon";
 import { Sidebar } from "./components/Sidebar";
@@ -42,7 +44,10 @@ const NodeFlow = lazy(() =>
 import { Modal } from "./components/Modal";
 import { ErrorLogModal } from "./components/ErrorLogModal";
 import { DiagnosticsModal } from "./components/DiagnosticsModal";
-import { FlowCacheModal } from "./components/FlowCacheModal";
+import {
+  StorageMemoryModal,
+  type StorageMemoryTab,
+} from "./components/StorageMemoryModal";
 import { ActivityModal } from "./components/ActivityModal";
 import { useCreatedNodesSettings } from "./components/CreatedNodesSettings";
 import {
@@ -56,13 +61,15 @@ import { ProgressBar } from "./components/ProgressBar";
 import { useRunProgress } from "./lib/useRunProgress";
 import { cancelOne, isCancelledError, registerRun, unregisterRun, wasCancelled } from "./lib/runController";
 import { uid } from "./lib/ids";
+import { setNodeFlowDenseMode } from "./lib/nodeFlowModel";
 import { ReconcileModal, ReconSpec } from "./components/ReconcileModal";
 import { DocsModal } from "./components/DocsModal";
 import { Notebook } from "./components/Notebook";
 import { FieldExplorer } from "./components/FieldExplorer";
+import { CommandPalette, type CommandPaletteItem } from "./components/CommandPalette";
 import { ReconReport } from "./components/ReconReport";
 import { reconReportCsv, reconCsvFilename } from "./lib/reconExport";
-import { buildReconcileRequest } from "./lib/reconcileRequest";
+import { createReconDetailController } from "./lib/reconDetailActions";
 import { profileCsv, profileCsvFilename } from "./lib/profileExport";
 import type { EdTab, ResultTab } from "./controllers/appTypes";
 import { useBackgroundOperations } from "./controllers/useBackgroundOperations";
@@ -317,6 +324,14 @@ export default function App() {
   useEffect(() => {
     setDropRootId(null);
   }, [dropFiles]);
+  useEffect(() => {
+    // Keep the drop prompt aligned with the Load modal: never leave DuckDB /
+    // view-mode selected when this machine has no DuckDB.
+    if (!health?.features?.duckdb) {
+      setDropDest((d) => (d === "duckdb" ? "auto" : d));
+      setDropMode("materialize");
+    }
+  }, [health?.features?.duckdb]);
   const [dropSheets, setDropSheets] = useState<string[] | null>(null);
   const [dropSheet, setDropSheet] = useState(""); // "" = all sheets
   const [dropHeaderRow, setDropHeaderRow] = useState(1);
@@ -338,29 +353,32 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // floating field-access explorer; stays open across IDE / Journal / Node
   const [fieldExplorerOpen, setFieldExplorerOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  // Tools & Tables is NodeFlow-only; open flag lives here so Ctrl+K can open it
+  // and it reappears when returning to NodeFlow (hidden in IDE/Journal).
+  const [toolsTablesOpen, setToolsTablesOpen] = useState(false);
   const [errorLogOpen, setErrorLogOpen] = useState(false);
   const [diagOpen, setDiagOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const [storage, setStorage] = useState<{
     open: boolean;
     busy: boolean;
+    tab?: StorageMemoryTab;
     rep?: Awaited<ReturnType<typeof api.storageReport>> | null;
   } | null>(null);
   const [storageMem, setStorageMem] = useState<MemInfo | null>(null);
-  const openStorage = async () => {
+  const openStorage = async (tab: StorageMemoryTab = "storage") => {
     setSettingsOpen(false);
-    setStorage({ open: true, busy: true });
+    setStorage({ open: true, busy: true, tab });
     api.memory().then(setStorageMem).catch(() => setStorageMem(null));
     try {
       const rep = await api.storageReport();
-      setStorage({ open: true, busy: false, rep });
+      setStorage({ open: true, busy: false, tab, rep });
     } catch (e: any) {
       toast("error", "Storage report failed", e.message || String(e));
       setStorage(null);
     }
   };
-  const gb = (n: number) =>
-    n >= 1e9 ? (n / 1e9).toFixed(2) + " GB" : Math.round(n / 1e6) + " MB";
 
   // load the files captured by a drag-and-drop, using the chosen destination.
   // Runs as a background job (so it can be cancelled mid-load): the upload is
@@ -419,6 +437,7 @@ export default function App() {
   // dragover/drop stops the browser from just opening the dropped file.
   useEffect(() => {
     let depth = 0;
+    let peekCtrl: AbortController | null = null;
     const hasFiles = (e: DragEvent) =>
       !!e.dataTransfer &&
       Array.from(e.dataTransfer.types || []).includes("Files");
@@ -470,11 +489,21 @@ export default function App() {
       // If exactly one Excel workbook was dropped, read its sheet names (the
       // file is uploaded once for the peek, then discarded) so the prompt can
       // offer the same sheet picker + header-row choice as the file browser.
+      // Abort any prior peek so a superseded drop cannot patch stale sheets.
+      peekCtrl?.abort();
+      peekCtrl = null;
       if (files.length === 1 && /\.(xlsx|xlsm|xls)$/i.test(files[0].name)) {
+        const ctrl = new AbortController();
+        peekCtrl = ctrl;
         api
-          .excelPeek(files[0])
-          .then((r) => setDropSheets(r.sheets || []))
-          .catch(() => setDropSheets(null));
+          .excelPeek(files[0], ctrl.signal)
+          .then((r) => {
+            if (!ctrl.signal.aborted) setDropSheets(r.sheets || []);
+          })
+          .catch((err) => {
+            if (isCancelledError(err)) return;
+            setDropSheets(null);
+          });
       }
     };
     window.addEventListener("dragenter", onEnter);
@@ -482,6 +511,7 @@ export default function App() {
     window.addEventListener("dragleave", onLeave);
     window.addEventListener("drop", onDrop);
     return () => {
+      peekCtrl?.abort();
       window.removeEventListener("dragenter", onEnter);
       window.removeEventListener("dragover", onOver);
       window.removeEventListener("dragleave", onLeave);
@@ -532,6 +562,50 @@ export default function App() {
       /* ignore */
     }
   }, [reduceMotion]);
+  // Eye Care: enlarge text, buttons, nodes, and containers together.
+  const [eyeCare, setEyeCare] = useState(() => {
+    try {
+      return window.localStorage?.getItem("samql.eyeCare") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    document.documentElement.classList.toggle("eye-care", eyeCare);
+    document.documentElement.setAttribute(
+      "data-eye-care",
+      eyeCare ? "on" : "off",
+    );
+    try {
+      window.localStorage?.setItem("samql.eyeCare", eyeCare ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [eyeCare]);
+  // Dense NodeFlow: shrink canvas geometry so more nodes fit. Pairs with
+  // Eye Care (chrome larger, graph denser). Apply the layout flag in the
+  // state initializer / click handler so the same render sees densified sizes.
+  const [nodeFlowDense, setNodeFlowDense] = useState(() => {
+    let on = false;
+    try {
+      on = window.localStorage?.getItem("samql.nodeFlowDense") === "1";
+    } catch {
+      on = false;
+    }
+    setNodeFlowDenseMode(on);
+    return on;
+  });
+  useLayoutEffect(() => {
+    setNodeFlowDenseMode(nodeFlowDense);
+    try {
+      window.localStorage?.setItem(
+        "samql.nodeFlowDense",
+        nodeFlowDense ? "1" : "0",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [nodeFlowDense]);
   // optional ivory background for the SQL editor (separate toggle in Settings)
   const [ivoryEditor, setIvoryEditor] = useState(() => {
     try {
@@ -858,7 +932,6 @@ export default function App() {
   };
 
   const [aboutOpen, setAboutOpen] = useState(false);
-  const [flowCacheOpen, setFlowCacheOpen] = useState(false);
   const [tableProps, setTableProps] = useState<
     { engine: string; name: string } | null
   >(null);
@@ -1429,6 +1502,161 @@ export default function App() {
     return () => clearTimeout(h);
   }, [edTabs, activeId, target, readOnly, dialect, sidebarW, showTables, showNodeSearch, resultsH, toast]);
 
+  // Ctrl/Cmd+K command palette (global).
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod || event.altKey || event.shiftKey) return;
+      if (event.key !== "k" && event.key !== "K") return;
+      event.preventDefault();
+      setCommandPaletteOpen((v) => !v);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const openToolsTables = useCallback(() => {
+    switchView("nodeflow");
+    setToolsTablesOpen(true);
+  }, [switchView]);
+
+  const commandPaletteCommands = useMemo((): CommandPaletteItem[] => {
+    const isMac =
+      typeof navigator !== "undefined" &&
+      /Mac|iPhone|iPad/.test(navigator.platform || "");
+    const mod = isMac ? "⌘" : "Ctrl";
+    return [
+      {
+        id: "tools-tables",
+        label: "Open Tools & Tables",
+        group: "NodeFlow",
+        keywords: "palette nodes tables floating",
+        hint: view === "nodeflow" ? undefined : "opens NodeFlow",
+        run: openToolsTables,
+      },
+      {
+        id: "view-ide",
+        label: "Switch to IDE",
+        group: "Navigation",
+        run: () => switchView("ide"),
+      },
+      {
+        id: "view-journal",
+        label: "Switch to Journal",
+        group: "Navigation",
+        run: () => switchView("notebook"),
+      },
+      {
+        id: "view-nodeflow",
+        label: "Switch to NodeFlow",
+        group: "Navigation",
+        run: () => switchView("nodeflow"),
+      },
+      {
+        id: "load-data",
+        label: "Load data…",
+        group: "Data",
+        run: () => setLoadOpen(true),
+      },
+      {
+        id: "refresh-tables",
+        label: "Refresh tables",
+        group: "Data",
+        run: () => {
+          void refreshTables();
+        },
+      },
+      {
+        id: "toggle-tables",
+        label: showTables ? "Hide tables panel" : "Show tables panel",
+        group: "View",
+        run: () => setShowTables((v) => !v),
+      },
+      {
+        id: "toggle-node-toolbar",
+        label: nodeToolbarHidden
+          ? "Show node toolbar"
+          : "Hide node toolbar",
+        group: "View",
+        run: () => setNodeToolbarHidden((v) => !v),
+      },
+      {
+        id: "field-explorer",
+        label: "Open Field explorer",
+        group: "Tools",
+        run: () => setFieldExplorerOpen(true),
+      },
+      {
+        id: "activity",
+        label: "Open Activity & connections",
+        group: "Tools",
+        run: () => setActivityOpen(true),
+      },
+      {
+        id: "docs",
+        label: "Open Documentation",
+        group: "Tools",
+        run: () => setJoinGuideOpen(true),
+      },
+      {
+        id: "save",
+        label: "Save",
+        group: "File",
+        hint: `${mod}+S`,
+        run: () => activeSave(),
+      },
+      {
+        id: "save-as",
+        label: "Save as…",
+        group: "File",
+        run: () => activeSaveAs(),
+      },
+      {
+        id: "open",
+        label: "Open…",
+        group: "File",
+        run: () => activeOpen(),
+      },
+      {
+        id: "eye-care",
+        label: eyeCare ? "Turn Eye Care off" : "Turn Eye Care on",
+        group: "View",
+        run: () => setEyeCare((v) => !v),
+      },
+      {
+        id: "dense-nodeflow",
+        label: nodeFlowDense
+          ? "Turn Dense NodeFlow off"
+          : "Turn Dense NodeFlow on",
+        group: "View",
+        run: () =>
+          setNodeFlowDense((v) => {
+            const next = !v;
+            setNodeFlowDenseMode(next);
+            return next;
+          }),
+      },
+      {
+        id: "settings",
+        label: "Open Settings",
+        group: "Tools",
+        run: () => setSettingsOpen(true),
+      },
+    ];
+  }, [
+    activeOpen,
+    activeSave,
+    activeSaveAs,
+    eyeCare,
+    nodeFlowDense,
+    nodeToolbarHidden,
+    openToolsTables,
+    refreshTables,
+    showTables,
+    switchView,
+    view,
+  ]);
+
   // ---- export ----
   const doSaveResultAsTable = async () => {
     const r = activeResultTab;
@@ -1726,89 +1954,17 @@ export default function App() {
     setReconcileOpen(false);
   };
 
-  // Open an already-materialized result (by id) in a fresh pinned result
-  // tab -- used by reconcile drill-down.
-  const openResultFromId = async (resultId: string, title: string) => {
-    const id = uid();
-    setResTabs((rs) => [
-      ...rs,
-      {
-        id,
-        kind: "result",
-        title,
-        resultId,
-        pinned: true,
-        page: null,
-        sortCol: null,
-        descending: false,
-        view: "grid",
-      },
-    ]);
-    setActiveResId(id);
-    try {
-      const pg = await api.page(resultId, { offset: 0, limit: LAZY_CHUNK });
-      patchRes(id, { page: pg });
-    } catch (e: any) {
-      toast("error", "Could not open rows", e?.message);
-    }
-  };
-
-  const reconDrill = async (
-    spec: ReconSpec,
-    bucket: ReconBucket,
-    field: string | null,
-  ) => {
-    try {
-      const d = await api.reconcileDrilldown(buildReconcileRequest(spec, bucket, field));
-      if (d.error) {
-        toast("error", "Drill-down failed", d.error);
-        return;
-      }
-      if (d.result_id == null || d.count === 0) {
-        toast("warn", "No rows", "That bucket is empty.");
-        return;
-      }
-      const fld = field && (bucket === "matching" || bucket === "non_matching")
-        ? ` · ${field}`
-        : "";
-      void openResultFromId(d.result_id, `${bucket.replace("_", " ")}${fld}`);
-    } catch (e: any) {
-      toast("error", "Drill-down failed", e?.message);
-    }
-  };
-
-  const reconProfile = async (
-    spec: ReconSpec,
-    bucket: ReconBucket,
-    field: string | null,
-  ) => {
-    const id = uid();
-    setResTabs((rs) => [
-      ...rs,
-      {
-        id,
-        kind: "profile",
-        title: bucket.replace("_", " "),
-        profileTable: bucket.replace("_", " "),
-        profileEngine: (spec as any).engine || "sqlite",
-        profileLoading: true,
-        profile: null,
-      },
-    ]);
-    setActiveResId(id);
-    try {
-      const p = await api.reconcileProfile(buildReconcileRequest(spec, bucket, field));
-      patchRes(id, {
-        profile: p,
-        profileLoading: false,
-        title: p.table || bucket.replace("_", " "),
-        profileTable: p.table || bucket.replace("_", " "),
-      });
-    } catch (e: any) {
-      toast("error", "Profile failed", e?.message);
-      patchRes(id, { profileLoading: false });
-    }
-  };
+  const { reconDrill, reconProfile } = useMemo(
+    () =>
+      createReconDetailController({
+        toast,
+        setResTabs: setResTabs as any,
+        setActiveResId,
+        patchRes: patchRes as any,
+        pageLimit: LAZY_CHUNK,
+      }),
+    [toast, setResTabs, setActiveResId, patchRes],
+  );
 
   // re-run a specific result tab's query and refresh its rows in place
   const rerunResultTab = async (id: string): Promise<string | null> => {
@@ -2088,15 +2244,6 @@ export default function App() {
   };
 
   const feats = health?.features;
-  const featList: [string, boolean][] = feats
-    ? [
-        ["duckdb", feats.duckdb],
-        ["sqlglot", feats.sqlglot],
-        ["pyarrow", feats.pyarrow],
-        ["openpyxl", feats.openpyxl],
-        ["pyodbc", feats.pyodbc],
-      ]
-    : [];
 
   // a DataGrid bound to a specific result id (used by the compare split, where
   // each side sorts/pages independently).
@@ -2221,6 +2368,20 @@ export default function App() {
                     : "Show node search bar"}
                 </button>
                 <button
+                  disabled={view !== "nodeflow"}
+                  title={
+                    view === "nodeflow"
+                      ? "Floating tables list and node palette"
+                      : "Available only in NodeFlow"
+                  }
+                  onClick={() => {
+                    setToolsTablesOpen(true);
+                    setSettingsOpen(false);
+                  }}
+                >
+                  Tools &amp; Tables…
+                </button>
+                <button
                   onClick={() => {
                     setNodeToolbarHidden((v) => !v);
                     setSettingsOpen(false);
@@ -2252,18 +2413,30 @@ export default function App() {
                 >
                   {reduceMotion ? "Enable animations" : "Reduce motion"}
                 </button>
+                <button
+                  data-testid="eye-care-toggle"
+                  aria-pressed={eyeCare}
+                  title="Enlarge text, buttons, nodes, and panels for easier reading"
+                  onClick={() => setEyeCare((v) => !v)}
+                >
+                  {eyeCare ? "Eye Care: on" : "Eye Care"}
+                </button>
+                <button
+                  data-testid="nodeflow-dense-toggle"
+                  aria-pressed={nodeFlowDense}
+                  title="Shrink NodeFlow node geometry so more of the graph fits on screen (works with Eye Care)"
+                  onClick={() =>
+                    setNodeFlowDense((v) => {
+                      const next = !v;
+                      setNodeFlowDenseMode(next);
+                      return next;
+                    })
+                  }
+                >
+                  {nodeFlowDense ? "Dense NodeFlow: on" : "Dense NodeFlow"}
+                </button>
                 <div className="sep" />
                 <div className="label">Engine</div>
-                <button
-                  data-testid="flow-cache-menu"
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    setFlowCacheOpen(true);
-                  }}
-                  title="Inspect, resize, or clear the incremental NodeFlow cache"
-                >
-                  NodeFlow cache…
-                </button>
                 <button
                   disabled={!health?.features?.duckdb}
                   title={
@@ -2464,7 +2637,12 @@ export default function App() {
                 >
                   Diagnostics…
                 </button>
-                <button onClick={openStorage}>Storage &amp; memory…</button>
+                <button
+                  data-testid="storage-memory-menu"
+                  onClick={() => void openStorage()}
+                >
+                  Storage &amp; memory…
+                </button>
                 <button
                   className="danger"
                   onClick={() => {
@@ -2496,21 +2674,6 @@ export default function App() {
         <span className="spacer" />
         <StatIndicator onOpenActivity={() => setActivityOpen(true)} />
         <TaskWatcher onComplete={onTaskComplete} />
-        <div className="feat">
-          {featList.map(([name, on]) => (
-            <span
-              key={name}
-              className={"feat-pill" + (on ? " on" : "")}
-              title={
-                on
-                  ? `${name} is available`
-                  : `${name} is not installed (optional)`
-              }
-            >
-              {name}
-            </span>
-          ))}
-        </div>
         <button
           className="btn ghost"
           onClick={() => setExitOpen(true)}
@@ -2607,13 +2770,18 @@ export default function App() {
             onToast={toast}
             onTablesChanged={refreshTables}
           />
+          <CommandPalette
+            open={commandPaletteOpen}
+            onClose={() => setCommandPaletteOpen(false)}
+            commands={commandPaletteCommands}
+          />
           {view === "nodeflow" ? (
             <Suspense
               fallback={
                 <div className="view-loading">Loading NodeFlow…</div>
               }
             >
-              <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} onTogglePalette={() => setNodeToolbarHidden((v) => !v)} />
+              <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} onTogglePalette={() => setNodeToolbarHidden((v) => !v)} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} />
             </Suspense>
           ) : view === "ide" ? (
             <>
@@ -3296,6 +3464,11 @@ export default function App() {
                   profile={activeRes.profile ?? null}
                   loading={!!activeRes.profileLoading}
                   tableName={activeRes.profileTable}
+                  onCancel={
+                    activeRes.profileQueryId
+                      ? () => cancelBgOp(activeRes.profileQueryId)
+                      : undefined
+                  }
                 />
               ) : activeResultTab ? (
                 (activeResultTab.view ?? "grid") === "chart" ? (
@@ -3602,7 +3775,10 @@ export default function App() {
         <DiagnosticsModal onClose={() => setDiagOpen(false)} tables={tables} />
       )}
       {activityOpen && (
-        <ActivityModal onClose={() => setActivityOpen(false)} />
+        <ActivityModal
+          onClose={() => setActivityOpen(false)}
+          onTablesChanged={refreshTables}
+        />
       )}
       {ideFile && (
         <FileBrowser
@@ -3680,12 +3856,6 @@ export default function App() {
 
       {confirmUi}
       {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
-      {flowCacheOpen && (
-        <FlowCacheModal
-          onClose={() => setFlowCacheOpen(false)}
-          onToast={toast}
-        />
-      )}
       {createdNodesUi.modals}
       {tableProps && (
         <TablePropsModal
@@ -3695,180 +3865,16 @@ export default function App() {
         />
       )}
       {storage?.open && (
-        <Modal title="Storage & memory" onClose={() => setStorage(null)}>
-          {storage.busy || !storage.rep ? (
-            <div className="faint"><span className="spin" /> measuring…</div>
-          ) : (
-            <div className="storage-panel">
-              <div className="hint" style={{ marginBottom: 8 }}>
-                Removed automatically: this instance's temp on close; dead
-                instances, zombies and installer leftovers on every open.
-                The conversion cache persists on purpose (it's why reloads
-                are instant) inside its budget.
-              </div>
-              <div className="storage-row">
-                <span>
-                  Engine memory
-                  {storageMem?.duckdb_mb != null
-                    ? ` · DuckDB ${Math.round(storageMem.duckdb_mb)} MB`
-                    : ""}
-                  {storageMem?.cached_results != null
-                    ? ` · ${storageMem.cached_results} cached results`
-                    : ""}
-                </span>
-                <b>
-                  {storageMem?.rss_mb != null
-                    ? Math.round(storageMem.rss_mb) + " MB"
-                    : "—"}
-                </b>
-              </div>
-              <div className="storage-row">
-                <span>This session (results, uploads, engine spill)</span>
-                <b>{gb(storage.rep.instance.bytes)}</b>
-              </div>
-              <div className="storage-row">
-                <span>
-                  Other instances ({storage.rep.other_instances.count},{" "}
-                  {storage.rep.other_instances.dead} dead)
-                </span>
-                <b>{gb(storage.rep.other_instances.bytes)}</b>
-              </div>
-              <div className="storage-row">
-                <span>
-                  Installer leftovers (_MEI ×{storage.rep.mei_orphans.count})
-                </span>
-                <b>{gb(storage.rep.mei_orphans.bytes)}</b>
-              </div>
-              {(storage.rep as any).mei_live_launcher?.present ? (
-                <div className="storage-row">
-                  <span>
-                    Held by the running launcher (_MEI — frees on exit)
-                  </span>
-                  <b>{gb((storage.rep as any).mei_live_launcher.bytes)}</b>
-                </div>
-              ) : null}
-              {(storage.rep as any).webview_cache ? (
-                <div className="storage-row">
-                  <span>App-window cache (Chromium)</span>
-                  <b>{gb((storage.rep as any).webview_cache.bytes)}</b>
-                </div>
-              ) : null}
-              <div className="storage-row">
-                <span>
-                  Conversion cache ({storage.rep.filecache.count} file
-                  {storage.rep.filecache.count === 1 ? "" : "s"}, budget{" "}
-                  {storage.rep.filecache.budget_gb.toFixed(0)} GB)
-                </span>
-                <b>{gb(storage.rep.filecache.bytes)}</b>
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  gap: 8,
-                  marginTop: 12,
-                }}
-              >
-                <button
-                  className="btn sm"
-                  onClick={async () => {
-                    try {
-                      const r = await api.storageClean({ orphans: true });
-                      if ((r as any).note)
-                        toast(r.freed.orphans ? "ok" : "warn",
-                          r.freed.orphans
-                            ? gb(r.freed.orphans) + " reclaimed"
-                            : "Nothing reclaimed",
-                          (r as any).note);
-                      else
-                        toast("ok", "Cleaned up",
-                          gb(r.freed.orphans) + " reclaimed");
-                      void openStorage();
-                    } catch (e: any) {
-                      toast("error", "Cleanup failed", e.message);
-                    }
-                  }}
-                >
-                  Clean orphans &amp; leftovers
-                </button>
-                <button
-                  className="btn sm ghost"
-                  title="Every cached conversion is deleted; the next load of each file converts again (slower once, then cached)."
-                  onClick={async () => {
-                    try {
-                      const r = await api.storageClean({ filecache: true });
-                      toast("ok", "Conversion cache cleared",
-                        gb(r.freed.filecache) + " reclaimed");
-                      void openStorage();
-                    } catch (e: any) {
-                      toast("error", "Cleanup failed", e.message);
-                    }
-                  }}
-                >
-                  Clear conversion cache
-                </button>
-                <button
-                  className="btn sm ghost"
-                  title="Clears the native window's Chromium cache dirs (Cache, Code Cache, GPU/shader caches). Cookies, saved logins and local storage are untouched. Files the open window holds clear next time."
-                  onClick={async () => {
-                    try {
-                      const r = await api.storageClean({
-                        webview_cache: true,
-                      });
-                      toast("ok", "Window cache cleared",
-                        gb(r.freed.webview_cache) + " reclaimed" +
-                          (r.note ? " — " + r.note : ""));
-                      void openStorage();
-                    } catch (e: any) {
-                      toast("error", "Cleanup failed", e.message);
-                    }
-                  }}
-                >
-                  Clear window cache
-                </button>
-                <button
-                  className="btn sm ghost"
-                  title="Release unused engine memory and drop cold cached results."
-                  onClick={async () => {
-                    try {
-                      const m = await api.freeMemory();
-                      toast("ok", "Memory & cache freed",
-                        m.freed_mb != null
-                          ? `Released ~${m.freed_mb} MB`
-                          : undefined);
-                      api.memory().then(setStorageMem).catch(() => {});
-                    } catch (e: any) {
-                      toast("error", "Free memory failed", e.message);
-                    }
-                  }}
-                >
-                  Free unused memory
-                </button>
-                <button
-                  className="btn sm ghost"
-                  title="Remove stale temp from previous runs; this session's usage is shown above."
-                  onClick={async () => {
-                    try {
-                      const r = await api.sweepTemp();
-                      toast("ok", "Temp files cleared",
-                        r.removed > 0
-                          ? `Removed ${r.removed} stale folder${
-                              r.removed === 1 ? "" : "s"
-                            }.`
-                          : "No stale temp to remove.");
-                      void openStorage();
-                    } catch (e: any) {
-                      toast("error", "Clear temp files failed", e.message);
-                    }
-                  }}
-                >
-                  Clear temp files
-                </button>
-              </div>
-
-            </div>
-          )}
-        </Modal>
+        <StorageMemoryModal
+          busy={storage.busy}
+          report={storage.rep}
+          mem={storageMem}
+          initialTab={storage.tab}
+          onClose={() => setStorage(null)}
+          onToast={toast}
+          onRefreshReport={() => void openStorage(storage.tab || "storage")}
+          onMemFreed={setStorageMem}
+        />
       )}
       {dropFiles && (
         <Modal
@@ -3906,8 +3912,21 @@ export default function App() {
               value={dropDest}
               onChange={(e) => setDropDest(e.target.value)}
             >
-              <option value="auto">Auto — DuckDB</option>
-              <option value="duckdb">DuckDB</option>
+              <option value="auto">
+                Auto
+                {health?.features?.duckdb
+                  ? " — DuckDB (recommended)"
+                  : " — SQLite"}
+              </option>
+              <option
+                value="duckdb"
+                disabled={!health?.features?.duckdb}
+              >
+                DuckDB
+                {health?.features?.duckdb
+                  ? ""
+                  : " (install duckdb to enable)"}
+              </option>
               <option value="sqlite">SQLite</option>
             </select>
           </label>

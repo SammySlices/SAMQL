@@ -8,7 +8,13 @@ import React, {
 } from "react";
 import { startPointerDrag } from "../lib/pointerDrag";
 import { api } from "../lib/api";
-import { cancelOne } from "../lib/runController";
+import {
+  cancelOne,
+  isCancelledError,
+  registerRun,
+  unregisterRun,
+  wasCancelled,
+} from "../lib/runController";
 import type {
   TableInfo,
   PivotResult,
@@ -188,12 +194,26 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     qid: string;
     ctrl: AbortController;
   } | null>(null);
-  const stopPivot = React.useCallback(() => {
+  // Debounce timer + stop-before-start: Stop is visible while loading=true
+  // for the 300ms settle window, before inflight exists. Without these,
+  // stopPivot was a no-op and the aggregate still fired.
+  const pendingTimer = React.useRef<number | null>(null);
+  const stopRequested = React.useRef(false);
+  const cancelInflight = React.useCallback(() => {
     const cur = inflight.current;
     if (!cur) return;
     inflight.current = null;
     cancelOne(cur.qid, cur.ctrl);
   }, []);
+  const stopPivot = React.useCallback(() => {
+    stopRequested.current = true;
+    if (pendingTimer.current != null) {
+      window.clearTimeout(pendingTimer.current);
+      pendingTimer.current = null;
+    }
+    cancelInflight();
+    setLoading(false);
+  }, [cancelInflight]);
   const [elapsed, setElapsed] = useState(0);
 
   // reset the layout when the source changes (fields differ)
@@ -321,6 +341,7 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
       return;
     }
     let alive = true;
+    stopRequested.current = false;
     setLoading(true);
     const started = Date.now();
     setElapsed(0);
@@ -328,12 +349,21 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
       () => alive && setElapsed(Date.now() - started),
       100,
     );
-    const run = window.setTimeout(async () => {
-      stopPivot(); // a superseding run cancels the one in flight
+    pendingTimer.current = window.setTimeout(async () => {
+      pendingTimer.current = null;
+      if (!alive || stopRequested.current) {
+        if (alive) {
+          setLoading(false);
+          window.clearInterval(timer);
+        }
+        return;
+      }
+      cancelInflight(); // a superseding run cancels the one in flight
       const ctrl = new AbortController();
       const qid =
         "pivot-" + Math.random().toString(36).slice(2, 12);
       inflight.current = { qid, ctrl };
+      registerRun(qid, ctrl);
       const vals = values.map((v) => ({ field: v.field, agg: v.agg }));
       const fils = filters
         .filter(
@@ -366,8 +396,14 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
           },
           ctrl.signal,
         );
-        if (!alive) return;
+        if (!alive || stopRequested.current || wasCancelled(qid) || ctrl.signal.aborted)
+          return;
         if (res.error) {
+          // Soft cancel: keep the previous grid (matches reconcile / VERSION).
+          if (/interrupt|cancel/i.test(res.error) || wasCancelled(qid)) {
+            onToast("warn", "Pivot cancelled", "Stopped at your request.");
+            return;
+          }
           if (res.error === "result expired") onExpired?.();
           else onToast("error", "Pivot failed", res.error);
           setData(null);
@@ -376,9 +412,15 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
         }
       } catch (e: any) {
         // a cancel is not a failure -- the previous grid stays put
-        if (alive && !ctrl.signal.aborted)
+        if (
+          alive &&
+          !ctrl.signal.aborted &&
+          !wasCancelled(qid) &&
+          !isCancelledError(e, qid)
+        )
           onToast("error", "Pivot failed", e?.message);
       } finally {
+        unregisterRun(qid, ctrl);
         if (inflight.current && inflight.current.qid === qid)
           inflight.current = null;
         if (alive) {
@@ -389,7 +431,10 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     }, 300);
     return () => {
       alive = false;
-      window.clearTimeout(run);
+      if (pendingTimer.current != null) {
+        window.clearTimeout(pendingTimer.current);
+        pendingTimer.current = null;
+      }
       window.clearInterval(timer);
       stopPivot(); // spec change / unmount frees the backend too
     };
@@ -656,6 +701,7 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
         {loading && (
           <button
             className="btn ghost sm"
+            data-testid="pivot-stop"
             title="Cancel this pivot (interrupts the backend aggregate)"
             onClick={stopPivot}
           >

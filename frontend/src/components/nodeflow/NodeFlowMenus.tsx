@@ -36,6 +36,8 @@ interface NodeFlowMenusProps {
   pasteClipboard: (at?: { x: number; y: number }) => void;
   deleteMany: (ids: string[]) => void;
   removeNode: (id: string) => void;
+  canOpenCreatedNode?: boolean;
+  onOpenCreatedNode?: () => void;
   deleteConfirm: DeleteConfirmState | null;
   setDeleteConfirm: (value: DeleteConfirmState | null) => void;
   doRemoveNode: (id: string) => void;
@@ -59,6 +61,8 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
   pasteClipboard,
   deleteMany,
   removeNode,
+  canOpenCreatedNode,
+  onOpenCreatedNode,
   deleteConfirm,
   setDeleteConfirm,
   doRemoveNode,
@@ -107,6 +111,20 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
               const count = multi ? selectedIds.length : 1;
               return (
                 <>
+                  {canOpenCreatedNode && onOpenCreatedNode && !multi && (
+                    <>
+                      <button
+                        data-testid="open-created-node"
+                        onClick={() => {
+                          onOpenCreatedNode();
+                          setNodeMenu(null);
+                        }}
+                      >
+                        <Icon.FolderOpen size={13} /> Open Node
+                      </button>
+                      <div className="sep" />
+                    </>
+                  )}
                   <button
                     onClick={() => {
                       copySelection();

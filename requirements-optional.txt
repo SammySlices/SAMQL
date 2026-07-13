@@ -1,34 +1,22 @@
-# Optional acceleration libraries for SamQL.
+# Acceleration and format libraries for SamQL distribution builds.
 #
-# NONE of these are required: SamQL runs on the Python standard library alone
-# (the SQLite engine) with a bare interpreter. But installing them in the build
-# environment BEFORE running `pyinstaller backend/samql.spec` makes the shipped
-# single-file executable bundle them -- and that is strongly recommended,
-# because the engine selection is "DuckDB whenever DuckDB is importable". With
-# no DuckDB in the binary the app silently falls back to SQLite, and large
-# datasets (millions of rows / multi-GB files) are far slower.
+# A bare interpreter can still run SamQL on SQLite alone, but every
+# ``build.ps1`` / ``build.sh`` distribution build MUST install this entire
+# file into the SAME Python that runs PyInstaller, then hard-verify the load
+# stack imports. Packages that are missing at packaging time are NOT bundled,
+# and recipients of the .exe then hit load/export failures that look like
+# "the file works for me but not for my coworker."
 #
-# build.sh installs this file (best-effort, one package at a time) so the
-# default build is the fast one. Each line is independent: if a wheel isn't
-# available for your platform/Python the build still succeeds without it.
-#
-#   duckdb   -- THE default analytics engine. Columnar, vectorized, reads CSV/
-#               Parquet/JSON natively, and combines folders in-engine. This is
-#               the one that makes it "DuckDB by default"; without it every node
-#               runs on SQLite. Pinned to a version with UNION ALL BY NAME.
-#   pyarrow  -- Arrow interchange + Parquet acceleration for the result cache on
-#               the SQLite side (DuckDB reads/writes Parquet natively without it).
-#   orjson   -- fast JSON encoding for large API / result payloads.
-#   ijson    -- streaming JSON parser for very large API responses (bounded RAM).
-#   openpyxl -- read/write .xlsx workbooks.
-#   sqlglot  -- SQL dialect niceties / validation.
-#   tzdata   -- timezone data so TIMESTAMP WITH TIME ZONE works in a frozen build.
-#   pywebview -- opens SamQL in a NATIVE desktop window (SamQL-AppWindow.exe /
-#               `SamQL.exe --window`) instead of a browser tab, so the window
-#               wears the SamQL icon and there is no Edge/Chrome chrome. On
-#               Windows its backend is Microsoft Edge WebView2 via pythonnet,
-#               which pip pulls in automatically. Optional: without it the
-#               app-window launcher falls back to a chromeless browser window.
+#   duckdb   -- default analytics engine (CSV / JSON / Parquet / large data)
+#   pyarrow  -- Arrow interchange + Parquet acceleration
+#   orjson   -- fast JSON for API / result payloads
+#   ijson    -- streaming JSON for large nested loads
+#   openpyxl -- .xlsx / .xlsm read + write
+#   sqlglot  -- SQL dialect niceties / validation
+#   tzdata   -- timezone data for TIMESTAMP WITH TIME ZONE in frozen builds
+#   pywebview -- native desktop window (SamQL-AppWindow); falls back to browser
+#   pyodbc   -- SQL Server connector (Windows builds)
+#   pywin32  -- Windows auth / DPAPI helpers used with SQL Server + secrets
 duckdb>=0.9.0
 pyarrow
 orjson
@@ -37,3 +25,5 @@ openpyxl
 sqlglot
 tzdata
 pywebview
+pyodbc; platform_system == "Windows"
+pywin32; platform_system == "Windows"

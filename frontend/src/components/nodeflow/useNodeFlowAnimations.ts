@@ -14,6 +14,9 @@ interface ImplosionOperation {
 export function useNodeFlowAnimations() {
   const [ripple, setRipple] = useState(false);
   const [dyingIds, setDyingIds] = useState<Set<string>>(() => new Set());
+  const [dyingEdgeIds, setDyingEdgeIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [bornId, setBornId] = useState<string | null>(null);
 
   const mountedRef = useRef(false);
@@ -24,6 +27,8 @@ export function useNodeFlowAnimations() {
   const bornIdRef = useRef<string | null>(null);
   const dyingCounts = useRef<Map<string, number>>(new Map());
   const implosions = useRef<Map<string, ImplosionOperation>>(new Map());
+  const edgeRetracts = useRef<Map<string, number>>(new Map());
+  const edgeCommitters = useRef<Map<string, () => void>>(new Map());
 
   const fireRipple = useCallback(() => {
     if (rippleTimer.current != null) {
@@ -135,10 +140,54 @@ export function useNodeFlowAnimations() {
     implosions.current.set(key, { timer, ids: uniqueIds });
   }, []);
 
+  /**
+   * Retract a connector wire, then commit its removal. The edge stays in the
+   * graph (with `.retract`) until the animation finishes so the stroke can
+   * play. Pending commits flush on unmount so a tab switch never leaves a
+   * "zombie" connector behind.
+   */
+  const withEdgeRetract = useCallback((edgeId: string, commit: () => void) => {
+    const id = String(edgeId || "").trim();
+    if (!id) {
+      commit();
+      return;
+    }
+    if (edgeCommitters.current.has(id)) return;
+    if (mountedRef.current) {
+      setDyingEdgeIds((current) => new Set([...current, id]));
+    }
+    const finish = () => {
+      if (!edgeCommitters.current.has(id)) return;
+      edgeCommitters.current.delete(id);
+      const timer = edgeRetracts.current.get(id);
+      if (timer != null) {
+        window.clearTimeout(timer);
+        edgeRetracts.current.delete(id);
+      }
+      try {
+        commit();
+      } finally {
+        if (mountedRef.current) {
+          setDyingEdgeIds((current) => {
+            if (!current.has(id)) return current;
+            const next = new Set(current);
+            next.delete(id);
+            return next;
+          });
+        }
+      }
+    };
+    edgeCommitters.current.set(id, finish);
+    const timer = window.setTimeout(finish, 220);
+    edgeRetracts.current.set(id, timer);
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     const activeImplosions = implosions.current;
     const activeCounts = dyingCounts.current;
+    const activeEdges = edgeRetracts.current;
+    const activeCommits = edgeCommitters.current;
     return () => {
       mountedRef.current = false;
       if (rippleTimer.current != null) {
@@ -162,15 +211,29 @@ export function useNodeFlowAnimations() {
       }
       activeImplosions.clear();
       activeCounts.clear();
+      for (const timer of activeEdges.values()) {
+        window.clearTimeout(timer);
+      }
+      activeEdges.clear();
+      for (const finish of [...activeCommits.values()]) {
+        try {
+          finish();
+        } catch {
+          /* ignore */
+        }
+      }
+      activeCommits.clear();
     };
   }, []);
 
   return {
     ripple,
     dyingIds,
+    dyingEdgeIds,
     bornId,
     fireRipple,
     fireBorn,
     withImplosion,
+    withEdgeRetract,
   };
 }

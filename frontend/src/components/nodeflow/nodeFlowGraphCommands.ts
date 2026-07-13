@@ -96,6 +96,9 @@ export function appendGroupChild(
   type: NodeType,
   childId = uid(),
 ): { nodes: NbNode[]; childId: string } {
+  if (type === "usernode" || type === "group" || type === "iterator") {
+    return { nodes, childId };
+  }
   const child = {
     id: childId,
     type,
@@ -239,7 +242,8 @@ export function moveNodeIntoContainer(
     !container ||
     (container.type !== "group" && container.type !== "iterator") ||
     moved.type === "group" ||
-    moved.type === "iterator"
+    moved.type === "iterator" ||
+    moved.type === "usernode"
   ) {
     return { nodes, edges };
   }

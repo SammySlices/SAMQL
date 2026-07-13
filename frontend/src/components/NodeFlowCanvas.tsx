@@ -20,45 +20,55 @@ export const WireLayer = React.memo(function WireLayer({
   onSelect,
   onDelete,
   dying,
+  dyingEdges,
 }: {
   wires: Wire[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
+  /** Node ids whose connected wires should retract (node delete). */
   dying?: Set<string>;
+  /** Edge ids currently playing the connector-delete retract animation. */
+  dyingEdges?: Set<string>;
 }) {
   return (
     <svg className="nb2-wires">
       {wires.map((w) => {
         const sel = w.id === selectedId;
+        const retracting =
+          !!dyingEdges?.has(w.id) ||
+          !!(dying && (dying.has(w.fromN) || dying.has(w.toN)));
         const mx = (w.ax + w.bx) / 2;
         const my = (w.ay + w.by) / 2;
         return (
           <g
             key={w.id}
             className={
-              "nb2-wire" +
-              (sel ? " sel" : "") +
-              (dying && (dying.has(w.fromN) || dying.has(w.toN))
-                ? " retract"
-                : "")
+              "nb2-wire" + (sel ? " sel" : "") + (retracting ? " retract" : "")
             }
+            data-testid={retracting ? "nodeflow-wire-retracting" : undefined}
           >
             <path
               className="nb2-wire-hit"
               d={wirePath(w.ax, w.ay, w.bx, w.by)}
               onClick={(e) => {
                 e.stopPropagation();
+                if (retracting) return;
                 onSelect(w.id);
               }}
             />
-            <path className="nb2-wire-line" d={wirePath(w.ax, w.ay, w.bx, w.by)} />
+            <path
+              className="nb2-wire-line"
+              d={wirePath(w.ax, w.ay, w.bx, w.by)}
+              pathLength={1}
+            />
             <g
               className="nb2-wire-del"
               transform={`translate(${mx},${my})`}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
+                if (retracting) return;
                 onDelete(w.id);
               }}
             >

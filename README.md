@@ -158,8 +158,8 @@ commands are:
 ```bash
 python tools/release_artifacts.py verify-tree --root .
 python tools/release_artifacts.py package --root . --output-dir release
-# Windows wrapper for the same verified package operation:
-.\Pack-SamQL.ps1 -OutputDir .\release
+# Windows wrapper (defaults to .\release):
+.\Pack-SamQL.ps1
 ```
 
 The package command emits the complete decoded full-source bundle, the
@@ -284,14 +284,18 @@ compatible and migrate automatically to the new format and keys.
 .\build.ps1
 ```
 
-Either script builds the frontend, makes sure PyInstaller is installed, and
-runs it. The result lands in `dist/` — `SamQL` on macOS/Linux or
-`SamQL.exe` on Windows. Double-click or run it to launch.
+Either script builds the frontend, installs the full optional dependency
+manifest into the packaging Python, hard-verifies the load stack, and runs
+PyInstaller. The result lands in `dist/` — both `SamQL.exe` (console server)
+and `SamQL-AppWindow.exe` (windowed launcher) on Windows, built from the
+**same shared payload** (frontend, DuckDB/openpyxl stack, icon, native-window
+packages). The build refuses to finish if either target is missing.
 
 To build manually:
 
 ```bash
 cd frontend && npm install && npm run build && cd ..
+pip install -r requirements-optional.txt
 pip install pyinstaller
 pyinstaller backend/samql.spec
 # -> dist/SamQL (the server+UI) AND dist/SamQL-AppWindow
@@ -299,15 +303,16 @@ pyinstaller backend/samql.spec
 ```
 
 Whatever optional libraries are installed in your Python environment at
-build time get bundled automatically, so install those first if you want
-DuckDB, Parquet, xlsx export, etc. baked into the binary.
+build time get bundled automatically into **both** exes, so install those
+first if you want DuckDB, Parquet, xlsx export, etc. baked in.
 
 ### Code signing (Windows, optional)
 
 Unsigned executables are frequently blocked by corporate IT (SmartScreen /
-AppLocker), so for distribution you'll usually want to sign `SamQL.exe`.
-`build.ps1` has an opt-in signing step — off by default, so a plain
-`.\build.ps1` still produces an unsigned binary:
+AppLocker), so for distribution you'll usually want to sign **both**
+`SamQL.exe` and `SamQL-AppWindow.exe`. `build.ps1` has an opt-in signing
+step — off by default, so a plain `.\build.ps1` still produces unsigned
+binaries:
 
 ```powershell
 # certificate already in the Windows certificate store (by SHA-1 thumbprint)

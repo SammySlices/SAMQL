@@ -52,6 +52,7 @@ function makeSceneProps(
     zoom: 1,
     snap: false,
     dyingIds: new Set(),
+    dyingEdgeIds: new Set(),
     selectedEdge: null,
     setSelectedEdge: vi.fn(),
     deleteEdge: vi.fn(),
@@ -84,6 +85,7 @@ function makeSceneProps(
     startWire: vi.fn(),
     setHoveredInput: vi.fn(),
     setNodeMenu: vi.fn(),
+    denseMode: false,
   };
 }
 

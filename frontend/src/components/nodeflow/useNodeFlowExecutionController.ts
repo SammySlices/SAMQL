@@ -8,7 +8,7 @@ import {
   type NbEdge,
   type NbNode,
 } from "../../lib/nodeFlowModel";
-import { cancelAllRuns, isCancelledError, registerRun, unregisterRun } from "../../lib/runController";
+import { cancelAllRuns, cancelOne, isCancelledError, registerRun, unregisterRun } from "../../lib/runController";
 import type { ChartData } from "../../lib/types";
 import type { NodeFlowSnapshot } from "./useNodeFlowDocumentController";
 
@@ -73,6 +73,7 @@ type AuxRequestOwner = {
   generation: number;
   scope: number;
   controller: AbortController;
+  queryId?: string;
 };
 
 export function useNodeFlowExecutionController({
@@ -130,38 +131,48 @@ export function useNodeFlowExecutionController({
 
   const abortAuxRequests = () => {
     for (const owner of auxRequestsRef.current.values()) {
-      try {
-        owner.controller.abort();
-      } catch {
-        // Best-effort cancellation only.
+      if (owner.queryId) cancelOne(owner.queryId, owner.controller);
+      else {
+        try {
+          owner.controller.abort();
+        } catch {
+          // Best-effort cancellation only.
+        }
       }
     }
     auxRequestsRef.current.clear();
     chartPromisesRef.current.clear();
   };
 
-  const beginAuxRequest = (key: string): AuxRequestOwner => {
+  const beginAuxRequest = (key: string, queryId?: string): AuxRequestOwner => {
     const previous = auxRequestsRef.current.get(key);
     if (previous) {
-      try {
-        previous.controller.abort();
-      } catch {
-        // Best-effort replacement only.
+      if (previous.queryId) cancelOne(previous.queryId, previous.controller);
+      else {
+        try {
+          previous.controller.abort();
+        } catch {
+          // Best-effort replacement only.
+        }
       }
     }
     const generation = (auxGenerationRef.current.get(key) || 0) + 1;
     auxGenerationRef.current.set(key, generation);
+    const controller = new AbortController();
+    if (queryId) registerRun(queryId, controller);
     const owner = {
       key,
       generation,
       scope: scopeVersionRef.current,
-      controller: new AbortController(),
+      controller,
+      queryId,
     };
     auxRequestsRef.current.set(key, owner);
     return owner;
   };
 
   const finishAuxRequest = (owner: AuxRequestOwner) => {
+    if (owner.queryId) unregisterRun(owner.queryId, owner.controller);
     if (auxRequestsRef.current.get(owner.key) === owner) {
       auxRequestsRef.current.delete(owner.key);
     }
@@ -170,11 +181,15 @@ export function useNodeFlowExecutionController({
   const cancelAuxRequest = (key: string) => {
     const owner = auxRequestsRef.current.get(key);
     if (!owner) return;
-    try {
-      owner.controller.abort();
-    } catch {
-      // Best-effort cancellation only.
+    if (owner.queryId) cancelOne(owner.queryId, owner.controller);
+    else {
+      try {
+        owner.controller.abort();
+      } catch {
+        // Best-effort cancellation only.
+      }
     }
+    if (owner.queryId) unregisterRun(owner.queryId, owner.controller);
     auxRequestsRef.current.delete(key);
     chartPromisesRef.current.delete(key);
   };
@@ -673,7 +688,7 @@ export function useNodeFlowExecutionController({
       return Promise.resolve();
     }
 
-    const owner = beginAuxRequest(key);
+    const owner = beginAuxRequest(key, `chart-${node.id}-${uid()}`);
     setChartEntry(node.id, { loading: true });
     const request = (async () => {
       try {
@@ -681,15 +696,19 @@ export function useNodeFlowExecutionController({
           graphForRun(),
           node.id,
           chartSpecOf(node),
-          undefined,
+          owner.queryId,
           owner.controller.signal,
         );
         if (!isAuxRequestCurrent(owner)) return;
-        if (wasCancelled(r)) {
+        if (wasCancelled(r) || !!r.cancelled) {
           setChartEntry(node.id, {});
           return;
         }
         if (r.error) {
+          if (/interrupt|cancel/i.test(r.error)) {
+            setChartEntry(node.id, {});
+            return;
+          }
           setChartEntry(node.id, { error: r.error });
           return;
         }
@@ -699,7 +718,7 @@ export function useNodeFlowExecutionController({
           !isAuxRequestCurrent(owner) ||
           owner.controller.signal.aborted ||
           cancelRequested.current ||
-          isCancelledError(e)
+          isCancelledError(e, owner.queryId)
         ) {
           return;
         }
@@ -731,12 +750,15 @@ export function useNodeFlowExecutionController({
       return;
     }
     const id = startRun(`Charting ${node.config.label}…`);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
       const r = await api.nodeflowChart(
         graphForApi(),
         node.id,
         chartSpecOf(node),
         id,
+        ctrl.signal,
       );
       if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
       if (r.error) {
@@ -756,11 +778,14 @@ export function useNodeFlowExecutionController({
       }
       onToast("error", "Chart error", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
   const doValidate = async (node: NbNode) => {
-    const owner = beginAuxRequest(`validate:${node.id}`);
+    const queryId = "validate-" + uid();
+    const owner = beginAuxRequest(`validate:${node.id}`, queryId);
     setValidateResults((p) => ({ ...p, [node.id]: { loading: true } }));
     try {
       const r = await api.nodeflowValidate(
@@ -768,8 +793,9 @@ export function useNodeFlowExecutionController({
         node.id,
         node.config.checks || [],
         owner.controller.signal,
+        queryId,
       );
-      if (!isAuxRequestCurrent(owner)) return;
+      if (!isAuxRequestCurrent(owner) || wasCancelled(r, queryId)) return;
       setValidateResults((p) => ({
         ...p,
         [node.id]: r.error ? { error: r.error } : r,
@@ -784,7 +810,7 @@ export function useNodeFlowExecutionController({
       if (
         !isAuxRequestCurrent(owner) ||
         cancelRequested.current ||
-        isCancelledError(e)
+        isCancelledError(e, queryId)
       ) {
         return;
       }
@@ -801,8 +827,10 @@ export function useNodeFlowExecutionController({
 
   const doProfile = async (node: NbNode) => {
     const id = startRun(`Profiling ${node.config.label}…`);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.nodeflowBrowse(graphForRun(), node.id, id);
+      const r = await api.nodeflowBrowse(graphForRun(), node.id, id, ctrl.signal);
       if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
       if (r.error) {
         onToast("error", "Browse error", r.error);
@@ -822,6 +850,8 @@ export function useNodeFlowExecutionController({
       }
       onToast("error", "Browse error", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
@@ -843,6 +873,8 @@ export function useNodeFlowExecutionController({
       return;
     }
     const id = startRun(`Reconciling ${node.config.label}…`);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
       const r = await api.nodeflowReconcile(
         graphForApi(),
@@ -851,6 +883,7 @@ export function useNodeFlowExecutionController({
         node.config.compare || [],
         id,
         node.config.balance || null,
+        ctrl.signal,
       );
       if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
       if (r.error) {
@@ -871,6 +904,8 @@ export function useNodeFlowExecutionController({
       }
       onToast("error", "Reconcile error", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
@@ -909,11 +944,8 @@ export function useNodeFlowExecutionController({
   };
 
   const doExportImage = async (node: NbNode): Promise<RunOutcome> => {
+    // Empty folder → server writes to the user's Downloads folder.
     const folder = (node.config.folder || "").trim();
-    if (!folder) {
-      onToast("error", "Pick an output folder", "Choose where to write the image.");
-      return { ok: false };
-    }
     const kind = outputKind(node);
     const src = inputNodeOf(node);
     if (!src || (kind !== "chart" && kind !== "dashboard")) {
@@ -986,11 +1018,8 @@ export function useNodeFlowExecutionController({
   };
 
   const doExport = async (node: NbNode): Promise<RunOutcome> => {
+    // Empty folder → server writes to the user's Downloads folder.
     const folder = (node.config.folder || "").trim();
-    if (!folder) {
-      onToast("error", "Pick an output folder", "Choose where to write the file.");
-      return { ok: false };
-    }
     const id = startRun(`Exporting ${node.config.label}…`);
     try {
       const r = await api.nodeflowExport(
@@ -1013,7 +1042,7 @@ export function useNodeFlowExecutionController({
       onToast(
         "ok",
         "Exported",
-        `${r.file} — ${(r.rows ?? 0).toLocaleString()} rows`,
+        `${r.path || r.file} — ${(r.rows ?? 0).toLocaleString()} rows`,
       );
       finishRun(id, r, `Exported ${(r.rows ?? 0).toLocaleString()} rows`);
       return { ok: true };
@@ -1039,9 +1068,8 @@ export function useNodeFlowExecutionController({
       for (const n of outs) rr.push(await doExport(n));
       return rr;
     };
-    // a node missing a folder can't be batched cleanly; run each so doExport
-    // surfaces the per-node "pick a folder" error.
-    if (outs.some((n) => !(n.config.folder || "").trim())) return eachAlone();
+    // Empty folder is OK — the server writes to Downloads. Batch still
+    // shares one materialisation when every output participates.
     const items = outs.map((n) => ({
       node_id: n.id,
       folder: (n.config.folder || "").trim(),
@@ -1161,8 +1189,10 @@ export function useNodeFlowExecutionController({
   };
   const doReadDirectory = async (node: NbNode, path: string, file: string) => {
     const id = startRun(`Reading ${file}…`);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.directoryRead(path, id);
+      const r = await api.directoryRead(path, id, ctrl.signal);
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
         return;
@@ -1193,13 +1223,17 @@ export function useNodeFlowExecutionController({
       }
       onToast("error", "Couldn't read file", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
   const doReadFolder = async (node: NbNode, folder: string) => {
     const id = startRun(`Reading folder…`);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.folderRead(folder, id);
+      const r = await api.folderRead(folder, id, ctrl.signal);
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
         return;
@@ -1230,6 +1264,8 @@ export function useNodeFlowExecutionController({
       }
       onToast("error", "Couldn't read folder", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
@@ -1240,13 +1276,18 @@ export function useNodeFlowExecutionController({
       return { ok: false };
     }
     const id = startRun(`Fetching ${node.config.label}…`);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.nodeApiFetch({
-        node_id: node.id,
-        config: node.config,
-        graph: graphForRun(),
-        query_id: id,
-      });
+      const r = await api.nodeApiFetch(
+        {
+          node_id: node.id,
+          config: node.config,
+          graph: graphForRun(),
+          query_id: id,
+        },
+        ctrl.signal,
+      );
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
         return { ok: false };
@@ -1301,6 +1342,8 @@ export function useNodeFlowExecutionController({
       onToast("error", "Fetch failed", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
       return { ok: false };
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 

@@ -1,4 +1,5 @@
 import { backupLocalStorageValue, runMigrations } from "./migrations";
+import { quoteSqlIdent } from "./sql";
 
 // Notebook-mode logic: cell-chaining (let a cell query an earlier cell's
 // result by name) and localStorage persistence of the cell list. Chaining is
@@ -78,9 +79,7 @@ function dropTrailingSemicolon(sql: string): string {
 }
 
 function quoteName(name: string): string {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
-    ? name
-    : '"' + name.replace(/"/g, '""') + '"';
+  return quoteSqlIdent(name);
 }
 
 // Detect a leading WITH / WITH RECURSIVE on the target query, skipping leading

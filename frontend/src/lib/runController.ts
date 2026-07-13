@@ -74,32 +74,39 @@ export function wasCancelled(queryId: string | null | undefined): boolean {
   return true;
 }
 
-// One call cancels a run END TO END: remember the intent (so the pending
-// promise's rejection reads as Cancelled), abort the local fetch, interrupt
-// the backend.
-export function cancelById(queryId: string): void {
-  markCancelled(queryId);
+function abortRegistered(queryId: string): void {
   const set = _ctl.get(queryId);
-  if (set) {
-    for (const c of set) {
-      try {
-        c.abort();
-      } catch {
-        /* ignore */
-      }
+  if (!set) return;
+  for (const c of set) {
+    try {
+      c.abort();
+    } catch {
+      /* ignore */
     }
   }
+}
+
+// One call cancels a run END TO END: remember the intent (so the pending
+// promise's rejection reads as Cancelled), abort every local fetch under
+// the id (run + page siblings), interrupt the backend. Aborting the fetch
+// alone is never enough -- the engine keeps running until cancelQuery.
+export function cancelById(queryId: string): void {
+  if (!queryId) return;
+  markCancelled(queryId);
+  abortRegistered(queryId);
   api.cancelQuery(queryId).catch(() => {});
 }
 
-// Cancel a single run: abort its in-flight fetch when the caller owns the
-// AbortController (IDE query, a Journal cell) AND interrupt the backend
-// statement(s) registered under its id. Safe with a null id/controller.
+// Cancel a single run end-to-end. Always interrupts the backend; aborts every
+// registered controller under the id (not just the one the caller held), so a
+// Stop mid-page-fetch cannot leave a sibling request or the engine running.
+// The optional ctrl is aborted too for callers that have not registered yet.
 export function cancelOne(
   queryId: string | null | undefined,
   ctrl?: AbortController | null,
 ): void {
   markCancelled(queryId);
+  if (queryId) abortRegistered(queryId);
   try {
     ctrl?.abort();
   } catch {

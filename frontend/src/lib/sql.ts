@@ -293,3 +293,24 @@ export function toggleLineComment(
     selEnd: lineStart + next.length,
   };
 }
+
+/** True when a bare identifier would be illegal or ambiguous in SQL. */
+export function needsSqlQuote(ident: string): boolean {
+  const s = String(ident ?? "");
+  if (!s) return true;
+  // Safe unquoted form: letter/underscore, then word chars only.
+  return !/^[A-Za-z_][A-Za-z0-9_]*$/.test(s);
+}
+
+/**
+ * Quote a SQL identifier for IDE / Journal insertion when needed.
+ * Safe names (`test_sam`, `Usinvestments_Monthly_1`) stay bare so typing
+ * stays natural; weird ones (spaces, dots, parens, leading digits) become
+ * `"..."` with embedded quotes doubled -- the same rule notebook chaining
+ * and Field Explorer already use.
+ */
+export function quoteSqlIdent(ident: string): string {
+  const s = String(ident ?? "");
+  if (!needsSqlQuote(s)) return s;
+  return `"${s.replace(/"/g, '""')}"`;
+}
