@@ -2,12 +2,78 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-14.595
+Current build:   2026-07-14.601
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-14.601  (v2.16.4)
+
+NESTED JSON FIELD-TREE + TABLE_ORIGINS + FULL-TEST HARDENING.
+Flatten-off Parquet keeps original JSON paths in DuckDB table_origins so
+diagnostics / column_field_tree can still sniff nested STRUCT/LIST and
+double-encoded JSON[] element keys. Sidebar field-tree collapse/search
+contracts stay green; backend suite covers origins retention, (element)
+trees, and non-empty zero-copy pages. Stall-sample / repro tools remain in
+SOURCE_MANIFEST (313 managed files).
+
+----------------------------------------------------------------------
+build 2026-07-14.600  (v2.16.4)
+
+LARGE JSON STALL FIX + STICKY-CANCEL PROFILE FIX.
+Top-level array / concat JSON rewrite no longer dies on ijson Decimal values
+(orjson dump + use_float); flatten-off no longer silently stream-flattens on
+native failure (that looked like a multi-GB stall). After a stalled load is
+cancelled, sticky DuckDB _cancel is cleared on fresh profile / query / pivot
+so right-click Profile is not auto-cancelled. Sample/repro tools under tools/
+(SOURCE_MANIFEST 313 files).
+
+----------------------------------------------------------------------
+build 2026-07-14.599  (v2.16.4)
+
+BIG-DATA LOAD DEFAULTS, TYPE FALLBACK, QUERY/UI LARGE-DATA RAILS.
+Flatten-on-load is opt-in (default OFF) so multi-GB nested JSON stays nested
+for speed; when the Flatten toggle is on, loads use full STRUCT/LIST then
+relational shred. DuckDB CSV/JSON conversion errors (e.g. empty string → int)
+fall back to all-VARCHAR so loads don't fail. Concurrent reads default ON.
+Load preflight advises before large files; Parquet COPY aborts mid-flight on
+low temp disk. Result grid uses a sliding window + optional column projection.
+orjson is required (backend/requirements.txt; build scripts verify it).
+Suite: 841 passed, 0 failed, 5 skipped.
+
+----------------------------------------------------------------------
+build 2026-07-14.598  (v2.16.4)
+
+LARGE-FILE LOAD CONVERSION + LOAD THRESHOLDS UI.
+Multi-GB JSON/CSV loads convert to on-disk Parquet (or stream-flatten) instead
+of failing at the old refuse-CTAS barrier; large CSV→SQLite auto-upgrades to
+DuckDB Parquet. Storage & memory gains a Load thresholds tab for Parquet /
+JSON / upload / filecache gates. SOURCE_MANIFEST is 311 managed files
+(load_thresholds.py, LoadThresholdsPanel + test).
+
+----------------------------------------------------------------------
+build 2026-07-14.597  (v2.16.4)
+
+BUILD.PS1 NPM CI FIX FOR POWERSHELL STOP + ONEDIR.
+``build.ps1`` no longer fails on harmless npm stderr warnings under
+``$ErrorActionPreference = Stop`` (the false ``npm ci failed`` during
+``-OneDir``). Frontend install now goes through lockfile normalization and
+``install_frontend_deps.py`` (EINTEGRITY recovery), then ``npm run build``.
+
+----------------------------------------------------------------------
+build 2026-07-14.596  (v2.16.4)
+
+QUERY LARGE-DATA PRIORITY FIXES, PANDAS PYTHON NODE, SHAREPOINT SIGN-IN.
+Ordered query results stay on the Parquet path; sort/filter materialize once;
+page fetches are cancellable; COPY results respect SAMQL_MAX_RESULT_GB.
+Python nodes get a real pandas DataFrame as `df` (pandas bundled in dist
+builds). SharePoint auth adds Microsoft device-code / interactive sign-in
+(MSAL) and Windows Integrated Auth for classic on-prem. Frontend packaging
+refuses a placeholder UI without a complete Vite dist. SOURCE_MANIFEST is
+308 managed files (adds sharepoint_auth.py).
 
 ----------------------------------------------------------------------
 build 2026-07-14.595  (v2.16.4)

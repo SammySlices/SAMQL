@@ -689,16 +689,25 @@ class Session:
                 "persistent_flow_cache_days", 14) or 0))
         except Exception:
             self.persistent_flow_cache_days = 14
-        # Flatten JSON on load: a JSON file is streamed into normalized,
-        # relational tables (a root table plus a child table per nested array)
-        # instead of one table with nested columns. Default on -- it is the
-        # cancellable, heartbeating streaming path and matches how most people
-        # want nested JSON in a query engine. Turned off, a DuckDB JSON load
-        # keeps the single nested table (SQLite has no nested types, so it
-        # always flattens regardless). Applies to every load entry point (drag
-        # and drop, the load modal, folders, load-by-path) since they all go
-        # through load_file.
-        self.flatten_on_load = bool(self.config.get("flatten_json", True))
+        # Flatten JSON on load: when ON, a JSON file is converted then shredded
+        # into normalized relational tables (root + child table per nested
+        # array). Default OFF -- multi-GB nested JSON is far faster as a single
+        # nested Parquet-backed table; turn the Load modal "Flatten into
+        # relational tables" toggle on only when you need that shape. SQLite
+        # has no nested types, so it always flattens regardless. Applies to
+        # every load entry point that does not pass an explicit flatten/shred
+        # flag (folder appends, some path loads).
+        self.flatten_on_load = bool(self.config.get("flatten_json", False))
+        # Load-file size thresholds (Parquet / JSON stream / upload / cache).
+        # Persisted overrides win over env vars; applied process-wide so
+        # engines.py / filecache / server upload cap all see them.
+        try:
+            from . import load_thresholds as _LT
+            saved_lt = self.config.get("load_thresholds")
+            if isinstance(saved_lt, dict) and saved_lt:
+                _LT.apply_overrides(saved_lt, replace=True)
+        except Exception:
+            pass
         # The registry/accounting lives in a dedicated thread-safe cache
         # object; session.py supplies the engine-specific size estimate and
         # table-drop callback. Compatibility aliases keep diagnostics/tests
@@ -824,12 +833,13 @@ class Session:
         return self.duckdb
 
     def set_flatten_json(self, on):
-        """Toggle 'flatten JSON on load' at runtime and persist it. When on, a
-        JSON load streams into normalized relational tables (a root plus a child
-        table per nested array); when off, a DuckDB JSON load keeps a single
-        nested table. Applies to the next load on every entry point (drag/drop,
-        modal, folder, path) since they all route through load_file, which reads
-        this flag."""
+        """Toggle 'flatten JSON on load' at runtime and persist it.
+
+        When on, a DuckDB JSON load shreds into normalized relational tables
+        after convert. When off (the default), the load keeps a single nested
+        table. Applies to the next load on every entry point that does not
+        pass an explicit flatten/shred flag.
+        """
         self.flatten_on_load = bool(on)
         try:
             self.config.set("flatten_json", self.flatten_on_load)
@@ -840,7 +850,7 @@ class Session:
     def flatten_json_enabled(self):
         """Whether a JSON load flattens into normalized tables (True) or keeps
         a single nested DuckDB table (False)."""
-        return bool(getattr(self, "flatten_on_load", True))
+        return bool(getattr(self, "flatten_on_load", False))
 
     def set_concurrent_reads(self, on):
         # .426: async reads are ALWAYS ON. The whole product leans on
@@ -867,7 +877,7 @@ class Session:
         if pref is not None:
             return bool(pref)
         from .engines import _env_truthy, CONCURRENT_READS_ENV
-        return _env_truthy(CONCURRENT_READS_ENV, False)
+        return _env_truthy(CONCURRENT_READS_ENV, True)
 
     def status(self):
         """Live activity snapshot for the dashboard and diagnostics: in-flight
@@ -1114,6 +1124,7 @@ class Session:
             "pyarrow": _ilu.find_spec("pyarrow") is not None,
             "sqlglot": _ilu.find_spec("sqlglot") is not None,
             "pandas": _ilu.find_spec("pandas") is not None,
+            "msal": _ilu.find_spec("msal") is not None,
             "pyodbc": _ilu.find_spec("pyodbc") is not None,
             "openpyxl": _ilu.find_spec("openpyxl") is not None,
             "secrets": dpapi_available(),
@@ -1212,7 +1223,11 @@ class Session:
         DuckDB type, so the sidebar can render the schema as an expandable tree
         instead of one giant type string. Returns {type, fields:[...]} where
         each field is {depth, name, type, kind, path, note}. Empty for a flat
-        (scalar / SQLite) column."""
+        (scalar / SQLite) column.
+
+        Flatten-off loads often store deep nesting as opaque JSON / JSON[]
+        (maximum_depth=2), so DESCRIBE alone yields an empty tree. In that
+        case sample live cell values and build the tree from them."""
         from .diagnostics import (parse_duckdb_type, flatten_type_tree,
                                   access_recipes)
         mgr = self.duckdb if engine == "duckdb" else self.db
@@ -1234,7 +1249,85 @@ class Session:
         # drop the root row (the column itself already shows in the tree)
         if rows and rows[0].get("depth") == 0:
             rows = rows[1:]
+        # Call via the class so unit tests that bind this method onto a
+        # SimpleNamespace still resolve the static helper.
+        if engine == "duckdb" and Session._field_tree_needs_json_sample(
+                raw, rows):
+            sampled = Session._sample_column_field_tree(
+                self, mgr, table, column, raw)
+            if sampled is not None:
+                return sampled
         return {"type": raw, "fields": rows}
+
+    @staticmethod
+    def _field_tree_needs_json_sample(raw_type, fields):
+        """True when DESCRIBE has no deep schema (opaque JSON / JSON leaves)."""
+        tu = (raw_type or "").strip().upper()
+        if tu == "JSON" or tu == "JSON[]" or tu.endswith(" JSON") \
+                or " JSON)" in tu or tu.endswith("JSON[]"):
+            if not fields:
+                return True
+            # STRUCT(... JSON) / JSON[] only expose shallow leaves -- sample
+            # when every leaf type is still opaque JSON.
+            leaves = [f for f in fields
+                      if (f.get("kind") or "") in ("scalar", "array-scalar")
+                      or str(f.get("type") or "").upper() in ("JSON",)]
+            if leaves and all(
+                    "JSON" in str(f.get("type") or "").upper()
+                    for f in leaves):
+                return True
+            # A lone "(element)" under JSON[] is not a useful field tree.
+            names = {f.get("name") for f in fields}
+            if names <= {"(element)"} and "JSON" in tu:
+                return True
+        return False
+
+    def _sample_column_field_tree(self, mgr, table, column, raw_type):
+        """Sample live values and build a field tree for opaque JSON columns."""
+        from .diagnostics import json_values_to_field_tree, access_recipes
+        from .sqlutil import quote_ident as _qid
+        try:
+            sql = ('SELECT %s FROM %s LIMIT 40'
+                   % (_qid(column), _qid(table)))
+            reader = getattr(mgr, "read", None) or getattr(mgr, "execute_read",
+                                                          None)
+            if reader is not None:
+                _c, rows = reader(sql)
+            else:
+                _c, rows = mgr.execute(sql)
+        except Exception:
+            return None
+        values = [r[0] for r in (rows or []) if r]
+        if not values:
+            return None
+        # STRUCT columns with JSON leaves use dotted access for the typed
+        # shell; pure JSON / JSON[] use ->> recipes.
+        tu = (raw_type or "").upper()
+        access = ("struct" if tu.startswith("STRUCT") else "json")
+        try:
+            ft = json_values_to_field_tree(values, colname=column,
+                                          access_style=access)
+        except Exception:
+            return None
+        nodes = list(ft.get("nodes") or [])
+        if nodes and nodes[0].get("depth") == 0:
+            nodes = nodes[1:]
+        if not nodes:
+            return None
+        try:
+            # Rebuild a root row so access_recipes has column context, then
+            # drop it again for the sidebar.
+            root = {"depth": 0, "name": column, "type": raw_type,
+                    "kind": "struct" if access == "struct" else "scalar",
+                    "path": column, "note": None}
+            full = [root] + [
+                dict(n, depth=int(n.get("depth") or 0)) for n in nodes]
+            access_recipes(column, full)
+            nodes = full[1:]
+        except Exception:
+            pass
+        return {"type": raw_type, "fields": nodes,
+                "sampled": ft.get("sampled"), "source": "sampled-values"}
 
     @staticmethod
     def _safe_count(engine, name):
@@ -1674,6 +1767,111 @@ class Session:
                 "persistent": self._persistent_flow_cache_registry.info(),
                 **self._flow_cache_registry.info()}
 
+    def load_thresholds_info(self):
+        """Effective load-file thresholds for the Storage & memory UI."""
+        from . import load_thresholds as LT
+        return {"ok": True, "thresholds": LT.effective_map(),
+                "overrides": LT.overrides_snapshot()}
+
+    def load_preflight(self, path):
+        """Advise before a large file load (engine, temp disk, format limits).
+
+        Returns warnings / blockers without starting the load. Used by the
+        Load Data UI so multi-GB files get guidance early.
+        """
+        from . import resourcebudget
+        from . import tmputil
+        from .engines import HAS_DUCKDB
+        warnings = []
+        blockers = []
+        path = str(path or "").strip()
+        info = {
+            "ok": True,
+            "path": path,
+            "exists": False,
+            "size": 0,
+            "size_mb": 0,
+            "ext": "",
+            "duckdb": bool(HAS_DUCKDB),
+            "disk_free_gb": None,
+            "warnings": warnings,
+            "blockers": blockers,
+        }
+        if not path or not os.path.isfile(path):
+            blockers.append("File not found.")
+            info["ok"] = False
+            return info
+        info["exists"] = True
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        info["size"] = size
+        info["size_mb"] = round(size / (1024 * 1024.0), 1)
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        info["ext"] = ext
+        try:
+            snap = resourcebudget.snapshot(temp_dir=tmputil.instance_dir())
+            info["disk_free_gb"] = snap.get("disk_free_gb")
+            free = int(snap.get("disk_free") or 0)
+        except Exception:
+            free = 0
+        # Temp volume should hold ~2× the file for NDJSON rewrite / Parquet.
+        if size >= 256 * 1024 * 1024 and free and free < size * 2:
+            warnings.append(
+                "Temp disk has only %.1f GiB free; this %.1f GiB file may "
+                "need ~2× headroom for conversion. Free space or set temp "
+                "onto a larger volume."
+                % (free / (1024 ** 3), size / (1024 ** 3)))
+        if ext in ("xlsx", "xlsm", "xls"):
+            warnings.append(
+                "Excel is not ideal for multi-GB / multi-million-row data "
+                "(~1,048,576 row limit). Prefer CSV or Parquet for large "
+                "datasets.")
+            if size >= 100 * 1024 * 1024:
+                warnings.append(
+                    "This workbook is large for openpyxl streaming — "
+                    "export to CSV/Parquet first if the load is slow or "
+                    "fails.")
+        if ext in ("csv", "tsv", "txt", "json", "ndjson", "jsonl") \
+                and size >= 512 * 1024 * 1024 and not HAS_DUCKDB:
+            blockers.append(
+                "DuckDB is required for files this large. Install duckdb "
+                "(pip install duckdb) so SamQL can convert to on-disk Parquet.")
+            info["ok"] = False
+        elif ext in ("csv", "tsv", "txt", "json", "ndjson", "jsonl") \
+                and size >= 256 * 1024 * 1024:
+            warnings.append(
+                "Large file — SamQL will convert to an on-disk Parquet cache "
+                "(DuckDB). Prefer Load by path over drag-drop for the "
+                "biggest files.")
+        if size >= 4 * 1024 * 1024 * 1024:
+            warnings.append(
+                "File is over 4 GiB. Use Load Data → File (path). Drag-drop "
+                "uploads are capped (see Storage & memory → Load thresholds).")
+        return info
+
+    def configure_load_thresholds(self, updates=None, reset=False):
+        """Apply and persist load-file threshold overrides.
+
+        ``updates`` is a dict of field → number. ``reset=True`` clears all
+        overrides (env vars / built-in defaults apply again).
+        """
+        from . import load_thresholds as LT
+        if reset:
+            LT.clear_overrides()
+            try:
+                if "load_thresholds" in self.config.data:
+                    del self.config.data["load_thresholds"]
+                    self.config.save()
+            except Exception:
+                pass
+        elif updates:
+            LT.apply_overrides(updates, replace=False)
+            snap = LT.overrides_snapshot()
+            self.config.set("load_thresholds", snap)
+        return self.load_thresholds_info()
+
     def configure_flow_cache(self, enabled=None, max_entries=None,
                              max_mb=None, clear=False, reset_stats=False,
                              adaptive_resources=None,
@@ -1812,12 +2010,18 @@ class Session:
         except Exception:
             _oid = None
         try:
-            loaded = loaders.load_file(self, path, destination=destination,
-                                       base_name=base_name, progress=progress,
-                                       delimiter=delimiter, mode=mode,
-                                       sheet=sheet, header_row=header_row,
-                                       exclude=exclude, flatten=flatten,
-                                       root_id=root_id)
+            # UI Flatten toggle uses shred=True with flatten=False. Load full
+            # STRUCT/LIST types (not depth-capped JSON) so relational shred
+            # sees real arrays/structs — and stays the fast Parquet path for
+            # large files — instead of mis-shredding JSON scalar columns.
+            loaded = loaders.load_file(
+                self, path, destination=destination,
+                base_name=base_name, progress=progress,
+                delimiter=delimiter, mode=mode,
+                sheet=sheet, header_row=header_row,
+                exclude=exclude, flatten=flatten,
+                root_id=root_id,
+                full_nested=bool(shred) and flatten is False)
             if shred:
                 loaded = self._shred_after_load(loaded, root_id=root_id)
         finally:
@@ -4921,6 +5125,7 @@ class Session:
         labelled; flow-internal calls pass no surface and register at the
         flow level instead (no double-begin on the same id)."""
         if surface and query_id:
+            self._clear_stale_engine_cancel(except_qid=query_id)
             self._register_run(query_id, None, surface=surface, label=label)
             try:
                 return self._run_query_inner(sql, target, read_only,
@@ -4929,6 +5134,7 @@ class Session:
             finally:
                 # Keep the cancelled flag through mid-send abort (_REQ_LOCAL).
                 self._end_run_keep_cancel(query_id)
+        self._clear_stale_engine_cancel(except_qid=query_id)
         return self._run_query_inner(sql, target, read_only, query_id,
                                      dialect, reuse,
                                      preview_limit=preview_limit)
@@ -5225,6 +5431,21 @@ class Session:
         except (TypeError, ValueError):
             return 10_000_000
 
+    def _result_byte_cap(self):
+        """Hard ceiling on materialized result Parquet size (bytes).
+
+        Complements the row cap so a wide nested explode can't fill the disk
+        before hitting 10M rows. Override with ``SAMQL_MAX_RESULT_GB``
+        (default 8; ``0`` disables)."""
+        v = os.environ.get("SAMQL_MAX_RESULT_GB")
+        if v is None:
+            return 8 * 1024 * 1024 * 1024
+        try:
+            gb = float(v)
+            return None if gb <= 0 else int(gb * 1024 * 1024 * 1024)
+        except (TypeError, ValueError):
+            return 8 * 1024 * 1024 * 1024
+
     class _ReadCursorHandle:
         """Precise cancel target for one DuckDB read cursor.
 
@@ -5252,28 +5473,76 @@ class Session:
         r'("(?:[^"]|"")+"|[A-Za-z_]\w*)\s*;?\s*$',
         re.IGNORECASE)
 
-    def _zero_copy_source(self, engine, sql):
-        """A bare SELECT * over a parquet-backed view serves the SOURCE
-        parquet as the result store DIRECTLY -- zero copy, instant paging
-        via the pruned reads. The on-box 2026-07-02 failure: the same
-        query re-materialized 1.7 GB of nested structs into a second
-        parquet, saturating the engine so every other request (even the
-        activity poll) starved behind it."""
-        m = self._BARE_SELECT.match(sql or "")
-        if not m:
+    # Simple SELECT list FROM one identifier, optional LIMIT.
+    # Used to widen zero-copy to column projections over a parquet source.
+    _SIMPLE_SELECT = re.compile(
+        r'^\s*SELECT\s+(?P<cols>.+?)\s+FROM\s+'
+        r'(?P<table>"(?:[^"]|"")+"|[A-Za-z_]\w*)'
+        r'(?:\s+LIMIT\s+(?P<limit>\d+))?'
+        r'\s*;?\s*$',
+        re.IGNORECASE | re.DOTALL)
+
+    @staticmethod
+    def _parse_simple_select_cols(cols_sql):
+        """Return ``'*'``, a list of bare column names, or ``None`` if the
+        select list is an expression / alias / function (not zero-copy safe)."""
+        s = (cols_sql or "").strip()
+        if not s:
             return None
-        ident = m.group(1)
+        if s == "*":
+            return "*"
+        out = []
+        for part in s.split(","):
+            p = part.strip()
+            if not p or "(" in p or ")" in p:
+                return None
+            if re.search(r"(?i)\bas\b", p):
+                return None
+            if p.startswith('"') and p.endswith('"') and len(p) >= 2:
+                out.append(p[1:-1].replace('""', '"'))
+                continue
+            if re.match(r"^[A-Za-z_]\w*$", p):
+                out.append(p)
+                continue
+            return None
+        return out or None
+
+    def _parquet_table_source(self, engine, ident):
+        """Resolve ``table_sources[ident]`` to a .parquet path, or None."""
         if ident.startswith('"'):
             ident = ident[1:-1].replace('""', '"')
         sources = getattr(engine, "table_sources", {}) or {}
         src = sources.get(ident)
-        if src is None:   # unquoted identifiers are case-insensitive
+        if src is None:
             low = ident.lower()
             for k, v in sources.items():
                 if str(k).lower() == low:
                     src = v
                     break
         if not src or not str(src).lower().endswith(".parquet"):
+            return None
+        return str(src)
+
+    def _zero_copy_source(self, engine, sql):
+        """Serve a parquet-backed table as the result store with no COPY.
+
+        Matches:
+          * bare ``SELECT * FROM t`` (historical path)
+          * simple projections ``SELECT a, b FROM t`` (no WHERE/JOIN/…)
+
+        The on-box 2026-07-02 failure: rematerializing 1.7 GB of nested structs
+        into a second parquet starved every other request. Projection still
+        borrows the source file; ParquetResultStore pushes column lists at
+        read time.
+        """
+        m = self._SIMPLE_SELECT.match(sql or "")
+        if not m:
+            return None
+        want = self._parse_simple_select_cols(m.group("cols"))
+        if want is None:
+            return None
+        src = self._parquet_table_source(engine, m.group("table"))
+        if not src:
             return None
         try:
             cur = engine.conn.cursor()
@@ -5284,19 +5553,43 @@ class Session:
                 total = int(cur.fetchone()[0])
                 cur.execute(
                     "DESCRIBE SELECT * FROM read_parquet('%s')" % fwd)
-                cols = [r[0] for r in cur.fetchall()]
+                all_cols = [r[0] for r in cur.fetchall()]
             finally:
                 try:
                     cur.close()
                 except Exception:
                     pass
         except Exception:
-            return None   # anything odd: take the normal path
+            return None
+        if want == "*":
+            cols = all_cols
+        else:
+            # Case-insensitive match against described columns; preserve
+            # the SELECT-list order the user asked for.
+            by_low = {str(c).lower(): c for c in all_cols}
+            cols = []
+            for name in want:
+                hit = by_low.get(name.lower())
+                if hit is None:
+                    return None  # unknown column → normal path / error there
+                cols.append(hit)
+        lim_raw = m.groupdict().get("limit")
+        lim = None
+        if lim_raw is not None:
+            try:
+                lim = max(0, int(lim_raw))
+            except Exception:
+                lim = None
         from .rows import ParquetResultStore
-        store = ParquetResultStore(engine, str(src), cols,
-                                   owns_path=False)
-        store._n = total
-        store.capped = False
+        store = ParquetResultStore(engine, src, cols, owns_path=False)
+        if lim is not None and lim < total:
+            store._n = lim
+            store.capped = True
+            store.cap = lim
+            total = lim
+        else:
+            store._n = total
+            store.capped = False
         return cols, store, total, "duckdb"
 
     def _exec_duckdb_parquet(self, engine, sql, query_id=None,
@@ -5371,19 +5664,82 @@ class Session:
                     with _ExecKeepalive(exec_conn, cancel_signal,
                                         threading.get_ident(),
                                         interval=keepalive_interval):
-                        exec_conn.execute(
-                            f"COPY (SELECT * FROM ({inner}){limit_clause}) "
-                            f"TO '{fwd}' (FORMAT PARQUET)")
-                    cur = exec_conn.execute(
-                        f"SELECT * FROM read_parquet('{fwd}') LIMIT 0")
-                    allcols = ([d[0] for d in cur.description]
-                               if cur.description else [])
-                    if not allcols:
-                        raise RuntimeError("parquet store: no columns")
-                    cnt = exec_conn.execute(
-                        f"SELECT count(*) FROM read_parquet('{fwd}')"
-                    ).fetchone()
-                    total = int(cnt[0]) if cnt else 0
+                        # ORDER BY in the inner SQL must survive parallel COPY:
+                        # temporarily force insertion order so file_row_number
+                        # matches the query's sort when paging later.
+                        has_order = bool(re.search(
+                            r"(?is)\border\s+by\b", inner))
+                        if has_order:
+                            try:
+                                exec_conn.execute(
+                                    "SET preserve_insertion_order = true")
+                            except Exception:
+                                pass
+                        bcap_fn = getattr(self, "_result_byte_cap", None)
+                        bcap = bcap_fn() if callable(bcap_fn) else None
+
+                        def _copy_cancelled():
+                            return bool(query_id) and self._run_is_cancelled(
+                                query_id)
+
+                        try:
+                            from .engines import exec_copy_parquet, _is_interrupt
+                            try:
+                                exec_copy_parquet(
+                                    exec_conn,
+                                    "SELECT * FROM (%s)%s"
+                                    % (inner, limit_clause),
+                                    fwd,
+                                    max_bytes=bcap,
+                                    should_cancel=_copy_cancelled,
+                                    interrupt_fn=getattr(
+                                        exec_conn, "interrupt", None))
+                            except RuntimeError:
+                                raise
+                            except Exception as e:
+                                # Only fall back when the engine rejected
+                                # jumbo options / unexpected SQL — not on
+                                # cancel or byte-ceiling aborts.
+                                if _copy_cancelled() or _is_interrupt(e):
+                                    raise
+                                exec_conn.execute(
+                                    "COPY (SELECT * FROM (%s)%s) "
+                                    "TO '%s' (FORMAT PARQUET)"
+                                    % (inner, limit_clause, fwd))
+                        finally:
+                            if has_order:
+                                try:
+                                    exec_conn.execute(
+                                        "SET preserve_insertion_order = false")
+                                except Exception:
+                                    pass
+                        # Post-COPY byte check (race with monitor).
+                        if bcap:
+                            try:
+                                sz = os.path.getsize(path)
+                            except OSError:
+                                sz = 0
+                            if sz > bcap:
+                                try:
+                                    os.unlink(path)
+                                except Exception:
+                                    pass
+                                raise RuntimeError(
+                                    "Query result Parquet is %.1f GiB — over the "
+                                    "%.1f GiB ceiling (SAMQL_MAX_RESULT_GB). "
+                                    "Narrow the SELECT, add LIMIT, or raise the "
+                                    "ceiling."
+                                    % (sz / (1024 ** 3), bcap / (1024 ** 3)))
+                        cur = exec_conn.execute(
+                            f"SELECT * FROM read_parquet('{fwd}') LIMIT 0")
+                        allcols = ([d[0] for d in cur.description]
+                                   if cur.description else [])
+                        if not allcols:
+                            raise RuntimeError("parquet store: no columns")
+                        cnt = exec_conn.execute(
+                            f"SELECT count(*) FROM read_parquet('{fwd}')"
+                        ).fetchone()
+                        total = int(cnt[0]) if cnt else 0
                 return path, allcols, total
             except BaseException:
                 try:
@@ -5573,6 +5929,34 @@ class Session:
         with self._running_lock:
             return query_id in self._cancelled_runs
 
+    def _clear_stale_engine_cancel(self, eng=None, except_qid=None):
+        """Clear sticky engine cancel Events left by a prior Stop / stall cancel.
+
+        ``DuckDBManager.interrupt`` sets ``_cancel`` and never clears it.
+        ``_BeatDaemon`` then re-interrupts every subsequent statement while the
+        flag stays set -- so a cancelled load made the next right-click Profile
+        (and other dashboard reads) auto-cancel. Clear only when no other run
+        is still in flight (a live cancel may still need BeatDaemon nudges).
+        """
+        with self._running_lock:
+            others = [k for k in self._running if k != except_qid]
+            if others:
+                return
+        engines = []
+        if eng is not None:
+            engines.append(eng)
+        else:
+            engines.extend([self.db, getattr(self, "duckdb", None)])
+        for e in engines:
+            if e is None:
+                continue
+            try:
+                ev = getattr(e, "_cancel", None)
+                if ev is not None and ev.is_set():
+                    ev.clear()
+            except Exception:
+                pass
+
     def interrupt_loads(self):
         """Best-effort interrupt of any engine work currently in flight, used
         to cancel a running file load. A load runs a single big statement on
@@ -5659,12 +6043,10 @@ class Session:
         # Fast, memory-light path for DuckDB reads: spill the result to a
         # temporary Parquet file and page from it columnar-side, instead of
         # converting millions of rows into Python tuples and a row store.
-        # Only when the query has no explicit ORDER BY -- a query that asks
-        # for a specific order keeps the order-preserving drain path below,
-        # since Parquet paging relies on a synthetic row order.
+        # ORDER BY stays on this path too: COPY with preserve_insertion_order
+        # writes rows in query order so file_row_number paging matches.
         if (kind == "duckdb" and getattr(self, "use_parquet_results", True)
-                and self._is_single_read(sql)
-                and "order by" not in sql.lower()):
+                and self._is_single_read(sql)):
             try:
                 return self._exec_duckdb_parquet(
                     engine, sql, query_id=query_id,
@@ -5918,7 +6300,8 @@ class Session:
         return rid
 
     def page(self, result_id, offset=0, limit=DISPLAY_LIMIT,
-             sort_col=None, descending=False, filters=None, columns=None):
+             sort_col=None, descending=False, filters=None, columns=None,
+             query_id=None):
         cr = self._results.get(result_id)
         if cr is None:
             return {"error": "result expired"}
@@ -5931,48 +6314,83 @@ class Session:
             limit = max(1, min(int(limit), DISPLAY_LIMIT))
         except (TypeError, ValueError):
             return {"error": "offset and limit must be integers"}
-        if filters:
-            view, total = cr.filtered_view(filters, sort_col, descending)
-        else:
-            view = cr.view(sort_col, descending)
-            total = cr.total
-        chunk = view[offset:offset + limit]
-        # Optional column projection: return only the requested columns
-        # (in the requested order). Keeps the wire payload and the client's
-        # row objects small for very wide results. Sorting/filtering still
-        # reference the full column set, so this never changes which rows
-        # come back, only their width.
-        proj = None
-        out_cols = cr.cols
-        if columns:
-            idx = [cr.cols.index(c) for c in columns if c in cr.cols]
-            if idx:
-                proj = idx
-                out_cols = [cr.cols[i] for i in idx]
-        # .514: CAP FIRST, convert after. json_safe deep-converts every raw
-        # cell -- on a flatten-off nested column that is a multi-MB dict per
-        # cell, so a 1000-row page burned MINUTES of CPU copying values the
-        # cap then threw away (the on-box 93s "Query 1" stall: the op sat in
-        # page serialization while cancel and health starved). Truncating the
-        # raw values first makes the convert step O(displayed bytes).
-        if proj is not None:
-            raw = [[r[i] for i in proj] for r in chunk]
-        else:
-            raw = [list(r) for r in chunk]
-        raw, cell_capped = _cap_page_rows(raw)
-        rows = [[json_safe(v) for v in r] for r in raw]
-        return {
-            "columns": out_cols,
-            "rows": rows,
-            "offset": offset,
-            "total_rows": total,
-            "filtered": bool(filters),
-            "sql": cr.sql,
-            "engine": cr.engine,
-            "cell_capped": cell_capped,
-            "result_capped": bool(cr.capped) and not filters,
-            "result_cap": cr.cap if (cr.capped and not filters) else None,
-        }
+        # Register a cancel target for long sort/filter materialize + page
+        # fetches so Stop interrupts DuckDB, not only the HTTP send.
+        own_run = bool(query_id)
+        handle = None
+        eng = getattr(getattr(cr, "store", None), "_engine", None)
+        if own_run and eng is not None:
+            class _PageHandle:
+                __slots__ = ("_eng",)
+
+                def __init__(self, e):
+                    self._eng = e
+
+                def interrupt(self):
+                    try:
+                        self._eng.interrupt()
+                    except Exception:
+                        pass
+
+            handle = _PageHandle(eng)
+            self._register_run(query_id, handle, kind="page",
+                               target="result page")
+        try:
+            if own_run and self._run_is_cancelled(query_id):
+                return {"cancelled": True}
+            if filters:
+                view, total = cr.filtered_view(filters, sort_col, descending)
+            else:
+                view = cr.view(sort_col, descending)
+                total = cr.total
+            if own_run and self._run_is_cancelled(query_id):
+                return {"cancelled": True}
+            chunk = view[offset:offset + limit]
+            # Optional column projection: return only the requested columns
+            # (in the requested order). Keeps the wire payload and the client's
+            # row objects small for very wide results. Sorting/filtering still
+            # reference the full column set, so this never changes which rows
+            # come back, only their width.
+            proj = None
+            out_cols = cr.cols
+            if columns:
+                idx = [cr.cols.index(c) for c in columns if c in cr.cols]
+                if idx:
+                    proj = idx
+                    out_cols = [cr.cols[i] for i in idx]
+            # .514: CAP FIRST, convert after. json_safe deep-converts every raw
+            # cell -- on a flatten-off nested column that is a multi-MB dict per
+            # cell, so a 1000-row page burned MINUTES of CPU copying values the
+            # cap then threw away (the on-box 93s "Query 1" stall: the op sat in
+            # page serialization while cancel and health starved). Truncating the
+            # raw values first makes the convert step O(displayed bytes).
+            if proj is not None:
+                raw = [[r[i] for i in proj] for r in chunk]
+            else:
+                raw = [list(r) for r in chunk]
+            raw, cell_capped = _cap_page_rows(raw)
+            rows = [[json_safe(v) for v in r] for r in raw]
+            return {
+                "columns": out_cols,
+                "rows": rows,
+                "offset": offset,
+                "total_rows": total,
+                "filtered": bool(filters),
+                "sql": cr.sql,
+                "engine": cr.engine,
+                "cell_capped": cell_capped,
+                "result_capped": bool(cr.capped) and not filters,
+                "result_cap": cr.cap if (cr.capped and not filters) else None,
+            }
+        except Exception as e:
+            from .engines import _is_interrupt
+            if own_run and (self._run_is_cancelled(query_id)
+                            or _is_interrupt(e)):
+                return {"cancelled": True}
+            raise
+        finally:
+            if own_run:
+                self._end_run_keep_cancel(query_id)
 
     def shred_preflight(self, engine, table):
         """Every gate between a table and 'Create relational tables',
@@ -7025,12 +7443,19 @@ class Session:
                     and table in self.duckdb.table_columns):
                 eng = self.duckdb
         key = (engine, table)
+        # Honour an explicit cancel for this query id before serving cache —
+        # otherwise a pre-flagged Stop looks like a successful cached profile.
+        if self._run_is_cancelled(query_id):
+            return {"cancelled": True}
         cached = self._profile_cache.get(key)
         if cached is not None:
             return cached
         # Register so Stop / window-close (cancel_query) interrupts the heavy
         # aggregate pass; the cancel callable also lets profile_table bail
         # between passes even if an interrupt lands in a swallowed gap.
+        # Clear a sticky engine cancel from an earlier stalled load Stop so
+        # BeatDaemon does not auto-interrupt this fresh profile.
+        self._clear_stale_engine_cancel(eng, except_qid=query_id)
         self._register_run(query_id, eng, kind="profile", target=table)
         try:
             if self._run_is_cancelled(query_id):
@@ -7061,6 +7486,7 @@ class Session:
         """
         qid = spec.get("query_id") or ("pf-%s" % uuid.uuid4().hex[:10])
         target = self._agg_interrupt_target(spec)
+        self._clear_stale_engine_cancel(target, except_qid=qid)
         self._register_run(
             qid, target, kind="profile", surface="profile",
             label=str(spec.get("column") or "field"))
@@ -7204,6 +7630,9 @@ class Session:
             pass
         eng.table_columns[new] = eng.table_columns.pop(old, [])
         eng.table_sources[new] = eng.table_sources.pop(old, "")
+        origins = getattr(eng, "table_origins", None)
+        if isinstance(origins, dict) and old in origins:
+            origins[new] = origins.pop(old)
         self._invalidate_profiles()
         self._invalidate_counts()
         return {"ok": True, "name": new}
@@ -7288,9 +7717,14 @@ class Session:
                 pass
             raise
         old_src = src
+        origin = (getattr(mgr, "table_origins", {}) or {}).get(name) or (
+            old_src if src_is_file else None)
         try:
             mgr.drop_table(name)
             final = mgr.create_view_from_file(name, pq, "parquet")
+            remember = getattr(mgr, "_remember_origin", None)
+            if remember and origin:
+                remember(final, origin)
         except Exception as e:
             try:
                 os.unlink(pq)
@@ -7996,7 +8430,8 @@ class Session:
                     pass
             # the engine must forget the dropped name too, or view-backing
             # bookkeeping can resurrect it later
-            for reg in ("view_backing", "table_sources", "table_columns"):
+            for reg in ("view_backing", "table_sources", "table_columns",
+                        "table_origins"):
                 try:
                     getattr(mgr, reg, {}).pop(t, None)
                 except Exception:
@@ -8462,18 +8897,45 @@ class Session:
 
     @staticmethod
     def _export_parquet(path, cols, view):
+        """Stream rows to Parquet in batches — never accumulate the full
+        result as Python column lists (OOM on millions of rows)."""
         try:
             import pyarrow as pa
             import pyarrow.parquet as pq
         except Exception:
             raise RuntimeError(
                 "parquet export requires pyarrow (pip install pyarrow)")
-        data = {c: [] for c in cols}
+        writer = None
+        batch_cols = {c: [] for c in cols}
+        n_batch = 0
+        chunk = 5000
+
+        def _flush():
+            nonlocal writer, n_batch, batch_cols
+            if n_batch == 0:
+                return
+            table = pa.table({c: batch_cols[c] for c in cols})
+            if writer is None:
+                writer = pq.ParquetWriter(path, table.schema)
+            writer.write_table(table)
+            batch_cols = {c: [] for c in cols}
+            n_batch = 0
+
         for r in view:
             for i, c in enumerate(cols):
-                data[c].append(json_safe(r[i]) if i < len(r) else None)
-        table = pa.table(data)
-        pq.write_table(table, path)
+                batch_cols[c].append(
+                    json_safe(r[i]) if i < len(r) else None)
+            n_batch += 1
+            if n_batch >= chunk:
+                _flush()
+        _flush()
+        if writer is not None:
+            writer.close()
+        else:
+            # empty result: still write a valid schema-only file
+            pq.write_table(
+                pa.table({c: pa.array([], type=pa.string()) for c in cols}),
+                path)
 
     # ---- persistence: history / saved -------------------------------
     def history_all(self):
@@ -8630,6 +9092,8 @@ class Session:
         NOTE: this stops *engine* work; a Python-side write loop (result
         export) is not interrupted by it and is handled separately."""
         qid = query_id or ("op-%s-%s" % (kind, uuid.uuid4().hex[:8]))
+        # Pivot / chart / reconcile: same sticky-cancel trap as profile.
+        self._clear_stale_engine_cancel(except_qid=qid)
         self._register_run(qid, None, kind=kind, target=target)
         try:
             if self._run_is_cancelled(qid):
@@ -10824,20 +11288,21 @@ class Session:
 
     def fetch_sharepoint_node(self, node_id, config, query_id=None):
         from . import sharepoint as _sp
+        from . import sharepoint_auth as _spa
         cfg = dict(config or {})
         site = (cfg.get("site_url") or "").strip()
         mode = (cfg.get("mode") or "list").strip().lower()
         lst = (cfg.get("list_title") or "").strip()
         folder = (cfg.get("folder_path") or "").strip()
-        sk = (cfg.get("secret_key") or "").strip()
-        token = ""
-        if sk:
-            try:
-                token = self.secrets.get(sk) or ""
-            except Exception:
-                token = ""
-        if not token and cfg.get("token"):
-            token = str(cfg.get("token") or "")
+        try:
+            auth = _spa.resolve_auth(self, cfg)
+        except Exception as e:
+            return {"error": str(e)}
+        auth_mode = auth.get("mode") or "bearer"
+        token = auth.get("token") or ""
+        # Persist resolved secret_key so later runs find the OAuth blob.
+        if auth.get("secret_key") and not (cfg.get("secret_key") or "").strip():
+            cfg["secret_key"] = auth["secret_key"]
         own_run = bool(query_id)
         if own_run:
             self._register_run(query_id, None, kind="fetch", target="sharepoint")
@@ -10845,10 +11310,12 @@ class Session:
             if own_run and self._run_is_cancelled(query_id):
                 return {"cancelled": True}
             if mode == "drive":
-                records, meta = _sp.browse_drive(site, folder, token)
+                records, meta = _sp.browse_drive(
+                    site, folder, token, auth_mode=auth_mode)
                 label = folder or "/"
             else:
-                records, meta = _sp.fetch_sharepoint_items(site, lst, token)
+                records, meta = _sp.fetch_sharepoint_items(
+                    site, lst, token, auth_mode=auth_mode)
                 label = lst
             cols, rows, _ = _sp.records_to_columns_rows(records)
         except Exception as e:
@@ -10861,42 +11328,44 @@ class Session:
             source_label="sharepoint:%s" % label, query_id=None)
         if out.get("ok"):
             out["meta"] = meta
+            if auth.get("secret_key"):
+                out["secret_key"] = auth["secret_key"]
         return out
 
     def download_sharepoint_file(self, config, query_id=None):
         """Download one SharePoint drive file into the user's Downloads folder."""
         from . import sharepoint as _sp
+        from . import sharepoint_auth as _spa
         import os
         cfg = dict(config or {})
         site = (cfg.get("site_url") or "").strip()
         item_id = (cfg.get("item_id") or cfg.get("file_id") or "").strip()
         download_url = (cfg.get("download_url") or "").strip() or None
-        sk = (cfg.get("secret_key") or "").strip()
-        token = ""
-        if sk:
-            try:
-                token = self.secrets.get(sk) or ""
-            except Exception:
-                token = ""
-        if not token and cfg.get("token"):
-            token = str(cfg.get("token") or "")
+        try:
+            auth = _spa.resolve_auth(self, cfg)
+        except Exception as e:
+            return {"error": str(e)}
+        auth_mode = auth.get("mode") or "bearer"
+        token = auth.get("token") or ""
         own_run = bool(query_id)
         if own_run:
             self._register_run(query_id, None, kind="fetch", target="sharepoint-dl")
-        try:
-            if own_run and self._run_is_cancelled(query_id):
-                return {"cancelled": True}
-            data, filename, meta = _sp.download_drive_item(
-                site, item_id, token, download_url=download_url)
-        except Exception as e:
-            return {"error": str(e)}
-        finally:
-            if own_run:
-                self._unregister_run(query_id)
         out_dir = self._resolve_export_dir("")
+        # Resolve a unique destination path first so the download can stream
+        # straight to disk (no whole-body buffer in RAM).
+        probe_name = "sharepoint_file"
+        if download_url:
+            # Best-effort name from URL path; Graph Content-Disposition wins later.
+            try:
+                import urllib.parse as _up
+                probe_name = _up.unquote(
+                    _up.urlparse(download_url).path.rsplit("/", 1)[-1]
+                ) or probe_name
+            except Exception:
+                pass
         safe = "".join(
             c if c.isalnum() or c in "._- " else "_"
-            for c in (filename or "sharepoint_file")
+            for c in probe_name
         ).strip() or "sharepoint_file"
         path = os.path.join(out_dir, safe)
         base, ext = os.path.splitext(path)
@@ -10905,17 +11374,80 @@ class Session:
             path = "%s_%d%s" % (base, n, ext)
             n += 1
         try:
-            with open(path, "wb") as f:
-                f.write(data)
+            if own_run and self._run_is_cancelled(query_id):
+                return {"cancelled": True}
+            nbytes, filename, meta = _sp.download_drive_item(
+                site, item_id, token, download_url=download_url,
+                dest_path=path, auth_mode=auth_mode)
         except Exception as e:
-            return {"error": "Could not write Downloads file: %s" % e}
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+            except Exception:
+                pass
+            return {"error": str(e)}
+        finally:
+            if own_run:
+                self._unregister_run(query_id)
+        # Rename if Graph supplied a better Content-Disposition name.
+        final_path = path
+        if filename and filename != os.path.basename(path):
+            safe2 = "".join(
+                c if c.isalnum() or c in "._- " else "_"
+                for c in filename
+            ).strip() or os.path.basename(path)
+            cand = os.path.join(out_dir, safe2)
+            b2, e2 = os.path.splitext(cand)
+            k = 1
+            while os.path.exists(cand) and cand != path:
+                cand = "%s_%d%s" % (b2, k, e2)
+                k += 1
+            if cand != path:
+                try:
+                    os.replace(path, cand)
+                    final_path = cand
+                except Exception:
+                    final_path = path
+        try:
+            nbytes = int(nbytes)
+        except Exception:
+            try:
+                nbytes = os.path.getsize(final_path)
+            except OSError:
+                nbytes = 0
         return {
             "ok": True,
-            "path": path,
-            "filename": os.path.basename(path),
-            "bytes": len(data),
+            "path": final_path,
+            "filename": os.path.basename(final_path),
+            "bytes": nbytes,
             "meta": meta,
         }
+
+    def sharepoint_auth_capabilities(self):
+        from . import sharepoint_auth as _spa
+        return _spa.auth_capabilities()
+
+    def sharepoint_auth_device_start(self, config):
+        from . import sharepoint_auth as _spa
+        try:
+            return _spa.start_device_code(self, config or {})
+        except Exception as e:
+            return {"error": str(e)}
+
+    def sharepoint_auth_device_poll(self, flow_id, block=False):
+        from . import sharepoint_auth as _spa
+        try:
+            return _spa.poll_device_code(
+                self, flow_id or "", block=bool(block))
+        except Exception as e:
+            return {"error": str(e)}
+
+    def sharepoint_auth_interactive(self, config):
+        from . import sharepoint_auth as _spa
+        try:
+            return _spa.interactive_sign_in(self, config or {})
+        except Exception as e:
+            return {"error": str(e)}
 
     def fetch_webscrape_node(self, node_id, config, query_id=None):
         from . import webscrape as _ws

@@ -5,6 +5,9 @@ A green development build is not enough: identity, saved-data compatibility,
 the exact source manifest, Microsoft Edge behavior, and both source transports
 must all be verified.
 
+Current release identity (must match everywhere): **v2.16.4 / build 2026-07-14.601**,
+**313** managed source files.
+
 ## 1. Confirm one release identity
 
 From the project root:
@@ -61,24 +64,39 @@ and clean-exit checks. Confirm `/api/health` reports the exact release version
 and build from `RELEASE_MANIFEST.json`.
 
 `build.ps1` / `build.sh` install the full `requirements-optional.txt` set into
-the packaging Python (DuckDB, pyarrow, openpyxl, ijson, orjson, sqlglot,
-tzdata, …), hard-fail if any of those imports are missing, and `samql.spec`
-refuses to package an incomplete load stack. Recipients of the built exe
-therefore get the same engines and format support as the builder.
+the packaging Python and hard-fail if the critical load/export stack cannot
+import. That stack now includes:
+
+- **duckdb**, **pyarrow**, **pandas**, **sqlglot**, **openpyxl**, **ijson**,
+  **orjson**, **tzdata** (required)
+- **msal**, **requests** (SharePoint sign-in; bundled when present)
+- **requests-negotiate-sspi** / **pyodbc** / **pywin32** (Windows)
+- **pywebview** + **pythonnet** (native AppWindow)
+
+`samql.spec` refuses to package without the required load stack, and refuses a
+build that lacks a complete `frontend/dist` (real Vite UI — not a placeholder).
+Recipients of the built exe therefore get DuckDB, Parquet, Excel, pandas Python
+nodes, and (when bundled) SharePoint OAuth / Windows Integrated Auth.
 
 ## 5. Package both complete source transports
 
 ```powershell
-python tools/release_artifacts.py package --root . --output-dir .
+.\Pack-SamQL.ps1
+# or:
+python tools/release_artifacts.py package --root . --output-dir release
 ```
 
-The command writes:
+The command writes into `release/`:
 
 - `samql_full_source_all_tests_ui_<build>.txt` — the complete decoded source;
 - `SAMQL_BUILD_<sequence>_EMAIL_SAFE_APHEX.txt` — the APHEX-1 mail-safe form;
-- `SAMQL_BUILD_<sequence>_RELEASE_RECEIPT.json` — sizes, hashes, and verification flags.
+- `SAMQL_BUILD_<sequence>_RELEASE_RECEIPT.json` — sizes, hashes, and verification flags;
+- `Expand-SamQL.ps1.txt` / `Decode-SamQL-APHEX.ps1.txt` — mail-safe helper scripts
+  (rename to `.ps1` before running);
+- `SHA256SUMS.txt` / `SAMQL_BUILD_<sequence>_RELEASE_REPORT.txt` — publish evidence.
 
-`tools/package_release.py` performs the bundle construction. Packaging is deterministic because the release timestamp is pinned in
+`tools/package_release.py` performs the bundle construction. Packaging is
+deterministic because the release timestamp is pinned in
 `RELEASE_MANIFEST.json`. It fails on a preflight error, a missing manifest
 file, a section mismatch, an incorrect bundle body hash, or any APHEX
 byte-for-byte round-trip difference.
@@ -94,4 +112,4 @@ Archive the following together:
 - executable build log and Windows checklist notes;
 - decoded bundle filename, byte count, and SHA-256;
 - APHEX filename, byte count, and SHA-256;
-- `AUDIT_2026-07-12_refactor_phase10.md`.
+- the `release/` receipt + report for this build.

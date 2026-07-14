@@ -32,6 +32,10 @@ export interface ResultTab {
   sortCol?: string | null;
   descending?: boolean;
   filters?: ColumnFilter[];
+  /** Full column set from the unprojected result (for hide/show). */
+  allColumns?: string[];
+  /** When set, page fetches request only these columns from the API. */
+  visibleColumns?: string[] | null;
   released?: boolean;
   loadingMore?: boolean;
   view?: "grid" | "chart" | "pivot";

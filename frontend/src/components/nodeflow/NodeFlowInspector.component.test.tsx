@@ -15,10 +15,42 @@ const sharepointDownload = vi.hoisted(() =>
     filename: "report.xlsx",
   })),
 );
+const sharepointAuthDeviceStart = vi.hoisted(() =>
+  vi.fn(async () => ({
+    ok: true,
+    flow_id: "flow1",
+    user_code: "ABCD",
+    verification_uri: "https://microsoft.com/devicelogin",
+    message: "enter ABCD",
+    secret_key: "sharepoint:Finance",
+  })),
+);
+const sharepointAuthDevicePoll = vi.hoisted(() =>
+  vi.fn(async () => ({
+    ok: true,
+    stored: true,
+    secret_key: "sharepoint:Finance",
+  })),
+);
+const sharepointAuthInteractive = vi.hoisted(() =>
+  vi.fn(async () => ({
+    ok: true,
+    stored: true,
+    secret_key: "sharepoint:Finance",
+  })),
+);
 
 vi.mock("../../lib/api", () => ({
   api: {
     sharepointDownload,
+    sharepointAuthDeviceStart,
+    sharepointAuthDevicePoll,
+    sharepointAuthInteractive,
+    sharepointAuthCapabilities: vi.fn(async () => ({
+      msal: true,
+      windows_negotiate: true,
+      modes: ["bearer", "device_code", "interactive", "windows"],
+    })),
     mssqlDrivers: vi.fn(async () => ({
       available: true,
       drivers: ["ODBC Driver 18 for SQL Server"],
@@ -167,6 +199,36 @@ describe("NodeFlowInspector", () => {
       "warn",
       "Pick a file",
       expect.any(String),
+    );
+  });
+
+  it("starts SharePoint device-code sign-in from the auth controls", async () => {
+    const onToast = vi.fn();
+    const patch = vi.fn();
+    const node: NbNode = {
+      id: "sp-auth",
+      type: "sharepoint",
+      x: 0,
+      y: 0,
+      config: {
+        mode: "list",
+        site_url: "https://contoso.sharepoint.com/sites/Finance",
+        list_title: "Invoices",
+        auth_mode: "device_code",
+        secret_key: "sharepoint:Finance",
+        label: "sharepoint",
+      },
+    };
+    render(
+      <NodeFlowInspector context={context(node, { onToast, patch })} />,
+    );
+    expect(screen.getByTestId("sharepoint-auth-mode")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("sharepoint-device-start"));
+    await waitFor(() => expect(sharepointAuthDeviceStart).toHaveBeenCalled());
+    expect(onToast).toHaveBeenCalledWith(
+      "ok",
+      "Enter this code",
+      expect.stringContaining("ABCD"),
     );
   });
 

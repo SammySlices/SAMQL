@@ -41,6 +41,7 @@ const ROW_H = 28;
 const OVERSCAN = 12;
 const DEFAULT_W = 150;
 const ROWNUM_W = 56;
+const EMPTY_ROWS: Cell[][] = [];
 
 function isNumeric(v: Cell): boolean {
   return typeof v === "number";
@@ -78,7 +79,25 @@ const DataGridImpl: React.FC<Props> = ({
   const [widths, setWidths] = useState<Record<string, number>>({});
 
   const cols = page.columns;
-  const rows = page.rows;
+  const rows = page.rows ?? EMPTY_ROWS;
+  const rowBase = page.offset || 0;
+  const isCapped = !!(page.result_capped || page.truncated);
+  const windowEnd = rowBase + rows.length;
+  const totalRows = page.total_rows || rows.length;
+
+  // Sliding-window retain: when oldest rows are dropped, bump scroll so the
+  // same absolute rows stay under the viewport.
+  const prevRowBase = useRef(rowBase);
+  useEffect(() => {
+    const prev = prevRowBase.current;
+    prevRowBase.current = rowBase;
+    if (rowBase <= prev) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const delta = (rowBase - prev) * ROW_H;
+    el.scrollTop = Math.max(0, el.scrollTop - delta);
+    setScrollTop(el.scrollTop);
+  }, [rowBase]);
 
   // estimate sensible initial widths from the header + first rows. Only
   // sizes columns that don't have a width yet (user resizes and prior sizing
@@ -370,6 +389,47 @@ const DataGridImpl: React.FC<Props> = ({
 
   return (
     <div className="grid-shell" data-testid="grid-shell">
+    {(isCapped || rowBase > 0) && (
+      <div
+        className="grid-status"
+        data-testid="grid-status"
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
+          alignItems: "center",
+          padding: "6px 10px",
+          fontSize: 12,
+          borderBottom: "1px solid rgba(255,255,255,0.08)",
+          background: "rgba(0,0,0,0.12)",
+        }}
+      >
+        {isCapped && (
+          <span
+            className="chip"
+            data-testid="result-capped-badge"
+            title={
+              page.result_cap != null
+                ? `Stopped at the ${page.result_cap.toLocaleString()}-row safety limit`
+                : "Result was truncated"
+            }
+            style={{ color: "#c98a2b" }}
+          >
+            Capped
+            {page.result_cap != null
+              ? ` at ${page.result_cap.toLocaleString()} rows`
+              : ""}
+          </span>
+        )}
+        {rowBase > 0 && (
+          <span className="stat faint" data-testid="grid-window-range">
+            Showing rows {(rowBase + 1).toLocaleString()}–
+            {windowEnd.toLocaleString()} of {totalRows.toLocaleString()}
+            {" "}(scroll window)
+          </span>
+        )}
+      </div>
+    )}
     <div
       className={"grid" + (hScrolled ? " hscrolled" : "")}
       data-testid="result-grid"
@@ -443,8 +503,8 @@ const DataGridImpl: React.FC<Props> = ({
         >
           {visible.map(({ idx, row }) => (
             <div
-              key={idx}
-              className={"grow" + (idx % 2 ? " odd" : "")}
+              key={rowBase + idx}
+              className={"grow" + ((rowBase + idx) % 2 ? " odd" : "")}
               style={{ top: idx * ROW_H, height: ROW_H }}
             >
               <div
@@ -454,7 +514,7 @@ const DataGridImpl: React.FC<Props> = ({
                 onMouseEnter={() => enterRow(idx)}
                 title="Click to select row"
               >
-                {idx + 1}
+                {rowBase + idx + 1}
               </div>
               {cols.map((c, ci) => {
                 const f = fmtCell(row[ci]);
@@ -465,7 +525,7 @@ const DataGridImpl: React.FC<Props> = ({
                     key={c}
                     className={"gc-cell " + f.cls + (inSel(idx, ci) ? " sel" : "")}
                     data-column={c}
-                    data-row-index={idx}
+                    data-row-index={rowBase + idx}
                     style={{ width: colWidth(c) }}
                     title={f.text}
                     onMouseDown={(e) => startCell(idx, ci, e)}
@@ -479,8 +539,8 @@ const DataGridImpl: React.FC<Props> = ({
                         className="gc-expand"
                         data-testid="structured-cell-expand"
                         data-column={c}
-                        data-row-index={idx}
-                        aria-label={`View formatted value for ${c}, row ${idx + 1}`}
+                        data-row-index={rowBase + idx}
+                        aria-label={`View formatted value for ${c}, row ${rowBase + idx + 1}`}
                         title="View formatted"
                         onMouseDown={(e) => e.stopPropagation()}
                         onClick={(e) => {
@@ -490,13 +550,14 @@ const DataGridImpl: React.FC<Props> = ({
                           const request = ++viewerRequestSeq.current;
                           if (truncated && cellFetch?.resultId) {
                             // Fetch the COMPLETE value under this grid's view.
+                            // Absolute row = window offset + local index.
                             // The sequence guard prevents an older request from
                             // overwriting a newer viewer selection.
                             setViewer({ x, y, text: f.text, loading: true });
                             api
                               .resultCell({
                                 result_id: cellFetch.resultId,
-                                row: idx,
+                                row: rowBase + idx,
                                 column: c,
                                 sort_col: sortCol,
                                 descending,

@@ -243,6 +243,89 @@ def verify_bundle(root: Path, bundle: bytes, entries: list[str]) -> None:
         raise ValueError("Bundle build header does not match RELEASE_MANIFEST.json")
 
 
+def _publish_release_companions(
+    root: Path,
+    output_dir: Path,
+    *,
+    release: dict[str, Any],
+    result: PackageResult,
+) -> None:
+    """Publish Expand/Decode helpers, SHA256SUMS, and a human release report.
+
+    Email-safe helper copies use a ``.ps1.txt`` suffix so mail gateways do not
+    strip them; recipients rename to ``.ps1`` before running.
+    """
+    build = str(release.get("build") or "")
+    sequence = build.rsplit(".", 1)[-1]
+    version = str(release.get("version") or "")
+
+    helpers = (
+        ("Expand-SamQL.ps1", "Expand-SamQL.ps1.txt"),
+        ("Decode-SamQL-APHEX.ps1", "Decode-SamQL-APHEX.ps1.txt"),
+    )
+    helper_paths: list[Path] = []
+    for src_name, dest_name in helpers:
+        src = resolve_manifest_path(root, src_name)
+        if not src.is_file():
+            raise ValueError(f"Release helper missing: {src_name}")
+        data = _normalize_text(src.read_text(encoding="utf-8")).encode("utf-8")
+        dest = output_dir / dest_name
+        _atomic_write_bytes(dest, data)
+        helper_paths.append(dest)
+
+    hashed = [
+        (result.bundle_path.name, result.bundle_sha256),
+        (result.aphex_path.name, result.aphex_sha256),
+        (result.receipt_path.name, result.receipt_sha256),
+    ]
+    for path in helper_paths:
+        hashed.append((path.name, sha256_bytes(path.read_bytes())))
+
+    sums_lines = [f"{digest}  {name}" for name, digest in hashed]
+    sums_path = output_dir / "SHA256SUMS.txt"
+    _atomic_write_bytes(sums_path, ("\n".join(sums_lines) + "\n").encode("utf-8"))
+
+    report = (
+        f"SamQL release report - build {build}\n"
+        f"{'=' * 42}\n"
+        f"\n"
+        f"application version:           {version}\n"
+        f"build number:                  {build}\n"
+        f"source file count:             {result.file_count}\n"
+        f"decoded bundle byte count:     {result.bundle_bytes}\n"
+        f"decoded bundle SHA-256:        {result.bundle_sha256}\n"
+        f"section-body SHA-256:          {result.body_sha256}\n"
+        f"APHEX byte count:              {result.aphex_bytes}\n"
+        f"APHEX SHA-256:                 {result.aphex_sha256}\n"
+        f"APHEX round-trip verification: PASS (byte-identical)\n"
+        f"preflight:                     PASS\n"
+        f"manifest section parity:       PASS\n"
+        f"bundle body hash:              PASS\n"
+        f"\n"
+        f"Contents: complete source + tests + UI (Test-SamQL-All ready),\n"
+        f"including DuckDB/pyarrow/pandas load stack, SharePoint MSAL +\n"
+        f"Windows Integrated Auth, Python-node DataFrames, query Parquet\n"
+        f"priority fixes, build.ps1 / build.sh, requirements-optional.txt,\n"
+        f"backend/samql.spec, frontend toolchain, and the full tests/ +\n"
+        f"tools/ extract trees.\n"
+        f"\n"
+        f"Artifacts:\n"
+        f"  release\\{result.bundle_path.name}\n"
+        f"  release\\{result.aphex_path.name}\n"
+        f"  release\\{result.receipt_path.name}\n"
+        f"  release\\SHA256SUMS.txt\n"
+        f"  release\\Expand-SamQL.ps1.txt\n"
+        f"  release\\Decode-SamQL-APHEX.ps1.txt\n"
+        f"\n"
+        f"Email the .ps1.txt helpers as plain text; rename to .ps1 before running.\n"
+        f"Reconstruct with Expand-SamQL.ps1 after decoding APHEX (if used) with\n"
+        f"Decode-SamQL-APHEX.ps1. Recipients need Python 3.10+ and Node 20.19+\n"
+        f"to build/run tests; they do not need those to run a packaged .exe.\n"
+    )
+    report_path = output_dir / f"SAMQL_BUILD_{sequence}_RELEASE_REPORT.txt"
+    _atomic_write_bytes(report_path, report.encode("utf-8"))
+
+
 def package_release(
     root: Path,
     output_dir: Path,
@@ -338,7 +421,7 @@ def package_release(
     if receipt_path.read_bytes() != receipt_bytes_value:
         raise ValueError("Published release receipt differs from verified bytes")
 
-    return PackageResult(
+    result = PackageResult(
         bundle_path=bundle_path,
         aphex_path=aphex_path,
         receipt_path=receipt_path,
@@ -351,6 +434,8 @@ def package_release(
         aphex_bytes=len(aphex_bytes_value),
         receipt_bytes=len(receipt_bytes_value),
     )
+    _publish_release_companions(root, output_dir, release=release, result=result)
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

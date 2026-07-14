@@ -28,22 +28,31 @@ EXPECT both commands to pass before any executable packaging begins.
 2. BACKEND SUITE ON THE BOX
 ----------------------------------------------------------------------
 2.1  PS> python tests\run_tests.py
-     EXPECT: 0 failed. The 21 sandbox env-skips SHRINK here (duckdb
-     and pyarrow are present in the venv): expect roughly 650+ passed,
-     and specifically the duckdb-gated flatten/shred/zero-copy tests
-     to RUN, not skip.
+     EXPECT: 0 failed. The sandbox env-skips SHRINK here (duckdb,
+     pyarrow, and pandas are present in the venv): expect roughly
+     840+ passed, and specifically the duckdb-gated flatten/shred/
+     zero-copy tests plus Python-node pandas bindings to RUN, not skip.
 2.2  EXPECT the two known stderr noise lines at most ("in-engine deep
      flatten..."), nothing else on stderr.
 
 ----------------------------------------------------------------------
 3. PYINSTALLER ONEFILE BUILD
 ----------------------------------------------------------------------
-3.1  PS> .\build.ps1   (or: pyinstaller backend\samql.spec)
+3.1  PS> .\build.ps1   (or: .\build.ps1 -OneDir)
+     EXPECT: frontend install uses normalize_npm_lock + install_frontend_deps
+     (not a raw npm ci that dies on stderr warnings under Stop).
+     EXPECT: npm run build succeeds and frontend\dist\index.html +
+     assets\ exist (build.ps1 / samql.spec refuse a placeholder UI).
+     EXPECT: critical imports OK including duckdb, pyarrow, pandas,
+     sqlglot, openpyxl, ijson, orjson, tzdata. Optional: msal,
+     requests, requests-negotiate-sspi (SharePoint sign-in / Windows
+     Integrated), pyodbc, pywebview.
      EXPECT: "embedding application icon" IF backend\samql.ico is
      present, otherwise the "default PyInstaller icon" notice -- the
      build must SUCCEED in both cases.
 3.2  EXPECT dist\SamQL.exe to exist; size sanity: tens of MB, not
      hundreds (a jump means a stray package rode into hiddenimports).
+     pandas + msal bump size vs older builds -- that is expected.
 3.3  PS> dist\SamQL.exe --help
      EXPECT: the argparse help with --port, --browser, --no-server;
      exit code 0; no console window lingering.
@@ -157,8 +166,10 @@ EXPECT both commands to pass before any executable packaging begins.
 ----------------------------------------------------------------------
 6.1  PS> .\Pack-SamQL.ps1
      (defaults to .\release; override with -OutputDir if needed)
-     EXPECT decoded, APHEX, and release-receipt files. Record both artifact
-     SHA-256 values. Decode APHEX and compare it byte-for-byte to the decoded
-     bundle. Expand-SamQL verifies count/hash before pruning or overwriting and
-     refangs every bracketed risky extension exactly.
+     EXPECT decoded, APHEX, release-receipt, Expand/Decode helper
+     scripts (.ps1.txt), SHA256SUMS, and RELEASE_REPORT for the
+     current build (see RELEASE_MANIFEST.json). Record both artifact
+     SHA-256 values. Decode APHEX and compare it byte-for-byte to the
+     decoded bundle. Expand-SamQL verifies count/hash before pruning
+     or overwriting and refangs every bracketed risky extension exactly.
 ======================================================================

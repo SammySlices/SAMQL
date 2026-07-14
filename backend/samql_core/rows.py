@@ -14,6 +14,7 @@ import datetime as _dt
 import os
 import sqlite3
 import threading
+from contextlib import nullcontext
 
 # Past this offset, a sorted/filtered page does the OFFSET scan index-only
 # (rowids via the sort index) and then looks up just the page's full rows,
@@ -525,6 +526,10 @@ class ParquetResultStore:
         self._cols = list(cols)            # display columns (excludes __rn)
         self._n = None
         self._closed = False
+        # Materialized sort/filter snapshots (path -> ParquetResultStore).
+        # First sorted/filtered page pays one COPY; later pages use
+        # file_row_number ranges on the snapshot instead of TopN/OFFSET.
+        self._snap_cache = {}
 
     def parquet_path(self):
         """The backing parquet file -- exports and save-as-table copy
@@ -590,12 +595,29 @@ class ParquetResultStore:
                    f"{order} LIMIT {int(limit)} OFFSET {int(offset)}")
         cur = self._run(sql)
         try:
-            return [tuple(r) for r in cur.fetchall()]
+            rows = [tuple(r) for r in cur.fetchall()]
         finally:
             try:
                 cur.close()
             except Exception:
                 pass
+        # Nested / JSON Parquet caches have occasionally returned COUNT>0 but
+        # an empty file_row_number window. Fall back to LIMIT/OFFSET through
+        # the synthesized __rn source so the grid never shows a blank page
+        # for a non-empty result.
+        if (not rows and limit > 0 and order == self._STABLE_ORDER
+                and offset < len(self)):
+            sql = (f"SELECT {self._collist()} FROM {self._src()} "
+                   f"{order} LIMIT {int(limit)} OFFSET {int(offset)}")
+            cur = self._run(sql)
+            try:
+                rows = [tuple(r) for r in cur.fetchall()]
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+        return rows
 
     def _stream(self, order, chunk=5000):
         if order == self._STABLE_ORDER:
@@ -647,12 +669,6 @@ class ParquetResultStore:
     def __iter__(self):
         return self._stream('ORDER BY "__rn"')
 
-    def sorted_view(self, col_ix, descending=False):
-        col = str(self._cols[col_ix]).replace('"', '""')
-        order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"}, '
-                 f'"__rn"')
-        return _ParquetSortedView(self, order)
-
     def _agg_ctx(self):
         """Context for SQL-side chart/pivot aggregation over this Parquet
         result, served by DuckDB reading the file directly."""
@@ -669,12 +685,9 @@ class ParquetResultStore:
         def colref(i):
             c = str(self._cols[int(i)]).replace('"', '""')
             return f'"{c}"'
-        # TRY_CAST yields NULL (not an error) on non-numeric values, so
-        # they drop out of numeric aggregates just like the Python path.
         return (run, self._src(), colref,
                 (lambda e: f"TRY_CAST({e} AS DOUBLE)"))
 
-    # ---- filtering (DuckDB-side WHERE over the Parquet) -------------
     def _qcol(self, ix):
         return '"' + str(self._cols[int(ix)]).replace('"', '""') + '"'
 
@@ -736,57 +749,64 @@ class ParquetResultStore:
             except Exception:
                 pass
 
-    def _fetch_where(self, where, params, order, limit, offset):
-        w = f"WHERE {where} " if where else ""
-        sql = (f"SELECT {self._collist()} FROM {self._src()} {w}{order} "
-               f"LIMIT {int(limit)} OFFSET {int(offset)}")
-        cur = self._run(sql, params)
+    def _materialize_snapshot(self, order, where="", params=None):
+        """COPY a sorted/filtered projection to a temp Parquet once.
+
+        File order matches ``order``, so subsequent paging uses the fast
+        ``file_row_number`` range path instead of repeating TopN/OFFSET.
+        """
+        from . import tmputil
+        from .engines import _ExecKeepalive
+        import threading
+        path = tmputil.new_tempfile("qv_", ".parquet")
         try:
-            return [tuple(r) for r in cur.fetchall()]
-        finally:
+            os.unlink(path)
+        except Exception:
+            pass
+        fwd = path.replace("\\", "/").replace("'", "''")
+        w = ("WHERE %s " % where) if where else ""
+        sql = ("COPY (SELECT %s FROM %s %s%s) TO '%s' (FORMAT PARQUET)"
+               % (self._collist(), self._src(), w, order, fwd))
+        eng = self._engine
+        cancel = getattr(eng, "_cancel", None)
+        # Prefer a write lock so SET + COPY are atomic vs other writers.
+        lock = getattr(eng, "write_lock", None)
+        ctx = lock if lock is not None else nullcontext()
+        with ctx:
             try:
-                cur.close()
+                eng.conn.execute("SET preserve_insertion_order = true")
             except Exception:
                 pass
-
-    def _stream_where(self, where, params, order, chunk=5000):
-        w = f"WHERE {where} " if where else ""
-        sql = f"SELECT {self._collist()} FROM {self._src()} {w}{order}"
-        cur = self._run(sql, params)
-        try:
-            while True:
-                rows = cur.fetchmany(chunk)
-                if not rows:
-                    return
-                for r in rows:
-                    yield tuple(r)
-        finally:
             try:
-                cur.close()
-            except Exception:
-                pass
+                with _ExecKeepalive(eng.conn, cancel, threading.get_ident(),
+                                    interval=0.25):
+                    if params:
+                        eng.conn.execute(sql, list(params))
+                    else:
+                        eng.conn.execute(sql)
+            finally:
+                try:
+                    eng.conn.execute("SET preserve_insertion_order = false")
+                except Exception:
+                    pass
+        snap = ParquetResultStore(eng, path, self._cols, owns_path=True)
+        try:
+            snap._n = len(snap)
+        except Exception:
+            pass
+        return snap
 
-    def _slice_where(self, item, where, params, order):
-        n = self._count_where(where, params)
-        if isinstance(item, slice):
-            start, stop, step = item.indices(n)
-            if start >= stop:
-                return []
-            if (step or 1) == 1:
-                return self._fetch_where(where, params, order,
-                                         stop - start, start)
-            return [r for j, r in
-                    enumerate(self._stream_where(where, params, order))
-                    if start <= j < stop and (j - start) % step == 0]
-        ix = int(item)
-        if ix < 0:
-            ix += n
-        if ix < 0 or ix >= n:
-            raise IndexError(item)
-        rows = self._fetch_where(where, params, order, 1, ix)
-        if not rows:
-            raise IndexError(item)
-        return rows[0]
+    def sorted_view(self, col_ix, descending=False):
+        col = str(self._cols[col_ix]).replace('"', '""')
+        order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"}, '
+                 f'"__rn"')
+        key = ("sort", int(col_ix), bool(descending))
+        hit = self._snap_cache.get(key)
+        if hit is not None and not getattr(hit, "_closed", False):
+            return hit
+        snap = self._materialize_snapshot(order)
+        self._snap_cache[key] = snap
+        return snap
 
     def filtered_view(self, terms, sort_ix=None, descending=False):
         if sort_ix is None:
@@ -796,7 +816,16 @@ class ParquetResultStore:
             order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"}, '
                      f'"__rn"')
         where, params = self._where(terms)
-        return _ParquetFilteredView(self, where, params, order)
+        key = ("filt", where, tuple(params), order)
+        hit = self._snap_cache.get(key)
+        if hit is not None and not getattr(hit, "_closed", False):
+            return hit
+        # Empty filter → just sorted snapshot (or self for stable order).
+        if not where and order == 'ORDER BY "__rn"':
+            return self
+        snap = self._materialize_snapshot(order, where=where, params=params)
+        self._snap_cache[key] = snap
+        return snap
 
     def count_view(self, terms):
         where, params = self._where(terms)
@@ -806,6 +835,12 @@ class ParquetResultStore:
         if self._closed:
             return
         self._closed = True
+        for snap in list(getattr(self, "_snap_cache", {}).values()):
+            try:
+                snap.close()
+            except Exception:
+                pass
+        self._snap_cache = {}
         if not getattr(self, "_owns_path", True):
             return   # borrowed source file: never ours to delete
         try:

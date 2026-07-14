@@ -294,7 +294,10 @@ export const NODE_DEFINITIONS = {
     folder_path: "",
     item_id: "",
     download_url: "",
+    auth_mode: "bearer",
     secret_key: "",
+    client_id: "",
+    tenant_id: "",
     table: "",
     label: "sharepoint",
   })),
@@ -311,10 +314,14 @@ export const NODE_DEFINITIONS = {
   sql: define("sql", "SQL", "Code", () => ({ sql: "SELECT *\nFROM input", label: "sql" }), true),
   python: define("python", "Python", "Terminal", () => ({
     code:
-      "# Optional input: columns, rows, df (list of dicts)\n" +
-      "# Assign `out` to emit a table.\n" +
+      "# Wire an upstream table into this node.\n" +
+      "#   df       — pandas DataFrame of the input (None if unwired)\n" +
+      "#   columns  — column names\n" +
+      "#   rows     — list of row tuples\n" +
+      "#   records  — list of row dicts\n" +
+      "# Assign out to emit a table (DataFrame, list of dicts, or {columns, rows}).\n" +
       "if df is not None:\n" +
-      "    out = df\n" +
+      "    out = df  # e.g. out = df[df[\"score\"] > 50]\n" +
       "else:\n" +
       '    out = [{"hello": "world", "n": 1}]\n',
     timeout_s: 30,

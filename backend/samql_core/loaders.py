@@ -408,6 +408,106 @@ def _sanitize_sheet(s):
     return _re.sub(r"[^A-Za-z0-9_]+", "_", str(s or "sheet")).strip("_") or "sheet"
 
 
+def _excel_sheet_stream(ws, skip, progress=None):
+    """Prepare a streaming Excel sheet ingest.
+
+    Returns ``(columns, row_iter_factory)`` or ``(None, None)`` when the sheet
+    has no header row at/after ``skip``. The factory yields body row tuples
+    one at a time so multi-million-row workbooks never materialise two full
+    Python copies of the sheet.
+    """
+    it = ws.iter_rows(values_only=True)
+    for _ in range(max(0, int(skip or 0))):
+        if next(it, None) is None:
+            return None, None
+    header = next(it, None)
+    if header is None:
+        return None, None
+    cols = _excel_headers(list(header) if header is not None else [])
+    if not cols:
+        return None, None
+    ncol = len(cols)
+
+    def _body():
+        n = 0
+        for r in it:
+            cells = list(r) if r is not None else []
+            vals = cells[:ncol] + [None] * (ncol - len(cells))
+            if all(v is None or v == "" for v in vals):
+                continue
+            n += 1
+            if progress is not None and (n % 5000 == 0):
+                try:
+                    progress(n, 0)
+                except LoadCancelled:
+                    raise
+                except Exception:
+                    pass
+            yield tuple(vals)
+
+    return cols, _body
+
+
+def _excel_ingest_sheet(session, path, tbase, sname, skip, destination,
+                        progress, prefer_duckdb):
+    """Stream one sheet into DuckDB (preferred) or SQLite.
+
+    openpyxl read-only iterators are one-shot, so a DuckDB failure re-opens
+    the workbook for the SQLite fallback instead of buffering the sheet.
+    """
+    try:
+        import openpyxl
+    except Exception:
+        raise RuntimeError("Reading Excel files needs the 'openpyxl' package, "
+                           "which isn't installed.")
+    try:
+        from .engines import HAS_DUCKDB as _HAS_DUCKDB
+    except Exception:
+        _HAS_DUCKDB = False
+
+    def _pass(wb, engine_name):
+        if sname not in wb.sheetnames:
+            return None
+        cols, body_fn = _excel_sheet_stream(wb[sname], skip, progress)
+        if cols is None:
+            return None
+        if engine_name == "duckdb":
+            duck = session.get_duckdb()
+            name, n = duck.add_table_streaming(
+                tbase, cols, body_fn(), source=path)
+            eng = duck
+        else:
+            name, n = session.db.add_table_streaming(
+                tbase, cols, body_fn(), source=path)
+            eng = session.db
+        return {"name": name, "rows": n,
+                "columns": eng.table_columns.get(name, cols),
+                "engine": engine_name}
+
+    if prefer_duckdb and destination == "duckdb" and _HAS_DUCKDB:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            return _pass(wb, "duckdb")
+        except LoadCancelled:
+            raise
+        except Exception:
+            pass
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        return _pass(wb, "sqlite")
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+
 def load_excel(session, path, base_name=None, destination="sqlite",
                sheet=None, header_row=1, progress=None):
     """Load an .xlsx/.xlsm workbook into one or more tables.
@@ -421,14 +521,9 @@ def load_excel(session, path, base_name=None, destination="sqlite",
     above it are skipped (use this when a sheet has a title/banner before the
     real header). Defaults to 1 (the first row).
 
-    Reads via openpyxl in read-only mode and buffers a sheet's rows so the
-    DuckDB-first / SQLite-fallback ingest can re-drain if typed ingest rejects
-    a value.
+    Reads via openpyxl in read-only mode and streams rows straight into
+    ``add_table_streaming`` — never buffers the whole sheet in Python.
     """
-    try:
-        from .engines import HAS_DUCKDB as _HAS_DUCKDB
-    except Exception:
-        _HAS_DUCKDB = False
     try:
         import openpyxl
     except Exception:
@@ -449,74 +544,36 @@ def load_excel(session, path, base_name=None, destination="sqlite",
         raise RuntimeError(
             "Legacy .xls (Excel 97-2003) isn't supported. Save the workbook "
             "as .xlsx and try again, or drag-drop the .xlsx file.")
+    # Peek sheet names only (no row scan) so multi-sheet naming is known up
+    # front without buffering cell data.
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    out = []
     try:
-        data_sheets = []
-        for sname in list(wb.sheetnames):
-            if not pick_all and sname != want:
-                continue
-            ws = wb[sname]
-            # Stream the sheet's rows into the buffer, polling progress every
-            # few thousand so a Stop pressed during a big read is seen. openpyxl's
-            # row iterator is a plain Python loop -- an engine interrupt can't
-            # reach it, so the progress callback (which re-raises LoadCancelled
-            # on cancel) is what makes the read interruptible.
-            rows = []
-            for r in ws.iter_rows(values_only=True):
-                rows.append(list(r) if r is not None else [])
-                if progress is not None and (len(rows) % 5000 == 0):
-                    try:
-                        progress(len(rows), 0)
-                    except LoadCancelled:
-                        raise
-                    except Exception:
-                        pass
-            if skip:
-                rows = rows[skip:]
-            while rows and all(c is None or c == "" for c in rows[-1]):
-                rows.pop()
-            if rows:
-                data_sheets.append((sname, rows))
-        if not pick_all and not data_sheets:
-            raise RuntimeError(
-                "Sheet %r wasn't found, or has no rows at/after row %d."
-                % (want, header_row))
-        multi = len(data_sheets) > 1
-        for sname, rows in data_sheets:
-            cols = _excel_headers(rows[0])
-            ncol = len(cols)
-            body = []
-            for r in rows[1:]:
-                vals = (r or [])[:ncol] + [None] * (ncol - len(r or []))
-                if all(v is None or v == "" for v in vals):
-                    continue
-                body.append(tuple(vals))
-            tbase = ("%s_%s" % (base, _sanitize_sheet(sname))) if multi else base
-            name = n = None
-            engine = None
-            if destination == "duckdb" and _HAS_DUCKDB:
-                try:
-                    duck = session.get_duckdb()
-                    name, n = duck.add_table_streaming(
-                        tbase, cols, iter(body), source=path)
-                    engine = "duckdb"
-                except Exception:
-                    name = engine = None
-            if engine is None:
-                name, n = session.db.add_table_streaming(
-                    tbase, cols, iter(body), source=path)
-                engine = "sqlite"
-            eng = session.get_duckdb() if engine == "duckdb" else session.db
-            out.append({"name": name, "rows": n,
-                        "columns": eng.table_columns.get(name, cols),
-                        "engine": engine})
+        sheetnames = list(wb.sheetnames)
     finally:
         try:
             wb.close()
         except Exception:
             pass
+    if not pick_all and want not in sheetnames:
+        raise RuntimeError(
+            "Sheet %r wasn't found, or has no rows at/after row %d."
+            % (want, header_row))
+    candidates = sheetnames if pick_all else [want]
+    multi = len(candidates) > 1
+    prefer_duck = destination == "duckdb"
+    out = []
+    for sname in candidates:
+        tbase = ("%s_%s" % (base, _sanitize_sheet(sname))) if multi else base
+        desc = _excel_ingest_sheet(
+            session, path, tbase, sname, skip, destination, progress,
+            prefer_duckdb=prefer_duck)
+        if desc is not None:
+            out.append(desc)
     if not out:
+        if not pick_all:
+            raise RuntimeError(
+                "Sheet %r wasn't found, or has no rows at/after row %d."
+                % (want, header_row))
         raise RuntimeError("That workbook has no readable sheets.")
     return out
 
@@ -573,56 +630,150 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
                       json_depth=None, force_ondisk=False):
     """Load a file into DuckDB, choosing storage by size.
 
-    A file at/above the on-disk threshold (SAMQL_ONDISK_MB) is streamed into a
-    Parquet cache and exposed as a query-in-place view -- bounded memory for the
-    whole lifecycle (the rows never live in the engine), with columnar column +
-    row-group pushdown for fast repeat queries. An already-Parquet large file is
-    just viewed in place (no re-copy). Smaller files materialise into an
-    in-memory table, as before. Nested JSON uses a lower threshold
-    (SAMQL_JSON_ONDISK_MB) because materialising structs/lists expands far
-    beyond file size. Falls back to the in-memory table if the Parquet route
-    fails for a non-cancel reason, so this is never worse than before.
+    A file at/above the on-disk threshold (SAMQL_ONDISK_MB) — or the hard
+    floor (SAMQL_ONDISK_HARD_MB, default 256 MiB) — is streamed into a
+    Parquet cache and exposed as a query-in-place view -- bounded memory for
+    the whole lifecycle (the rows never live in the engine), with columnar
+    column + row-group pushdown for fast repeat queries. An already-Parquet
+    large file is just viewed in place (no re-copy). Smaller files
+    materialise into an in-memory table, as before. Nested JSON uses a lower
+    threshold (SAMQL_JSON_ONDISK_MB) because materialising structs/lists
+    expands far beyond file size.
+
+    When the on-disk Parquet route fails for JSON, retry once at
+    ``json_depth=0`` (single JSON column, no STRUCT explosion). If that still
+    fails, raise so ``_load_json_duckdb`` can stream-flatten instead of
+    refusing the load. CSV/text may fall through to DuckDB CTAS (spill-aware)
+    and are then promoted back to Parquet so multi-GB CSVs still end as an
+    efficient on-disk cache. Nested JSON never uses that CTAS fallthrough
+    (multi-GB STRUCT materialize risk).
 
     ``json_depth`` caps DuckDB nested-type expansion for JSON (flatten-off).
     ``force_ondisk`` prefers the Parquet-cache path even below the size floor
     (used when converting large nested JSON to a safer on-disk format).
     """
-    from .engines import (_ondisk_min_bytes, _json_ondisk_min_bytes,
-                          _is_interrupt, ensure_json_engine_memory)
+    from .engines import (_ondisk_min_bytes, _ondisk_hard_floor_bytes,
+                          _json_ondisk_min_bytes, _is_interrupt,
+                          ensure_json_engine_memory,
+                          ensure_large_file_engine_memory)
     duck = session.get_duckdb()
     if kind == "json":
         ensure_json_engine_memory(duck, path)
+    elif kind == "csv":
+        ensure_large_file_engine_memory(duck, path)
     thresh = _ondisk_min_bytes()
     if kind == "json":
         jthresh = _json_ondisk_min_bytes()
         if jthresh is not None:
             thresh = jthresh if thresh is None else min(thresh, jthresh)
+    hard = _ondisk_hard_floor_bytes()
     big = bool(force_ondisk)
-    if not big and thresh is not None:
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    if not big:
+        if thresh is not None and size >= thresh:
+            big = True
+        elif hard is not None and size >= hard:
+            big = True
+
+    def _parquet_result(name, storage, depth):
+        return [{"name": name, "rows": _duck_count(duck, name),
+                 "columns": duck.table_columns.get(name, []),
+                 "engine": "duckdb", "storage": storage,
+                 "json_depth": depth}]
+
+    def _promote_table_to_parquet(table_name, depth):
+        """Materialize an in-engine table to a Parquet cache view (CSV
+        CTAS recovery). Best-effort: on failure keep the table."""
+        from . import tmputil
+        origin = (getattr(duck, "table_origins", {}) or {}).get(table_name) \
+            or (getattr(duck, "table_sources", {}) or {}).get(table_name) \
+            or path
+        cache = tmputil.new_tempfile("cache_", ".parquet")
         try:
-            big = os.path.getsize(path) >= thresh
-        except OSError:
-            big = False
+            duck.view_to_parquet(table_name, cache)
+            try:
+                duck.drop_table(table_name)
+            except Exception:
+                pass
+            name = duck.create_view_from_file(base_name, cache, "parquet")
+            remember = getattr(duck, "_remember_origin", None)
+            if remember:
+                remember(name, origin)
+            elif origin:
+                getattr(duck, "table_origins", {})[name] = origin
+            sys.stderr.write(
+                "[samql] promoted DuckDB table %s → Parquet cache\n"
+                % table_name)
+            return _parquet_result(name, "parquet-cache", depth)
+        except Exception as ex:
+            try:
+                os.unlink(cache)
+            except OSError:
+                pass
+            sys.stderr.write(
+                "[samql] Parquet promote failed (%s); keeping in-engine "
+                "table\n" % ex)
+            return [{"name": table_name,
+                     "rows": _duck_count(duck, table_name),
+                     "columns": duck.table_columns.get(table_name, []),
+                     "engine": "duckdb", "storage": "table",
+                     "json_depth": depth}]
+
     if big:
         try:
             if kind == "parquet":
                 name = duck.create_view_from_file(base_name, path, "parquet")
-                storage = "parquet-view"
-            else:
-                name = duck.load_file_to_parquet_view(
-                    base_name, path, kind, delimiter=delimiter,
-                    json_depth=json_depth)
-                storage = "parquet-cache"
-            return [{"name": name, "rows": _duck_count(duck, name),
-                     "columns": duck.table_columns.get(name, []),
-                     "engine": "duckdb", "storage": storage,
-                     "json_depth": json_depth}]
+                return _parquet_result(name, "parquet-view", json_depth)
+            name = duck.load_file_to_parquet_view(
+                base_name, path, kind, delimiter=delimiter,
+                json_depth=json_depth)
+            return _parquet_result(name, "parquet-cache", json_depth)
         except LoadCancelled:
             raise
         except Exception as e:
             if _is_interrupt(e):
                 raise                       # a cancel: abort, don't fall back
-            # otherwise fall through to the in-memory materialize below
+            # Flatten-off shallow loads: one more Parquet attempt as a single
+            # json column before handing off to the streaming flattener.
+            # Flatten-on (json_depth=None) skips this — stream-flatten is the
+            # better recovery than a opaque JSON-column Parquet.
+            if kind == "json" and json_depth is not None and json_depth != 0:
+                try:
+                    sys.stderr.write(
+                        "[samql] on-disk Parquet failed at depth=%s (%s); "
+                        "retrying as JSON-column Parquet (depth=0)\n"
+                        % (json_depth, e))
+                    name = duck.load_file_to_parquet_view(
+                        base_name, path, kind, delimiter=delimiter,
+                        json_depth=0)
+                    return _parquet_result(name, "parquet-cache", 0)
+                except LoadCancelled:
+                    raise
+                except Exception as e2:
+                    if _is_interrupt(e2):
+                        raise
+                    e = e2
+            if kind == "json":
+                # Do not CTAS nested JSON. Surface a recoverable error so
+                # _load_json_duckdb can stream-flatten into DuckDB tables.
+                raise RuntimeError(
+                    "On-disk Parquet load failed for large JSON %s (%s). "
+                    "Streaming flatten will be tried next."
+                    % (path, e)
+                ) from e
+            # CSV / delimited: spill-aware CTAS, then promote to Parquet so
+            # multi-GB loads still end as an efficient on-disk cache.
+            sys.stderr.write(
+                "[samql] on-disk Parquet failed for %s (%s); "
+                "materializing via DuckDB then converting to Parquet\n"
+                % (path, e))
+            name = duck.create_table_from_file(
+                base_name, path, kind, delimiter=delimiter,
+                json_depth=json_depth)
+            return _promote_table_to_parquet(name, json_depth)
     name = duck.create_table_from_file(base_name, path, kind,
                                        delimiter=delimiter,
                                        json_depth=json_depth)
@@ -688,7 +839,8 @@ def _shred_nested_json_load(session, res, root_id=None):
 
 
 def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
-                      spill=None, exclude=None, root_id=None):
+                      spill=None, exclude=None, root_id=None,
+                      full_nested=False):
     """DuckDB JSON load for array / NDJSON / concat / single-object shapes.
 
     Every JSON format is converted before query use:
@@ -697,15 +849,19 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
     2. NDJSON is COPY'd to an on-disk Parquet cache (file-cached when possible).
     3. Flatten-off uses shallow ``maximum_depth`` (default 2, then 0 on failure)
        so deep nesting stays JSON instead of exploding into STRUCTs.
-    4. Flatten-on loads full nested types from that Parquet, then runs
+    4. ``full_nested`` (shred post-pass): same as flatten-off routing but with
+       uncapped nested types so a later ``flatten_table`` sees real STRUCT/LIST
+       columns instead of depth-capped JSON scalars.
+    5. Flatten-on loads full nested types from that Parquet, then runs
        in-engine ``flatten_table``. A multi-GB *single* object still uses the
        Python streaming flattener (spill) because one STRUCT cannot be
-       materialised safely. OOM on the nested path also falls back to the
-       streamer.
+       materialised safely. Any Parquet-route failure (OOM or otherwise)
+       also falls back to the streamer so large files still load.
     """
     from .engines import (
         _is_interrupt, _is_duckdb_oom, _sniff_json_format,
         _json_stream_flatten_min_bytes, _json_shallow_depth_default,
+        _json_ondisk_min_bytes, _ondisk_min_bytes,
     )
     size = _json_file_size(path)
     fmt = _sniff_json_format(path)
@@ -732,8 +888,42 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
             json_depth=json_depth,
             force_ondisk=force_ondisk)
 
+    def _ondisk_for_size():
+        thresh = _json_ondisk_min_bytes()
+        if thresh is None:
+            thresh = _ondisk_min_bytes()
+        return bool(thresh is not None and size >= thresh)
+
+    if not flatten and full_nested:
+        # UI Flatten/shred toggle: need full STRUCT/LIST types for the
+        # relational shred pass, but do NOT shred here (session does that).
+        # Prefer Parquet only above the size floor so small files stay fast.
+        force_ondisk = _ondisk_for_size()
+        sys.stderr.write(
+            "[samql] JSON load (shred prep, %s): %s with full nested types\n"
+            % (fmt,
+               ("converting to Parquet" if force_ondisk
+                else "materializing")))
+        try:
+            return _native(json_depth=None, force_ondisk=force_ondisk)
+        except LoadCancelled:
+            raise
+        except Exception as e:
+            if _is_interrupt(e):
+                raise
+            sys.stderr.write(
+                "[samql] full-nested JSON load failed (%s); "
+                "streaming flatten into DuckDB\n" % e)
+            return _stream_flatten_into_duckdb(
+                session, path, base_name, progress=progress,
+                spill=spill, exclude=exclude)
+
     if not flatten:
-        # Flatten-off: shallow depth → Parquet (not relational flatten).
+        # Flatten-off: shallow depth. Prefer on-disk Parquet only when the file
+        # is large enough -- small files CTAS + struct-expand so keys show as
+        # columns without a full relational shred. Large files stay Parquet-
+        # backed for bounded memory.
+        force_ondisk = _ondisk_for_size()
         depths = [_json_shallow_depth_default()]
         if depths[0] != 0:
             depths.append(0)
@@ -743,13 +933,18 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
                 if i > 0:
                     sys.stderr.write(
                         "[samql] nested JSON failed at maximum_depth=%s "
-                        "(%s); retrying as JSON-column Parquet (depth=0)\n"
-                        % (depths[i - 1], last_err))
+                        "(%s); retrying as JSON-column%s\n"
+                        % (depths[i - 1], last_err,
+                           " Parquet" if force_ondisk else ""))
                 else:
                     sys.stderr.write(
-                        "[samql] JSON load (flatten off, %s): converting to "
-                        "Parquet with maximum_depth=%d\n" % (fmt, depth))
-                return _native(json_depth=depth, force_ondisk=True)
+                        "[samql] JSON load (flatten off, %s): "
+                        "%s with maximum_depth=%d\n"
+                        % (fmt,
+                           ("converting to Parquet" if force_ondisk
+                            else "materializing"),
+                           depth))
+                return _native(json_depth=depth, force_ondisk=force_ondisk)
             except LoadCancelled:
                 raise
             except Exception as e:
@@ -757,12 +952,21 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
                     raise
                 last_err = e
                 if i + 1 >= len(depths):
-                    raise
+                    break
                 continue
-        raise last_err  # pragma: no cover
+        # Native path exhausted. Do NOT silently stream-flatten here: that
+        # violates Flatten-off (creates many relational tables) and on a
+        # multi-GB nested file can run for hours looking like a stall.
+        # Flatten-on still uses the streamer as a recovery path below.
+        raise RuntimeError(
+            "Could not load nested JSON with Flatten off (%s). "
+            "Convert the file to .ndjson / .jsonl, free disk for the temp "
+            "NDJSON→Parquet rewrite, or turn Flatten on if you want "
+            "relational tables." % last_err) from last_err
 
     # Flatten on: always convert to Parquet first (full nested types), then
-    # in-engine shred. OOM → Python streamer (bounded memory).
+    # in-engine shred. Any Parquet-route failure (OOM or otherwise) →
+    # Python streamer (bounded memory) so large files still load.
     sys.stderr.write(
         "[samql] JSON load (flatten on, %s): converting to Parquet "
         "then shred\n" % fmt)
@@ -773,14 +977,13 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
     except Exception as e:
         if _is_interrupt(e):
             raise
-        if _is_duckdb_oom(e):
-            sys.stderr.write(
-                "[samql] nested JSON OOM during flatten-on load; "
-                "streaming flatten into DuckDB\n")
-            return _stream_flatten_into_duckdb(
-                session, path, base_name, progress=progress,
-                spill=spill, exclude=exclude)
-        raise
+        why = "OOM" if _is_duckdb_oom(e) else "Parquet conversion failed"
+        sys.stderr.write(
+            "[samql] nested JSON %s during flatten-on load (%s); "
+            "streaming flatten into DuckDB\n" % (why, e))
+        return _stream_flatten_into_duckdb(
+            session, path, base_name, progress=progress,
+            spill=spill, exclude=exclude)
     try:
         return _shred_nested_json_load(session, res, root_id=root_id)
     except LoadCancelled:
@@ -797,7 +1000,7 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
 def load_file(session, path, destination="sqlite", base_name=None,
               progress=None, delimiter=None, mode="materialize",
               sheet=None, header_row=1, exclude=None, flatten=None,
-              root_id=None):
+              root_id=None, full_nested=False):
     """Dispatch a single file to the right loader based on extension and
     the requested destination engine. ``session`` provides .db and
     .get_duckdb(). ``progress`` (optional) is called as
@@ -808,6 +1011,8 @@ def load_file(session, path, destination="sqlite", base_name=None,
     (query the file in place via a DuckDB view -- no copy). View mode needs
     DuckDB and a streamable format (CSV / JSON / Parquet); anything else
     (Excel, or DuckDB unavailable) safely falls back to a materialized load.
+    ``full_nested`` (JSON + DuckDB, flatten off) loads uncapped STRUCT/LIST
+    types for a subsequent shred pass without running shred in the loader.
     Returns a list of loaded-table descriptors."""
     # "auto"/"default" means "the best engine for this machine" -- DuckDB when
     # installed (far better at large files), else SQLite. The Session.load_file
@@ -825,6 +1030,9 @@ def load_file(session, path, destination="sqlite", base_name=None,
     if mode == "view" and ext not in ("xlsx", "xlsm", "xls"):
         # query-in-place: a DuckDB view over read_*. Needs DuckDB; if it's
         # unavailable we fall through to a normal materialized load.
+        # Large CSV/JSON and non-NDJSON JSON must not use a live view: CSV/JSON
+        # views re-parse every query, and top-level JSON arrays buffer in
+        # DuckDB on each scan. Prefer the Parquet-cache materialize path.
         try:
             duck = session.get_duckdb()
         except Exception:
@@ -833,11 +1041,37 @@ def load_file(session, path, destination="sqlite", base_name=None,
             kind = ("parquet" if ext in ("parquet", "pq")
                     else "json" if ext in ("json", "ndjson", "jsonl")
                     else "csv")
-            name = duck.create_view_from_file(
-                base_name, path, kind, delimiter=_norm_delim(delimiter))
-            cols = duck.table_columns.get(name, [])
-            return [{"name": name, "rows": None, "columns": cols,
-                     "engine": "duckdb", "view": True}]
+            use_view = True
+            if kind == "json":
+                from .engines import (
+                    _sniff_json_format, _is_ndjson_path,
+                    _json_ondisk_min_bytes, _ondisk_min_bytes)
+                if (_sniff_json_format(path) != "ndjson"
+                        and not _is_ndjson_path(path)):
+                    use_view = False
+                else:
+                    thresh = _json_ondisk_min_bytes()
+                    if thresh is None:
+                        thresh = _ondisk_min_bytes()
+                    try:
+                        if thresh is not None and os.path.getsize(path) >= thresh:
+                            use_view = False
+                    except OSError:
+                        pass
+            elif kind == "csv":
+                from .engines import _ondisk_min_bytes
+                thresh = _ondisk_min_bytes()
+                try:
+                    if thresh is not None and os.path.getsize(path) >= thresh:
+                        use_view = False
+                except OSError:
+                    pass
+            if use_view:
+                name = duck.create_view_from_file(
+                    base_name, path, kind, delimiter=_norm_delim(delimiter))
+                cols = duck.table_columns.get(name, [])
+                return [{"name": name, "rows": None, "columns": cols,
+                         "engine": "duckdb", "view": True}]
         # else: fall through and materialize instead
     if ext in ("xlsx", "xlsm", "xls"):
         return load_excel(session, path, base_name, destination=destination,
@@ -853,7 +1087,7 @@ def load_file(session, path, destination="sqlite", base_name=None,
         # legacy session default for callers that don't say (folder appends,
         # node loads)
         if flatten is None:
-            flatten = bool(getattr(session, "flatten_on_load", True))
+            flatten = bool(getattr(session, "flatten_on_load", False))
         flatten = bool(flatten)
         spill = (10_000 if getattr(session, "low_memory", False)
                  else JSON_SPILL_ROWS)
@@ -861,7 +1095,7 @@ def load_file(session, path, destination="sqlite", base_name=None,
             return _load_json_duckdb(
                 session, path, base_name, flatten=flatten,
                 progress=progress, spill=spill, exclude=exclude,
-                root_id=root_id)
+                root_id=root_id, full_nested=bool(full_nested))
         # SQLite (or any non-DuckDB engine) always flattens -- it has no nested
         # column types -- so the toggle only affects the DuckDB path above.
         return load_json(session.db, path, base_name, progress=progress,
@@ -871,5 +1105,31 @@ def load_file(session, path, destination="sqlite", base_name=None,
     if destination == "duckdb":
         return _load_into_duckdb(session, path, base_name, "csv",
                                  delimiter=ndelim)
+    # Large CSV into SQLite thrash-queries and can OOM on analytics. When
+    # DuckDB is available, auto-upgrade to the on-disk Parquet path so
+    # multi-GB / multi-million-row CSVs still load. Only fail loud when
+    # DuckDB is unavailable.
+    from .engines import (_ondisk_min_bytes, _ondisk_hard_floor_bytes,
+                          HAS_DUCKDB)
+    thresh = _ondisk_min_bytes()
+    hard = _ondisk_hard_floor_bytes()
+    try:
+        sz = os.path.getsize(path)
+    except OSError:
+        sz = 0
+    large = ((thresh is not None and sz >= thresh)
+             or (hard is not None and sz >= hard))
+    if large:
+        if HAS_DUCKDB:
+            sys.stderr.write(
+                "[samql] CSV is %.0f MiB — using DuckDB on-disk Parquet "
+                "instead of SQLite\n" % (sz / (1024 * 1024.0)))
+            return _load_into_duckdb(session, path, base_name, "csv",
+                                     delimiter=ndelim, force_ondisk=True)
+        raise RuntimeError(
+            "This CSV is %.0f MiB — too large for SQLite, and DuckDB is "
+            "not installed. Install duckdb (pip install duckdb) so SamQL "
+            "can stream it to on-disk Parquet."
+            % (sz / (1024 * 1024.0)))
     return [load_csv(session.db, path, base_name, sep=ndelim,
                      progress=progress)]

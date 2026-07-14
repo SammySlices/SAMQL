@@ -3,11 +3,15 @@
 
   The Python release facade validates release identity, saved-data declarations,
   SOURCE_MANIFEST exactness, section bytes, and the APHEX decode before it
-  publishes anything. The output directory receives:
+  publishes anything. The output directory (default: .\release) receives:
 
     samql_full_source_all_tests_ui_<build>.txt
     SAMQL_BUILD_<sequence>_EMAIL_SAFE_APHEX.txt
     SAMQL_BUILD_<sequence>_RELEASE_RECEIPT.json
+    SAMQL_BUILD_<sequence>_RELEASE_REPORT.txt
+    Expand-SamQL.ps1.txt
+    Decode-SamQL-APHEX.ps1.txt
+    SHA256SUMS.txt
 
   APHEX is reversible mail-safe encoding, not cryptographic encryption.
   Windows PowerShell 5.1 compatible.

@@ -700,6 +700,32 @@ def _api_duckdb_file(session, path, base_name, full_url, status):
             "tables": [desc], "url": full_url}
 
 
+def _api_duckdb_records_file(session, path, base_name, full_url, status,
+                             json_path=None):
+    """Stream records (optional ``json_path``) to a temp NDJSON file, then
+    hand that file to DuckDB — never ``list()`` the whole nested array."""
+    import tempfile
+    from . import tmputil
+    fd, nd = tempfile.mkstemp(prefix="api_nd_", suffix=".ndjson",
+                              dir=tmputil.instance_dir())
+    os.close(fd)
+    n_recs = 0
+    try:
+        with open(nd, "w", encoding="utf-8") as out:
+            for rec in _records_from_file(path, json_path):
+                out.write(json.dumps(rec, ensure_ascii=False, default=str))
+                out.write("\n")
+                n_recs += 1
+        if n_recs == 0:
+            return None
+        return _api_duckdb_file(session, nd, base_name, full_url, status)
+    finally:
+        try:
+            os.unlink(nd)
+        except Exception:
+            pass
+
+
 def _load_records(session, records, base_name, full_url, status, destination):
     """Load a list of records into one table in the requested engine, falling
     back from DuckDB to SQLite when DuckDB is unavailable."""
@@ -815,8 +841,10 @@ def load_api(session, url, base_name="api_data", auth_user=None,
             res["pages"] = 1
             return res
         try:
-            # DuckDB + a records-path: parse the nested array out, then load.
-            records = list(_records_from_file(tmp, json_path))
+            # DuckDB + a records-path: stream nested records to NDJSON then
+            # let DuckDB read the file (bounded memory — no list()).
+            res = _api_duckdb_records_file(
+                session, tmp, base_name, src_label, status, json_path)
         except FetchCancelled:
             raise
         except Exception:
@@ -826,12 +854,10 @@ def load_api(session, url, base_name="api_data", auth_user=None,
             return {"ok": False, "status": status,
                     "error": _not_json_error(status, ctype, _peek_text(tmp)),
                     "url": src_label, "pages": 1}
-        if not records:
+        if res is None:
             return {"ok": False, "status": status,
                     "error": "Response contained no records to load.",
                     "url": src_label, "pages": 1}
-        res = _load_records(session, records, base_name, src_label, status,
-                            destination)
         res["pages"] = 1
         return res
     except FetchCancelled:

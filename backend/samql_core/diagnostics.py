@@ -90,6 +90,15 @@ def env_report(session=None, **_):
     except Exception:
         spill = None
     reader = os.environ.get("SAMQL_JSON_READER", "") or "auto"
+    try:
+        from . import load_thresholds as LT
+        ondisk_v, ondisk_src = LT.get_raw("ondisk_mb")
+        hard_v, hard_src = LT.get_raw("ondisk_hard_mb")
+        ondisk_disp = "%s (%s)" % (ondisk_v, ondisk_src)
+        hard_disp = "%s (%s)" % (hard_v, hard_src)
+    except Exception:
+        ondisk_disp = os.environ.get("SAMQL_ONDISK_MB") or "512 (default)"
+        hard_disp = os.environ.get("SAMQL_ONDISK_HARD_MB") or "256 (default)"
     info = {
         "version": __version__,
         "build": BUILD,
@@ -100,7 +109,8 @@ def env_report(session=None, **_):
         "features": feats,
         "json_reader": reader,
         "json_spill_rows": spill,
-        "ondisk_mb": os.environ.get("SAMQL_ONDISK_MB") or "512 (default)",
+        "ondisk_mb": ondisk_disp,
+        "ondisk_hard_mb": hard_disp,
     }
     if feats["ijson"] and reader == "auto":
         info["reader_note"] = ("Files starting with '[' are read with ijson; if "
@@ -117,6 +127,13 @@ def _resolve_path(session, table, path):
         for mgr in (getattr(session, "duckdb", None),
                     getattr(session, "db", None)):
             if mgr is not None:
+                # Prefer the ORIGINAL file (JSON/CSV) when the live source is a
+                # Parquet cache -- sniffing / field trees need the text input,
+                # not the converted cache path.
+                origins = getattr(mgr, "table_origins", {}) or {}
+                origin = origins.get(table)
+                if origin and os.path.exists(str(origin)):
+                    return str(origin)
                 src = getattr(mgr, "table_sources", {}).get(table)
                 if src and os.path.exists(str(src)):
                     return str(src)
@@ -494,76 +511,100 @@ def access_recipes(column, rows):
     return rows
 
 
-def json_field_tree(path, colname="json", access_style="json",
-                    sample=0, time_budget_s=25):
-    """Sample a JSON file and return the nested field TREE of its records, in
-    the same display shape as flatten_type_tree, with a query expression per
-    readable scalar. This is how the structure view shows field names when the
-    engine stored the record as one opaque JSON column (so DESCRIBE reveals no
-    sub-fields).
+def _json_tree_new():
+    return {"kind": None, "types": set(), "children": {},
+            "elem": None, "max_items": 0}
 
-    `access_style` picks the query syntax: "json" -> DuckDB JSON access on the
-    column, e.g.  json ->> '$.a.b'  (returns text) and an UNNEST note for
-    arrays; "struct" -> dotted struct access, e.g.  json.a.b. Time-boxed like
-    discovery. Merges the shape across sampled records so ragged inputs still
-    produce a complete tree."""
-    from .flatten import stream_json_records
 
-    def new():
-        return {"kind": None, "types": set(), "children": {},
-                "elem": None, "max_items": 0}
-
-    def merge(node, val, depth):
-        if depth > 40:
+def _json_tree_merge(node, val, depth):
+    """Merge one Python value into a shape tree (mutates ``node``)."""
+    if depth > 40:
+        return
+    # Double-encoded JSON often survives as a string leaf inside arrays /
+    # objects; decode before treating it as a scalar so field discovery can
+    # see nested keys under "(element)".
+    if isinstance(val, str):
+        coerced = _coerce_json_sample(val)
+        if isinstance(coerced, (dict, list)):
+            _json_tree_merge(node, coerced, depth)
             return
+        val = coerced
+    if isinstance(val, dict):
+        if node["kind"] != "array":
+            node["kind"] = "object"
+        for k, v in val.items():
+            ch = node["children"].get(str(k))
+            if ch is None:
+                ch = _json_tree_new()
+                node["children"][str(k)] = ch
+            _json_tree_merge(ch, v, depth + 1)
+    elif isinstance(val, list):
+        node["kind"] = "array"
+        if len(val) > node["max_items"]:
+            node["max_items"] = len(val)
+        if node["elem"] is None:
+            node["elem"] = _json_tree_new()
+        for it in val[:8]:
+            _json_tree_merge(node["elem"], it, depth + 1)
+    else:
+        if node["kind"] is None:
+            node["kind"] = "scalar"
+        node["types"].add("null" if val is None
+                          else {"str": "text", "int": "integer",
+                                "float": "double", "bool": "boolean"}
+                          .get(type(val).__name__, type(val).__name__))
+
+
+def _coerce_json_sample(val, _decode_depth=0):
+    """Turn a live cell (JSON text / STRUCT dict / list) into a mergeable
+    Python value. Opaque JSON cells often arrive as already-encoded strings,
+    and arrays may hold *stringified* objects (double-encoded JSON) — recurse
+    after each successful parse so nested keys surface under ``(element)``.
+
+    ``_decode_depth`` caps successive string→JSON decodes only; walking
+    already-parsed dict/list structure is uncapped (merge has its own limit)."""
+    if val is None:
+        return None
+    if isinstance(val, (dict, list)):
+        # STRUCT/LIST cells may still hold JSON-encoded string leaves.
         if isinstance(val, dict):
-            if node["kind"] != "array":
-                node["kind"] = "object"
+            out = {}
             for k, v in val.items():
-                ch = node["children"].get(str(k))
-                if ch is None:
-                    ch = new()
-                    node["children"][str(k)] = ch
-                merge(ch, v, depth + 1)
-        elif isinstance(val, list):
-            node["kind"] = "array"
-            if len(val) > node["max_items"]:
-                node["max_items"] = len(val)
-            if node["elem"] is None:
-                node["elem"] = new()
-            for it in val[:8]:
-                merge(node["elem"], it, depth + 1)
-        else:
-            if node["kind"] is None:
-                node["kind"] = "scalar"
-            node["types"].add("null" if val is None
-                              else {"str": "text", "int": "integer",
-                                    "float": "double", "bool": "boolean"}
-                              .get(type(val).__name__, type(val).__name__))
+                out[str(k)] = _coerce_json_sample(v, _decode_depth)
+            return out
+        return [_coerce_json_sample(v, _decode_depth) for v in val[:32]]
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            val = val.decode("utf-8", "replace")
+        except Exception:
+            return str(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return val
+        if s[0] in "{[":
+            try:
+                import orjson
+                parsed = orjson.loads(s)
+            except Exception:
+                try:
+                    import json as _json
+                    parsed = _json.loads(s)
+                except Exception:
+                    return val
+            # One loads() is not enough when the array elements are themselves
+            # JSON text (e.g. ["{\"id\":1}", ...]). Re-coerce the parsed value.
+            if _decode_depth >= 12:
+                return parsed
+            return _coerce_json_sample(parsed, _decode_depth + 1)
+        return val
+    return val
 
-    root = new()
-    n = 0
-    t0 = time.monotonic()
-    budget = float(time_budget_s or 25)
-    cap = int(sample or 0)
 
-    def _over():
-        return time.monotonic() - t0 > budget
-    complete = True
-    try:
-        for r in stream_json_records(path, should_cancel=_over):
-            merge(root, r, 0)
-            n += 1
-            if cap and n >= cap:
-                break
-            if (n & 31) == 0 and _over():
-                complete = False
-                break
-    except InterruptedError:
-        complete = False
-    except Exception:
-        complete = False
-
+def _field_tree_from_root(root, colname="json", access_style="json",
+                          sampled=0, complete=True, scan_s=0.0,
+                          source=None):
+    """Walk a merged shape root into the display nodes used by the sidebar."""
     rows = []
 
     def label(nd):
@@ -614,8 +655,72 @@ def json_field_tree(path, colname="json", access_style="json",
                          "path": None if in_array else expr(jptr), "note": None})
 
     walk(colname, root, 0, "$", False)
-    return {"sampled": n, "complete": complete,
-            "scan_s": round(time.monotonic() - t0, 2), "nodes": rows}
+    out = {"sampled": sampled, "complete": complete,
+           "scan_s": scan_s, "nodes": rows}
+    if source is not None:
+        out["source"] = source
+    return out
+
+
+def json_values_to_field_tree(values, colname="json", access_style="json"):
+    """Build a nested field tree from already-sampled Python/JSON values.
+
+    Same display shape as ``json_field_tree`` / ``flatten_type_tree``. Used when
+    DESCRIBE only shows opaque JSON / JSON[] (flatten-off depth cap) so the
+    sidebar can still expand real field names from live table cells."""
+    root = _json_tree_new()
+    n = 0
+    for raw in values or []:
+        _json_tree_merge(root, _coerce_json_sample(raw), 0)
+        n += 1
+    return _field_tree_from_root(root, colname=colname,
+                                 access_style=access_style,
+                                 sampled=n, complete=True, scan_s=0.0,
+                                 source="sampled-values")
+
+
+def json_field_tree(path, colname="json", access_style="json",
+                    sample=0, time_budget_s=25):
+    """Sample a JSON file and return the nested field TREE of its records, in
+    the same display shape as flatten_type_tree, with a query expression per
+    readable scalar. This is how the structure view shows field names when the
+    engine stored the record as one opaque JSON column (so DESCRIBE reveals no
+    sub-fields).
+
+    `access_style` picks the query syntax: "json" -> DuckDB JSON access on the
+    column, e.g.  json ->> '$.a.b'  (returns text) and an UNNEST note for
+    arrays; "struct" -> dotted struct access, e.g.  json.a.b. Time-boxed like
+    discovery. Merges the shape across sampled records so ragged inputs still
+    produce a complete tree."""
+    from .flatten import stream_json_records
+
+    root = _json_tree_new()
+    n = 0
+    t0 = time.monotonic()
+    budget = float(time_budget_s or 25)
+    cap = int(sample or 0)
+
+    def _over():
+        return time.monotonic() - t0 > budget
+    complete = True
+    try:
+        for r in stream_json_records(path, should_cancel=_over):
+            _json_tree_merge(root, r, 0)
+            n += 1
+            if cap and n >= cap:
+                break
+            if (n & 31) == 0 and _over():
+                complete = False
+                break
+    except InterruptedError:
+        complete = False
+    except Exception:
+        complete = False
+
+    return _field_tree_from_root(root, colname=colname,
+                                 access_style=access_style,
+                                 sampled=n, complete=complete,
+                                 scan_s=round(time.monotonic() - t0, 2))
 
 
 def _scratch_writer(session):
@@ -799,6 +904,12 @@ def profile_json_load(path, max_records=40, session=None, offset=0):
         if slow is None or (r.get("seconds") or 0) > (slow.get("seconds") or 0):
             slow = r
 
+    # D: flatten-off production path (sniff → optional NDJSON rewrite →
+    # depth-capped native COPY to Parquet). The flatten timings above remain
+    # for flatten-ON comparison; large loads no longer stream-flatten by
+    # default, so this section is what the UI/load path actually does.
+    parquet_path = _profile_flatten_off_parquet(path, feats)
+
     return {
         "path": path,
         "size_mb": round(os.path.getsize(path) / 1e6, 2),
@@ -816,10 +927,126 @@ def profile_json_load(path, max_records=40, session=None, offset=0):
         "write": write,
         "per_table": per_table,
         "slowest_table": slow,
+        "flatten_off_parquet": parquet_path,
+        "nested_discovery": (
+            "When flatten-off stores opaque JSON / JSON[] columns "
+            "(maximum_depth=2), nested field trees are built by sampling "
+            "live cell values — DESCRIBE alone shows no deep schema."
+        ),
         "features": feats,
         "hint": _hint(read_prod_s, read_std_s, uses_ijson),
         "profile": buf.getvalue(),
     }
+
+
+def _profile_flatten_off_parquet(path, feats):
+    """Time the flatten-off Parquet conversion path used for large JSON."""
+    if not feats.get("duckdb"):
+        return {"skipped": True, "reason": "duckdb not available"}
+    try:
+        from .engines import (DuckDBManager, _sniff_json_format,
+                              _is_ndjson_path)
+        from . import tmputil
+    except Exception as e:
+        return {"skipped": True, "reason": "%s: %s" % (type(e).__name__, e)}
+
+    out = {"maximum_depth": 2}
+    try:
+        t0 = time.monotonic()
+        fmt = ("ndjson" if _is_ndjson_path(path)
+               else _sniff_json_format(path))
+        out["sniff_s"] = round(time.monotonic() - t0, 3)
+        out["format"] = fmt
+    except Exception as e:
+        out["sniff_error"] = "%s: %s" % (type(e).__name__, e)
+        fmt = None
+
+    mgr = None
+    cache = None
+    try:
+        mgr = DuckDBManager()
+        t0 = time.monotonic()
+        read_path, is_nd, cleanup = mgr._json_source_for_read(path)
+        out["rewrite_s"] = round(time.monotonic() - t0, 3)
+        out["rewrote_to_ndjson"] = bool(cleanup)
+        out["reads_as_ndjson"] = bool(is_nd)
+        cache = tmputil.new_tempfile("diag_pq_", ".parquet")
+        try:
+            os.unlink(cache)
+        except OSError:
+            pass
+        cfwd = cache.replace("\\", "/").replace("'", "''")
+        rfwd = read_path.replace("\\", "/").replace("'", "''")
+        from .engines import _json_readers, exec_copy_parquet
+        readers = _json_readers(
+            rfwd, ndjson=is_nd,
+            memory_limit_mb=getattr(mgr, "_applied_resource_memory_mb", None),
+            maximum_depth=2)
+        t0 = time.monotonic()
+        last = None
+        for reader in readers:
+            try:
+                exec_copy_parquet(
+                    mgr.conn, "SELECT * FROM %s" % reader, cfwd)
+                last = None
+                break
+            except Exception as e:
+                last = e
+                try:
+                    os.unlink(cache)
+                except OSError:
+                    pass
+        out["native_parquet_s"] = round(time.monotonic() - t0, 3)
+        if last is not None:
+            out["error"] = "%s: %s" % (type(last).__name__, last)
+        else:
+            try:
+                out["parquet_bytes"] = os.path.getsize(cache)
+                cur = mgr.conn.cursor()
+                try:
+                    cur.execute(
+                        "SELECT count(*) FROM read_parquet('%s')" % cfwd)
+                    out["rows"] = int(cur.fetchone()[0])
+                    cur.execute(
+                        "DESCRIBE SELECT * FROM read_parquet('%s')" % cfwd)
+                    cols = [(r[0], r[1] or "") for r in cur.fetchall()]
+                finally:
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+                out["columns"] = [{"name": c, "type": t} for c, t in cols]
+                opaque = [c for c, t in cols
+                          if "JSON" in (t or "").upper()]
+                out["opaque_json_columns"] = opaque
+                out["note"] = (
+                    "Flatten-off Parquet path (depth=2). Opaque JSON columns "
+                    "need sampled-value field trees for nested discovery."
+                    if opaque else
+                    "Flatten-off Parquet path (depth=2).")
+            except Exception as e:
+                out["post_error"] = "%s: %s" % (type(e).__name__, e)
+        if cleanup:
+            try:
+                os.unlink(cleanup)
+            except OSError:
+                pass
+    except Exception as e:
+        out["error"] = "%s: %s" % (type(e).__name__, e)
+    finally:
+        if cache:
+            try:
+                os.unlink(cache)
+            except OSError:
+                pass
+        if mgr is not None:
+            try:
+                conn = getattr(mgr, "_conn", None) or getattr(mgr, "conn", None)
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+    return out
 
 
 def scan_heaviest_records(path, cap=0, top=15):
@@ -906,11 +1133,12 @@ def json_heaviest_diag(session=None, table=None, path=None, max_records=0,
 
 
 @diagnostic("json_load", "JSON load profiler",
-            "Times read vs read+flatten vs the engine write of EVERY table on a "
-            "JSON file (or a loaded table's source), catching per-table write "
-            "errors, so you can see exactly which phase or which table is slow. "
-            "Use the offset to skip the small records at the front and aim at "
-            "the big ones deeper in the file.",
+            "Times the JSON load phases: production read vs stdlib read, "
+            "read+flatten (flatten-ON comparison), per-table engine writes, "
+            "AND the flatten-OFF Parquet path (sniff → NDJSON rewrite → "
+            "depth=2 native COPY). For a loaded table, prefers the original "
+            "JSON file when the live source is a Parquet cache. Use offset to "
+            "skip small leading records and aim at bigger ones deeper in.",
             params=[
                 {"name": "table", "label": "Loaded table (uses its source file)",
                  "type": "table"},

@@ -9,7 +9,8 @@
 #
 #   duckdb   -- default analytics engine (CSV / JSON / Parquet / large data)
 #   pyarrow  -- Arrow interchange + Parquet acceleration
-#   orjson   -- fast JSON for API / result payloads
+#   pandas   -- Python node DataFrames (input `df` / assign DataFrame to `out`)
+#   orjson   -- REQUIRED fast JSON (NDJSON rewrite + API / result payloads)
 #   ijson    -- streaming JSON for large nested loads
 #   openpyxl -- .xlsx / .xlsm read + write
 #   sqlglot  -- SQL dialect niceties / validation
@@ -17,13 +18,19 @@
 #   pywebview -- native desktop window (SamQL-AppWindow); falls back to browser
 #   pyodbc   -- SQL Server connector (Windows builds)
 #   pywin32  -- Windows auth / DPAPI helpers used with SQL Server + secrets
+#   msal     -- SharePoint sign-in (device code / interactive OAuth)
+#   requests + requests-negotiate-sspi -- Windows Integrated Auth for on-prem SP
 duckdb>=0.9.0
 pyarrow
+pandas
 orjson
 ijson
 openpyxl
 sqlglot
 tzdata
 pywebview
+msal
+requests
 pyodbc; platform_system == "Windows"
 pywin32; platform_system == "Windows"
+requests-negotiate-sspi; platform_system == "Windows"
