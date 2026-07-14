@@ -19167,6 +19167,194 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_json_field_tree_deep_nested_and_heterogeneous():
+        # Cashflow-style depth (col→array→object→array→object→array→scalars)
+        # plus ragged array elements whose unique keys appear late (past the
+        # old 8-element merge cap) and mixed STRUCT+JSON DESCRIBE shells that
+        # used to skip live-cell sampling.
+        from samql_core import session as S
+        from samql_core.diagnostics import json_values_to_field_tree
+        deep = {
+            "code": "X",
+            "trades": [{
+                "tid": 1,
+                "legs": [{
+                    "side": "PAY",
+                    "cashflows": [{
+                        "cf_type": "FIXED",
+                        "schedule": [
+                            {"pay_date": "2024-01-01", "amt": 1.0,
+                             "ccy": "USD"},
+                        ],
+                    }],
+                }],
+            }],
+        }
+        ft = json_values_to_field_tree([deep], colname="json")
+        names = [n["name"] for n in ft.get("nodes") or []]
+        depths = {n["name"]: n["depth"] for n in ft.get("nodes") or []}
+        for key in ("trades", "legs", "cashflows", "schedule",
+                    "pay_date", "amt", "ccy", "cf_type", "side", "tid"):
+            need(key in names,
+                 "deep cashflow tree lists %r: %r" % (key, names))
+        need(depths.get("pay_date", 0) >= 5,
+             "pay_date is at depth 5+: %r" % depths.get("pay_date"))
+        need(max(n["depth"] for n in ft["nodes"]) >= 6,
+             "tree walks past depth 5: max=%d" % max(
+                 n["depth"] for n in ft["nodes"]))
+
+        # Heterogeneous array: unique keys only after element 8, plus a nested
+        # array-of-arrays shape under a late element.
+        ragged = {
+            "items": ([{"k": i} for i in range(10)]
+                      + [{"late_key": 99,
+                          "matrix": [[{"deep_z": 1, "only_late": True}]]}]),
+        }
+        ft2 = json_values_to_field_tree([ragged], colname="json")
+        names2 = [n["name"] for n in ft2.get("nodes") or []]
+        need("late_key" in names2,
+             "union keys across array elements (late_key): %r" % names2)
+        need("deep_z" in names2 and "only_late" in names2,
+             "nested array-of-array under late element: %r" % names2)
+        need("k" in names2,
+             "early element keys still merged: %r" % names2)
+
+        # Different keys on different top-level array elements must union.
+        hetero = [
+            {"a": 1, "shared": True},
+            {"b": 2, "shared": True},
+            {"c": {"inner_only": 3}},
+        ]
+        ft3 = json_values_to_field_tree(hetero, colname="json")
+        names3 = [n["name"] for n in ft3.get("nodes") or []]
+        for key in ("a", "b", "c", "shared", "inner_only"):
+            need(key in names3,
+                 "heterogeneous records union key %r: %r" % (key, names3))
+
+        # Mixed STRUCT+JSON DESCRIBE leaf used to return needs_sample=False.
+        from samql_core.diagnostics import (parse_duckdb_type,
+                                            flatten_type_tree)
+        raw = "STRUCT(id INTEGER, nest JSON)"
+        node = parse_duckdb_type(raw)
+        rows = flatten_type_tree("col", node)
+        fields = rows[1:] if rows and rows[0].get("depth") == 0 else rows
+        need(S.Session._field_tree_needs_json_sample(raw, fields),
+             "mixed STRUCT+JSON leaf must trigger live-cell sampling")
+        raw2 = ("STRUCT(trades STRUCT(id INTEGER, "
+                "legs STRUCT(n INTEGER, cf JSON)[])[])")
+        node2 = parse_duckdb_type(raw2)
+        rows2 = flatten_type_tree("col", node2)
+        fields2 = rows2[1:] if rows2 and rows2[0].get("depth") == 0 else rows2
+        need(S.Session._field_tree_needs_json_sample(raw2, fields2),
+             "deep STRUCT shell with JSON leaf samples: %r"
+             % [f.get("name") for f in fields2])
+
+        if not feats["duckdb"]:
+            return
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            # Live flatten-off-style cell: typed shell + opaque JSON nest.
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE mixed_ft AS "
+                "SELECT 7 AS id, ?::JSON AS nest",
+                [json.dumps({"trades": [{
+                    "legs": [{"cashflows": [{"schedule": [
+                        {"pay_date": "2025-06-01", "amt": 9.5}]}]}]}]})])
+            # Probe the JSON column directly (opaque leaf case).
+            tree = s.column_field_tree("duckdb", "mixed_ft", "nest")
+            tnames = [f["name"] for f in tree.get("fields") or []]
+            need(tree.get("source") == "sampled-values",
+                 "JSON nest column uses sampled-values: %r" % tree)
+            for key in ("trades", "legs", "cashflows", "schedule",
+                        "pay_date", "amt"):
+                need(key in tnames,
+                     "live nest expands deep key %r: %r" % (key, tnames))
+            # Also: a true STRUCT column with a JSON leaf (maximum_depth style).
+            duck.conn.execute("""
+                CREATE OR REPLACE TABLE struct_json_leaf AS
+                SELECT {
+                    'id': 1,
+                    'nest': '{"deep":{"v":42,"tag":"z"}}'::JSON
+                } AS payload
+            """)
+            st = s.column_field_tree("duckdb", "struct_json_leaf", "payload")
+            snames = [f["name"] for f in st.get("fields") or []]
+            # DESCRIBE alone would stop at nest:JSON; sampling must expand it.
+            need(st.get("source") == "sampled-values"
+                 or ("deep" in snames or "v" in snames or "tag" in snames),
+                 "STRUCT+JSON leaf expands nested keys: source=%r names=%r"
+                 % (st.get("source"), snames[:20]))
+            need("deep" in snames or "v" in snames or "tag" in snames,
+                 "nested keys under JSON leaf visible: %r" % snames[:20])
+        finally:
+            s.shutdown()
+
+    def t_cashflows_receiving_leg_field_tree():
+        # Exact user shape: object → nested array of objects → scalar
+        # CashFlows.receivingLeg[].fixingdate — must appear under the column
+        # in column_field_tree / field explorer (incl. opaque JSON leaf,
+        # JSON[] elements, double-encoded strings, and original key casing).
+        from samql_core.diagnostics import json_values_to_field_tree
+
+        shape = {"CashFlows": {"receivingLeg": [{"fixingdate": "test"}]}}
+        ft = json_values_to_field_tree([shape], colname="payload")
+        names = [n["name"] for n in ft.get("nodes") or []]
+        for key in ("CashFlows", "receivingLeg", "(element)", "fixingdate"):
+            need(key in names,
+                 "CashFlows shape lists %r: %r" % (key, names))
+        need("fixingDate" not in names,
+             "key casing preserved (fixingdate, not fixingDate): %r" % names)
+
+        # Opaque JSON string leaf under a STRUCT-like shell.
+        opaque = {"CashFlows": json.dumps(
+            {"receivingLeg": [{"fixingdate": "test"}]})}
+        ft2 = json_values_to_field_tree([opaque], colname="payload")
+        names2 = [n["name"] for n in ft2.get("nodes") or []]
+        need("receivingLeg" in names2 and "fixingdate" in names2,
+             "opaque CashFlows JSON leaf expands: %r" % names2)
+
+        # receivingLeg as array of stringified objects (JSON[]-style cells).
+        jarr = {"CashFlows": {"receivingLeg": [
+            json.dumps({"fixingdate": "test"})]}}
+        ft3 = json_values_to_field_tree([jarr], colname="payload")
+        names3 = [n["name"] for n in ft3.get("nodes") or []]
+        need("fixingdate" in names3,
+             "stringified receivingLeg elements expand: %r" % names3)
+
+        # Whole cell double-encoded.
+        ft4 = json_values_to_field_tree([json.dumps(shape)], colname="payload")
+        names4 = [n["name"] for n in ft4.get("nodes") or []]
+        need("CashFlows" in names4 and "fixingdate" in names4,
+             "double-encoded cell expands CashFlows tree: %r" % names4)
+
+        if not feats["duckdb"]:
+            return
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE cf_leg AS SELECT ?::JSON AS payload",
+                [json.dumps(shape)])
+            tree = s.column_field_tree("duckdb", "cf_leg", "payload")
+            tnames = [f["name"] for f in tree.get("fields") or []]
+            need(tree.get("source") == "sampled-values",
+                 "live CashFlows column uses sampled-values")
+            for key in ("CashFlows", "receivingLeg", "(element)", "fixingdate"):
+                need(key in tnames,
+                     "column_field_tree lists %r: %r" % (key, tnames))
+
+            duck.conn.execute("""
+                CREATE OR REPLACE TABLE cf_struct_leaf AS
+                SELECT {'id': 1, 'CashFlows': ?::JSON} AS payload
+            """, [json.dumps({"receivingLeg": [{"fixingdate": "test"}]})])
+            st = s.column_field_tree("duckdb", "cf_struct_leaf", "payload")
+            snames = [f["name"] for f in st.get("fields") or []]
+            need("receivingLeg" in snames and "fixingdate" in snames,
+                 "STRUCT+JSON CashFlows leaf expands: %r" % snames[:20])
+        finally:
+            s.shutdown()
+
     def t_duckdb_load_cancel_aborts_read():
         # interrupt() trips the cooperative flag so the Python array pre-pass
         # aborts mid-read -- conn.interrupt() alone can't stop it, since no
@@ -35201,6 +35389,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_flatten_off_parquet_nested_field_tree_and_page),
         ("JSON[]/(element): double-encoded objects expand nested keys",
          t_json_array_element_field_tree_double_encoded),
+        ("JSON field tree: deep nest + heterogeneous array key union",
+         t_json_field_tree_deep_nested_and_heterogeneous),
+        ("CashFlows.receivingLeg[].fixingdate field discovery",
+         t_cashflows_receiving_leg_field_tree),
         ("DuckDB load cancel aborts the JSON array pre-pass",
          t_duckdb_load_cancel_aborts_read),
         ("JSON array pre-pass polls cancel and aborts promptly",

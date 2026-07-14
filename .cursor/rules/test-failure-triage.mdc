@@ -1,0 +1,21 @@
+---
+description: Before fixing full-test failures, explain test-vs-code judgment
+alwaysApply: true
+---
+
+# Test failure triage before code changes
+
+When full tests (or any suite) fail and a fix is needed:
+
+1. **Do not silently patch.** Before changing production code or tests, state clearly:
+   - Whether the **test is wrong**, the **code is wrong**, or **both**
+   - **What** will be changed
+   - **Why** that side is the correct one to change (product intent, big-data load posture, API contract, obsolete assertion, etc.)
+
+2. **Prefer fixing code** when the failure shows a real regression vs intended behavior.
+
+3. **Prefer fixing the test** only when the assertion is obsolete, overly brittle, or out of date with deliberate product changes (and say so explicitly). Do not weaken tests just to go green.
+
+4. **Never both-weaken**: do not change product behavior and loosen the test in the same change without calling that out and justifying both.
+
+5. Keep SamQL posture in mind when judging: large CSV/JSON→Parquet thresholds, flatten/shred opt-in (no silent stream-flatten), concurrent reads default-on, nested JSON discovery without breaking load performance.

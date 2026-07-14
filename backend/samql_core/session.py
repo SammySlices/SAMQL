@@ -1259,22 +1259,32 @@ class Session:
                 return sampled
         return {"type": raw, "fields": rows}
 
+    # Live-cell field discovery: how many rows to pull when DESCRIBE stops at
+    # opaque JSON (flatten-off maximum_depth). Kept modest — union of shapes,
+    # not a full scan.
+    _FIELD_TREE_SAMPLE_ROWS = 80
+
     @staticmethod
     def _field_tree_needs_json_sample(raw_type, fields):
-        """True when DESCRIBE has no deep schema (opaque JSON / JSON leaves)."""
+        """True when DESCRIBE has no deep schema (opaque JSON / JSON leaves).
+
+        Flatten-off ``maximum_depth=2`` often yields STRUCT shells with typed
+        scalars *and* opaque JSON leaves. Sampling must still run whenever any
+        leaf is JSON — otherwise the sidebar stops at those leaves and never
+        shows cashflow-style keys nested underneath."""
         tu = (raw_type or "").strip().upper()
         if tu == "JSON" or tu == "JSON[]" or tu.endswith(" JSON") \
-                or " JSON)" in tu or tu.endswith("JSON[]"):
+                or " JSON)" in tu or tu.endswith("JSON[]") \
+                or " JSON," in tu or "JSON " in tu:
             if not fields:
                 return True
-            # STRUCT(... JSON) / JSON[] only expose shallow leaves -- sample
-            # when every leaf type is still opaque JSON.
-            leaves = [f for f in fields
-                      if (f.get("kind") or "") in ("scalar", "array-scalar")
-                      or str(f.get("type") or "").upper() in ("JSON",)]
-            if leaves and all(
-                    "JSON" in str(f.get("type") or "").upper()
-                    for f in leaves):
+            # Any opaque JSON leaf means DESCRIBE stopped early — sample live
+            # cells so nested keys under those leaves appear in the field tree.
+            # (Previously required *all* leaves to be JSON, which skipped mixed
+            # STRUCT(id INTEGER, nest JSON) columns — the common flatten-off
+            # shape.)
+            if any("JSON" in str(f.get("type") or "").upper()
+                   for f in fields):
                 return True
             # A lone "(element)" under JSON[] is not a useful field tree.
             names = {f.get("name") for f in fields}
@@ -1287,8 +1297,9 @@ class Session:
         from .diagnostics import json_values_to_field_tree, access_recipes
         from .sqlutil import quote_ident as _qid
         try:
-            sql = ('SELECT %s FROM %s LIMIT 40'
-                   % (_qid(column), _qid(table)))
+            sql = ('SELECT %s FROM %s LIMIT %d'
+                   % (_qid(column), _qid(table),
+                      int(Session._FIELD_TREE_SAMPLE_ROWS)))
             reader = getattr(mgr, "read", None) or getattr(mgr, "execute_read",
                                                           None)
             if reader is not None:

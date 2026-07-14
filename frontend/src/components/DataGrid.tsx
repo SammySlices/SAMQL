@@ -6,7 +6,11 @@ import { useWinDrag } from "./ActivityShared";
 import type { Cell, ResultPage } from "../lib/types";
 import { useRenderCount } from "../lib/renderDebug";
 import { menuPos } from "../lib/menuPos";
-import { prettyStruct, looksStructy } from "../lib/prettyStruct";
+import {
+  prettyStruct,
+  looksStructy,
+  runAfterPaint,
+} from "../lib/prettyStruct";
 
 /** Only the most recently selected grid responds to Ctrl/Cmd+C. */
 let copyOwnerToken = 0;
@@ -212,6 +216,9 @@ const DataGridImpl: React.FC<Props> = ({
   // cell must never replace the viewer after the user opens another cell,
   // closes the viewer, or switches to a different result page.
   const viewerRequestSeq = useRef(0);
+  // Separate from fetch seq: pretty-print generations must not cancel an
+  // in-flight resultCell request (and vice versa).
+  const viewerFormatSeq = useRef(0);
 
   const claimCopyOwner = () => {
     copyOwnerRef.current = nextCopyOwnerToken++;
@@ -232,19 +239,33 @@ const DataGridImpl: React.FC<Props> = ({
       setViewerFormatting(false);
       return;
     }
-    const raw = viewer.text || "";
-    // Paint the raw text immediately; format on the next task.
-    setViewerPretty(raw);
-    setViewerFormatting(looksStructy(raw));
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      if (cancelled) return;
-      setViewerPretty(prettyStruct(raw));
+    // Full-value fetch in flight: keep the window open with loading..., do
+    // not pretty-print the truncated preview (it would be thrown away).
+    if (viewer.loading) {
+      setViewerPretty("");
       setViewerFormatting(false);
-    }, 0);
+      return;
+    }
+    const raw = viewer.text || "";
+    if (!looksStructy(raw)) {
+      setViewerPretty(raw);
+      setViewerFormatting(false);
+      return;
+    }
+    // Open with loading... first; pretty-print only after paint so the first
+    // click always shows the window (setTimeout(0) alone can still block paint).
+    setViewerPretty("");
+    setViewerFormatting(true);
+    const formatGen = ++viewerFormatSeq.current;
+    const cancel = runAfterPaint(() => {
+      if (formatGen !== viewerFormatSeq.current) return;
+      const pretty = prettyStruct(raw);
+      if (formatGen !== viewerFormatSeq.current) return;
+      setViewerPretty(pretty);
+      setViewerFormatting(false);
+    });
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+      cancel();
     };
   }, [viewer]);
 
@@ -264,6 +285,7 @@ const DataGridImpl: React.FC<Props> = ({
   // a fresh result clears any prior selection
   useEffect(() => {
     viewerRequestSeq.current += 1;
+    viewerFormatSeq.current += 1;
     setSel(null);
     setCellMenu(null);
     setViewer(null);
@@ -547,7 +569,10 @@ const DataGridImpl: React.FC<Props> = ({
                           e.stopPropagation();
                           const x = e.clientX;
                           const y = e.clientY;
+                          // One viewer at a time; bump both guards so a prior
+                          // fetch/format cannot clobber this open.
                           const request = ++viewerRequestSeq.current;
+                          viewerFormatSeq.current += 1;
                           if (truncated && cellFetch?.resultId) {
                             // Fetch the COMPLETE value under this grid's view.
                             // Absolute row = window offset + local index.
@@ -752,11 +777,7 @@ const DataGridImpl: React.FC<Props> = ({
           >
             <span className="label">
               Value
-              {viewer.loading
-                ? " · fetching full…"
-                : viewerFormatting
-                  ? " · formatting…"
-                  : ""}
+              {viewer.loading || viewerFormatting ? " · loading…" : ""}
             </span>
             <button
               type="button"
@@ -770,6 +791,7 @@ const DataGridImpl: React.FC<Props> = ({
               aria-label="Close"
               onClick={() => {
                 viewerRequestSeq.current += 1;
+                viewerFormatSeq.current += 1;
                 setViewer(null);
                 setVpos(null);
               }}
@@ -777,7 +799,11 @@ const DataGridImpl: React.FC<Props> = ({
               ✕
             </button>
           </div>
-          <pre className="gc-json-body">{viewerPretty || viewer.text}</pre>
+          <pre className="gc-json-body">
+            {viewer.loading || viewerFormatting
+              ? "loading..."
+              : viewerPretty || viewer.text}
+          </pre>
           {viewer.note && <div className="gc-json-note">{viewer.note}</div>}
         </div>,
         document.body,

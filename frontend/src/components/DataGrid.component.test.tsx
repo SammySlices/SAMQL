@@ -99,6 +99,41 @@ describe("DataGrid DOM behavior", () => {
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 
+  it("opens View Formatted immediately with loading... then pretty text", async () => {
+    mount(page([[1, '{"region":"east","priority":2}']]));
+
+    fireEvent.click(screen.getByTitle("View formatted"));
+    const viewer = screen.getByTestId("structured-value-viewer");
+    expect(viewer).toBeInTheDocument();
+    expect(viewer.querySelector(".gc-json-body")?.textContent).toBe("loading...");
+    expect(viewer.querySelector(".label")?.textContent).toMatch(/loading/i);
+
+    await waitFor(() =>
+      expect(viewer.querySelector(".gc-json-body")?.textContent).toContain("region"),
+    );
+    expect(viewer.querySelector(".gc-json-body")?.textContent).toContain("priority");
+    expect(viewer.querySelector(".label")?.textContent).not.toMatch(/loading/i);
+  });
+
+  it("keeps a single viewer across rapid View Formatted clicks", async () => {
+    mount(
+      page([
+        [1, '{"a":1}'],
+        [2, '{"b":2}'],
+      ]),
+    );
+    const expanders = screen.getAllByTitle("View formatted");
+    fireEvent.click(expanders[0]);
+    fireEvent.click(expanders[1]);
+    fireEvent.click(expanders[1]);
+
+    expect(screen.getAllByTestId("structured-value-viewer")).toHaveLength(1);
+    await waitFor(() =>
+      expect(screen.getByTestId("structured-value-viewer")).toHaveTextContent("b"),
+    );
+    expect(screen.getByTestId("structured-value-viewer")).not.toHaveTextContent('"a"');
+  });
+
   it("opens structured values and ignores a stale full-value response", async () => {
     const first = deferred<{ value: string }>();
     const second = deferred<{ value: string }>();

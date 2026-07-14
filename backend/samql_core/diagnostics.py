@@ -351,8 +351,9 @@ def discover_load_fields(path, sample=0, time_budget_s=25):
     t0 = time.monotonic()
     budget = float(time_budget_s or 25)
     cap = int(sample or 0)
-    MAX_DEPTH = 40
-    ELEM_SCAN = 8          # array elements to descend into (to find deeper arrays)
+    # Same caps as live-cell field trees (see JSON_TREE_* above).
+    MAX_DEPTH = JSON_TREE_MAX_DEPTH
+    ELEM_SCAN = JSON_TREE_ARRAY_ELEMS
 
     def rec(key, kind, depth, items):
         e = seen.get(key)
@@ -368,6 +369,21 @@ def discover_load_fields(path, sample=0, time_budget_s=25):
         if items and items > e["max_items"]:
             e["max_items"] = items
 
+    def _elem_idxs(seq):
+        """Prefix + stride + last, matching ``_json_tree_merge`` coverage."""
+        n = len(seq)
+        idxs = list(range(min(n, ELEM_SCAN)))
+        if n > ELEM_SCAN:
+            step = max(1, n // ELEM_SCAN)
+            for i in range(ELEM_SCAN, n, step):
+                if i not in idxs:
+                    idxs.append(i)
+                if len(idxs) >= ELEM_SCAN * 2:
+                    break
+            if (n - 1) not in idxs:
+                idxs.append(n - 1)
+        return idxs
+
     def walk(obj, depth):
         if depth > MAX_DEPTH:
             return
@@ -376,24 +392,18 @@ def discover_load_fields(path, sample=0, time_budget_s=25):
                 key = str(k)
                 if isinstance(v, list):
                     rec(key, "array", depth, len(v))
-                    scanned = 0
-                    for it in v:
+                    for i in _elem_idxs(v):
+                        it = v[i]
                         if isinstance(it, (dict, list)):
                             walk(it, depth + 1)
-                        scanned += 1
-                        if scanned >= ELEM_SCAN:
-                            break
                 elif isinstance(v, dict):
                     rec(key, "object", depth, None)
                     walk(v, depth + 1)
         elif isinstance(obj, list):
-            scanned = 0
-            for it in obj:
+            for i in _elem_idxs(obj):
+                it = obj[i]
                 if isinstance(it, (dict, list)):
                     walk(it, depth + 1)
-                scanned += 1
-                if scanned >= ELEM_SCAN:
-                    break
 
     def _over():
         return time.monotonic() - t0 > budget
@@ -511,6 +521,20 @@ def access_recipes(column, rows):
     return rows
 
 
+# Field-discovery caps (shape sampling only — not a full data dump).
+# Depth 64 covers cashflow-style chains (array→object→array→…→scalars)
+# several levels past typical swap/trade nesting without walking forever.
+JSON_TREE_MAX_DEPTH = 64
+# Union keys across this many array elements per level (heterogeneous shapes).
+JSON_TREE_ARRAY_ELEMS = 32
+# When coercing list cells, peel at most this many elements for nested decode.
+JSON_COERCE_LIST_ELEMS = 64
+# Successive string→JSON decode rounds (double-/triple-encoded leaves).
+JSON_COERCE_DECODE_ROUNDS = 12
+# Hard cap on display nodes emitted from a merged shape tree.
+JSON_TREE_MAX_NODES = 4000
+
+
 def _json_tree_new():
     return {"kind": None, "types": set(), "children": {},
             "elem": None, "max_items": 0}
@@ -518,7 +542,7 @@ def _json_tree_new():
 
 def _json_tree_merge(node, val, depth):
     """Merge one Python value into a shape tree (mutates ``node``)."""
-    if depth > 40:
+    if depth > JSON_TREE_MAX_DEPTH:
         return
     # Double-encoded JSON often survives as a string leaf inside arrays /
     # objects; decode before treating it as a scalar so field discovery can
@@ -544,8 +568,22 @@ def _json_tree_merge(node, val, depth):
             node["max_items"] = len(val)
         if node["elem"] is None:
             node["elem"] = _json_tree_new()
-        for it in val[:8]:
-            _json_tree_merge(node["elem"], it, depth + 1)
+        # Merge a prefix of elements so ragged arrays union their keys;
+        # also scan a stride of later elements when the list is longer so
+        # shapes that only appear deep in the array still surface.
+        n = len(val)
+        idxs = list(range(min(n, JSON_TREE_ARRAY_ELEMS)))
+        if n > JSON_TREE_ARRAY_ELEMS:
+            step = max(1, n // JSON_TREE_ARRAY_ELEMS)
+            for i in range(JSON_TREE_ARRAY_ELEMS, n, step):
+                if i not in idxs:
+                    idxs.append(i)
+                if len(idxs) >= JSON_TREE_ARRAY_ELEMS * 2:
+                    break
+            if (n - 1) not in idxs:
+                idxs.append(n - 1)
+        for i in idxs:
+            _json_tree_merge(node["elem"], val[i], depth + 1)
     else:
         if node["kind"] is None:
             node["kind"] = "scalar"
@@ -572,7 +610,8 @@ def _coerce_json_sample(val, _decode_depth=0):
             for k, v in val.items():
                 out[str(k)] = _coerce_json_sample(v, _decode_depth)
             return out
-        return [_coerce_json_sample(v, _decode_depth) for v in val[:32]]
+        return [_coerce_json_sample(v, _decode_depth)
+                for v in val[:JSON_COERCE_LIST_ELEMS]]
     if isinstance(val, (bytes, bytearray)):
         try:
             val = val.decode("utf-8", "replace")
@@ -594,7 +633,7 @@ def _coerce_json_sample(val, _decode_depth=0):
                     return val
             # One loads() is not enough when the array elements are themselves
             # JSON text (e.g. ["{\"id\":1}", ...]). Re-coerce the parsed value.
-            if _decode_depth >= 12:
+            if _decode_depth >= JSON_COERCE_DECODE_ROUNDS:
                 return parsed
             return _coerce_json_sample(parsed, _decode_depth + 1)
         return val
@@ -628,7 +667,7 @@ def _field_tree_from_root(root, colname="json", access_style="json",
         return "%s ->> '%s'" % (colname, jptr)
 
     def walk(name, nd, depth, jptr, in_array):
-        if len(rows) >= 4000:
+        if len(rows) >= JSON_TREE_MAX_NODES:
             return
         k = nd["kind"]
         if k == "object":
@@ -929,9 +968,10 @@ def profile_json_load(path, max_records=40, session=None, offset=0):
         "slowest_table": slow,
         "flatten_off_parquet": parquet_path,
         "nested_discovery": (
-            "When flatten-off stores opaque JSON / JSON[] columns "
-            "(maximum_depth=2), nested field trees are built by sampling "
-            "live cell values — DESCRIBE alone shows no deep schema."
+            "When flatten-off stores opaque JSON / JSON[] (or STRUCT shells "
+            "with JSON leaves via maximum_depth=2), nested field trees are "
+            "built by sampling live cell values and unioning keys across "
+            "rows/array elements — DESCRIBE alone stops at opaque JSON."
         ),
         "features": feats,
         "hint": _hint(read_prod_s, read_std_s, uses_ijson),
