@@ -21,8 +21,9 @@ $script:total = 0
 
 function Size([string]$p) {
     if (-not (Test-Path $p)) { return 0 }
-    $s = (Get-ChildItem $p -Recurse -Force -ErrorAction SilentlyContinue |
-          Measure-Object Length -Sum).Sum
+    $items = @(Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue)
+    if ($items.Count -eq 0) { return 0 }
+    $s = ($items | Measure-Object Length -Sum).Sum
     if ($null -eq $s) { $s = 0 }
     return $s
 }
@@ -106,6 +107,15 @@ Zap (Join-Path $repo '.samql-npm-cache') 'SamQL isolated npm cache'
 if ($NodeModules) {
     Zap (Join-Path $repo 'frontend\node_modules') 'node_modules (-NodeModules)'
 }
+
+# ---- 4b) repo-root agent / suite logs left by Test-SamQL-All runs
+Get-ChildItem $repo -Force -File -Filter '.samql-*.log' `
+    -ErrorAction SilentlyContinue |
+    ForEach-Object { Zap $_.FullName ('suite log: ' + $_.Name) }
+Get-ChildItem $repo -Force -File -Filter '*.log' `
+    -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike '.samql-*' } |
+    ForEach-Object { Zap $_.FullName ('log: ' + $_.Name) }
 
 # ---- 5) npm cache (measure, then let npm clean it properly)
 $npmCache = Join-Path $env:LOCALAPPDATA 'npm-cache'

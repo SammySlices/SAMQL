@@ -1476,24 +1476,9 @@ def _list_dir(path):
 
 
 def _downloads_dir():
-    """.539: the user's Downloads folder, one resolution for EVERY
-    server-side save (the .510 result-export ladder, extracted).
-    SAMQL_DOWNLOADS_DIR overrides for tests. Registry known-folder on
-    Windows (OneDrive redirection honoured), ~/Downloads elsewhere,
-    home as the last resort."""
-    envd = os.environ.get("SAMQL_DOWNLOADS_DIR")
-    if envd and os.path.isdir(envd):
-        return envd
-    dl = None
-    if os.name == "nt":
-        try:
-            dl = _win_known_folder("Downloads")
-        except Exception:
-            dl = None
-    if not dl or not os.path.isdir(dl):
-        cand = os.path.join(os.path.expanduser("~"), "Downloads")
-        dl = cand if os.path.isdir(cand) else os.path.expanduser("~")
-    return dl
+    """.539: the user's Downloads folder -- shared ladder in
+    ``samql_core.tmputil.downloads_dir`` (registry / OneDrive / env)."""
+    return tmputil.downloads_dir()
 
 
 def _downloads_filename(dl, name):
@@ -1513,16 +1498,8 @@ def _downloads_filename(dl, name):
 
 
 def _win_known_folder(key_name):
-    """Resolve a Windows shell folder (Desktop / Personal / Downloads) from the
-    registry so OneDrive-redirected locations are honoured."""
-    import winreg
-    sub = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
-    # Downloads has no friendly name -- it's stored under its known-folder GUID
-    name = ("{374DE290-123F-4565-9164-39C4925E467B}"
-            if key_name == "Downloads" else key_name)
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub) as k:
-        val, _ = winreg.QueryValueEx(k, name)
-    return os.path.expandvars(val)
+    """Resolve a Windows shell folder -- shared with tmputil."""
+    return tmputil.win_known_folder(key_name)
 
 
 def _user_shortcuts():
@@ -3361,6 +3338,24 @@ class Api:
                                 query_id=b.get("query_id"))
 
     @staticmethod
+    def node_source_fetch(s, m, body, ctx):
+        """Fetch for SQL Server / SharePoint / Web scrape (and API) source nodes."""
+        b = body or {}
+        return s.fetch_source_node(
+            b.get("type") or "",
+            b.get("node_id"),
+            b.get("config") or {},
+            graph=b.get("graph"),
+            query_id=b.get("query_id"),
+        )
+
+    @staticmethod
+    def sharepoint_download(s, m, body, ctx):
+        b = body or {}
+        return s.download_sharepoint_file(
+            b.get("config") or b, query_id=b.get("query_id"))
+
+    @staticmethod
     def iterator_run(s, m, body, ctx):
         # the iterator node: loop a driver's values, run the body each pass with
         # the loop variable set, and append into one accumulator table.
@@ -4087,6 +4082,8 @@ ROUTES = [
     ("POST", r"^/api/reconcile/failures$", Api.reconcile_failures),
     ("POST", r"^/api/api-fetch$", Api.api_fetch),
     ("POST", r"^/api/node-api-fetch$", Api.api_node_fetch),
+    ("POST", r"^/api/node-source-fetch$", Api.node_source_fetch),
+    ("POST", r"^/api/sharepoint/download$", Api.sharepoint_download),
     ("POST", r"^/api/iterator/run$", Api.iterator_run),
     ("POST", r"^/api/while/run$", Api.while_run),
     ("POST", r"^/api/api-preview$", Api.api_preview),
@@ -5059,8 +5056,16 @@ def main(argv=None):
 
     _install_exit_handlers()
 
+    # Accept HTTP as soon as the port is bound. get_session() can take
+    # seconds on a cold frozen exe; if we warm it BEFORE serve_forever,
+    # the launcher sees port_open, opens WebView2, and the first navigation
+    # hangs in the listen backlog -- a white / "Not Responding" window.
+    # SESSION_LOCK makes concurrent first-request construction safe.
+    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+
     bar.set("warming up data engine")
-    get_session()  # warm the session so the first request is snappy
+    get_session()  # warm the session so the first query is snappy
 
     # .510: WARM the heavy imports in the background so the FIRST query
     # doesn't pay the frozen-exe import tax (PyInstaller onefile + AV
@@ -5083,8 +5088,6 @@ def main(argv=None):
               % (", ".join(got) or "none", _t.time() - t0), flush=True)
     threading.Thread(target=_warm_imports, daemon=True,
                      name="import-warm").start()
-    server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    server_thread.start()
 
     # .512: when the LAUNCHER spawned us it tags SAMQL_PARENT_PID. Tie our
     # life to it: if the launcher dies for ANY reason (crash, kill, logoff)
@@ -5166,8 +5169,11 @@ def main(argv=None):
                             return c
                     return None
 
+                # Match launcher / _brand.CHROME_BG: WebView2 defaults to
+                # white until content paints.
                 _win = webview.create_window("SamQL", _url,
-                                             width=1280, height=860)
+                                             width=1280, height=860,
+                                             background_color=_brand.CHROME_BG)
 
                 def _set_srv_icon(_w=_win):
                     """.519: mirror of the launcher's icon landing -- wait

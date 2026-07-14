@@ -57,8 +57,8 @@ _TRANSPARENT = {"filter", "sort", "sample", "unique", "dedupe", "topn",
 _AGG_FUNCS = {"sum", "avg", "min", "max", "count", "countd"}
 # leaf node types that are sinks/inspectors, not data the lineage should treat
 # as a terminal when no explicit output exists
-_NON_TERMINAL = {"output", "write", "chart", "dashboard", "browse", "text",
-                 "validate", "reconcile", "filebrowser"}
+_NON_TERMINAL = {"output", "samqldash", "write", "chart", "dashboard", "browse",
+                 "text", "validate", "reconcile", "filebrowser"}
 
 SQL_NOTE = "This output field may have SQL on top of it."
 
@@ -180,6 +180,10 @@ def _node_columns_info(session, graph, node_id, port, memo):
             info[c] = {"kind": "source", "srcs": [], "file": fname}
 
     elif typ == "sql":
+        for c in _resolve_columns(session, graph, node_id, port):
+            info[c] = {"kind": "sql", "srcs": [], "step": _step(typ, node)}
+
+    elif typ == "python":
         for c in _resolve_columns(session, graph, node_id, port):
             info[c] = {"kind": "sql", "srcs": [], "step": _step(typ, node)}
 

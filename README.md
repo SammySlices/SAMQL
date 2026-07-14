@@ -765,8 +765,16 @@ If you simply close the browser tab or hit reload, the browser shows its own
 "Leave site?" confirmation first (so an accidental close can be cancelled).
 That native prompt can't host custom buttons — browsers don't allow it — so
 the in-app **Exit** button is the way to get the keep-server / stop-server
-choice. When SamQL runs in its own desktop window, closing the window stops
-the server and clears temp the same way (it's the same process).
+choice.
+
+Desktop window behavior:
+
+- **SamQL AppWindow** (the usual double-click launcher) leaves the local
+  server running when you close the window so the next launch can reattach
+  with the session intact. Use **Exit & stop server** (or Storage / Clean-SamQL)
+  when you want a full teardown and temp reclaim.
+- **`SamQL.exe --window`** (server owns the native window) stops the server
+  and clears temp when the window closes — same process as Exit → stop.
 
 ---
 
@@ -808,7 +816,21 @@ Ordinary JSON request bodies are limited to 32 MB before buffering; configure
 that with `SAMQL_JSON_BODY_MB` (`0` disables). Streamed multipart uploads use
 `SAMQL_UPLOAD_MB` and default to 4 GB. `SAMQL_JSON_OBJECT_MB` controls DuckDB's
 largest single-record JSON parser buffer (256 MiB by default; raise it only for
-genuinely huge individual records). The incremental NodeFlow cache uses both
+genuinely huge individual records, and only after giving DuckDB enough
+`SAMQL_DUCKDB_MEMORY_GB` — the live engine budget also clamps the parser so a
+tight adaptive floor cannot request a 512 MiB allocation it cannot satisfy).
+Nested JSON loads prefer an on-disk Parquet cache from `SAMQL_JSON_ONDISK_MB`
+(default 64 MiB) so materialising structs/lists does not fill RAM. All JSON
+formats (array, NDJSON, concat, single object) are rewritten to NDJSON when
+needed and COPY'd to Parquet for both flatten-on and flatten-off loads. A
+single document at/above `SAMQL_JSON_STREAM_FLATTEN_MB` (default 256 MiB) uses
+the Python streaming flattener with disk spill so multi-GB nested objects
+still land. Flatten-off uses a shallow DuckDB `maximum_depth`
+(default 2 via `SAMQL_JSON_MAX_DEPTH`; `0` = one JSON column per row) so deep
+nesting stays queryable JSON instead of exploding into STRUCTs. Flatten-on
+shreds the Parquet nested table into relational child tables.
+`SAMQL_JSON_STREAM_MB` (default 32 MiB) remains available for tuning the
+array-stream pre-pass. The incremental NodeFlow cache uses both
 an entry cap and `SAMQL_FLOW_CACHE_MB` (default 1024 MB). Cache accounting and
 LRU policy live in `backend/samql_core/flowcache.py`; engine-specific size
 estimation and table cleanup remain in `Session`.

@@ -49,4 +49,4 @@ export interface ResultTab {
 
 export type ToastKind = "ok" | "error" | "warn";
 export type ToastFn = (kind: ToastKind, title: string, msg?: string) => void;
-export type AppView = "ide" | "notebook" | "nodeflow";
+export type AppView = "ide" | "notebook" | "nodeflow" | "dashboard";

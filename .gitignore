@@ -32,3 +32,6 @@ samql_txt/
 *.aphex.txt
 *_EMAIL_SAFE_APHEX.txt
 *_RELEASE_RECEIPT.json
+
+# Local suite / agent logs (never ship)
+.samql-*.log

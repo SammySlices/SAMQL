@@ -13,6 +13,7 @@ import time as _time_mod
 import itertools
 import json
 import os
+import sys
 import sqlite3
 import tempfile
 import threading
@@ -1186,7 +1187,7 @@ class _NullCtx:
         return False
 
 
-def _json_object_cap_bytes():
+def _json_object_cap_bytes(memory_limit_mb=None):
     """DuckDB JSON parser object ceiling.
 
     DuckDB reserves parser buffers in multiples of ``maximum_object_size``;
@@ -1194,16 +1195,30 @@ def _json_object_cap_bytes():
     for a tiny NDJSON file and fail on a normally configured 2 GiB engine. A
     256 MiB default keeps ordinary loads bounded while still allowing unusually
     large records through an explicit environment override.
+
+    When the live DuckDB ``memory_limit`` is known, the cap is also clamped so
+    a ~2x parser reservation still fits under that budget. Adaptive resources
+    can leave the engine at the 512 MiB floor; without this clamp the default
+    256 MiB object size alone requests a 512 MiB allocation and the nested
+    (non-flatten) JSON load fails before any rows are read.
     """
     raw = os.environ.get("SAMQL_JSON_OBJECT_MB", "256")
     try:
         mb = int(raw)
     except Exception:
         mb = 256
-    return max(1, min(1024, mb)) * 1024 * 1024
+    mb = max(1, min(1024, mb))
+    try:
+        lim = int(memory_limit_mb) if memory_limit_mb else 0
+    except Exception:
+        lim = 0
+    if lim > 0:
+        # Leave headroom for the table / spill buffers: 2 * cap <= ~half limit.
+        mb = min(mb, max(16, lim // 4))
+    return mb * 1024 * 1024
 
 
-def _json_readers(fwd, ndjson=False):
+def _json_readers(fwd, ndjson=False, memory_limit_mb=None, maximum_depth=None):
     """Ordered DuckDB JSON readers to try for a file load, most-specific first.
 
     ``fwd`` is the file path, already forward-slashed and single-quote-escaped.
@@ -1214,20 +1229,83 @@ def _json_readers(fwd, ndjson=False):
     and finally to plain auto-detect in case the extension was wrong. For other
     JSON (a single object, or an array) we auto-detect, then retry tolerantly.
     Every reader caps the per-object size so one giant record can't blow the
-    parser. ``SAMQL_JSON_OBJECT_MB`` tunes the cap (default 256, max 1024).
+    parser. ``SAMQL_JSON_OBJECT_MB`` tunes the cap (default 256, max 1024);
+    ``memory_limit_mb`` further clamps it to the live engine budget.
+
+    ``maximum_depth`` (optional int) is DuckDB's nested-type expansion ceiling.
+    Depth 2 keeps top-level scalars typed and leaves deeper objects/arrays as
+    JSON -- the flatten-off path for multi-GB nested files. Depth 0 lands a
+    single ``json`` column via ``read_ndjson_objects`` / ``read_json_objects``.
     """
-    cap = "maximum_object_size=%d" % _json_object_cap_bytes()
+    cap = "maximum_object_size=%d" % _json_object_cap_bytes(memory_limit_mb)
+    depth = None
+    if maximum_depth is not None:
+        try:
+            depth = int(maximum_depth)
+        except Exception:
+            depth = None
+    if depth is not None and depth <= 0:
+        # Safest nested-off shape: one JSON value per row, no STRUCT explosion.
+        if ndjson:
+            return [
+                f"read_ndjson_objects('{fwd}')",
+                f"read_json_objects('{fwd}', format='newline_delimited')",
+            ]
+        return [
+            f"read_json_objects_auto('{fwd}')",
+            f"read_json_objects('{fwd}', auto_detect=true)",
+        ]
+    depth_arg = (", maximum_depth=%d" % depth) if depth is not None else ""
     if ndjson:
         return [
-            f"read_json('{fwd}', format='newline_delimited', {cap})",
+            f"read_json('{fwd}', format='newline_delimited', {cap}{depth_arg})",
             f"read_json('{fwd}', format='newline_delimited', "
-            f"ignore_errors=true, {cap})",
-            f"read_json_auto('{fwd}', ignore_errors=true, {cap})",
+            f"ignore_errors=true, {cap}{depth_arg})",
+            f"read_json_auto('{fwd}', ignore_errors=true, {cap}{depth_arg})",
         ]
     return [
-        f"read_json_auto('{fwd}', {cap})",
-        f"read_json('{fwd}', auto_detect=true, ignore_errors=true, {cap})",
+        f"read_json_auto('{fwd}', {cap}{depth_arg})",
+        f"read_json('{fwd}', auto_detect=true, ignore_errors=true, "
+        f"{cap}{depth_arg})",
     ]
+
+
+def _json_shallow_depth_default():
+    """Default ``maximum_depth`` for flatten-off nested JSON loads.
+
+    Depth 2: top-level scalars stay BIGINT/VARCHAR/BOOLEAN; nested objects and
+    arrays become JSON / JSON[] instead of deep STRUCTs that OOM on multi-GB
+    files. Override with ``SAMQL_JSON_MAX_DEPTH`` (``0`` = single json column).
+    """
+    raw = os.environ.get("SAMQL_JSON_MAX_DEPTH", "2")
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 2
+
+
+def _is_duckdb_oom(exc):
+    """True when ``exc`` looks like a DuckDB out-of-memory failure."""
+    msg = str(exc or "").lower()
+    return ("out of memory" in msg
+            or "failed to allocate" in msg
+            or "could not allocate" in msg)
+
+
+def _json_oom_hint(path, memory_limit_mb=None):
+    lim = ""
+    try:
+        if memory_limit_mb:
+            lim = " (engine budget ~%d MiB)" % int(memory_limit_mb)
+    except Exception:
+        lim = ""
+    return (
+        "DuckDB could not load %s: out of memory while reading nested JSON%s. "
+        "Try View mode, enable Flatten on load, convert to .ndjson/.jsonl, "
+        "set SAMQL_DUCKDB_MEMORY_GB higher, or lower SAMQL_JSON_OBJECT_MB "
+        "if individual records are not huge."
+        % (path, lim)
+    )
 
 
 def _csv_readers(fwd, delimiter=None):
@@ -1258,18 +1336,33 @@ def _is_ndjson_path(path):
 
 
 def _json_stream_min_bytes():
-    """JSON files at/above this size get the streaming array->NDJSON pre-pass;
-    smaller arrays read fine directly. The pre-pass is not just a memory guard:
-    it is the finely-cancellable, heartbeating read path (DuckDB reads a raw
-    top-level array as one native call that only observes a Stop after it has
-    read the whole array), so the threshold is deliberately modest so a mid-size
-    array that a user might want to cancel takes the streaming path. Override
-    with SAMQL_JSON_STREAM_MB."""
+    """JSON files at/above this size get the streaming array/concat->NDJSON
+    pre-pass; smaller files read fine directly. The pre-pass is not just a
+    memory guard: it is the finely-cancellable, heartbeating read path (DuckDB
+    reads a raw top-level array as one native call that only observes a Stop
+    after it has read the whole array), so the threshold is deliberately modest
+    so a mid-size array that a user might want to cancel takes the streaming
+    path. Override with SAMQL_JSON_STREAM_MB."""
     try:
         mb = float(os.environ.get("SAMQL_JSON_STREAM_MB", "32"))
         return int(max(1, mb) * 1024 * 1024)
     except Exception:
         return 32 * 1024 * 1024
+
+
+def _json_stream_flatten_min_bytes():
+    """Single-object JSON at/above this size uses the Python streaming flattener
+    into DuckDB instead of a native nested materialise. A multi-GB single
+    document cannot be buffered as one DuckDB STRUCT; the streamer spills and
+    emits relational tables with bounded memory. Override with
+    ``SAMQL_JSON_STREAM_FLATTEN_MB`` (default 256; ``0`` disables)."""
+    try:
+        mb = float(os.environ.get("SAMQL_JSON_STREAM_FLATTEN_MB", "256"))
+    except Exception:
+        mb = 256.0
+    if mb <= 0:
+        return None
+    return int(max(1, mb) * 1024 * 1024)
 
 
 def _ondisk_min_bytes():
@@ -1285,6 +1378,115 @@ def _ondisk_min_bytes():
     if mb <= 0:
         return None
     return int(mb * 1024 * 1024)
+
+
+def _json_ondisk_min_bytes():
+    """On-disk Parquet threshold for nested JSON loads.
+
+    Nested JSON expands far beyond file size once DuckDB materialises structs /
+    lists, so the generic 512 MiB file threshold is too late -- a few hundred
+    MiB of nested JSON can OOM a tight engine budget. Prefer the Parquet-cache
+    path sooner. Override with ``SAMQL_JSON_ONDISK_MB`` (default 64; ``0``
+    disables the JSON-specific floor and uses the generic threshold only)."""
+    raw = os.environ.get("SAMQL_JSON_ONDISK_MB", "64")
+    try:
+        mb = float(raw)
+    except Exception:
+        mb = 64.0
+    if mb <= 0:
+        return None
+    return int(max(1, mb) * 1024 * 1024)
+
+
+def _sniff_json_format(path, sample_size=1024 * 1024):
+    """Classify a JSON file from a bounded head sample.
+
+    Returns one of ``ndjson``, ``array``, ``concat``, ``object``, or
+    ``unknown``. Used to decide whether DuckDB can read the file natively or
+    whether we must rewrite it to NDJSON first (arrays and concatenated
+    top-level values both need the rewrite on multi-GB files).
+    """
+    if _is_ndjson_path(path):
+        return "ndjson"
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="strict") as f:
+            data = f.read(max(4096, int(sample_size)))
+    except Exception:
+        return "unknown"
+    i = 0
+    n = len(data)
+    while i < n and data[i].isspace():
+        i += 1
+    if i >= n:
+        return "unknown"
+    first = data[i]
+    decoder = json.JSONDecoder()
+
+    def _skip_ws(pos):
+        while pos < n and data[pos].isspace():
+            pos += 1
+        return pos
+
+    if first == "[":
+        try:
+            _, end = decoder.raw_decode(data, i)
+        except json.JSONDecodeError:
+            return "array"  # incomplete in sample: still a top-level array
+        j = _skip_ws(end)
+        if j < n and data[j] in "[{":
+            return "concat"
+        return "array"
+    if first == "{":
+        try:
+            _, end = decoder.raw_decode(data, i)
+        except json.JSONDecodeError:
+            return "object"  # pretty-printed / larger than sample
+        j = _skip_ws(end)
+        if j >= n:
+            return "object"
+        if data[j] not in "{[":
+            return "object"
+        gap = data[end:j]
+        if "\n" in gap or "\r" in gap:
+            return "ndjson"
+        return "concat"
+    return "unknown"
+
+
+def ensure_json_engine_memory(duck, path):
+    """Raise DuckDB's memory ceiling for a large JSON load when the machine
+    has spare RAM. Explicit ``SAMQL_DUCKDB_MEMORY_GB`` always wins. Targets
+    multi-GB nested / NDJSON / concat loads that otherwise sit on the adaptive
+    512 MiB floor and OOM during parser reservation."""
+    if duck is None or os.environ.get("SAMQL_DUCKDB_MEMORY_GB"):
+        return False
+    try:
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+    except OSError:
+        return False
+    if size_mb < 64:
+        return False
+    try:
+        from . import resourcebudget
+        snap = resourcebudget.recommend()
+        avail = float(snap.get("memory_available_mb") or 0)
+        total = float(snap.get("memory_total_mb") or 0)
+    except Exception:
+        avail = total = 0.0
+    # Aim for enough headroom to parse + spill: at least 2 GiB, up to 8 GiB,
+    # never more than half of currently available RAM.
+    want = int(max(2048, min(8192, size_mb)))
+    if avail > 0:
+        want = int(min(want, max(512, avail * 0.5)))
+    elif total > 0:
+        want = int(min(want, max(512, total * 0.35)))
+    current = int(getattr(duck, "_applied_resource_memory_mb", 0) or 0)
+    if want <= current:
+        return False
+    try:
+        return bool(duck.apply_resource_memory_mb(want))
+    except Exception:
+        return False
 
 
 def total_physical_ram_bytes():
@@ -1749,10 +1951,14 @@ class DuckDBManager:
             spill = tmputil.instance_path("duckdb_spill")
             os.makedirs(spill, exist_ok=True)
             spill = spill.replace("\\", "/")
-        except Exception:
-            spill = (tempfile.gettempdir().replace("\\", "/")
-                     + "/duckdb_spill")
-        _try(f"SET temp_directory = '{spill}'")
+            _try(f"SET temp_directory = '{spill}'")
+        except Exception as e:
+            # Never fall back to a bare <temp>/duckdb_spill outside the
+            # per-pid instance dir -- that path survives sweep_stale and
+            # leaks across runs. Skip the SET if instance temp is unavailable.
+            print("[samql] DuckDB spill dir unavailable (%s); "
+                  "leaving engine default temp_directory" % e,
+                  file=sys.stderr)
         _try(f"SET threads TO {self._thread_count(low_memory)}")
         _try("SET enable_object_cache = true")
         _try("SET preserve_insertion_order = false")
@@ -2359,24 +2565,19 @@ class DuckDBManager:
     def _json_source_for_read(self, path):
         """Decide what file DuckDB should actually read for a JSON load.
 
-        For a large, non-newline-delimited ``.json`` that is a single top-level
-        array, stream it to a temp NDJSON file first (via the shared streaming
-        reader) so DuckDB streams (and spills) it instead of buffering the whole
-        array into memory -- the difference between a clean load and an
-        out-of-memory failure on a multi-GB file. Returns ``(read_path,
-        is_ndjson, cleanup_path_or_None)``; the caller removes ``cleanup_path``
-        once the table is materialized. A cancel during the read raises (the
-        load aborts); any other problem falls back to the original file."""
-        if _is_ndjson_path(path):
+        Every non-NDJSON shape is rewritten to a temp NDJSON file through the
+        shared bounded-memory reader so DuckDB always ingests
+        ``format='newline_delimited'`` (and then usually COPY to Parquet).
+        That covers top-level arrays, concatenated values, and single objects
+        with one code path. True NDJSON / ``.ndjson`` / ``.jsonl`` is read in
+        place. Returns ``(read_path, is_ndjson, cleanup_path_or_None)``.
+        A cancel during the rewrite raises; any other problem falls back to
+        the original file."""
+        fmt = _sniff_json_format(path)
+        if fmt == "ndjson" or _is_ndjson_path(path):
             return path, True, None
-        try:
-            big = os.path.getsize(path) >= _json_stream_min_bytes()
-        except OSError:
-            big = False
-        # Only a top-level array needs the pre-pass -- DuckDB reads a single
-        # object or NDJSON natively without buffering the whole file.
-        if not big or not _file_starts_with_array(path):
-            return path, False, None
+        # Rewrite array / concat / object / unknown so every JSON format
+        # shares the NDJSON → Parquet conversion pipeline.
         dst = None
         try:
             import uuid
@@ -2401,7 +2602,8 @@ class DuckDBManager:
             return path, False, None
         return dst, True, dst
 
-    def create_table_from_file(self, name, path, kind, delimiter=None):
+    def create_table_from_file(self, name, path, kind, delimiter=None,
+                               json_depth=None):
         """Materialize a file into a real DuckDB table.
 
         Unlike a file-backed view (which re-parses the source on every
@@ -2417,6 +2619,10 @@ class DuckDBManager:
         ``delimiter`` (CSV only) forces a single-character field separator
         instead of DuckDB's auto-sniffer -- needed for separators the
         sniffer won't guess on its own (e.g. ``~``).
+
+        ``json_depth`` (JSON only) caps DuckDB nested-type expansion
+        (``maximum_depth``). Used by flatten-off loads so deep nesting
+        stays as JSON instead of exploding into STRUCTs.
         """
         # CONCURRENT LOADS (on-box 2026-07-02: a second load queued behind
         # a running conversion for its whole duration). A cursor is its own
@@ -2446,6 +2652,7 @@ class DuckDBManager:
             # Fresh load: clear any cancel left set by a previous one so it
             # can't abort this read before it starts.
             self._cancel.clear()
+            mem_mb = self._applied_resource_memory_mb
             if kind == "parquet":
                 readers = [f"read_parquet('{fwd}')"]
             elif kind == "json":
@@ -2453,7 +2660,9 @@ class DuckDBManager:
                 # DuckDB doesn't buffer the whole array into memory.
                 read_path, is_nd, cleanup = self._json_source_for_read(path)
                 rfwd = read_path.replace("\\", "/").replace("'", "''")
-                readers = _json_readers(rfwd, ndjson=is_nd)
+                readers = _json_readers(
+                    rfwd, ndjson=is_nd, memory_limit_mb=mem_mb,
+                    maximum_depth=json_depth)
             else:  # csv / delimited text
                 readers = _csv_readers(fwd, delimiter)
             try:
@@ -2472,11 +2681,12 @@ class DuckDBManager:
                                     if cur.description else [])
                             self.table_columns[final] = cols
                             self._types_cache_drop(final)
-                            if kind == "json":
-                                # NDJSON/JSON whose rows are a single struct -- or
-                                # a [{...}] array -- land as one opaque column;
-                                # expand it so the table shows the JSON keys as
-                                # headers.
+                            if kind == "json" and json_depth is None:
+                                # Full nested loads: NDJSON/JSON whose rows are
+                                # a single struct -- or a [{...}] array -- land
+                                # as one opaque column; expand it so the table
+                                # shows the JSON keys as headers. Shallow
+                                # (flatten-off) loads already project columns.
                                 cols = self._maybe_expand_json_struct(final)
                                 self.table_columns[final] = cols
                                 self._types_cache_drop(final)
@@ -2497,6 +2707,9 @@ class DuckDBManager:
                                 raise
                             last = e
                             continue
+                    if kind == "json" and _is_duckdb_oom(last):
+                        raise RuntimeError(
+                            _json_oom_hint(path, mem_mb)) from last
                     raise RuntimeError(
                         f"DuckDB could not load {path}: {last}")
             finally:
@@ -2534,7 +2747,10 @@ class DuckDBManager:
             if kind == "parquet":
                 readers = [f"read_parquet('{fwd}')"]
             elif kind == "json":
-                readers = _json_readers(fwd, ndjson=_is_ndjson_path(path))
+                readers = _json_readers(
+                    fwd, ndjson=(_sniff_json_format(path) == "ndjson"
+                                 or _is_ndjson_path(path)),
+                    memory_limit_mb=self._applied_resource_memory_mb)
             else:  # csv / delimited text
                 readers = _csv_readers(fwd, delimiter)
             last = None
@@ -2618,7 +2834,7 @@ class DuckDBManager:
             self.write_lock.release()
 
     def load_file_to_parquet_view(self, name, path, kind, delimiter=None,
-                                  cancel=None):
+                                  cancel=None, json_depth=None):
         """Stream a (large) file straight into a Parquet cache and expose it as
         a read_parquet view. The rows are never materialised in the engine, so
         memory stays bounded for the whole lifecycle -- ingest AND queries --
@@ -2630,7 +2846,11 @@ class DuckDBManager:
         cooperative flag, and the optional ``cancel`` pre-check catches a stop
         that lands first. On cancel or failure the partial cache is removed and
         the exception propagates (the caller may fall back to an in-memory
-        load)."""
+        load).
+
+        ``json_depth`` (JSON only) is included in the file-cache key so a
+        shallow flatten-off conversion never collides with a full nested one.
+        """
         from .loaders import LoadCancelled
         from . import tmputil
         from . import filecache
@@ -2639,7 +2859,10 @@ class DuckDBManager:
         # attach the existing Parquet and skip the whole parse. The key
         # changes whenever the source changes, so a stale entry can't be
         # served; SAMQL_FILECACHE=0 restores the old per-instance behavior.
-        fc_key = filecache.cache_key(path, kind, extra=delimiter or "") \
+        extra = delimiter or ""
+        if kind == "json" and json_depth is not None:
+            extra = "%s|depth=%s" % (extra, json_depth)
+        fc_key = filecache.cache_key(path, kind, extra=extra) \
             if filecache.enabled() else None
         hit = filecache.lookup(fc_key)
         if hit:
@@ -2659,7 +2882,10 @@ class DuckDBManager:
                 elif kind == "json":
                     read_path, is_nd, cleanup = self._json_source_for_read(path)
                     rfwd = read_path.replace("\\", "/").replace("'", "''")
-                    reader = _json_readers(rfwd, ndjson=is_nd)[0]
+                    reader = _json_readers(
+                        rfwd, ndjson=is_nd,
+                        memory_limit_mb=self._applied_resource_memory_mb,
+                        maximum_depth=json_depth)[0]
                 else:  # csv / delimited text
                     reader = _csv_readers(fwd, delimiter)[0]
                 if cancel and cancel():

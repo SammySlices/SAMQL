@@ -490,6 +490,14 @@ export const Icon = {
       <path d="M8 12h8" />
     </S>
   ),
+  Maximize2: (p: P) => (
+    <S {...p}>
+      <polyline points="15 3 21 3 21 9" />
+      <polyline points="9 21 3 21 3 15" />
+      <line x1="21" x2="14" y1="3" y2="10" />
+      <line x1="3" x2="10" y1="21" y2="14" />
+    </S>
+  ),
   Layers: (p: P) => (
     <S {...p}>
       <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
@@ -583,6 +591,12 @@ export const Icon = {
       <path d="m8 6-6 6 6 6" />
     </S>
   ),
+  Terminal: (p: P) => (
+    <S {...p}>
+      <polyline points="4 17 10 11 4 5" />
+      <line x1="12" x2="20" y1="19" y2="19" />
+    </S>
+  ),
   ArrowDownToLine: (p: P) => (
     <S {...p}>
       <path d="M12 17V3" />
@@ -610,6 +624,23 @@ export const Icon = {
     <S {...p}>
       <path d="M15.5 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2V8.5z" />
       <path d="M15 3v6h6" />
+    </S>
+  ),
+  Server: (p: P) => (
+    <S {...p}>
+      <rect width="20" height="8" x="2" y="2" rx="2" ry="2" />
+      <rect width="20" height="8" x="2" y="14" rx="2" ry="2" />
+      <line x1="6" x2="6.01" y1="6" y2="6" />
+      <line x1="6" x2="6.01" y1="18" y2="18" />
+    </S>
+  ),
+  Share2: (p: P) => (
+    <S {...p}>
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <line x1="8.59" x2="15.42" y1="13.51" y2="17.49" />
+      <line x1="15.41" x2="8.59" y1="6.51" y2="10.49" />
     </S>
   ),
   Dashboard: (p: P) => (

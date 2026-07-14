@@ -2,12 +2,26 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-13.594
+Current build:   2026-07-14.595
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-14.595  (v2.16.4)
+
+APP DASHBOARD, SQL SERVER NODE PARITY, JSON LOAD HARDENING, START/CLOSE CLEANUP.
+App Dashboard boards widgets (query/chart/text), expand windows, PDF export to
+Downloads, and settings chrome. NodeFlow SQL Server matches Load Data (shared
+MsSqlConnectForm, remembered profiles/secrets, auto-fetch for Dashboard runs).
+Python / SharePoint / web-scrape nodes land. Large JSON loads cap memory, stream
+arrays to NDJSON, and prefer Parquet on disk. Session shutdown closes connections
+and clears temps; DuckDB spill stays under the per-pid instance path; AppWindow
+close keeps the server for reattach while Exit→stop / Ctrl+C shut down cleanly.
+Release gates rise to 200 component / 20 Edge E2E tests; SOURCE_MANIFEST stays
+at 307 managed files.
 
 ----------------------------------------------------------------------
 build 2026-07-13.594  (v2.16.4)

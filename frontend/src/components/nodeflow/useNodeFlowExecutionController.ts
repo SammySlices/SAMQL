@@ -1269,25 +1269,83 @@ export function useNodeFlowExecutionController({
     }
   };
 
-  const doFetchApi = async (node: NbNode): Promise<RunOutcome> => {
-    const url = (node.config.url || "").trim();
-    if (!url) {
+  const doFetchApi = async (
+    node: NbNode,
+    configExtra?: Record<string, unknown>,
+  ): Promise<RunOutcome> => {
+    const sourceTypes = new Set(["apinode", "sqlserver", "sharepoint", "webscrape"]);
+    if (!sourceTypes.has(node.type)) {
+      onToast("error", "Cannot fetch", "This node type has no Fetch action.");
+      return { ok: false };
+    }
+    if (node.type === "apinode" && !(node.config.url || "").trim()) {
       onToast("error", "Add a URL", "The API node needs a URL to fetch.");
       return { ok: false };
     }
+    if (node.type === "sqlserver" && !(node.config.query || "").trim()) {
+      onToast("error", "Add a query", "The SQL Server node needs a SELECT to run.");
+      return { ok: false };
+    }
+    if (
+      node.type === "sqlserver" &&
+      !(node.config.server || "").trim() &&
+      !(node.config.profile_key || "").trim() &&
+      !(node.config.connection || "").trim()
+    ) {
+      onToast(
+        "error",
+        "Connection required",
+        "Set a server / saved profile, or an active connection name.",
+      );
+      return { ok: false };
+    }
+    if (
+      node.type === "sharepoint" &&
+      !(node.config.site_url || "").trim()
+    ) {
+      onToast("error", "Site URL", "Set the SharePoint site URL.");
+      return { ok: false };
+    }
+    if (
+      node.type === "sharepoint" &&
+      (node.config.mode || "list") === "list" &&
+      !(node.config.list_title || "").trim()
+    ) {
+      onToast("error", "List title", "Set the SharePoint list name.");
+      return { ok: false };
+    }
+    if (node.type === "webscrape" && !(node.config.url || "").trim()) {
+      onToast("error", "Add a URL", "The Web scrape node needs a page URL.");
+      return { ok: false };
+    }
+    const fetchConfig = configExtra
+      ? { ...node.config, ...configExtra }
+      : node.config;
     const id = startRun(`Fetching ${node.config.label}…`);
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
-      const r = await api.nodeApiFetch(
-        {
-          node_id: node.id,
-          config: node.config,
-          graph: graphForRun(),
-          query_id: id,
-        },
-        ctrl.signal,
-      );
+      const r =
+        node.type === "apinode"
+          ? await api.nodeApiFetch(
+              {
+                node_id: node.id,
+                config: fetchConfig,
+                graph: graphForRun(),
+                query_id: id,
+              },
+              ctrl.signal,
+            )
+          : await api.nodeSourceFetch(
+              {
+                type: node.type,
+                node_id: node.id,
+                config: fetchConfig,
+                graph: graphForRun(),
+                query_id: id,
+              },
+              ctrl.signal,
+            );
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
         return { ok: false };

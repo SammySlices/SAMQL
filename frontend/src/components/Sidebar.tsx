@@ -18,6 +18,17 @@ import {
 import { useRenderCount } from "../lib/renderDebug";
 import { menuPos } from "../lib/menuPos";
 import { quoteSqlIdent } from "../lib/sql";
+import {
+  addWorkflowGroup,
+  deleteWorkflowGroup,
+  groupedNames,
+  groupsForKind,
+  loadWorkflowGroups,
+  moveWorkflowToGroup,
+  renameWorkflowGroup,
+  saveWorkflowGroups,
+  toggleWorkflowGroupCollapsed,
+} from "../lib/workflowGroups";
 
 type Tab = "tables" | "history" | "saved";
 
@@ -84,7 +95,7 @@ interface Props {
   onActiveSave: () => void;
   onActiveSaveAs: () => void;
   onActiveOpen: () => void;
-  activeView: "ide" | "notebook" | "nodeflow";
+  activeView: "ide" | "notebook" | "nodeflow" | "dashboard";
   onRefresh: () => void;
   onClearHistory: () => void;
   onOpenLoad: () => void;
@@ -1197,13 +1208,77 @@ const WF_SECTIONS: { kind: WorkflowKind; label: string }[] = [
   { kind: "ide", label: "SQL editor" },
   { kind: "journal", label: "Journal" },
   { kind: "node", label: "Node" },
+  { kind: "dashboard", label: "Dashboard" },
 ];
 
 const WF_VIEW_LABEL: Record<Props["activeView"], string> = {
   ide: "SQL editor",
   notebook: "Journal",
   nodeflow: "NodeFlow",
+  dashboard: "Dashboard",
 };
+
+const WF_DRAG_MIME = "application/x-samql-workflow";
+
+function WorkflowItemRow({
+  kind,
+  w,
+  onLoadWorkflow,
+  onDeleteWorkflow,
+}: {
+  kind: WorkflowKind;
+  w: WorkflowSummary;
+  onLoadWorkflow: (kind: WorkflowKind, name: string) => void;
+  onDeleteWorkflow: (kind: WorkflowKind, name: string) => void;
+}) {
+  return (
+    <div
+      className="list-item wf-item"
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(
+          WF_DRAG_MIME,
+          JSON.stringify({ kind, name: w.name }),
+        );
+        e.dataTransfer.effectAllowed = "move";
+      }}
+    >
+      <div
+        className="wf-item-row"
+        onClick={() => onLoadWorkflow(kind, w.name)}
+        title="Open"
+      >
+        <span className="name" style={{ flex: 1 }}>
+          {w.name}
+        </span>
+        <button
+          className="btn ghost icon danger"
+          title="Delete"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDeleteWorkflow(kind, w.name);
+          }}
+        >
+          <span className="icon-trash">
+            <Icon.Trash size={14} />
+          </span>
+        </button>
+      </div>
+      {kind === "ide" && w.preview ? (
+        <div className="sql" onClick={() => onLoadWorkflow(kind, w.name)}>
+          {w.preview}
+        </div>
+      ) : null}
+      <div className="meta wf-meta">
+        {kind === "node" && typeof w.nodes === "number"
+          ? `${w.nodes} node${w.nodes === 1 ? "" : "s"}`
+          : kind === "journal" && typeof w.cells === "number"
+            ? `${w.cells} cell${w.cells === 1 ? "" : "s"}`
+            : ""}
+      </div>
+    </div>
+  );
+}
 
 const WorkflowsPanel: React.FC<Props> = ({
   workflows,
@@ -1213,93 +1288,295 @@ const WorkflowsPanel: React.FC<Props> = ({
   onActiveSaveAs,
   onActiveOpen,
   activeView,
-}) => (
-  <>
-    <div className="side-head">
-      <span className="title">Saved Workflows</span>
-    </div>
-    <div className="wf-actions">
-      <div className="wf-actions-row">
-        <button className="btn sm" onClick={onActiveSave} title={`Save the current ${WF_VIEW_LABEL[activeView]} here`}>
-          <Icon.Save size={13} /> Save
-        </button>
-        <button className="btn sm" onClick={onActiveSaveAs} title="Save to a file on your computer">
-          Save As
-        </button>
-        <button className="btn sm" onClick={onActiveOpen} title="Open a workflow file from your computer">
-          <Icon.Folder size={13} /> Open
-        </button>
+}) => {
+  const [groupState, setGroupState] = useState(() => loadWorkflowGroups());
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  const persist = (next: ReturnType<typeof loadWorkflowGroups>) => {
+    setGroupState(next);
+    saveWorkflowGroups(next);
+  };
+
+  return (
+    <>
+      <div className="side-head">
+        <span className="title">Saved Workflows</span>
       </div>
-      <div className="wf-actions-hint">
-        Acting on: <strong>{WF_VIEW_LABEL[activeView]}</strong>
-      </div>
-    </div>
-    <div className="side-body">
-      {workflows.length === 0 ? (
-        <div className="empty" style={{ padding: "30px 18px" }}>
-          <div className="inner">
-            <Icon.Bookmark size={24} className="faint" />
-            <p>
-              Use Save in the SQL editor, Journal or Node and your work is kept
-              here, grouped by where it came from.
-            </p>
-          </div>
+      <div className="wf-actions">
+        <div className="wf-actions-row">
+          <button
+            className="btn sm"
+            onClick={onActiveSave}
+            title={`Save the current ${WF_VIEW_LABEL[activeView]} here`}
+          >
+            <Icon.Save size={13} /> Save
+          </button>
+          <button
+            className="btn sm"
+            onClick={onActiveSaveAs}
+            title="Save to a file on your computer"
+          >
+            Save As
+          </button>
+          <button
+            className="btn sm"
+            onClick={onActiveOpen}
+            title="Open a workflow file from your computer"
+          >
+            <Icon.Folder size={13} /> Open
+          </button>
         </div>
-      ) : (
-        WF_SECTIONS.map(({ kind, label }) => {
-          const items = workflows.filter((w) => w.kind === kind);
-          return (
-            <div className="wf-section" key={kind}>
-              <div className="wf-section-head">
-                {label}
-                <span className="wf-count">{items.length}</span>
-              </div>
-              {items.length === 0 ? (
-                <div className="wf-empty">No saves yet.</div>
-              ) : (
-                items.map((w) => (
-                  <div key={kind + ":" + w.name} className="list-item wf-item">
-                    <div
-                      className="wf-item-row"
-                      onClick={() => onLoadWorkflow(kind, w.name)}
-                      title="Open"
-                    >
-                      <span className="name" style={{ flex: 1 }}>
-                        {w.name}
-                      </span>
-                      <button
-                        className="btn ghost icon danger"
-                        title="Delete"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeleteWorkflow(kind, w.name);
-                        }}
-                      >
-                        <span className="icon-trash"><Icon.Trash size={14} /></span>
-                      </button>
-                    </div>
-                    {kind === "ide" && w.preview ? (
-                      <div className="sql" onClick={() => onLoadWorkflow(kind, w.name)}>
-                        {w.preview}
-                      </div>
-                    ) : null}
-                    <div className="meta wf-meta">
-                      {kind === "node" && typeof w.nodes === "number"
-                        ? `${w.nodes} node${w.nodes === 1 ? "" : "s"}`
-                        : kind === "journal" && typeof w.cells === "number"
-                          ? `${w.cells} cell${w.cells === 1 ? "" : "s"}`
-                          : ""}
-                    </div>
-                  </div>
-                ))
-              )}
+        <div className="wf-actions-hint">
+          Acting on: <strong>{WF_VIEW_LABEL[activeView]}</strong>
+        </div>
+      </div>
+      <div className="side-body">
+        {workflows.length === 0 ? (
+          <div className="empty" style={{ padding: "30px 18px" }}>
+            <div className="inner">
+              <Icon.Bookmark size={24} className="faint" />
+              <p>
+                Use Save in the SQL editor, Journal or Node and your work is kept
+                here, grouped by where it came from.
+              </p>
             </div>
-          );
-        })
-      )}
-    </div>
-  </>
-);
+          </div>
+        ) : (
+          WF_SECTIONS.map(({ kind, label }) => {
+            const items = workflows.filter((w) => w.kind === kind);
+            const groups = groupsForKind(groupState, kind);
+            const inGroup = groupedNames(groupState, kind);
+            const ungrouped = items.filter((w) => !inGroup.has(w.name));
+            return (
+              <div className="wf-section" key={kind}>
+                <div className="wf-section-head">
+                  <span>{label}</span>
+                  <span className="wf-section-actions">
+                    <button
+                      type="button"
+                      className="btn ghost icon"
+                      title="Add group"
+                      onClick={() =>
+                        persist(addWorkflowGroup(groupState, kind))
+                      }
+                    >
+                      <Icon.Folder size={13} />
+                    </button>
+                    <span className="wf-count">{items.length}</span>
+                  </span>
+                </div>
+                {items.length === 0 ? (
+                  <div className="wf-empty">No saves yet.</div>
+                ) : (
+                  <>
+                    {groups.map((g) => {
+                      const members = items.filter((w) =>
+                        g.members.includes(w.name),
+                      );
+                      const isDrop = dropTarget === g.id;
+                      return (
+                        <div
+                          key={g.id}
+                          className={
+                            "wf-group" + (isDrop ? " drop-target" : "")
+                          }
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = "move";
+                            setDropTarget(g.id);
+                          }}
+                          onDragLeave={() =>
+                            setDropTarget((cur) => (cur === g.id ? null : cur))
+                          }
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            setDropTarget(null);
+                            try {
+                              const raw = e.dataTransfer.getData(WF_DRAG_MIME);
+                              const payload = JSON.parse(raw || "{}") as {
+                                kind?: WorkflowKind;
+                                name?: string;
+                              };
+                              if (
+                                payload.kind === kind &&
+                                typeof payload.name === "string"
+                              ) {
+                                persist(
+                                  moveWorkflowToGroup(
+                                    groupState,
+                                    kind,
+                                    payload.name,
+                                    g.id,
+                                  ),
+                                );
+                              }
+                            } catch {
+                              /* ignore bad drag payloads */
+                            }
+                          }}
+                        >
+                          <div className="wf-group-head">
+                            <button
+                              type="button"
+                              className="btn ghost icon"
+                              title={g.collapsed ? "Expand" : "Minimize"}
+                              onClick={() =>
+                                persist(
+                                  toggleWorkflowGroupCollapsed(
+                                    groupState,
+                                    g.id,
+                                  ),
+                                )
+                              }
+                            >
+                              <span
+                                className={
+                                  "wf-group-chevron" +
+                                  (g.collapsed ? " collapsed" : "")
+                                }
+                              >
+                                <Icon.Chevron size={13} />
+                              </span>
+                            </button>
+                            {renamingId === g.id ? (
+                              <input
+                                className="wf-group-rename"
+                                autoFocus
+                                value={renameDraft}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                onBlur={() => {
+                                  persist(
+                                    renameWorkflowGroup(
+                                      groupState,
+                                      g.id,
+                                      renameDraft,
+                                    ),
+                                  );
+                                  setRenamingId(null);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    (e.target as HTMLInputElement).blur();
+                                  } else if (e.key === "Escape") {
+                                    setRenamingId(null);
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="wf-group-name"
+                                title="Rename group"
+                                onDoubleClick={() => {
+                                  setRenamingId(g.id);
+                                  setRenameDraft(g.name);
+                                }}
+                                onClick={() => {
+                                  setRenamingId(g.id);
+                                  setRenameDraft(g.name);
+                                }}
+                              >
+                                {g.name}
+                              </button>
+                            )}
+                            <span className="wf-count">{members.length}</span>
+                            <button
+                              type="button"
+                              className="btn ghost icon danger"
+                              title="Delete group"
+                              onClick={() =>
+                                persist(deleteWorkflowGroup(groupState, g.id))
+                              }
+                            >
+                              <Icon.Trash size={12} />
+                            </button>
+                          </div>
+                          {!g.collapsed ? (
+                            members.length ? (
+                              members.map((w) => (
+                                <WorkflowItemRow
+                                  key={kind + ":" + w.name}
+                                  kind={kind}
+                                  w={w}
+                                  onLoadWorkflow={onLoadWorkflow}
+                                  onDeleteWorkflow={onDeleteWorkflow}
+                                />
+                              ))
+                            ) : (
+                              <div className="wf-empty">
+                                Drop workflows here.
+                              </div>
+                            )
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                    <div
+                      className={
+                        "wf-ungrouped" +
+                        (dropTarget === `ungrouped:${kind}`
+                          ? " drop-target"
+                          : "")
+                      }
+                      onDragOver={(e) => {
+                        if (!groups.length) return;
+                        e.preventDefault();
+                        setDropTarget(`ungrouped:${kind}`);
+                      }}
+                      onDragLeave={() =>
+                        setDropTarget((cur) =>
+                          cur === `ungrouped:${kind}` ? null : cur,
+                        )
+                      }
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setDropTarget(null);
+                        try {
+                          const raw = e.dataTransfer.getData(WF_DRAG_MIME);
+                          const payload = JSON.parse(raw || "{}") as {
+                            kind?: WorkflowKind;
+                            name?: string;
+                          };
+                          if (
+                            payload.kind === kind &&
+                            typeof payload.name === "string"
+                          ) {
+                            persist(
+                              moveWorkflowToGroup(
+                                groupState,
+                                kind,
+                                payload.name,
+                                null,
+                              ),
+                            );
+                          }
+                        } catch {
+                          /* ignore */
+                        }
+                      }}
+                    >
+                      {ungrouped.map((w) => (
+                        <WorkflowItemRow
+                          key={kind + ":" + w.name}
+                          kind={kind}
+                          w={w}
+                          onLoadWorkflow={onLoadWorkflow}
+                          onDeleteWorkflow={onDeleteWorkflow}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </>
+  );
+};
 
 // Skip re-render when the data props are unchanged (e.g. while typing in the
 // editor). The callbacks are stale-safe — they act on arguments or read live

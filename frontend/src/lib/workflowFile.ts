@@ -55,7 +55,7 @@ export function parseWfFile(content: string): WfEnvelope | null {
     return null; // raw SQL or a legacy notebook file
   }
   if (!raw || raw.samql !== "workflow") return null;
-  if (!(["ide", "journal", "node"] as string[]).includes(raw.kind))
+  if (!(["ide", "journal", "node", "dashboard"] as string[]).includes(raw.kind))
     throw new Error("This SamQL workflow has an unknown kind.");
   if (!("payload" in raw))
     throw new Error("This SamQL workflow is missing its payload.");

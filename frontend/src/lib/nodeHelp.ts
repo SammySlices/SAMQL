@@ -249,6 +249,21 @@ export const NODE_HELP: Record<string, NodeHelp> = {
     what: "Calls an HTTP endpoint and loads the JSON response as a table.",
     use: "Set the URL (${variables} are filled per run/pass). Two outputs: data and errors.",
   },
+  sqlserver: {
+    title: "SQL Server",
+    what: "Runs a query against SQL Server with the same connection settings as Load Data (Windows / alternate Windows / SQL login, ODBC driver, encrypt, timeouts). Saved passwords stay in the OS secret store — never in the workflow — so Dashboard widgets can re-run unattended.",
+    use: "Fill the connection form (or pick a saved mssql profile), tick Save password when needed, enter a SELECT, then Fetch. NodeFlow Run / Dashboard auto-fetch using the stored profile + password.",
+  },
+  sharepoint: {
+    title: "SharePoint",
+    what: "Loads items from a SharePoint list (Microsoft Graph or classic REST) into a table.",
+    use: "Set the site URL + list title, store a bearer token under a secret key, then Fetch.",
+  },
+  webscrape: {
+    title: "Web scrape",
+    what: "Fetches a public page and extracts HTML tables, links, page text, or JSON objects into a relation.",
+    use: "Set the URL and mode (tables / links / text / JSON), optional JSON path, then Fetch. Respects the same outbound URL safety rules as the API node.",
+  },
   iterator: {
     title: "Iterator",
     what: "Loops a set of values and runs a body once per value, appending each pass into one accumulator table.",
@@ -269,6 +284,19 @@ export const NODE_HELP: Record<string, NodeHelp> = {
       items: ["SELECT / WHERE / GROUP BY / ORDER BY", "JOINs and CTEs (WITH …)", "window functions (OVER …)", "all built-in scalar + aggregate functions"],
     },
   },
+  python: {
+    title: "Python",
+    what: "Runs a Python script inside SamQL (bundled runtime — no separate install).",
+    use: "Wire an optional input for `df` / `rows` / `columns`, assign `out` to emit a table. Leave the input unwired to generate data from scratch.",
+    funcs: {
+      label: "Script bindings",
+      items: [
+        "df — list of row dicts (None if unwired)",
+        "rows / columns — raw tuples + names",
+        "out — list of dicts, {columns, rows}, or pandas DataFrame",
+      ],
+    },
+  },
   write: {
     title: "Write to table",
     what: "Writes the input into a named table so other flows and cells can read it.",
@@ -278,6 +306,11 @@ export const NODE_HELP: Record<string, NodeHelp> = {
     title: "Output",
     what: "The end of a flow — exports the input to a file (or an image from a chart/dashboard).",
     use: "Pick the format. Leave the folder blank to write into Downloads, or browse to another folder, then run.",
+  },
+  samqldash: {
+    title: "SamQL Dashboard",
+    what: "Marks a NodeFlow workflow as eligible for the app Dashboard tab.",
+    use: "Wire a chart, pivot, reconcile, or data node into this sink, save the workflow, then pick it from a Dashboard cell.",
   },
   variable: {
     title: "Variables",

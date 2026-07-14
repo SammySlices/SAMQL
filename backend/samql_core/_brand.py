@@ -7,6 +7,11 @@ excludes binaries).
 """
 import base64
 
+# Shared chrome colours -- WebView2 defaults to white (#FFFFFF) until HTML
+# paints; splash / native window / page first-paint must stay on these.
+CHROME_BG = "#16181d"  # splash + pywebview background_color
+PAGE_BG = "#15171b"    # frontend --bg / index.html inline first paint
+
 # 256x256 PNG -- the green "squircle" prompt mark.
 APP_ICON_PNG_B64 = """
 iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAABHrElEQVR4nO2deZxcVZm/n3PuUmvv

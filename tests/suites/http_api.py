@@ -679,26 +679,42 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         need(not any(x.get("name") == "wf-http"
                      for x in d.get("workflows", [])),
              "deleted workflow no longer listed")
-        # kind-aware: the same name can exist once per kind (IDE/Journal/Node)
+        # kind-aware: the same name can exist once per kind (IDE/Journal/Node/Dashboard)
         c.js("POST", "/api/workflows",
              {"name": "shared", "kind": "node",
               "graph": {"nodes": [{}], "edges": []}})
         c.js("POST", "/api/workflows",
              {"name": "shared", "kind": "ide", "graph": {"sql": "SELECT 42"}})
+        c.js("POST", "/api/workflows",
+             {"name": "shared", "kind": "dashboard",
+              "graph": {
+                  "version": 2,
+                  "activeId": "d1",
+                  "dashboards": [{
+                      "id": "d1",
+                      "name": "Main",
+                      "widgets": [{"id": "w1"}, {"id": "w2"}],
+                  }],
+              }})
         st, d = c.js("GET", "/api/workflows")
         shared = [x for x in d.get("workflows", []) if x.get("name") == "shared"]
-        eq(sorted(x.get("kind") for x in shared), ["ide", "node"],
+        eq(sorted(x.get("kind") for x in shared), ["dashboard", "ide", "node"],
            "same name coexists across kinds")
         st, d = c.js("POST", "/api/workflows/load",
                      {"name": "shared", "kind": "ide"})
         eq((d.get("graph") or {}).get("sql"), "SELECT 42",
            "load by kind returns the matching payload")
+        st, d = c.js("POST", "/api/workflows/load",
+                     {"name": "shared", "kind": "dashboard"})
+        eq((d.get("graph") or {}).get("version"), 2,
+           "dashboard kind load returns the workspace")
         c.js("DELETE", "/api/workflows", {"name": "shared", "kind": "ide"})
         st, d = c.js("GET", "/api/workflows")
-        shared2 = [x.get("kind") for x in d.get("workflows", [])
-                   if x.get("name") == "shared"]
-        eq(shared2, ["node"], "deleting one kind leaves the other")
+        shared2 = sorted(x.get("kind") for x in d.get("workflows", [])
+                         if x.get("name") == "shared")
+        eq(shared2, ["dashboard", "node"], "deleting one kind leaves the others")
         c.js("DELETE", "/api/workflows", {"name": "shared", "kind": "node"})
+        c.js("DELETE", "/api/workflows", {"name": "shared", "kind": "dashboard"})
 
     def t_workspace_file_http():
         import tempfile, os as _osf, shutil as _sh
@@ -1102,6 +1118,55 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
                 eq(r[0], "webview", "window mode returns a pywebview handle")
         finally:
             server.webbrowser.open = orig_open
+
+    def t_chrome_and_window_launch_paths():
+        # Dual start paths: Chrome/browser via server.py --browser (and the
+        # default auto Chrome preference), and the native window app via
+        # --window / Start-SamQL-AppWindow.ps1 / launcher_app.py. Flag parsing
+        # + both entrypoints must stay wired; full pywebview UI is covered by
+        # backend launcher tests with a fake webview.
+        p = server._build_arg_parser()
+        eq(server._ui_mode(p.parse_args(["--browser"])), "browser",
+           "--browser forces browser UI mode")
+        eq(server._ui_mode(p.parse_args(["--window"])), "window",
+           "--window forces native window UI mode")
+        eq(server._ui_mode(p.parse_args(["--no-browser"])), "none",
+           "--no-browser serves headlessly")
+        eq(server._ui_mode(p.parse_args([])), "auto",
+           "default mode is auto (prefer Chrome/Edge window)")
+
+        # --browser must not open a pywebview handle; --window may.
+        opened = {"u": None}
+        orig_open = server.webbrowser.open
+        orig_launch = server._launch_browser_window
+        server.webbrowser.open = lambda u, *a, **k: opened.__setitem__("u", u)
+        server._launch_browser_window = lambda u: (_ for _ in ()).throw(
+            AssertionError("--browser must use webbrowser.open, not Chrome Popen"))
+        try:
+            r = server._open_window_or_browser("http://launch-browser/", "browser")
+            eq(r, None, "browser launch path returns no window handle")
+            eq(opened["u"], "http://launch-browser/",
+               "browser launch path opens the system browser")
+        finally:
+            server.webbrowser.open = orig_open
+            server._launch_browser_window = orig_launch
+
+        aw = os.path.join(ROOT, "Start-SamQL-AppWindow.ps1")
+        la = os.path.join(BACKEND, "launcher_app.py")
+        need(os.path.isfile(aw), "Start-SamQL-AppWindow.ps1 is the window-app entry")
+        need(os.path.isfile(la), "launcher_app.py backs the window-app path")
+        ps = open(aw, encoding="utf-8").read()
+        lap = open(la, encoding="utf-8").read()
+        srv = open(os.path.join(BACKEND, "server.py"), encoding="utf-8").read()
+        need("def _ui_mode" in srv and "--browser" in srv and "--window" in srv,
+             "server.py exposes --browser and --window launch flags")
+        need("SamQL-AppWindow" in ps and "launcher_app.py" in ps,
+             "AppWindow script targets the native launcher")
+        need("def main" in lap and "webview" in lap,
+             "launcher_app drives the pywebview window app")
+        # Chrome preference is shared with the browser-window launcher test.
+        need("chrome" in ps.lower() or "Browser" in ps,
+             "AppWindow script can prefer Chrome when falling back")
 
     def t_errors_log_http():
         # The error log captures server-side failures with debuggable detail
@@ -1688,6 +1753,8 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             ("single-instance second launch attaches", t_single_instance_attaches),
             ("browser-window launcher (detect + launch + mode routing)",
              t_browser_open_mode),
+            ("Chrome/browser and window-app launch paths",
+             t_chrome_and_window_launch_paths),
             ("GET /api/features", t_features),
             ("GET /api/fs/list", t_fs_list),
             ("POST /api/load/start + progress", t_load_progress),

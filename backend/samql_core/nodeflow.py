@@ -524,6 +524,19 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
                 "to read.")
         return _project_source("SELECT * FROM %s" % _q(table), needed, cols_of)
 
+    if typ in ("sqlserver", "sharepoint", "webscrape"):
+        table = (cfg.get("table") or "").strip()
+        label = {
+            "sqlserver": "SQL Server",
+            "sharepoint": "SharePoint",
+            "webscrape": "Web scrape",
+        }.get(typ, typ)
+        if not table:
+            raise NodeflowError(
+                "Fetch from the %s node first (press Fetch) so it has data "
+                "to read." % label)
+        return _project_source("SELECT * FROM %s" % _q(table), needed, cols_of)
+
     if typ == "shred":
         # .475/.494/.495: flatten a nested DuckDB load into its full relational
         # set (base + <base>_joinkeys + one table per list + the deep hierarchy
@@ -1782,6 +1795,14 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
                        lambda m: m.group(1) + " " + up, q)
         return "SELECT * FROM (%s) AS _sql" % q
 
+    if typ == "python":
+        # Python nodes materialise via session._materialize_flows (they cannot
+        # compile to SQL). This branch exists so port-parity / compile_port
+        # callers get a clear error instead of "unsupported type".
+        raise NodeflowError(
+            "Python nodes run when the flow materialises — use Run or Preview."
+        )
+
     if typ == "write":
         # a sink: passthrough so its upstream can be materialised, then the
         # session writes the materialised relation out as a loaded table.
@@ -1857,6 +1878,11 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
 
     if typ == "output":
         return "SELECT * FROM %s AS _o" % need("in")
+
+    if typ == "samqldash":
+        # App Dashboard sink: relation passthrough so the Dashboard tab can
+        # also run tabular upstreams. Chart / reconcile are handled client-side.
+        return "SELECT * FROM %s AS _dash" % need("in")
 
     if typ == "iterator":
         # the iterator's "out" port reads from its accumulator table (named in
@@ -2116,11 +2142,16 @@ NODE_PORTS = {
     "appendfolder": {"in": [], "out": ["out"]},
     "filebrowser": {"in": [], "out": ["out"]},
     "apinode": {"in": [], "out": ["out", "err"]},
+    "sqlserver": {"in": [], "out": ["out"]},
+    "sharepoint": {"in": [], "out": ["out"]},
+    "webscrape": {"in": [], "out": ["out"]},
     "iterator": {"in": ["vars", "in"], "out": ["out"]},
     "while": {"in": ["in"], "out": []},
     "sql": {"in": ["in"], "out": ["out"]},
+    "python": {"in": ["in"], "out": ["out"]},
     "write": {"in": ["in"], "out": ["out"]},
     "output": {"in": ["in"], "out": []},
+    "samqldash": {"in": ["in"], "out": []},
     "group": {"in": ["in", "in2", "in3", "in4", "in5"], "out": ["out"]},
     "dashboard": {"in": ["in1", "in2", "in3", "in4"], "out": ["out"]},
     "dyn_input": {"in": [], "out": ["out"]},
@@ -2382,6 +2413,12 @@ def _node_needed_inputs(node, in_port, needed_out):
             else:
                 deps |= _ident_cols(expr)
         return deps
+
+    if typ == "python":
+        # Opaque user script — pull the full upstream relation when wired.
+        if in_port != "in":
+            return None
+        return None
 
     if typ == "window":
         produced = {
@@ -2673,10 +2710,11 @@ _INCREMENTAL_EXPENSIVE_TYPES = frozenset({
 })
 _INCREMENTAL_SOURCE_TYPES = frozenset({
     "input", "directory", "appendfolder", "filebrowser", "apinode",
+    "sqlserver", "sharepoint", "webscrape",
     "iterator", "shred", "createtable", "variable", "text",
 })
 _INCREMENTAL_SINK_TYPES = frozenset({
-    "output", "write", "dashboard", "while",
+    "output", "samqldash", "write", "dashboard", "while",
 })
 
 
@@ -2696,6 +2734,9 @@ def _incremental_node_safe(node):
     if typ == "sql":
         # A SQL node may contain random(), current_timestamp, external table
         # functions, or other runtime-only state that cannot be proven stable.
+        return False
+    if typ == "python":
+        # Arbitrary Python is opaque and may be non-deterministic.
         return False
     if typ == "group":
         return all(_incremental_node_safe(c)

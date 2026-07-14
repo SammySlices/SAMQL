@@ -323,7 +323,7 @@ class WorkflowStore:
     same name can exist once per kind. Legacy entries written before kinds
     existed are treated as "node"."""
     MAX_ENTRIES = 400
-    KINDS = ("ide", "journal", "node")
+    KINDS = ("ide", "journal", "node", "dashboard")
 
     def __init__(self, dirname=APP_CONFIG_DIRNAME, filename="workflows.json"):
         self.path = Path.home() / dirname / filename
@@ -412,6 +412,17 @@ class WorkflowStore:
             elif kind == "journal":
                 cells = g.get("cells") if isinstance(g, dict) else None
                 item["cells"] = len(cells) if isinstance(cells, list) else None
+            elif kind == "dashboard":
+                docs = g.get("dashboards") if isinstance(g, dict) else None
+                if isinstance(docs, list):
+                    item["dashboards"] = len(docs)
+                    item["widgets"] = sum(
+                        len(d.get("widgets") or d.get("cells") or [])
+                        for d in docs if isinstance(d, dict)
+                    )
+                else:
+                    widgets = g.get("widgets") or g.get("cells") if isinstance(g, dict) else None
+                    item["widgets"] = len(widgets) if isinstance(widgets, list) else 0
             out.append(item)
         return out
 

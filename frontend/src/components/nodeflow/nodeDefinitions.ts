@@ -168,6 +168,16 @@ const summaryFor = (node: NbNode, edges: NbEdge[]): string => {
       return cfg.pattern || "(path / glob)";
     case "apinode":
       return cfg.url ? String(cfg.url).replace(/^https?:\/\//, "").slice(0, 30) : "(set a URL)";
+    case "sqlserver":
+      return cfg.profile_key || cfg.connection || cfg.query
+        ? `${cfg.profile_key || cfg.connection || "SQL Server"}${cfg.query ? " · query" : ""}`
+        : "(pick a SQL Server profile)";
+    case "sharepoint":
+      return cfg.list_title || cfg.site_url
+        ? String(cfg.list_title || cfg.site_url).slice(0, 30)
+        : "(set site + list)";
+    case "webscrape":
+      return cfg.url ? String(cfg.url).replace(/^https?:\/\//, "").slice(0, 30) : "(set a URL)";
     case "iterator":
       return cfg.table ? `iterate → ${cfg.table}` : "(configure loop)";
     case "while":
@@ -176,7 +186,10 @@ const summaryFor = (node: NbNode, edges: NbEdge[]): string => {
       return `→ ${cfg.name || "table"}`;
     case "output":
       return cfg.format ? `→ ${String(cfg.format).toUpperCase()}` : "";
+    case "samqldash":
+      return "→ Dashboard";
     case "sql":
+    case "python":
     case "text":
     case "variable":
     case "group":
@@ -251,12 +264,66 @@ export const NODE_DEFINITIONS = {
   appendfolder: define("appendfolder", "Append folder", "Files", () => ({ folder: "", table: "", columns: [], files: 0, label: "folder" })),
   filebrowser: define("filebrowser", "File browser", "FolderSearch", () => ({ pattern: "", source_column: "", label: "file browser" })),
   apinode: define("apinode", "API", "Cloud", () => ({ url: "", params: [], json_path: "", auth_user: "", retry: { retries: 0 }, continue_on_error: false, label: "api" })),
+  sqlserver: define("sqlserver", "SQL Server", "Server", () => ({
+    profile_key: "",
+    profile_name: "",
+    connection: "",
+    driver: "",
+    server: "",
+    port: "",
+    auth: "windows",
+    user: "",
+    encrypt: true,
+    trust: true,
+    multi_subnet: false,
+    login_timeout: "15",
+    stmt_timeout: "0",
+    read_only: true,
+    save_password: false,
+    secret_key: "",
+    secret_saved: false,
+    database: "",
+    query: "SELECT TOP 1000 * FROM dbo.MyTable",
+    table: "",
+    label: "sql server",
+  })),
+  sharepoint: define("sharepoint", "SharePoint", "Share2", () => ({
+    site_url: "",
+    mode: "list",
+    list_title: "",
+    folder_path: "",
+    item_id: "",
+    download_url: "",
+    secret_key: "",
+    table: "",
+    label: "sharepoint",
+  })),
+  webscrape: define("webscrape", "Web scrape", "Globe", () => ({
+    url: "",
+    mode: "tables",
+    table_index: 0,
+    json_path: "",
+    table: "",
+    label: "scrape",
+  })),
   iterator: define("iterator", "Iterator", "Repeat", () => ({ children: [], table: "", accumulate: "append", label: "iterator" })),
   while: define("while", "Repeat until", "RotateCw", () => ({ table: "", var: "", reset_first: true, replace_keys: [], accumulate: "append", max_iters: 100, label: "repeat until" })),
   sql: define("sql", "SQL", "Code", () => ({ sql: "SELECT *\nFROM input", label: "sql" }), true),
+  python: define("python", "Python", "Terminal", () => ({
+    code:
+      "# Optional input: columns, rows, df (list of dicts)\n" +
+      "# Assign `out` to emit a table.\n" +
+      "if df is not None:\n" +
+      "    out = df\n" +
+      "else:\n" +
+      '    out = [{"hello": "world", "n": 1}]\n',
+    timeout_s: 30,
+    label: "python",
+  }), true),
   group: define("group", "Group", "Group", () => ({ children: [], label: "group", note: "" }), true),
   write: define("write", "Write to table", "ArrowDownToLine", () => ({ name: "flow_result", label: "write" })),
   output: define("output", "Output", "FileDown", () => ({ folder: "", format: "csv", base_name: "output", label: "output" })),
+  samqldash: define("samqldash", "SamQL Dashboard", "Pin", () => ({ label: "dashboard out" })),
   dyn_input: define("dyn_input", "Dynamic Input", "Upload", () => ({ label: "dyn in" })),
   dyn_output: define("dyn_output", "Dynamic Output", "Download", () => ({ label: "dyn out" })),
   usernode: define("usernode", "Created node", "Sparkle", () => ({
@@ -278,8 +345,9 @@ export const NODE_PALETTE_ORDER: NodeType[] = [
   "jsonextract", "explode", "textclean", "date", "groupconcat", "maprecode", "parse",
   "topn", "coalesce", "renamecols", "validate", "pivot", "join", "multijoin",
   "crossjoin", "union", "chart", "dashboard", "browse", "profile", "reconcile", "group",
-  "createtable", "directory", "appendfolder", "filebrowser", "apinode", "text", "variable",
-  "sql", "write", "output", "iterator", "while", "dyn_input", "dyn_output",
+  "createtable", "directory", "appendfolder", "filebrowser", "apinode", "sqlserver",
+  "sharepoint", "webscrape", "text", "variable",
+  "sql", "python", "write", "output", "samqldash", "iterator", "while", "dyn_input", "dyn_output",
 ];
 
 export const NODE_PALETTE = NODE_PALETTE_ORDER.map((type) => {
@@ -301,12 +369,12 @@ export const NODE_GROUPS: {
   icon: NodeIconName;
   types: NodeType[];
 }[] = [
-  { id: "input", label: "Input", icon: "Database", types: ["input", "shred", "directory", "appendfolder", "filebrowser", "apinode", "createtable", "dyn_input"] },
+  { id: "input", label: "Input", icon: "Database", types: ["input", "shred", "directory", "appendfolder", "filebrowser", "apinode", "sqlserver", "sharepoint", "webscrape", "createtable", "dyn_input"] },
   { id: "transform", label: "Transform", icon: "Filter", types: ["select", "filter", "formula", "sort", "sample", "unique", "bin", "dedupe", "split", "jsonextract", "explode", "textclean", "date", "maprecode", "parse", "coalesce", "renamecols", "validate", "profile"] },
   { id: "aggregate", label: "Aggregate", icon: "Step", types: ["summarize", "pivot", "unpivot", "window", "perioddelta", "rank", "groupconcat", "topn"] },
   { id: "combine", label: "Combine", icon: "Swap", types: ["join", "multijoin", "crossjoin", "union", "reconcile", "group"] },
-  { id: "create", label: "Create", icon: "Table", types: ["chart", "dashboard", "sql", "text", "variable"] },
-  { id: "output", label: "Output", icon: "Download", types: ["browse", "write", "output", "iterator", "while", "dyn_output"] },
+  { id: "create", label: "Create", icon: "Table", types: ["chart", "dashboard", "sql", "python", "text", "variable"] },
+  { id: "output", label: "Output", icon: "Download", types: ["browse", "write", "output", "samqldash", "iterator", "while", "dyn_output"] },
 ];
 
 

@@ -146,7 +146,7 @@ export async function seedStorageBeforeBoot(
 export async function openApp(
   page: Page,
   entries: StorageEntries = {},
-  expectedView: "ide" | "notebook" | "nodeflow" = "ide",
+  expectedView: "ide" | "notebook" | "nodeflow" | "dashboard" = "ide",
 ): Promise<void> {
   await seedStorageBeforeBoot(page, entries);
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -160,6 +160,9 @@ export async function openApp(
     if (await journalEditor.count()) await expect(journalEditor.first()).toBeHidden();
   } else if (expectedView === "notebook") {
     await expect(page.getByTestId("journal-view")).toBeVisible();
+    await expect(page.getByTestId("ide-sql-editor")).toBeHidden();
+  } else if (expectedView === "dashboard") {
+    await expect(page.getByTestId("dashboard-root")).toBeVisible();
     await expect(page.getByTestId("ide-sql-editor")).toBeHidden();
   } else {
     await expect(page.getByTestId("nodeflow-view")).toBeVisible();

@@ -158,7 +158,7 @@ export interface HistoryEntry {
   [k: string]: any;
 }
 
-export type WorkflowKind = "ide" | "journal" | "node";
+export type WorkflowKind = "ide" | "journal" | "node" | "dashboard";
 
 export interface WorkflowSummary {
   name: string;

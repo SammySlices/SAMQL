@@ -195,6 +195,57 @@ describe("Phase 5 App controllers", () => {
     });
   });
 
+  it("workspace controller routes dashboard envelopes and activeSave commands", async () => {
+    const tabsRef = createRef<EdTab[]>() as React.MutableRefObject<EdTab[]>;
+    const activeRef = createRef<string>() as React.MutableRefObject<string>;
+    tabsRef.current = [{ id: "one", title: "One", sql: "" }];
+    activeRef.current = "one";
+    const { result } = renderHook(() =>
+      useWorkspaceController({
+        viewKey: "samql.test.view",
+        toast,
+        askConfirm: vi.fn(),
+        refreshWorkflows: vi.fn(),
+        edTabsRef: tabsRef,
+        activeIdRef: activeRef,
+        loadSqlIntoEditor: vi.fn(),
+      }),
+    );
+
+    const dash = wfEnvelope("dashboard", "Board Pack", {
+      version: 2,
+      activeId: "d1",
+      dashboards: [{ id: "d1", name: "Main", widgets: [] }],
+    });
+    act(() => result.current.openWorkflowContent(dash, "board.samql.json"));
+    expect(result.current.view).toBe("dashboard");
+    expect(result.current.dashboardLoad).toMatchObject({
+      name: "Board Pack",
+      graph: expect.objectContaining({ version: 2 }),
+    });
+
+    act(() => result.current.switchView("dashboard"));
+    act(() => result.current.activeSave());
+    expect(result.current.dashboardCmd).toMatchObject({ action: "save" });
+    act(() => result.current.activeSaveAs());
+    expect(result.current.dashboardCmd).toMatchObject({ action: "saveAs" });
+    act(() => result.current.activeOpen());
+    expect(result.current.dashboardCmd).toMatchObject({ action: "open" });
+
+    apiMock.workflowLoad.mockResolvedValue({
+      graph: {
+        version: 2,
+        activeId: "d1",
+        dashboards: [{ id: "d1", name: "Main", widgets: [] }],
+      },
+    });
+    await act(async () => {
+      await result.current.onLoadWorkflow("dashboard", "From List");
+    });
+    expect(result.current.view).toBe("dashboard");
+    expect(result.current.dashboardLoad?.name).toBe("From List");
+  });
+
   it("background controller starts loads, closes the modal, and reports completion", async () => {
     apiMock.loadStart.mockResolvedValue({ job_id: "job-1" });
     const refreshTables = vi.fn();

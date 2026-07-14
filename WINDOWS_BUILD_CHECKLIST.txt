@@ -51,10 +51,13 @@ EXPECT both commands to pass before any executable packaging begins.
 ----------------------------------------------------------------------
 4. LAUNCHER BEHAVIOR (the .456 contracts, live)
 ----------------------------------------------------------------------
-4.1  COLD START. No SamQL running. Double-click SamQL.exe.
-     EXPECT: splash -> "Starting the SamQL server..." -> an app
-     window on http://127.0.0.1:8765/ within a few seconds; the log
-     gains "INFO launcher start (port 8765)".
+4.1  COLD START. No SamQL running. Double-click SamQL-AppWindow.exe
+     (or SamQL.exe --window).
+     EXPECT: splash -> "Starting the SamQL server..." ->
+     "Waiting for SamQL to be ready..." -> dark native window (never a
+     white / Not Responding flash) on http://127.0.0.1:8765/ within a
+     few seconds; the log gains "INFO launcher start (port 8765)".
+     The window's WebView2 background is #16181d until HTML paints.
 4.2  REUSE-BY-PORT (single instance). With 4.1 still running, launch
      SamQL.exe again.
      EXPECT: NO second server; a second app window opens onto the

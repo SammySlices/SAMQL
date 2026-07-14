@@ -34,6 +34,8 @@ _RESERVED_MUSTACHE = ("in", "input")
 # is flagged with a context-appropriate "use ${name}" message.
 _RAW_VALUE_NODES = {
     "apinode": ("API", "a URL or query parameter"),
+    "webscrape": ("Web scrape", "a URL"),
+    "sharepoint": ("SharePoint", "a site URL"),
     "filebrowser": ("file browser", "a file path"),
 }
 

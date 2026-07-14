@@ -8,6 +8,9 @@
 // quoted spans so punctuation inside a string is left alone -- and is tolerant
 // of unbalanced/truncated input (it never throws).
 
+/** Cap sync pretty-print work so opening the viewer stays responsive. */
+export const PRETTY_STRUCT_MAX_CHARS = 120_000;
+
 export function looksStructy(text: string): boolean {
   const t = (text || "").trim();
   return t.length > 2 && (t[0] === "{" || t[0] === "[");
@@ -15,20 +18,22 @@ export function looksStructy(text: string): boolean {
 
 export function prettyStruct(text: string, indent = "  "): string {
   if (!looksStructy(text)) return text;
+  const truncated = text.length > PRETTY_STRUCT_MAX_CHARS;
+  const src = truncated ? text.slice(0, PRETTY_STRUCT_MAX_CHARS) : text;
   let out = "";
   let depth = 0;
   let inStr = false;
   let quote = "";
   const nl = (d: number) => "\n" + indent.repeat(Math.max(0, d));
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
     if (inStr) {
       out += ch;
       if (ch === "\\") {
         // copy the escaped character verbatim so an escaped quote inside the
         // string doesn't look like the end of it
         i++;
-        if (i < text.length) out += text[i];
+        if (i < src.length) out += src[i];
       } else if (ch === quote) {
         inStr = false;
       }
@@ -43,9 +48,9 @@ export function prettyStruct(text: string, indent = "  "): string {
     if (ch === "{" || ch === "[") {
       // keep an empty container on one line: {} / []
       let j = i + 1;
-      while (j < text.length && /\s/.test(text[j])) j++;
+      while (j < src.length && /\s/.test(src[j])) j++;
       const close = ch === "{" ? "}" : "]";
-      if (text[j] === close) {
+      if (src[j] === close) {
         out += ch + close;
         i = j;
         continue;
@@ -66,7 +71,7 @@ export function prettyStruct(text: string, indent = "  "): string {
     if (ch === ":") {
       out += ": ";
       // swallow following spaces so the value isn't double-spaced
-      while (i + 1 < text.length && text[i + 1] === " ") i++;
+      while (i + 1 < src.length && src[i + 1] === " ") i++;
       continue;
     }
     if (/\s/.test(ch)) {
@@ -77,6 +82,12 @@ export function prettyStruct(text: string, indent = "  "): string {
       continue;
     }
     out += ch;
+  }
+  if (truncated) {
+    out +=
+      "\n… [pretty-print capped at " +
+      PRETTY_STRUCT_MAX_CHARS.toLocaleString() +
+      " chars]";
   }
   return out;
 }

@@ -14,6 +14,11 @@ export type NodeCommand = {
   action: "save" | "saveAs" | "open" | "exportLineage";
 };
 
+export type DashboardCommand = {
+  id: number;
+  action: "save" | "saveAs" | "open" | "export";
+};
+
 export type ConfirmAsk = (
   anchor: HTMLElement | { left: number; top: number; side?: "left" | "right" },
   message: React.ReactNode,
@@ -50,6 +55,7 @@ export function useWorkspaceController({
       const saved = window.localStorage?.getItem(viewKey);
       if (saved === "notebook") return "notebook";
       if (saved === "nodeflow" || saved === "nodebook") return "nodeflow";
+      if (saved === "dashboard") return "dashboard";
       return "ide";
     } catch {
       return "ide";
@@ -83,6 +89,9 @@ export function useWorkspaceController({
 
   const [journalCmd, setJournalCmd] = useState<JournalCommand | null>(null);
   const [nodeCmd, setNodeCmd] = useState<NodeCommand | null>(null);
+  const [dashboardCmd, setDashboardCmd] = useState<DashboardCommand | null>(
+    null,
+  );
   const [ideWfNames, setIdeWfNames] = useState<Record<string, string>>({});
   const [journalLoad, setJournalLoad] = useState<{
     id: number;
@@ -90,6 +99,11 @@ export function useWorkspaceController({
     doc: string;
   } | null>(null);
   const [nodeLoad, setNodeLoad] = useState<{
+    id: number;
+    name: string;
+    graph: unknown;
+  } | null>(null);
+  const [dashboardLoad, setDashboardLoad] = useState<{
     id: number;
     name: string;
     graph: unknown;
@@ -172,6 +186,11 @@ export function useWorkspaceController({
           switchView("notebook");
           return;
         }
+        if (kind === "dashboard") {
+          setDashboardLoad({ id: Date.now(), name, graph });
+          switchView("dashboard");
+          return;
+        }
         setNodeLoad({ id: Date.now(), name, graph });
         switchView("nodeflow");
       } catch (error: unknown) {
@@ -237,6 +256,15 @@ export function useWorkspaceController({
         switchView("nodeflow");
         return;
       }
+      if (envelope.kind === "dashboard") {
+        setDashboardLoad({
+          id: Date.now(),
+          name: envelope.name || name,
+          graph: envelope.payload,
+        });
+        switchView("dashboard");
+        return;
+      }
       switchView("ide");
       loadSqlIntoEditor(String(envelope.payload?.sql ?? ""));
     },
@@ -247,6 +275,8 @@ export function useWorkspaceController({
     if (viewRef.current === "ide") void saveIdeWorkflow();
     else if (viewRef.current === "notebook")
       setJournalCmd({ id: Date.now(), action: "save" });
+    else if (viewRef.current === "dashboard")
+      setDashboardCmd({ id: Date.now(), action: "save" });
     else setNodeCmd({ id: Date.now(), action: "save" });
   }, [saveIdeWorkflow]);
 
@@ -254,6 +284,8 @@ export function useWorkspaceController({
     if (viewRef.current === "ide") setIdeFile({ mode: "save" });
     else if (viewRef.current === "notebook")
       setJournalCmd({ id: Date.now(), action: "saveAs" });
+    else if (viewRef.current === "dashboard")
+      setDashboardCmd({ id: Date.now(), action: "saveAs" });
     else setNodeCmd({ id: Date.now(), action: "saveAs" });
   }, []);
 
@@ -261,6 +293,8 @@ export function useWorkspaceController({
     if (viewRef.current === "ide") setIdeFile({ mode: "open" });
     else if (viewRef.current === "notebook")
       setJournalCmd({ id: Date.now(), action: "open" });
+    else if (viewRef.current === "dashboard")
+      setDashboardCmd({ id: Date.now(), action: "open" });
     else setNodeCmd({ id: Date.now(), action: "open" });
   }, []);
 
@@ -272,12 +306,16 @@ export function useWorkspaceController({
     setJournalCmd,
     nodeCmd,
     setNodeCmd,
+    dashboardCmd,
+    setDashboardCmd,
     ideWfNames,
     setIdeWfNames,
     journalLoad,
     setJournalLoad,
     nodeLoad,
     setNodeLoad,
+    dashboardLoad,
+    setDashboardLoad,
     ideFile,
     setIdeFile,
     saveIdeWorkflow,

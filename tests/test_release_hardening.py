@@ -143,7 +143,7 @@ def main() -> int:
         )
 
         receipt = json.loads(first_receipt)
-        require(receipt["build"] == "2026-07-13.594", "receipt build is wrong")
+        require(receipt["build"] == "2026-07-14.595", "receipt build is wrong")
         require(receipt["version"] == "2.16.4", "receipt version is wrong")
         require(receipt["sourceFiles"] == len(manifest), "receipt source count is wrong")
         require(receipt["decodedBundle"]["sha256"] == first.bundle_sha256, "receipt bundle SHA is wrong")

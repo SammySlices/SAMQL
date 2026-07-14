@@ -5,14 +5,37 @@ import { isCancelledError, registerRun, unregisterRun, cancelOne } from "../../l
 import { Icon } from "../Icon";
 import {
   type SqlProfile,
-  type SqlAuth,
   SQL_PROFILES_KEY,
   bestOdbcDriver,
   parseSqlProfiles,
-  dumpSqlProfiles,
   lastProfileName,
   sanitizeProfileName,
 } from "../../lib/sqlProfiles";
+import {
+  MsSqlConnectForm,
+  type MsSqlConnectValues,
+  deleteMsSqlProfile,
+  persistMsSqlProfile,
+  sqlProfileToConnectValues,
+} from "./MsSqlConnectForm";
+
+const defaultConnect = (): MsSqlConnectValues => ({
+  driver: "",
+  server: "",
+  port: "",
+  auth: "windows",
+  user: "",
+  encrypt: true,
+  trust: true,
+  multi_subnet: false,
+  login_timeout: "15",
+  stmt_timeout: "0",
+  read_only: true,
+  save_password: false,
+  profile_name: "",
+  profile_sel: "(new)",
+  secret_saved: false,
+});
 
 export const SqlServerLoadTab: React.FC<{
   busy: boolean;
@@ -25,24 +48,11 @@ export const SqlServerLoadTab: React.FC<{
 }> = ({ busy, setBusy, onLoaded, onError, duck, secretsOk, cancelRef }) => {
   const [drivers, setDrivers] = useState<string[]>([]);
   const [available, setAvailable] = useState(true);
-  const [driver, setDriver] = useState("");
-  const [server, setServer] = useState("");
-  const [port, setPort] = useState("");
-  const [auth, setAuth] = useState<SqlAuth>("windows");
-  const [user, setUser] = useState("");
+  const [connectVals, setConnectVals] = useState<MsSqlConnectValues>(defaultConnect);
   const [pwd, setPwd] = useState("");
-  const [savePass, setSavePass] = useState(false);
-  const [encrypt, setEncrypt] = useState(true);
-  const [trust, setTrust] = useState(true);
-  const [multiSubnet, setMultiSubnet] = useState(false);
-  const [loginTimeout, setLoginTimeout] = useState("15");
-  const [stmtTimeout, setStmtTimeout] = useState("0");
-  const [readOnly, setReadOnly] = useState(true);
   const [destination, setDestination] = useState(duck ? "auto" : "sqlite");
 
   const [profiles, setProfiles] = useState<Record<string, SqlProfile>>({});
-  const [profileSel, setProfileSel] = useState("(new)");
-  const [profileName, setProfileName] = useState("");
 
   const [conn, setConn] = useState<{
     name: string;
@@ -55,136 +65,58 @@ export const SqlServerLoadTab: React.FC<{
   const [query, setQuery] = useState("");
   const [tableName, setTableName] = useState("sql_server_data");
 
-  // A saved password is keyed by the profile name (only once it has one).
-  const profileForKey =
-    profileSel !== "(new)" ? profileSel : sanitizeProfileName(profileName);
-  const secretKey = profileForKey ? "mssql:" + profileForKey : "";
-
-  const applyProfile = (p: SqlProfile, avail: string[]) => {
-    if (p.driver && avail.includes(p.driver)) setDriver(p.driver);
-    setServer(p.server);
-    setPort(p.port);
-    setAuth(p.auth);
-    setUser(p.user);
-    setPwd(""); // password is re-entered (or pulled from the encrypted store)
-    setSavePass(!!p.savePassword);
-    setEncrypt(p.encrypt);
-    setTrust(p.trust);
-    setMultiSubnet(p.multiSubnet);
-    setLoginTimeout(p.loginTimeout);
-    setStmtTimeout(p.stmtTimeout);
-    setReadOnly(p.readOnly);
+  const patchConnect = (patch: Partial<MsSqlConnectValues>) => {
+    setConnectVals((prev) => ({ ...prev, ...patch }));
   };
 
-  const currentProfile = (): SqlProfile => ({
-    driver,
-    server: server.trim(),
-    port: port.trim(),
-    auth,
-    user,
-    encrypt,
-    trust,
-    multiSubnet,
-    loginTimeout,
-    stmtTimeout,
-    readOnly,
-    savePassword: savePass,
-  });
-
-  const persistProfiles = (
-    next: Record<string, SqlProfile>,
-    last?: string,
-  ) => {
-    setProfiles(next);
-    try {
-      localStorage.setItem(SQL_PROFILES_KEY, dumpSqlProfiles(next, last));
-    } catch {
-      /* storage may be unavailable */
+  const applyProfile = (p: SqlProfile, name: string, avail: string[]) => {
+    const next = sqlProfileToConnectValues(p, name);
+    if (next.driver && avail.length && !avail.includes(next.driver)) {
+      next.driver = bestOdbcDriver(avail) || next.driver;
     }
+    setConnectVals((prev) => ({ ...prev, ...next }));
+    setPwd("");
   };
 
   const onSelectProfile = (name: string) => {
-    setProfileSel(name);
     if (name === "(new)") {
-      setProfileName("");
+      patchConnect({ profile_sel: "(new)", profile_name: "" });
       return;
     }
     const p = profiles[name];
-    if (p) {
-      applyProfile(p, drivers);
-      setProfileName(name);
-    }
+    if (p) applyProfile(p, name, drivers);
   };
 
   const saveProfile = async () => {
-    const nm = sanitizeProfileName(profileName || profileSel);
-    if (!nm || nm === "(new)") {
-      onError("Enter a profile name to save.");
+    const r = await persistMsSqlProfile(
+      connectVals.profile_name || connectVals.profile_sel,
+      connectVals,
+      profiles,
+      pwd,
+    );
+    if (!r.ok) {
+      onError(r.error || "Could not save profile.");
       return;
     }
-    const next = { ...profiles, [nm]: currentProfile() };
-    persistProfiles(next, nm);
-    setProfileSel(nm);
-    setProfileName(nm);
-    // Store the password encrypted when requested + typed; else clear it.
-    const key = "mssql:" + nm;
-    try {
-      if (savePass && pwd) await api.secretSet(key, pwd);
-      else await api.secretDelete(key);
-    } catch {
-      /* non-fatal: the profile still saved */
-    }
-    // Also persist as a first-class connection profile so NodeFlow / reconnect
-    // can resolve fields + secret by key (mssql:Name).
-    try {
-      const p = currentProfile();
-      await api.connectionProfilesUpsert({
-        kind: "mssql",
-        name: nm,
-        fields: {
-          driver: p.driver,
-          server: p.server,
-          port: p.port,
-          auth: p.auth,
-          user: p.user,
-          encrypt: p.encrypt,
-          trust: p.trust,
-          multi_subnet: p.multiSubnet,
-          login_timeout: p.loginTimeout,
-          stmt_timeout: p.stmtTimeout,
-          read_only: p.readOnly,
-        },
-        password: savePass && pwd ? pwd : undefined,
-      });
-    } catch {
-      /* non-fatal */
-    }
+    setProfiles(r.profiles);
+    const nm = sanitizeProfileName(
+      connectVals.profile_name || connectVals.profile_sel,
+    );
+    patchConnect({
+      profile_sel: nm,
+      profile_name: nm,
+      secret_saved: r.secretSaved,
+    });
   };
 
   const deleteProfile = async () => {
-    if (profileSel === "(new)" || !profiles[profileSel]) return;
-    const key = "mssql:" + profileSel;
-    const next = { ...profiles };
-    delete next[profileSel];
-    persistProfiles(next, "");
-    setProfileSel("(new)");
-    setProfileName("");
-    try {
-      await api.secretDelete(key);
-    } catch {
-      /* ignore */
-    }
-    try {
-      await api.connectionProfilesDelete(key);
-    } catch {
-      /* ignore */
-    }
+    const next = await deleteMsSqlProfile(connectVals.profile_sel, profiles);
+    setProfiles(next);
+    setConnectVals(defaultConnect());
+    setPwd("");
   };
 
   useEffect(() => {
-    // Saved profiles live in localStorage, not on the backend, so load them
-    // up front -- independent of the pyodbc/driver probe -- so a saved profile
-    // is never hidden just because pyodbc isn't detected on the server.
     try {
       setProfiles(parseSqlProfiles(localStorage.getItem(SQL_PROFILES_KEY)));
     } catch {
@@ -199,16 +131,18 @@ export const SqlServerLoadTab: React.FC<{
         setAvailable(r.available);
         const ds = r.drivers || [];
         setDrivers(ds);
-        if (ds.length) setDriver(bestOdbcDriver(ds));
+        if (ds.length) {
+          setConnectVals((prev) =>
+            prev.driver ? prev : { ...prev, driver: bestOdbcDriver(ds) },
+          );
+        }
         try {
           const raw = localStorage.getItem(SQL_PROFILES_KEY);
           const profs = parseSqlProfiles(raw);
           setProfiles(profs);
           const last = lastProfileName(raw);
           if (last && profs[last]) {
-            applyProfile(profs[last], ds);
-            setProfileSel(last);
-            setProfileName(last);
+            applyProfile(profs[last], last, ds);
           }
         } catch {
           /* ignore unreadable profile store */
@@ -217,37 +151,49 @@ export const SqlServerLoadTab: React.FC<{
       .catch(() => setAvailable(false));
   }, []);
 
+  const profileForKey =
+    connectVals.profile_sel !== "(new)"
+      ? connectVals.profile_sel
+      : sanitizeProfileName(connectVals.profile_name);
+  const secretKey = profileForKey ? "mssql:" + profileForKey : "";
+
   const connect = async () => {
-    if (!server.trim()) {
+    if (!connectVals.server.trim()) {
       onError("Server is required.");
       return;
     }
     setBusy(true);
     try {
+      const auth = connectVals.auth || "windows";
       const res = await api.mssqlConnect({
-        name: server.trim(),
-        driver,
-        server: server.trim(),
-        port: port.trim(),
+        name: connectVals.server.trim(),
+        driver: connectVals.driver,
+        server: connectVals.server.trim(),
+        port: connectVals.port.trim(),
         auth,
-        user: auth === "windows" ? "" : user,
+        user: auth === "windows" ? "" : connectVals.user,
         pwd: auth === "windows" ? "" : pwd,
         secret_key: auth === "windows" ? undefined : secretKey || undefined,
-        encrypt,
-        trust,
-        multi_subnet: multiSubnet,
-        login_timeout: Number(loginTimeout) || 15,
-        stmt_timeout: Number(stmtTimeout) || 0,
-        read_only: readOnly,
+        encrypt: connectVals.encrypt !== false,
+        trust: connectVals.trust !== false,
+        multi_subnet: !!connectVals.multi_subnet,
+        login_timeout: Number(connectVals.login_timeout) || 15,
+        stmt_timeout: Number(connectVals.stmt_timeout) || 0,
+        read_only: connectVals.read_only !== false,
       });
       if (res.error || !res.ok) {
         onError(res.error || "Connection failed.");
         return;
       }
-      // Persist the password (encrypted) on a successful connect when asked.
-      if (auth !== "windows" && savePass && pwd && secretKey) {
+      if (
+        auth !== "windows" &&
+        connectVals.save_password &&
+        pwd &&
+        secretKey
+      ) {
         try {
           await api.secretSet(secretKey, pwd);
+          patchConnect({ secret_saved: true });
         } catch {
           /* non-fatal */
         }
@@ -399,218 +345,31 @@ export const SqlServerLoadTab: React.FC<{
 
   if (!conn) {
     return (
-      <div className="mssql-connect-form">
-        <div className="form-row mssql-profile-row">
-          <label>Saved profile</label>
-          <div className="mssql-profile-ctl">
-            <select
-              value={profileSel}
-              onChange={(e) => onSelectProfile(e.target.value)}
-            >
-              <option value="(new)">(new)</option>
-              {Object.keys(profiles)
-                .sort()
-                .map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-            </select>
-            <input
-              placeholder="Profile name"
-              value={profileName}
-              onChange={(e) => setProfileName(e.target.value)}
-            />
-            <button className="btn sm" type="button" onClick={saveProfile}>
-              Save
-            </button>
-            <button
-              className="btn sm ghost"
-              type="button"
-              disabled={profileSel === "(new)"}
-              onClick={deleteProfile}
-            >
-              Delete
+      <MsSqlConnectForm
+        values={connectVals}
+        onChange={patchConnect}
+        drivers={drivers}
+        profiles={profiles}
+        secretsOk={secretsOk}
+        pwd={pwd}
+        onPwdChange={setPwd}
+        onSaveProfile={saveProfile}
+        onDeleteProfile={deleteProfile}
+        onSelectProfile={onSelectProfile}
+        variant="load"
+        footer={
+          <div style={{ marginTop: 14 }}>
+            <button className="btn primary" disabled={busy} onClick={connect}>
+              {busy ? <span className="spin" /> : <Icon.Database size={15} />}{" "}
+              Connect
             </button>
           </div>
-        </div>
-        <div className="form-grid">
-          <div className="form-row">
-            <label>ODBC driver</label>
-            <select value={driver} onChange={(e) => setDriver(e.target.value)}>
-              {drivers.length === 0 && <option value="">(none found)</option>}
-              {drivers.map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="form-row">
-            <label>Authentication</label>
-            <select
-              value={auth}
-              onChange={(e) => setAuth(e.target.value as SqlAuth)}
-            >
-              <option value="windows">Windows (Trusted)</option>
-              <option value="windows_alt">
-                Alternate Windows account (runas /netonly)
-              </option>
-              <option value="sql">SQL Login</option>
-            </select>
-          </div>
-        </div>
-        <div className="form-grid">
-          <div className="form-row">
-            <label>Server / instance</label>
-            <input
-              placeholder="HOST\SQLEXPRESS or 10.0.0.5"
-              value={server}
-              onChange={(e) => setServer(e.target.value)}
-            />
-          </div>
-          <div className="form-row">
-            <label>Port (optional)</label>
-            <input
-              placeholder="1433"
-              value={port}
-              onChange={(e) => setPort(e.target.value)}
-            />
-          </div>
-        </div>
-        {auth !== "windows" && (
-          <>
-            <div className="form-grid">
-              <div className="form-row">
-                <label>
-                  {auth === "windows_alt" ? "Windows account" : "Username"}
-                </label>
-                <input
-                  placeholder={
-                    auth === "windows_alt" ? "DOMAIN\\user (e.g. tdbfg\\laurs72)" : ""
-                  }
-                  value={user}
-                  onChange={(e) => setUser(e.target.value)}
-                />
-              </div>
-              <div className="form-row">
-                <label>Password</label>
-                <input
-                  type="password"
-                  value={pwd}
-                  placeholder={
-                    secretKey && savePass && !pwd
-                      ? "using saved password (encrypted)"
-                      : ""
-                  }
-                  onChange={(e) => setPwd(e.target.value)}
-                />
-              </div>
-            </div>
-            <label
-              className="save-pass"
-              title={
-                secretsOk
-                  ? "Encrypt and store this password with Windows DPAPI (tied to your Windows login). Saved when you Save the profile or connect."
-                  : "Encrypted password storage needs Windows (DPAPI) — unavailable here, so the password is re-entered each session."
-              }
-            >
-              <input
-                type="checkbox"
-                checked={savePass}
-                disabled={!secretsOk}
-                onChange={(e) => setSavePass(e.target.checked)}
-              />
-              Save password (encrypted){secretsOk ? "" : " — Windows only"}
-            </label>
-            {auth === "windows_alt" && (
-              <div className="hint" style={{ marginTop: 2 }}>
-                Connects with this domain account's network credentials via
-                Windows <code>runas /netonly</code> impersonation (LogonUser).
-                Requires <code>pywin32</code> on the machine running SamQL; the
-                password is used only to open the connection and is never
-                stored.
-              </div>
-            )}
-            {auth === "sql" && user.includes("\\") && (
-              <div className="hint mssql-credwarn" style={{ marginTop: 2 }}>
-                “{user}” looks like a Windows account (<code>DOMAIN\user</code>).
-                SQL Login sends it as a SQL Server login, which the server
-                rejects (error 18456). For a domain account, switch
-                Authentication to{" "}
-                <b>Alternate Windows account (runas /netonly)</b>.
-              </div>
-            )}
-          </>
-        )}
-        <div className="form-grid">
-          <div className="form-row">
-            <label>Login timeout (s)</label>
-            <input
-              value={loginTimeout}
-              onChange={(e) => setLoginTimeout(e.target.value)}
-            />
-          </div>
-          <div className="form-row">
-            <label>Statement timeout (s, 0 = none)</label>
-            <input
-              value={stmtTimeout}
-              onChange={(e) => setStmtTimeout(e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="mssql-toggles">
-          <label>
-            <input
-              type="checkbox"
-              checked={readOnly}
-              onChange={(e) => setReadOnly(e.target.checked)}
-            />
-            Read-only (block writes)
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={encrypt}
-              onChange={(e) => setEncrypt(e.target.checked)}
-            />
-            Encrypt
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={trust}
-              onChange={(e) => setTrust(e.target.checked)}
-            />
-            Trust server cert
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={multiSubnet}
-              onChange={(e) => setMultiSubnet(e.target.checked)}
-            />
-            MultiSubnetFailover
-          </label>
-        </div>
-        <div className="hint" style={{ marginTop: 12 }}>
-          Connections are <b>read-only by default</b> — only SELECT/SET/USE
-          batches are allowed; untick to permit writes. Statements are GO-aware
-          and run serialized, and results stream to disk so large pulls stay
-          memory-bounded. Credentials go to the local backend only. A password
-          is stored only if you tick “Save password” — then it’s encrypted with
-          Windows DPAPI (your Windows login); otherwise profiles keep just the
-          connection settings.
-        </div>
-        <div style={{ marginTop: 14 }}>
-          <button className="btn primary" disabled={busy} onClick={connect}>
-            {busy ? <span className="spin" /> : <Icon.Database size={15} />}{" "}
-            Connect
-          </button>
-        </div>
-      </div>
+        }
+      />
     );
   }
+
+  const readOnly = connectVals.read_only !== false;
 
   return (
     <div>
@@ -729,9 +488,3 @@ export const SqlServerLoadTab: React.FC<{
     </div>
   );
 };
-
-// ---- HDFS (WebHDFS) connector tab ---------------------------------------
-// Connect to a WebHDFS URL, navigate the directory tree, then scan a folder
-// that holds the dated partitions. The scan regroups <date>/<feed>/<file>
-// feed-first; loading pulls only the selected dates of each selected feed into
-// <root>__<feed>__<file> tables (each with a typed partition_date column).

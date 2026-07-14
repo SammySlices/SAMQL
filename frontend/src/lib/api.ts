@@ -110,6 +110,8 @@ const UNBOUNDED_ENDPOINTS = new Set<string>([
   "/api/iterator/run",
   "/api/while/run",
   "/api/node-api-fetch",
+  "/api/node-source-fetch",
+  "/api/sharepoint/download",
   "/api/reconcile",
   "/api/catalog/import",
   "/api/run-tests",
@@ -638,6 +640,58 @@ export const api = {
       status?: number;
       error?: string;
     }>("/api/node-api-fetch", {
+      signal,
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  nodeSourceFetch: (
+    body: {
+      type: string;
+      node_id: string;
+      config: unknown;
+      graph?: unknown;
+      query_id?: string;
+    },
+    signal?: AbortSignal,
+  ) =>
+    jsonFetch<{
+      ok?: boolean;
+      fetched?: boolean;
+      cancelled?: boolean;
+      table?: string;
+      engine?: string;
+      columns?: string[];
+      rows?: number;
+      err_table?: string;
+      err_rows?: number;
+      error_captured?: string;
+      url?: string;
+      status?: number;
+      error?: string;
+      meta?: unknown;
+    }>("/api/node-source-fetch", {
+      signal,
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  sharepointDownload: (
+    body: {
+      config: unknown;
+      query_id?: string;
+    },
+    signal?: AbortSignal,
+  ) =>
+    jsonFetch<{
+      ok?: boolean;
+      path?: string;
+      filename?: string;
+      bytes?: number;
+      error?: string;
+      cancelled?: boolean;
+      meta?: unknown;
+    }>("/api/sharepoint/download", {
       signal,
       method: "POST",
       body: JSON.stringify(body),
@@ -1571,18 +1625,20 @@ export const api = {
     jsonFetch<{
       workflows?: {
         name: string;
-        kind?: "ide" | "journal" | "node";
+        kind?: "ide" | "journal" | "node" | "dashboard";
         created_at?: string;
         last_used?: string;
         nodes?: number;
         edges?: number;
         cells?: number;
+        dashboards?: number;
+        widgets?: number;
         preview?: string;
       }[];
     }>("/api/workflows"),
   workflowLoad: (
     name: string,
-    kind: "ide" | "journal" | "node" = "node",
+    kind: "ide" | "journal" | "node" | "dashboard" = "node",
     signal?: AbortSignal,
   ) =>
     jsonFetch<{ name?: string; kind?: string; graph?: unknown; error?: string }>(
@@ -1592,13 +1648,16 @@ export const api = {
   workflowSave: (
     name: string,
     graph: unknown,
-    kind: "ide" | "journal" | "node" = "node",
+    kind: "ide" | "journal" | "node" | "dashboard" = "node",
   ) =>
     jsonFetch<{ ok?: boolean; name?: string; kind?: string; error?: string }>(
       "/api/workflows",
       { method: "POST", body: JSON.stringify({ name, graph, kind }) },
     ),
-  workflowDelete: (name: string, kind: "ide" | "journal" | "node" = "node") =>
+  workflowDelete: (
+    name: string,
+    kind: "ide" | "journal" | "node" | "dashboard" = "node",
+  ) =>
     jsonFetch<{ ok?: boolean }>("/api/workflows", {
       method: "DELETE",
       body: JSON.stringify({ name, kind }),

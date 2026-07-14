@@ -340,6 +340,7 @@ def frontend_tests(do_build):
             "src/components/LoadDataModal.tsx", "src/components/Icon.tsx",
             "e2e/fixtures.ts", "e2e/security-smoke.spec.ts",
             "e2e/workflow-smoke.spec.ts",
+            "e2e/dashboard-smoke.spec.ts",
             "e2e/load-query-export.spec.ts",
             "e2e/cancellation-recovery.spec.ts",
             "e2e/eye-care.spec.ts",
@@ -356,6 +357,12 @@ def frontend_tests(do_build):
         miss = [r for r in required
                 if not os.path.isfile(os.path.join(FRONTEND, r))]
         need(not miss, "missing frontend files: " + ", ".join(miss))
+        idx = open(os.path.join(FRONTEND, "index.html"),
+                   encoding="utf-8").read()
+        need("background: #15171b" in idx
+             and "color-scheme" in idx
+             and "Inline before any CSS/JS" in idx,
+             "index.html paints dark before the JS bundle (no white flash)")
         need(os.path.isfile(os.path.join(ROOT, ".github", "workflows",
                                         "windows-browser.yml")),
              "missing Windows real-browser CI workflow")
@@ -1262,7 +1269,8 @@ console.log("OK");
              "setDialect" in app and '"spark"' in app
              and "dialect" in app),
             ("query cancellation", "cancelQuery" in app or "cancelOne" in app),
-            ("can switch among the three views", "switchView" in app),
+            ("can switch among the views", "switchView" in app),
+            ("Dashboard view toggle is wired", 'data-testid="view-dashboard"' in app),
             ("SqlEditor consumes the schema for autocomplete",
              "tables" in ed),
         ]
@@ -1755,25 +1763,27 @@ console.log("OK");
             need(i >= 0, "could not find '%s'" % marker)
             return text[i:i + n]
 
-        # the kind union is exactly these three
+        # the kind union includes IDE, Journal, Node, and Dashboard
         m = _re.search(r'WorkflowKind\s*=\s*([^;]+);', types)
         need(m, "WorkflowKind type not found")
         kinds = set(_re.findall(r'"(\w+)"', m.group(1)))
-        need(kinds == {"node", "journal", "ide"},
-             "WorkflowKind should be exactly node/journal/ide, got "
+        need(kinds == {"node", "journal", "ide", "dashboard"},
+             "WorkflowKind should be node/journal/ide/dashboard, got "
              + str(sorted(kinds)))
 
-        # open-from-Saved-Workflows handles all three (ide + journal explicit,
-        # node as the else branch)
+        # open-from-Saved-Workflows handles all kinds (ide + journal + dashboard
+        # explicit, node as the else branch)
         load = after(workspace, "onLoadWorkflow = useCallback")
         for needle in ('kind === "ide"', 'kind === "journal"',
+                       'kind === "dashboard"',
                        'switchView("nodeflow")'):
             need(needle in load, "onLoadWorkflow missing: " + needle)
 
-        # open-file-from-disk handles all three (journal + node explicit, ide as
-        # the fallthrough)
+        # open-file-from-disk handles all kinds (journal + node + dashboard
+        # explicit, ide as the fallthrough)
         openc = after(workspace, "openWorkflowContent = useCallback")
         for needle in ('envelope.kind === "journal"', 'envelope.kind === "node"',
+                       'envelope.kind === "dashboard"',
                        'switchView("ide")', "loadSqlIntoEditor"):
             need(needle in openc, "openWorkflowContent missing: " + needle)
 
@@ -1784,6 +1794,63 @@ console.log("OK");
              "Notebook (Journal) must save with kind=journal")
         need('{ sql: tab.sql }, "ide")' in workspace,
              "the SQL editor must save with kind=ide")
+        dash = _read_fe("src", "components", "Dashboard.tsx")
+        need('workflowSave(name, workspace, "dashboard")' in dash,
+             "Dashboard must save with kind=dashboard")
+        need("setDashboardCmd" in workspace
+             and 'action: "save"' in workspace,
+             "workspace controller routes save to dashboardCmd")
+        need('kind: "dashboard", label: "Dashboard"' in _read_fe(
+                "src", "components", "Sidebar.tsx"),
+             "Sidebar WF_SECTIONS includes Dashboard")
+        app = _read_fe("src", "App.tsx")
+        need("useDashboardSettings" in app
+             and "dashboardUi.menu" in app
+             and "dashboardUi.modals" in app,
+             "App hosts Dashboard Settings export/load")
+        need("inspectorHost={dashHostEl}" in app
+             and "onSelectionChange={setDashSel}" in app,
+             "App still wires Dashboard selection/host props")
+        # Config is a Field Explore–style float (useWinDrag + tt-mini), not a
+        # tables-rail portal. Board background customization was removed.
+        need("useWinDrag" in dash
+             and 'data-testid="dashboard-config-mini"' in dash
+             and "tt-mini" in dash
+             and 'data-testid="dashboard-config-close"' in dash
+             and "openWidgetConfig" in dash
+             and "openTitleConfig" in dash
+             and 'data-testid="dashboard-export-pdf"' in dash
+             and "exportDashboardElementToPdf" in dash
+             and "openExpand" in dash
+             and "dashboard-widget-expand-" in dash
+             and "dash-expand-win" in dash
+             and "Maximize2" in dash
+             and "dashboard-bg-menu" not in dash
+             and "dash-root-custom-bg" not in dash,
+             "Dashboard configure is a draggable float (not board-bg chrome)")
+        need("Maximize2" in _read_fe("src", "components", "Icon.tsx"),
+             "Icon.Maximize2 backs the dashboard expand control")
+        need(os.path.isfile(os.path.join(
+                FRONTEND, "src", "lib", "dashboardPdf.ts")),
+             "dashboard PDF export helper must exist")
+        pdf = _read_fe("src", "lib", "dashboardPdf.ts")
+        need("saveToDownloads" in pdf
+             and "jpegBytesToPdf" in pdf
+             and "b64" in pdf,
+             "dashboard PDF export must write via saveToDownloads b64")
+        api = _read_fe("src", "lib", "api.ts")
+        need("sharepointDownload" in api
+             and '"/api/sharepoint/download"' in api,
+             "api.sharepointDownload posts to /api/sharepoint/download")
+        insp = _read_fe("src", "components", "nodeflow", "NodeFlowInspector.tsx")
+        need('data-testid="sharepoint-download"' in insp
+             and "api.sharepointDownload" in insp,
+             "SharePoint inspector exposes Download file")
+        srv = open(os.path.join(ROOT, "backend", "server.py"),
+                   encoding="utf-8").read()
+        need('r"^/api/sharepoint/download$"' in srv
+             or "/api/sharepoint/download" in srv,
+             "server registers POST /api/sharepoint/download")
 
     def t_select_fields_logic():
         # Exercise select-field reconciliation (reconcileSelectFields,
@@ -2042,8 +2109,10 @@ console.log("OK");
         api = _read_fe("src", "lib", "api.ts")
         helpers = _read_fe("src", "lib", "connectionProfiles.ts")
         mssql = _read_fe("src", "components", "load", "SqlServerLoadTab.tsx")
+        mssql_form = _read_fe("src", "components", "load", "MsSqlConnectForm.tsx")
         rest = _read_fe("src", "components", "load", "ApiLoadTab.tsx")
         insp = _read_fe("src", "components", "nodeflow", "NodeFlowInspector.tsx")
+        defs = _read_fe("src", "components", "nodeflow", "nodeDefinitions.ts")
         vitest = os.path.join(
             FRONTEND, "src", "lib", "connectionProfiles.component.test.ts")
         missing = []
@@ -2064,10 +2133,14 @@ console.log("OK");
         if "export function listConnectionProfiles" not in helpers and \
                 "export async function listConnectionProfiles" not in helpers:
             missing.append("listConnectionProfiles helper")
-        if "connectionProfilesUpsert" not in mssql:
-            missing.append("SQL Server Load tab upserts connection profiles")
-        if "connectionProfilesDelete" not in mssql:
-            missing.append("SQL Server Load tab deletes connection profiles")
+        if "persistMsSqlProfile" not in mssql_form:
+            missing.append("MsSqlConnectForm persistMsSqlProfile")
+        if "connectionProfilesUpsert" not in mssql_form:
+            missing.append("MsSqlConnectForm upserts connection profiles")
+        if "connectionProfilesDelete" not in mssql_form:
+            missing.append("MsSqlConnectForm deletes connection profiles")
+        if "MsSqlConnectForm" not in mssql:
+            missing.append("SQL Server Load tab uses MsSqlConnectForm")
         if "connectionProfilesUpsert" not in rest:
             missing.append("REST API Load tab upserts connection profiles")
         if "connectionProfilesDelete" not in rest:
@@ -2076,6 +2149,15 @@ console.log("OK");
             missing.append("API node connection-profile picker")
         if "connectionProfilesList" not in insp:
             missing.append("inspector loads connection profiles")
+        if "MsSqlConnectForm" not in insp:
+            missing.append("SQL Server node uses MsSqlConnectForm")
+        if "sqlserver-node-fetch" not in insp:
+            missing.append("SQL Server node Fetch control")
+        if 'save_password: false' not in defs and \
+                "save_password: false" not in defs:
+            missing.append("sqlserver node defaults include save_password")
+        if 'auth: "windows"' not in defs:
+            missing.append("sqlserver node defaults include auth")
         if not os.path.isfile(vitest):
             missing.append("Vitest connectionProfiles helpers")
         need(not missing,
@@ -2544,7 +2626,7 @@ console.log("OK");
             "formula": "Beaker", "summarize": "Sigma", "sort": "SortArrows",
             "sample": "Dice", "jsonextract": "Braces", "validate": "ShieldCheck",
             "reconcile": "Scale", "browse": "Eye", "variable": "Variable",
-            "sql": "Code", "iterator": "Repeat", "while": "RotateCw",
+            "sql": "Code", "python": "Terminal", "iterator": "Repeat", "while": "RotateCw",
             "pivot": "LayoutGrid", "join": "GitMerge", "date": "Calendar",
         }
         wrong = ["%s->%s (want %s)" % (t, m.get(t), ic)
@@ -4367,13 +4449,14 @@ console.log("OK");
             ("Input is a nested category (input + source nodes including Dynamic Input)",
              '{ id: "input", label: "Input", icon: "Database", types: '
              '["input", "shred", "directory", "appendfolder", "filebrowser", '
-             '"apinode", "createtable", "dyn_input"] }' in nb),
+             '"apinode", "sqlserver", "sharepoint", "webscrape", "createtable", '
+             '"dyn_input"] }' in nb),
             ("chart + dashboard live in the Create category",
-             '"chart", "dashboard", "sql", "text"' in nb),
+             '"chart", "dashboard", "sql", "python", "text"' in nb),
             ("validate + profile in Transform",
              '"renamecols", "validate", "profile"' in nb),
             ("Output category includes Dynamic Output",
-             '"browse", "write", "output", "iterator", "while", "dyn_output"' in nb),
+             '"browse", "write", "output", "samqldash", "iterator", "while", "dyn_output"' in nb),
             # --- .93: chart/dashboard output saves on Run all (no button) ---
             ("output: no manual Save image button",
              '{isImage ? "Save image" : "Run & export"}' not in nb
@@ -4794,10 +4877,12 @@ console.log("OK");
             ("sql node honours a user width + height (bodyW/bodyH)",
              'if (n.type === "sql") {' in nb
              and "n.config.bodyW" in nb
-             and 'if (n.type === "sql") return base + bodyH(SQL_BODY_H);' in nb),
+             and ('if (n.type === "sql") return base + bodyH(SQL_BODY_H);' in nb
+                  or 'if (n.type === "sql" || n.type === "python") return base + bodyH(SQL_BODY_H);' in nb)),
             ("sql node renders the corner resize handle",
              ('n.type === "sql" ? (' in nb
-              or 'node.type === "sql") && (' in nb)
+              or 'node.type === "sql") && (' in nb
+              or 'node.type === "python") && (' in nb)
              and "nb2-node-resize" in nb
              and "startNodeResize" in nb),
             ("sql node shows a (resizable) read-only query body",
@@ -4805,6 +4890,11 @@ console.log("OK");
              and "nb2-node-sql-text" in nb
              and ('n.type === "sql" && (' in nb
                   or 'node.type === "sql" && (' in nb)),
+            ("python node is registered with Terminal icon + inspector",
+             '"python"' in nb
+             and "Terminal" in nb
+             and 'inspectorType === "python"' in nb
+             and "config.code" in nb),
             ("sql node keeps its ports by the header (not centred) like chart",
              'n.type === "sql"\n  ) {\n    return PORT_TOP + idx * PORT_GAP;' in nb
              or ('n.type === "sql"' in nb
@@ -5652,8 +5742,10 @@ console.log("OK");
             missing.append("DataGrid: import prettyStruct helpers")
         if "looksStructy(f.text)" not in dg:
             missing.append("DataGrid: gate expander on looksStructy")
-        if "prettyStruct(viewer.text)" not in dg:
-            missing.append("DataGrid: viewer must reindent the value")
+        # Pretty-print is deferred after open (viewerPretty) so large values
+        # don't block the first paint of the popup.
+        if "prettyStruct(" not in dg or "viewerPretty" not in dg:
+            missing.append("DataGrid: viewer must reindent the value (deferred)")
         # the expander button + the viewer popover state/markup
         for tok in ("gc-expand", "setViewer(", "gc-json-pop", "gc-json-body"):
             if tok not in dg:
@@ -5682,6 +5774,7 @@ console.log("OK");
                 "FileLoadTab.tsx",
                 "FlattenLoadTab.tsx",
                 "HdfsLoadTab.tsx",
+                "MsSqlConnectForm.tsx",
                 "RootIdPicker.tsx",
                 "SqlServerLoadTab.tsx",
             )
@@ -5709,6 +5802,8 @@ console.log("OK");
             ("load source responsibilities are isolated",
              re.search(r"api\s*\.\s*apiFetch\b", load_files["ApiLoadTab.tsx"])
              and re.search(r"api\s*\.\s*mssqlImport\b", load_files["SqlServerLoadTab.tsx"])
+             and "MsSqlConnectForm" in load_files["SqlServerLoadTab.tsx"]
+             and "persistMsSqlProfile" in load_files["MsSqlConnectForm.tsx"]
              and re.search(r"api\s*\.\s*flattenStart\b", load_files["FlattenLoadTab.tsx"])
              and re.search(r"api\s*\.\s*hdfsConnect\b", load_files["HdfsLoadTab.tsx"])
              and re.search(r"api\s*\.\s*excelSheets\b", load_files["FileLoadTab.tsx"])

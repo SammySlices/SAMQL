@@ -41,6 +41,9 @@ import { LoadDataModal, FileBrowser, RootIdPicker } from "./components/LoadDataM
 const NodeFlow = lazy(() =>
   import("./components/NodeFlow").then((m) => ({ default: m.NodeFlow })),
 );
+const Dashboard = lazy(() =>
+  import("./components/Dashboard").then((m) => ({ default: m.Dashboard })),
+);
 import { Modal } from "./components/Modal";
 import { ErrorLogModal } from "./components/ErrorLogModal";
 import { DiagnosticsModal } from "./components/DiagnosticsModal";
@@ -50,6 +53,7 @@ import {
 } from "./components/StorageMemoryModal";
 import { ActivityModal } from "./components/ActivityModal";
 import { useCreatedNodesSettings } from "./components/CreatedNodesSettings";
+import { useDashboardSettings } from "./components/DashboardSettings";
 import {
   useActivityStatus,
   useEngineReset,
@@ -640,6 +644,9 @@ export default function App() {
   // the tables list for that node's config panel (and back, on deselect).
   const [nbSel, setNbSel] = useState(false);
   const [nbHostEl, setNbHostEl] = useState<HTMLElement | null>(null);
+  const [dashSel, setDashSel] = useState(false);
+  const [dashHostEl, setDashHostEl] = useState<HTMLElement | null>(null);
+  const [dashReloadKey, setDashReloadKey] = useState(0);
   // whether the Node view's palette shows its "Search nodes…" bar
   const [showNodeSearch, setShowNodeSearch] = useState<boolean>(() =>
     typeof SAVED?.showNodeSearch === "boolean" ? SAVED.showNodeSearch : true,
@@ -760,11 +767,15 @@ export default function App() {
     setJournalCmd,
     nodeCmd,
     setNodeCmd,
+    dashboardCmd,
+    setDashboardCmd,
     ideWfNames,
     journalLoad,
     setJournalLoad,
     nodeLoad,
     setNodeLoad,
+    dashboardLoad,
+    setDashboardLoad,
     ideFile,
     setIdeFile,
     onLoadWorkflow,
@@ -783,6 +794,10 @@ export default function App() {
     loadSqlIntoEditor,
   });
 
+  const dashboardUi = useDashboardSettings(toast, () => {
+    setDashReloadKey((k) => k + 1);
+    switchView("dashboard");
+  });
   // ---- exit / tab-close handling ----
   // Browsers only allow their own generic confirmation during an actual
   // tab close, so this guard provides the "really exit?" prompt (Cancel =
@@ -1553,6 +1568,12 @@ export default function App() {
         run: () => switchView("nodeflow"),
       },
       {
+        id: "view-dashboard",
+        label: "Switch to Dashboard",
+        group: "Navigation",
+        run: () => switchView("dashboard"),
+      },
+      {
         id: "load-data",
         label: "Load data…",
         group: "Data",
@@ -2299,7 +2320,7 @@ export default function App() {
           <span className="brand-name">Sam<span className="ql">QL</span></span>
           {/* .538: the version moved to Settings -> About */}
         </div>
-        <div className="view-toggle" title="Switch between the IDE editor, Journal, and NodeFlow views">
+        <div className="view-toggle" title="Switch between the IDE editor, Journal, and NodeFlow views (Dashboard too)">
           <button
             className={"vt-seg" + (view === "ide" ? " on" : "")}
             data-testid="view-ide"
@@ -2320,6 +2341,13 @@ export default function App() {
             onClick={() => switchView("nodeflow")}
           >
             NodeFlow
+          </button>
+          <button
+            className={"vt-seg" + (view === "dashboard" ? " on" : "")}
+            data-testid="view-dashboard"
+            onClick={() => switchView("dashboard")}
+          >
+            Dashboard
           </button>
         </div>
         <div className="settings-wrap">
@@ -2481,6 +2509,7 @@ export default function App() {
                   Engine tuning (memory / threads)…
                 </button>
                 {createdNodesUi.menu(() => setSettingsOpen(false))}
+                {dashboardUi.menu(() => setSettingsOpen(false))}
                 <div className="sep" />
                 <div className="label">Workflow</div>
                 <button
@@ -2689,10 +2718,13 @@ export default function App() {
           className="sidebar"
           style={showTables ? { width: sidebarW } : { display: "none" }}
         >
-          {view === "nodeflow" && showTables && nbSel ? (
-            // node selected in the Node view: the config panel takes over this
-            // slot; NodeFlow portals its inspector into this host
-            <div className="nb-inspector-host" ref={setNbHostEl} />
+          {((view === "nodeflow" && showTables && nbSel) ||
+            (view === "dashboard" && showTables && dashSel)) ? (
+            // config panel takes over this slot; portals into this host
+            <div
+              className="nb-inspector-host"
+              ref={view === "dashboard" ? setDashHostEl : setNbHostEl}
+            />
           ) : (
             <Sidebar
             onTableProps={(engine, name) => setTableProps({ engine, name })}
@@ -2782,6 +2814,24 @@ export default function App() {
               }
             >
               <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} onTogglePalette={() => setNodeToolbarHidden((v) => !v)} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} />
+            </Suspense>
+          ) : view === "dashboard" ? (
+            <Suspense
+              fallback={
+                <div className="view-loading">Loading Dashboard…</div>
+              }
+            >
+              <Dashboard
+                key={dashReloadKey}
+                onToast={toast}
+                command={dashboardCmd}
+                onCommandConsumed={() => setDashboardCmd(null)}
+                loadRequest={dashboardLoad}
+                onLoadConsumed={() => setDashboardLoad(null)}
+                onWorkflowsChanged={refreshWorkflows}
+                inspectorHost={dashHostEl}
+                onSelectionChange={setDashSel}
+              />
             </Suspense>
           ) : view === "ide" ? (
             <>
@@ -3857,6 +3907,7 @@ export default function App() {
       {confirmUi}
       {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
       {createdNodesUi.modals}
+      {dashboardUi.modals}
       {tableProps && (
         <TablePropsModal
           engine={tableProps.engine}

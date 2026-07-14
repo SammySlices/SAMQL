@@ -1566,7 +1566,8 @@ class Session:
                 and int(self._effective_resource_budget().get(
                     "persistent_cache_mb") or 0) <= 0):
             return skip()
-        volatile = {"apinode", "sql", "iterator", "while", "filebrowser",
+        volatile = {"apinode", "sqlserver", "sharepoint", "webscrape",
+                    "sql", "iterator", "while", "filebrowser",
                     "directory", "appendfolder", "shred", "write"}
         sources = []
         eng, _kind = self._engine_obj(engine_target)
@@ -1986,13 +1987,15 @@ class Session:
         return self._col_names(eng, sql=sql)
 
     def _flow_has_pivot_upstream(self, graph, node_id, port):
-        """True if (node_id, port) is a pivot or has a pivot anywhere upstream.
-        A pivot's output columns are only known after its crosstab runs, so
+        """True if (node_id, port) is a pivot/python or has one upstream.
+
+        Pivot and Python output columns are only known after they run, so
         such ports need materialising to read their columns; everything else
         can be probed cheaply with a zero-row compile."""
         from . import nodeflow
         nodes = nodeflow._node_map(graph)
         seen = set()
+        runtime_types = ("pivot", "python")
 
         def walk(nid, prt):
             if (nid, prt) in seen:
@@ -2001,7 +2004,7 @@ class Session:
             node = nodes.get(nid)
             if node is None:
                 return False
-            if node.get("type") == "pivot":
+            if node.get("type") in runtime_types:
                 return True
             for ip in nodeflow.NODE_PORTS.get(node.get("type"), {}).get(
                     "in", []):
@@ -2321,17 +2324,14 @@ class Session:
                 typ = n.get("type")
                 cfg = n.get("config") or {}
                 if (typ == "input" or typ == "directory"
-                        or typ == "appendfolder" or typ == "apinode"):
+                        or typ == "appendfolder" or typ == "apinode"
+                        or typ in ("sqlserver", "sharepoint", "webscrape")):
                     t = (cfg.get("table") or cfg.get("err_table")
                          or "").strip()
                     eng_hint = None
-                    if typ == "apinode":
-                        # an API node's hidden table lives in whichever engine
-                        # the fetch loaded it into -- trust that record over the
-                        # cached catalog, which may not yet list the freshly-
-                        # created hidden table (e.g. inside an iterator pass).
-                        # Without this the flow can target the wrong engine and
-                        # the body fails to read the table with "no such table".
+                    if typ in ("apinode", "sqlserver", "sharepoint", "webscrape"):
+                        # Hidden source tables live in whichever engine the
+                        # fetch loaded them into -- trust that record.
                         rec = self._api_node_tables.get(n.get("id")) or {}
                         eng_hint = rec.get("engine")
                     _note(eng_hint
@@ -2510,6 +2510,11 @@ class Session:
         # resolve ${name} workflow-variable tokens once, up front: everything
         # below compiles a graph whose tokens are already filled in
         graph = applyvars.resolve_graph(graph)
+        # SQL Server / SharePoint / Web scrape: reconnect + import before
+        # compile so Dashboard / Run all work with a saved profile + password
+        # without a prior interactive Fetch.
+        self._ensure_source_nodes_fetched(
+            graph, [nid for nid, _port in targets], query_id=None)
         # SHRED nodes create their relational tables before anything composes
         self._shred_flow_prepass(graph, targets)
         from . import nodeflow
@@ -2605,9 +2610,10 @@ class Session:
                     raise nodeflow.NodeflowError("That node no longer exists.")
                 typ = node.get("type")
                 # a pivot reads its input twice (distinct values + the
-                # crosstab) and a SQL node's {{in}} token may appear more than
-                # once, so their inputs are always materialised, never inlined.
-                force = typ in ("pivot", "sql")
+                # crosstab), a SQL node's {{in}} token may appear more than
+                # once, and a Python node executes outside SQL — their
+                # inputs are always materialised, never inlined.
+                force = typ in ("pivot", "sql", "python")
 
                 def get_input(in_port):
                     sn, sp = nodeflow.upstream(graph, nid, in_port)
@@ -2625,6 +2631,33 @@ class Session:
                     return self._pivot_crosstab_sql(
                         eng, in_rel, node.get("config") or {},
                         "duckdb" if engine_target == DUCKDB_TARGET else "sqlite")
+                if typ == "python":
+                    in_rel = get_input("in")
+                    cfg = node.get("config") or {}
+                    side = "__nbpy_%s_%s" % (
+                        _tok,
+                        _re.sub(r"[^A-Za-z0-9]", "", str(nid)))
+                    from . import python_node as _pynode
+                    try:
+                        _pynode.run_into_table(
+                            eng, side,
+                            in_rel=in_rel,
+                            code=cfg.get("code") or "",
+                            timeout_s=cfg.get("timeout_s") or 30,
+                        )
+                    except _pynode.PythonNodeError as e:
+                        raise nodeflow.NodeRunError(
+                            str(e), node_id=nid, node_type="python") from e
+                    except Exception as e:
+                        if _is_interrupt(e):
+                            raise
+                        raise nodeflow.NodeRunError(
+                            nodeflow.explain_node_error(
+                                node, err_str(e)),
+                            node_id=nid, node_type="python") from e
+                    if collect is not None:
+                        collect.append(side)
+                    return 'SELECT * FROM "%s" AS _py' % side
                 live_out = needed_map.get((nid, prt))
                 sql = nodeflow.node_output_sql(
                     node, prt, get_input, cols_of,
@@ -2649,7 +2682,7 @@ class Session:
                 if node is None:
                     raise nodeflow.NodeflowError("That node no longer exists.")
                 _ctyp = node.get("type")
-                can_fuse = (fuse and _ctyp != "pivot"
+                can_fuse = (fuse and _ctyp not in ("pivot", "python")
                             and not (cache_checkpoints
                                      and nid in checkpoint_nodes
                                      and (fps.get(nid)
@@ -3435,17 +3468,14 @@ class Session:
         return n
 
     def _resolve_export_dir(self, out_dir):
-        """Empty out_dir → user's Downloads (SAMQL_DOWNLOADS_DIR in tests).
+        """Empty out_dir → user's Downloads (shared ``tmputil.downloads_dir``).
         A non-empty path must already exist as a directory."""
         import os
+        from . import tmputil
         out = (out_dir or "").strip()
         if out:
             return out if os.path.isdir(out) else None
-        envd = os.environ.get("SAMQL_DOWNLOADS_DIR")
-        if envd and os.path.isdir(envd):
-            return envd
-        cand = os.path.join(os.path.expanduser("~"), "Downloads")
-        return cand if os.path.isdir(cand) else os.path.expanduser("~")
+        return tmputil.downloads_dir()
 
     def export_nodeflow(self, graph, node_id, out_dir, fmt="csv",
                         base_name=None, query_id=None):
@@ -3762,6 +3792,97 @@ class Session:
                     if frm:
                         stack.append(frm)
         return api
+
+    def _volatile_source_nodes_upstream(self, graph, start_nodes):
+        """Upstream (and self) source nodes that must be fetched before a
+        materialize -- SQL Server / SharePoint / Web scrape. API nodes are
+        handled separately by iterators; here we cover Dashboard / Run all
+        so a saved profile + DPAPI password is enough without a prior Fetch.
+        """
+        want = {"sqlserver", "sharepoint", "webscrape"}
+        edges = graph.get("edges") or []
+        nodes = {n.get("id"): n for n in (graph.get("nodes") or [])
+                 if isinstance(n, dict)}
+
+        def _collect_nested(n, out_list):
+            if not isinstance(n, dict):
+                return
+            if n.get("type") in want:
+                out_list.append(n)
+            if n.get("type") in ("group", "iterator"):
+                for ch in (n.get("config") or {}).get("children") or []:
+                    _collect_nested(ch, out_list)
+
+        seen, stack, out = set(), list(start_nodes or []), []
+        while stack:
+            nid = stack.pop()
+            if nid is None or nid in seen:
+                continue
+            seen.add(nid)
+            n = nodes.get(nid)
+            if n:
+                _collect_nested(n, out)
+            for e in edges:
+                if (e.get("to") or {}).get("node") == nid:
+                    frm = (e.get("from") or {}).get("node")
+                    if frm:
+                        stack.append(frm)
+        # Stable unique by id (keep first).
+        seen_ids, uniq = set(), []
+        for n in out:
+            nid = n.get("id")
+            if nid is None or nid in seen_ids:
+                continue
+            seen_ids.add(nid)
+            uniq.append(n)
+        return uniq
+
+    def _ensure_source_nodes_fetched(self, graph, start_nodes, query_id=None):
+        """Fetch upstream SQL Server / SharePoint / Web scrape nodes in place
+        so ``config.table`` is set before compile. Mutates ``graph`` node
+        configs. Raises ``nodeflow.NodeflowError`` on failure."""
+        from . import nodeflow
+        sources = self._volatile_source_nodes_upstream(graph, start_nodes)
+        if not sources:
+            return
+        # Index every node (including nested children) for config patches.
+        by_id = {}
+
+        def _index(nodes):
+            for n in nodes or []:
+                if not isinstance(n, dict):
+                    continue
+                nid = n.get("id")
+                if nid is not None:
+                    by_id[nid] = n
+                cfg = n.get("config") or {}
+                if n.get("type") in ("group", "iterator"):
+                    _index(cfg.get("children"))
+
+        _index(graph.get("nodes"))
+        for n in sources:
+            nid = n.get("id")
+            typ = n.get("type")
+            cfg = dict(n.get("config") or {})
+            label = (cfg.get("label") or typ or "source")
+            fr = self.fetch_source_node(
+                typ, nid, cfg, graph=graph, query_id=query_id)
+            if fr.get("cancelled"):
+                raise nodeflow.NodeflowError("cancelled")
+            if fr.get("error") or not fr.get("ok"):
+                raise nodeflow.NodeflowError(
+                    'Could not fetch "%s" (%s): %s' % (
+                        label, typ, fr.get("error") or "unknown error"))
+            live = by_id.get(nid) or n
+            live_cfg = dict(live.get("config") or {})
+            live_cfg["table"] = fr.get("table") or ""
+            if fr.get("engine"):
+                live_cfg["engine"] = fr.get("engine")
+            if fr.get("columns") is not None:
+                live_cfg["columns"] = fr.get("columns")
+            if fr.get("rows") is not None:
+                live_cfg["rows"] = fr.get("rows")
+            live["config"] = live_cfg
 
     def _daterange_values(self, driver):
         import datetime as _dt
@@ -10479,6 +10600,370 @@ class Session:
                 "err_table": en, "err_rows": 0,
                 "pages": res.get("pages"), "url": res.get("url", url)}
 
+    def _drop_hidden_source_table(self, node_id):
+        prev = self._api_node_tables.get(node_id)
+        if not prev:
+            return
+        for nm, en in ((prev.get("table"), prev.get("engine")),
+                       (prev.get("err"), prev.get("err_engine"))):
+            if not nm:
+                continue
+            eng = self.duckdb if en == "duckdb" else self.db
+            try:
+                if eng is not None:
+                    eng.drop_table(nm)
+            except Exception:
+                pass
+        self._api_node_tables.pop(node_id, None)
+
+    def _load_hidden_columns_rows(self, node_id, prefix, columns, rows,
+                                  source_label, query_id=None):
+        """Materialize columns/rows into a hidden ``__…`` table for source nodes."""
+        import hashlib
+        from .engines import HAS_DUCKDB
+        self._drop_hidden_source_table(node_id)
+        base = prefix + hashlib.md5(str(node_id).encode("utf-8")).hexdigest()[:10]
+        cols = [str(c) for c in (columns or [])]
+        if not cols:
+            return {"error": "No columns to load."}
+        data = list(rows or [])
+        tname, n, engine = None, 0, None
+        own_run = bool(query_id)
+        if own_run:
+            self._register_run(query_id, None, kind="fetch", target=base)
+        try:
+            if HAS_DUCKDB:
+                try:
+                    duck = self.get_duckdb()
+                    if own_run:
+                        self._register_run(query_id, duck, kind="fetch",
+                                           target=base)
+                    tname, n = duck.add_table_streaming(
+                        base, cols, iter(data), source=source_label)
+                    engine = "duckdb"
+                except Exception:
+                    tname, n, engine = None, 0, None
+            if engine is None:
+                if own_run:
+                    self._register_run(query_id, self.db, kind="fetch",
+                                       target=base)
+                tname, n = self.db.add_table_streaming(
+                    base, cols, iter(data), source=source_label)
+                engine = "sqlite"
+        finally:
+            if own_run:
+                self._unregister_run(query_id)
+        self._api_node_tables[node_id] = {"table": tname, "engine": engine}
+        self._invalidate_profiles()
+        self._invalidate_counts()
+        eng = self.duckdb if engine == "duckdb" else self.db
+        col_now = list((getattr(eng, "table_columns", {}) or {}).get(tname) or cols)
+        return {
+            "ok": True,
+            "table": tname,
+            "engine": engine,
+            "columns": col_now,
+            "rows": n,
+        }
+
+    def fetch_sqlserver_node(self, node_id, config, query_id=None):
+        """Connect via a saved mssql profile, inline node fields, or an active
+        connection name and import the node's query into a hidden table.
+
+        Password resolution matches Load Data: one-shot ``pwd`` in the fetch
+        body, else DPAPI secret under ``secret_key`` / ``profile_key``.
+        """
+        cfg = dict(config or {})
+        query = (cfg.get("query") or "").strip()
+        if not query:
+            return {"error": "Enter a SQL query for the SQL Server node."}
+        conn_name = (cfg.get("connection") or "").strip()
+        profile_key = (cfg.get("profile_key") or "").strip()
+        secret_key = (cfg.get("secret_key") or "").strip() or profile_key
+        server = (cfg.get("server") or "").strip()
+        if not conn_name and profile_key:
+            conn_name = profile_key.split(":", 1)[-1] if ":" in profile_key \
+                else profile_key
+        if not conn_name and server:
+            conn_name = server
+        if not conn_name:
+            return {"error":
+                    "Set a server, saved mssql profile, or active connection "
+                    "name on the SQL Server node."}
+
+        if conn_name not in self.connections:
+            from samql_core.mssql import (SQLServerConnection,
+                                          build_mssql_conn_str,
+                                          split_domain_user, HAS_PYODBC)
+            if not HAS_PYODBC:
+                return {"error": "pyodbc is not installed on the server."}
+
+            fields = {}
+            pk = profile_key or ("mssql:" + conn_name)
+            prof = None
+            try:
+                prof = self.connection_profiles.get(pk)
+            except Exception:
+                prof = None
+            if prof:
+                fields = dict(prof.get("fields") or {})
+                if not secret_key:
+                    secret_key = pk
+            # Inline node config fills / overrides blanks (Load-modal parity).
+            for k, ck in (
+                ("driver", "driver"),
+                ("server", "server"),
+                ("port", "port"),
+                ("auth", "auth"),
+                ("user", "user"),
+                ("encrypt", "encrypt"),
+                ("trust", "trust"),
+                ("multi_subnet", "multi_subnet"),
+                ("login_timeout", "login_timeout"),
+                ("stmt_timeout", "stmt_timeout"),
+                ("read_only", "read_only"),
+                ("extra", "extra"),
+            ):
+                v = cfg.get(ck)
+                if v is None or v == "":
+                    continue
+                fields[k] = v
+            if not (fields.get("server") or "").strip() and not prof:
+                return {"error":
+                        'Connection "%s" is not active and no saved profile '
+                        "or server fields were found. Save an mssql profile "
+                        "(with password if needed) or connect in Load Data, "
+                        "then Fetch again." % conn_name}
+
+            auth = fields.get("auth", "windows") or "windows"
+            pwd = (cfg.get("pwd") or "") or ""
+            if not pwd and secret_key:
+                try:
+                    pwd = self.secrets.get(secret_key) or ""
+                except Exception:
+                    pwd = ""
+            if not pwd and pk and pk != secret_key:
+                try:
+                    pwd = self.secrets.get(pk) or ""
+                except Exception:
+                    pwd = ""
+            if auth in ("sql", "windows_alt") and not pwd:
+                return {"error":
+                        "No password available for %s. Enter it once and tick "
+                        "Save password on the SQL Server node (or Load Data "
+                        "profile), then retry." % (secret_key or pk or conn_name)}
+
+            alt_creds = None
+            if auth == "windows_alt":
+                domain, user = split_domain_user(fields.get("user", ""))
+                alt_creds = (domain, user, pwd)
+            try:
+                conn_str = build_mssql_conn_str(
+                    fields.get("driver"), fields.get("server"),
+                    fields.get("port", ""), auth, fields.get("user", ""),
+                    pwd, bool(fields.get("encrypt", True)),
+                    bool(fields.get("trust", True)),
+                    bool(fields.get("multi_subnet", False)),
+                    fields.get("extra", ""))
+                conn = SQLServerConnection(
+                    conn_name, conn_str, alt_creds=alt_creds,
+                    login_timeout=int(fields.get("login_timeout", 15) or 15),
+                    stmt_timeout=int(fields.get("stmt_timeout", 0) or 0),
+                    read_only=bool(fields.get("read_only", True)))
+                self.connections[conn_name] = conn
+            except Exception as e:
+                return {"error": "Could not connect: %s" % e}
+
+        # Optional default database (same role as the Load tab Database picker).
+        database = (cfg.get("database") or "").strip()
+        if database:
+            conn = self.connections.get(conn_name)
+            if conn is not None:
+                try:
+                    # Bracket-quote a simple identifier; reject odd names.
+                    safe = database.replace("]", "]]")
+                    conn.execute("USE [%s]" % safe)
+                except Exception as e:
+                    return {"error":
+                            "Could not USE database %r: %s" % (database, e)}
+
+        # Use a hidden base name so the import stays off the tables list.
+        import hashlib
+        base = "__nbsql_" + hashlib.md5(
+            str(node_id).encode("utf-8")).hexdigest()[:10]
+        self._drop_hidden_source_table(node_id)
+        res = self.import_from_connection(
+            conn_name, query, base_name=base, destination="duckdb",
+            query_id=query_id)
+        if res.get("error") or res.get("cancelled"):
+            return res
+        tname = res.get("table")
+        engine = res.get("engine") or "duckdb"
+        self._api_node_tables[node_id] = {"table": tname, "engine": engine}
+        cols = []
+        try:
+            eng = self.duckdb if engine == "duckdb" else self.db
+            cols = list((getattr(eng, "table_columns", {}) or {}).get(tname) or [])
+        except Exception:
+            cols = []
+        rows = None
+        try:
+            loaded = (res.get("loaded") or [{}])[0]
+            tables = loaded.get("tables") or []
+            if tables:
+                rows = tables[0].get("rows")
+        except Exception:
+            rows = None
+        return {
+            "ok": True,
+            "table": tname,
+            "engine": engine,
+            "columns": cols,
+            "rows": rows,
+        }
+
+    def fetch_sharepoint_node(self, node_id, config, query_id=None):
+        from . import sharepoint as _sp
+        cfg = dict(config or {})
+        site = (cfg.get("site_url") or "").strip()
+        mode = (cfg.get("mode") or "list").strip().lower()
+        lst = (cfg.get("list_title") or "").strip()
+        folder = (cfg.get("folder_path") or "").strip()
+        sk = (cfg.get("secret_key") or "").strip()
+        token = ""
+        if sk:
+            try:
+                token = self.secrets.get(sk) or ""
+            except Exception:
+                token = ""
+        if not token and cfg.get("token"):
+            token = str(cfg.get("token") or "")
+        own_run = bool(query_id)
+        if own_run:
+            self._register_run(query_id, None, kind="fetch", target="sharepoint")
+        try:
+            if own_run and self._run_is_cancelled(query_id):
+                return {"cancelled": True}
+            if mode == "drive":
+                records, meta = _sp.browse_drive(site, folder, token)
+                label = folder or "/"
+            else:
+                records, meta = _sp.fetch_sharepoint_items(site, lst, token)
+                label = lst
+            cols, rows, _ = _sp.records_to_columns_rows(records)
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            if own_run:
+                self._unregister_run(query_id)
+        out = self._load_hidden_columns_rows(
+            node_id, "__nbsp_", cols, rows,
+            source_label="sharepoint:%s" % label, query_id=None)
+        if out.get("ok"):
+            out["meta"] = meta
+        return out
+
+    def download_sharepoint_file(self, config, query_id=None):
+        """Download one SharePoint drive file into the user's Downloads folder."""
+        from . import sharepoint as _sp
+        import os
+        cfg = dict(config or {})
+        site = (cfg.get("site_url") or "").strip()
+        item_id = (cfg.get("item_id") or cfg.get("file_id") or "").strip()
+        download_url = (cfg.get("download_url") or "").strip() or None
+        sk = (cfg.get("secret_key") or "").strip()
+        token = ""
+        if sk:
+            try:
+                token = self.secrets.get(sk) or ""
+            except Exception:
+                token = ""
+        if not token and cfg.get("token"):
+            token = str(cfg.get("token") or "")
+        own_run = bool(query_id)
+        if own_run:
+            self._register_run(query_id, None, kind="fetch", target="sharepoint-dl")
+        try:
+            if own_run and self._run_is_cancelled(query_id):
+                return {"cancelled": True}
+            data, filename, meta = _sp.download_drive_item(
+                site, item_id, token, download_url=download_url)
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            if own_run:
+                self._unregister_run(query_id)
+        out_dir = self._resolve_export_dir("")
+        safe = "".join(
+            c if c.isalnum() or c in "._- " else "_"
+            for c in (filename or "sharepoint_file")
+        ).strip() or "sharepoint_file"
+        path = os.path.join(out_dir, safe)
+        base, ext = os.path.splitext(path)
+        n = 1
+        while os.path.exists(path):
+            path = "%s_%d%s" % (base, n, ext)
+            n += 1
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except Exception as e:
+            return {"error": "Could not write Downloads file: %s" % e}
+        return {
+            "ok": True,
+            "path": path,
+            "filename": os.path.basename(path),
+            "bytes": len(data),
+            "meta": meta,
+        }
+
+    def fetch_webscrape_node(self, node_id, config, query_id=None):
+        from . import webscrape as _ws
+        cfg = dict(config or {})
+        url = (cfg.get("url") or "").strip()
+        if not url:
+            return {"error": "Give the Web scrape node a URL."}
+        mode = (cfg.get("mode") or "tables").strip().lower()
+        json_path = (cfg.get("json_path") or "").strip() or None
+        own_run = bool(query_id)
+        if own_run:
+            self._register_run(query_id, None, kind="fetch", target="webscrape")
+        try:
+            if own_run and self._run_is_cancelled(query_id):
+                return {"cancelled": True}
+            cols, rows, meta = _ws.scrape_to_columns_rows(
+                url,
+                mode=mode,
+                table_index=cfg.get("table_index") or 0,
+                json_path=json_path,
+            )
+        except Exception as e:
+            return {"error": str(e)}
+        finally:
+            if own_run:
+                self._unregister_run(query_id)
+        out = self._load_hidden_columns_rows(
+            node_id, "__nbws_", cols, rows,
+            source_label="webscrape:%s" % url, query_id=None)
+        if out.get("ok"):
+            out["meta"] = meta
+            out["url"] = (meta or {}).get("url", url)
+        return out
+
+    def fetch_source_node(self, node_type, node_id, config, graph=None,
+                          query_id=None):
+        typ = (node_type or "").strip().lower()
+        if typ == "apinode":
+            return self.fetch_api_node(node_id, config, graph=graph,
+                                       query_id=query_id)
+        if typ == "sqlserver":
+            return self.fetch_sqlserver_node(node_id, config, query_id=query_id)
+        if typ == "sharepoint":
+            return self.fetch_sharepoint_node(node_id, config, query_id=query_id)
+        if typ == "webscrape":
+            return self.fetch_webscrape_node(node_id, config, query_id=query_id)
+        return {"error": "Unknown source node type: %s" % typ}
+
     def load_folder_files(self, folder, query_id=None):
         """Read every loadable file in a folder and stack them (UNION ALL,
         aligned by column name -- missing columns become NULL) into a hidden
@@ -10979,10 +11464,35 @@ class Session:
                     self._cleanup_timer = None
         except Exception:
             pass
-        # Graceful shutdown (Ctrl+C / SIGTERM / window close) is a clean exit:
+        # Abort any in-flight engine work first so recycle/unlink isn't blocked
+        # by an open statement handle (Windows file locks).
+        try:
+            self.interrupt_loads()
+        except Exception:
+            pass
+        # Close remote ODBC / SQL Server connections before engines recycle so
+        # a clean exit never leaves network sessions or driver state hanging.
+        try:
+            for name, conn in list((self.connections or {}).items()):
+                try:
+                    close = getattr(conn, "close", None)
+                    if callable(close):
+                        close()
+                except Exception:
+                    pass
+                try:
+                    del self.connections[name]
+                except Exception:
+                    pass
+            self.connections.clear()
+        except Exception:
+            pass
+        # Graceful shutdown (Ctrl+C / SIGTERM / Exit → stop) is a clean exit:
         # drop every table (loaded + temp) AND clear the restore manifest, so
         # the next launch comes up empty with nothing loaded. (A hard crash
         # never reaches here, so its manifest survives for crash recovery.)
+        # AppWindow window-close alone does NOT call this -- the server is
+        # left running for reattach (.534); only /api/shutdown does.
         self.clear_all(clear_manifest=True)
         try:
             self.db.recycle()
@@ -10998,3 +11508,4 @@ class Session:
                 os.unlink(p)
             except Exception:
                 pass
+        self.temp_files.clear()

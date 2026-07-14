@@ -39,6 +39,11 @@ import time
 # so the wait and the failure message can never disagree.
 SERVER_BOOT_TIMEOUT_S = 120
 
+# Match samql_core._brand.CHROME_BG -- kept local so the launcher stays
+# stdlib-only when run from source (no samql_core import on the hot path).
+# WebView2's default background is white; splash + native window must agree.
+CHROME_BG = "#16181d"
+
 # ---------------------------------------------------------------- log
 
 # .532: the app's shell identity -- VERSIONED ON PURPOSE. The Windows
@@ -159,7 +164,7 @@ class Splash:
         # workaround for opaque mattes, and with transparent logos it would
         # sample the (still-white) RGB under alpha 0 and paint a white box
         # again. Tk composites PNG alpha onto this Label background.
-        bg, fg = "#16181d", "#d7dae0"
+        bg, fg = CHROME_BG, "#d7dae0"
         img = None
         if logo_path:
             try:
@@ -1766,8 +1771,12 @@ def open_native_window(url, args, splash):
     try:
         w, h = _parse_window_size(args.window_size)
         splash.set_text("Opening the SamQL window...")
+        # WebView2's default background is white (#FFFFFF). Until HTML/CSS
+        # paint, that is the "white unresponsive first-open window" users
+        # report -- match the splash / app chrome so the handoff stays dark.
         win = webview.create_window("SamQL", url, width=w, height=h,
-                                    min_size=(900, 600))
+                                    min_size=(900, 600),
+                                    background_color=CHROME_BG)
 
         def _set_native_icon(_w=win):
             """.513/.517: runs inside the GUI loop. Setting the WinForms
@@ -2093,10 +2102,15 @@ def main(argv=None):
             fail_visibly(splash, "Nothing to start: no SamQL exe or "
                          "python backend found beside the launcher.")
         we_started_server = True
+        # Wait for /api/health, not merely TCP bind. The server binds the
+        # port before it can accept (and before the session is warm), so
+        # opening the WebView on port_open alone navigates into a hang and
+        # looks like a white, frozen window on first launch.
         deadline = time.time() + SERVER_BOOT_TIMEOUT_S
-        while time.time() < deadline and not port_open(args.port):
+        splash.set_text("Waiting for SamQL to be ready...")
+        while time.time() < deadline and not _server_alive_now(args.port):
             splash.pump(0.25)
-        if not port_open(args.port):
+        if not _server_alive_now(args.port):
             msg = ("The server did not come up on port %d within %d s "
                    "(see the error log in Settings)."
                    % (args.port, SERVER_BOOT_TIMEOUT_S))

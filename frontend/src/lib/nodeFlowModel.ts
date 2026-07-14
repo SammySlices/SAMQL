@@ -53,12 +53,17 @@ export type NodeType =
   | "appendfolder"
   | "filebrowser"
   | "apinode"
+  | "sqlserver"
+  | "sharepoint"
+  | "webscrape"
   | "iterator"
   | "while"
   | "sql"
+  | "python"
   | "group"
   | "write"
   | "output"
+  | "samqldash"
   | "dyn_input"
   | "dyn_output"
   | "usernode";
@@ -130,12 +135,17 @@ export const PORTS: Record<NodeType, { inputs: string[]; outputs: string[] }> = 
   appendfolder: { inputs: [], outputs: ["out"] },
   filebrowser: { inputs: [], outputs: ["out"] },
   apinode: { inputs: [], outputs: ["out", "err"] },
+  sqlserver: { inputs: [], outputs: ["out"] },
+  sharepoint: { inputs: [], outputs: ["out"] },
+  webscrape: { inputs: [], outputs: ["out"] },
   iterator: { inputs: ["vars", "in"], outputs: ["out"] },
   while: { inputs: ["in"], outputs: [] },
   sql: { inputs: ["in"], outputs: ["out"] },
+  python: { inputs: ["in"], outputs: ["out"] },
   group: { inputs: ["in", "in2", "in3", "in4", "in5"], outputs: ["out"] },
   write: { inputs: ["in"], outputs: ["out"] },
   output: { inputs: ["in"], outputs: [] },
+  samqldash: { inputs: ["in"], outputs: [] },
   dyn_input: { inputs: [], outputs: ["out"] },
   dyn_output: { inputs: ["in"], outputs: [] },
   // Max ports; visible count comes from config.inputCount / outputCount.
@@ -623,7 +633,7 @@ export function nodeHeight(n: NbNode) {
   if (n.type === "chart" && nodeShowsBody(n)) return base + bodyH(CHART_BODY_H);
   if (n.type === "dashboard" && nodeShowsBody(n))
     return base + bodyH(DASH_BODY_H);
-  if (n.type === "sql") return base + bodyH(SQL_BODY_H);
+  if (n.type === "sql" || n.type === "python") return base + bodyH(SQL_BODY_H);
   if (n.type === "group" || n.type === "iterator") {
     const k = ((n.config && n.config.children) || []).length;
     return Math.max(

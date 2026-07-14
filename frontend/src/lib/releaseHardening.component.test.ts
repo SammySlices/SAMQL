@@ -61,6 +61,11 @@ describe("Phase 10 release compatibility", () => {
       ide: { sql: "select 1" },
       journal: { doc: '{"format":"samql-notebook","version":2,"cells":[]}' },
       node: { nodes: [], edges: [] },
+      dashboard: {
+        version: 2,
+        activeId: "d1",
+        dashboards: [{ id: "d1", name: "Main", widgets: [] }],
+      },
     } as const;
 
     for (const [kind, payload] of Object.entries(payloads)) {

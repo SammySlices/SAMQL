@@ -47,8 +47,31 @@ function Step([string]$Text) {
 }
 
 function Run-Native([string]$Label, [scriptblock]$Command) {
-  & $Command
+  # Windows PowerShell records native stderr as error objects; with
+  # $ErrorActionPreference=Stop that can abort a healthy suite when a test
+  # process writes an informational line to stderr. Keep exit-code checks.
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $Command
+  } finally {
+    $ErrorActionPreference = $prev
+  }
   if ($LASTEXITCODE -ne 0) {
+    throw "$Label failed with exit code $LASTEXITCODE."
+  }
+}
+
+function Invoke-Python([string]$Label, [string[]]$PyArgs) {
+  # Avoid scriptblock capture of automatic $Args; call python directly.
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $script:VenvPython @PyArgs
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+  if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
     throw "$Label failed with exit code $LASTEXITCODE."
   }
 }
@@ -191,30 +214,24 @@ if (-not $SkipInstall) {
 }
 
 Step "Compiling all Python sources"
-& $VenvPython -m compileall -q backend tests tools
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Python "compileall" @("-m", "compileall", "-q", "backend", "tests", "tools")
 
 Step "Running deterministic release/package regression"
-& $VenvPython "tests\test_release_hardening.py"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Python "release hardening" @("tests\test_release_hardening.py")
 
 Step "Running complete Python, HTTP, frontend contract and React component suite"
 $mainArgs = @("tests\run_tests.py", "--build")
 if (-not $SkipOnline) { $mainArgs += "--online" }
-& $VenvPython @mainArgs
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Python "complete suite" $mainArgs
 
 Step "Running SQLite and DuckDB optimization suite"
-& $VenvPython "tests\test_optimizations_dual_engine.py"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Python "dual-engine optimizations" @("tests\test_optimizations_dual_engine.py")
 
 Step "Running adaptive resources, parallel branches and persistent-cache suite"
-& $VenvPython "tests\test_nodeflow_resources.py"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Python "nodeflow resources" @("tests\test_nodeflow_resources.py")
 
 Step "Running benchmark harness self-test"
-& $VenvPython "tests\benchmark_workloads.py" --self-test
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Python "benchmark self-test" @("tests\benchmark_workloads.py", "--self-test")
 
 if (-not $SkipBrowser) {
   Step "Running UI tests (Playwright; Microsoft Edge on Windows)"
@@ -293,8 +310,15 @@ if (-not $SkipBrowser) {
       Write-Host "Playwright discovery confirmed $playwrightCount E2E tests." -ForegroundColor Green
 
       Write-Host "Running: npm run test:e2e"
-      & $npmCmd.Source run test:e2e
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      $prevEap = $ErrorActionPreference
+      $ErrorActionPreference = "Continue"
+      try {
+        & $npmCmd.Source run test:e2e
+        $e2eCode = $LASTEXITCODE
+      } finally {
+        $ErrorActionPreference = $prevEap
+      }
+      if ($e2eCode -ne 0) { exit $e2eCode }
       Write-Host "PLAYWRIGHT UI TESTS PASSED ($playwrightCount tests)" -ForegroundColor Green
     } finally {
       if ($null -eq $oldChannel) { Remove-Item Env:PLAYWRIGHT_BROWSER_CHANNEL -ErrorAction SilentlyContinue } else { $env:PLAYWRIGHT_BROWSER_CHANNEL = $oldChannel }

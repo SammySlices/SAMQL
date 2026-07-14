@@ -368,3 +368,36 @@ def dir_size(path):
     except Exception:
         pass
     return total
+
+
+def win_known_folder(key_name):
+    """Resolve a Windows shell folder (Desktop / Personal / Downloads) from the
+    registry so OneDrive-redirected locations are honoured."""
+    import winreg
+    sub = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+    # Downloads has no friendly name -- it's stored under its known-folder GUID
+    name = ("{374DE290-123F-4565-9164-39C4925E467B}"
+            if key_name == "Downloads" else key_name)
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub) as k:
+        val, _ = winreg.QueryValueEx(k, name)
+    return os.path.expandvars(val)
+
+
+def downloads_dir():
+    """.539: the user's Downloads folder, one resolution for EVERY
+    server-side save. SAMQL_DOWNLOADS_DIR overrides for tests. Registry
+    known-folder on Windows (OneDrive redirection honoured), ~/Downloads
+    elsewhere, home as the last resort."""
+    envd = os.environ.get("SAMQL_DOWNLOADS_DIR")
+    if envd and os.path.isdir(envd):
+        return envd
+    dl = None
+    if os.name == "nt":
+        try:
+            dl = win_known_folder("Downloads")
+        except Exception:
+            dl = None
+    if not dl or not os.path.isdir(dl):
+        cand = os.path.join(os.path.expanduser("~"), "Downloads")
+        dl = cand if os.path.isdir(cand) else os.path.expanduser("~")
+    return dl

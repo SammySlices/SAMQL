@@ -569,7 +569,8 @@ def _duck_count(duck, name):
         return None
 
 
-def _load_into_duckdb(session, path, base_name, kind, delimiter=None):
+def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
+                      json_depth=None, force_ondisk=False):
     """Load a file into DuckDB, choosing storage by size.
 
     A file at/above the on-disk threshold (SAMQL_ONDISK_MB) is streamed into a
@@ -577,13 +578,27 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None):
     whole lifecycle (the rows never live in the engine), with columnar column +
     row-group pushdown for fast repeat queries. An already-Parquet large file is
     just viewed in place (no re-copy). Smaller files materialise into an
-    in-memory table, as before. Falls back to the in-memory table if the Parquet
-    route fails for a non-cancel reason, so this is never worse than before."""
-    from .engines import _ondisk_min_bytes, _is_interrupt
+    in-memory table, as before. Nested JSON uses a lower threshold
+    (SAMQL_JSON_ONDISK_MB) because materialising structs/lists expands far
+    beyond file size. Falls back to the in-memory table if the Parquet route
+    fails for a non-cancel reason, so this is never worse than before.
+
+    ``json_depth`` caps DuckDB nested-type expansion for JSON (flatten-off).
+    ``force_ondisk`` prefers the Parquet-cache path even below the size floor
+    (used when converting large nested JSON to a safer on-disk format).
+    """
+    from .engines import (_ondisk_min_bytes, _json_ondisk_min_bytes,
+                          _is_interrupt, ensure_json_engine_memory)
     duck = session.get_duckdb()
+    if kind == "json":
+        ensure_json_engine_memory(duck, path)
     thresh = _ondisk_min_bytes()
-    big = False
-    if thresh is not None:
+    if kind == "json":
+        jthresh = _json_ondisk_min_bytes()
+        if jthresh is not None:
+            thresh = jthresh if thresh is None else min(thresh, jthresh)
+    big = bool(force_ondisk)
+    if not big and thresh is not None:
         try:
             big = os.path.getsize(path) >= thresh
         except OSError:
@@ -595,11 +610,13 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None):
                 storage = "parquet-view"
             else:
                 name = duck.load_file_to_parquet_view(
-                    base_name, path, kind, delimiter=delimiter)
+                    base_name, path, kind, delimiter=delimiter,
+                    json_depth=json_depth)
                 storage = "parquet-cache"
             return [{"name": name, "rows": _duck_count(duck, name),
                      "columns": duck.table_columns.get(name, []),
-                     "engine": "duckdb", "storage": storage}]
+                     "engine": "duckdb", "storage": storage,
+                     "json_depth": json_depth}]
         except LoadCancelled:
             raise
         except Exception as e:
@@ -607,9 +624,174 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None):
                 raise                       # a cancel: abort, don't fall back
             # otherwise fall through to the in-memory materialize below
     name = duck.create_table_from_file(base_name, path, kind,
-                                       delimiter=delimiter)
+                                       delimiter=delimiter,
+                                       json_depth=json_depth)
     return [{"name": name, "rows": _duck_count(duck, name),
-             "columns": duck.table_columns.get(name, []), "engine": "duckdb"}]
+             "columns": duck.table_columns.get(name, []), "engine": "duckdb",
+             "json_depth": json_depth}]
+
+
+def _json_file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _stream_flatten_into_duckdb(session, path, base_name, progress=None,
+                                spill=None, exclude=None):
+    """Bounded-memory Python flatten → DuckDB tables (spill + streaming insert).
+
+    Used for multi-GB single documents and as an OOM fallback when the native
+    nested DuckDB read cannot allocate. Returns the same descriptor list as
+    ``load_json``."""
+    from .engines import ensure_json_engine_memory
+    duck = session.get_duckdb()
+    ensure_json_engine_memory(duck, path)
+    return load_json(duck, path, base_name, progress=progress,
+                     spill_threshold=spill if spill is not None
+                     else JSON_SPILL_ROWS,
+                     engine="duckdb", exclude=exclude)
+
+
+def _shred_nested_json_load(session, res, root_id=None):
+    """Run in-engine flatten_table on a nested DuckDB JSON load result."""
+    tables = [t.get("table") or t.get("name") for t in res
+              if isinstance(t, dict)]
+    tbl = next((t for t in tables if t), None)
+    # .501 audit: ONE on-load flatten engine. flatten_table owns the load
+    # path; the UNNEST engine remains for right-click Flatten.
+    fr = (session.flatten_table(tbl, base=tbl, root_id=root_id)
+          if tbl else None)
+    if fr and fr.get("cancelled"):
+        raise LoadCancelled()
+    if fr and not fr.get("error") and fr.get("created"):
+        out = []
+        for t in fr["created"]:
+            out.append({"table": t["name"],
+                        "rows": t.get("rows"),
+                        "engine": "duckdb",
+                        "method": "flatten-table",
+                        "key": "_sk"})
+        if fr.get("root_id"):
+            out[0]["root_id_stats"] = fr["root_id"]
+        return out
+    if fr and fr.get("error"):
+        sys.stderr.write(
+            "[samql] on-load flatten failed (%s); the nested "
+            "load stands\n" % fr["error"])
+    else:
+        sys.stderr.write(
+            "[samql] on-load flatten reported nothing to "
+            "do; the nested table stands\n")
+    return res
+
+
+def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
+                      spill=None, exclude=None, root_id=None):
+    """DuckDB JSON load for array / NDJSON / concat / single-object shapes.
+
+    Every JSON format is converted before query use:
+
+    1. Non-NDJSON shapes are rewritten to temp NDJSON (``_json_source_for_read``).
+    2. NDJSON is COPY'd to an on-disk Parquet cache (file-cached when possible).
+    3. Flatten-off uses shallow ``maximum_depth`` (default 2, then 0 on failure)
+       so deep nesting stays JSON instead of exploding into STRUCTs.
+    4. Flatten-on loads full nested types from that Parquet, then runs
+       in-engine ``flatten_table``. A multi-GB *single* object still uses the
+       Python streaming flattener (spill) because one STRUCT cannot be
+       materialised safely. OOM on the nested path also falls back to the
+       streamer.
+    """
+    from .engines import (
+        _is_interrupt, _is_duckdb_oom, _sniff_json_format,
+        _json_stream_flatten_min_bytes, _json_shallow_depth_default,
+    )
+    size = _json_file_size(path)
+    fmt = _sniff_json_format(path)
+    stream_flat_min = _json_stream_flatten_min_bytes()
+    giant_object = (
+        fmt == "object"
+        and stream_flat_min is not None
+        and size >= stream_flat_min
+    )
+
+    if flatten and giant_object:
+        # One multi-hundred-MB / multi-GB document: native nested read would
+        # buffer the whole STRUCT. Stream-flatten with spill instead.
+        sys.stderr.write(
+            "[samql] large single-object JSON (%d MiB); "
+            "streaming flatten into DuckDB\n" % (size // (1024 * 1024)))
+        return _stream_flatten_into_duckdb(
+            session, path, base_name, progress=progress,
+            spill=spill, exclude=exclude)
+
+    def _native(json_depth=None, force_ondisk=False):
+        return _load_into_duckdb(
+            session, path, base_name, "json",
+            json_depth=json_depth,
+            force_ondisk=force_ondisk)
+
+    if not flatten:
+        # Flatten-off: shallow depth → Parquet (not relational flatten).
+        depths = [_json_shallow_depth_default()]
+        if depths[0] != 0:
+            depths.append(0)
+        last_err = None
+        for i, depth in enumerate(depths):
+            try:
+                if i > 0:
+                    sys.stderr.write(
+                        "[samql] nested JSON failed at maximum_depth=%s "
+                        "(%s); retrying as JSON-column Parquet (depth=0)\n"
+                        % (depths[i - 1], last_err))
+                else:
+                    sys.stderr.write(
+                        "[samql] JSON load (flatten off, %s): converting to "
+                        "Parquet with maximum_depth=%d\n" % (fmt, depth))
+                return _native(json_depth=depth, force_ondisk=True)
+            except LoadCancelled:
+                raise
+            except Exception as e:
+                if _is_interrupt(e):
+                    raise
+                last_err = e
+                if i + 1 >= len(depths):
+                    raise
+                continue
+        raise last_err  # pragma: no cover
+
+    # Flatten on: always convert to Parquet first (full nested types), then
+    # in-engine shred. OOM → Python streamer (bounded memory).
+    sys.stderr.write(
+        "[samql] JSON load (flatten on, %s): converting to Parquet "
+        "then shred\n" % fmt)
+    try:
+        res = _native(force_ondisk=True)
+    except LoadCancelled:
+        raise
+    except Exception as e:
+        if _is_interrupt(e):
+            raise
+        if _is_duckdb_oom(e):
+            sys.stderr.write(
+                "[samql] nested JSON OOM during flatten-on load; "
+                "streaming flatten into DuckDB\n")
+            return _stream_flatten_into_duckdb(
+                session, path, base_name, progress=progress,
+                spill=spill, exclude=exclude)
+        raise
+    try:
+        return _shred_nested_json_load(session, res, root_id=root_id)
+    except LoadCancelled:
+        raise
+    except Exception as e:
+        if _is_interrupt(e):
+            raise
+        sys.stderr.write(
+            "[samql] on-load flatten failed (%s); the "
+            "nested load stands\n" % e)
+        return res
 
 
 def load_file(session, path, destination="sqlite", base_name=None,
@@ -676,75 +858,10 @@ def load_file(session, path, destination="sqlite", base_name=None,
         spill = (10_000 if getattr(session, "low_memory", False)
                  else JSON_SPILL_ROWS)
         if destination == "duckdb":
-            if not flatten:
-                # Opt-out (settings toggle off): keep one nested DuckDB table
-                # via read_json.
-                return _load_into_duckdb(session, path, base_name, "json")
-            # Default (flatten on): DEEP recursive flatten into DuckDB -- the
-            # full normalized tree (a child table for every nested array at
-            # every depth, keyed parent<->child), exactly the SQLite-style
-            # output, but written into DuckDB. add_table_streaming uses a
-            # columnar (Arrow) bulk insert when pyarrow is present, falling back
-            # to batched inserts, so a large explode lands in minutes, not the
-            # row-at-a-time crawl. If the flatten fails for a non-cancel reason
-            # (e.g. a value that won't bind), fall back to the nested read_json
-            # load so the data still lands.
-            # .423 REROUTE: flatten-on-load used the Python streaming
-            # flattener on the FILE -- a row crawl that failed on the
-            # 1.7 GB sophis shape and silently fell back to a nested
-            # load ("won't flatten"). The strategy is now inverted: do
-            # the FAST native nested load first (the path that already
-            # works), then run the in-engine recursive UNNEST flatten
-            # (.422 planner + .423 depth recursion) replacing the
-            # nested table in place. The Python streamer remains only
-            # for engines without DuckDB.
-            res = _load_into_duckdb(session, path, base_name, "json")
-            try:
-                tables = [t.get("table") or t.get("name") for t in res
-                          if isinstance(t, dict)]
-                tbl = next((t for t in tables if t), None)
-                # .501 audit: ONE on-load flatten engine. This used to call
-                # flatten_json (the UNNEST engine, _rowkey keys) here, and then
-                # load_file ALSO ran _shred_after_load (flatten_table, _sk/_rid
-                # keys) -- two engines, two key schemes, mixed families on one
-                # load. flatten_table is the hardened engine (.474-.495: base
-                # replaces the source IN PLACE by name, deep compound-key
-                # hierarchy, _sk/_parent_sk on every table, joinkeys hub,
-                # map/json breakout), so it owns the load path outright; the
-                # UNNEST engine remains for right-click Flatten.
-                fr = (session.flatten_table(tbl, base=tbl, root_id=root_id)
-                      if tbl else None)
-                if fr and fr.get("cancelled"):
-                    raise LoadCancelled()
-                if fr and not fr.get("error") and fr.get("created"):
-                    out = []
-                    for t in fr["created"]:
-                        out.append({"table": t["name"],
-                                    "rows": t.get("rows"),
-                                    "engine": "duckdb",
-                                    "method": "flatten-table",
-                                    "key": "_sk"})
-                    if fr.get("root_id"):
-                        out[0]["root_id_stats"] = fr["root_id"]
-                    return out
-                if fr and fr.get("error"):
-                    sys.stderr.write(
-                        "[samql] on-load flatten failed (%s); the nested "
-                        "load stands\n" % fr["error"])
-                else:
-                    sys.stderr.write(
-                        "[samql] on-load flatten reported nothing to "
-                        "do; the nested table stands\n")
-            except LoadCancelled:
-                raise
-            except Exception as e:
-                from .engines import _is_interrupt
-                if _is_interrupt(e):
-                    raise
-                sys.stderr.write(
-                    "[samql] on-load flatten failed (%s); the "
-                    "nested load stands\n" % e)
-            return res
+            return _load_json_duckdb(
+                session, path, base_name, flatten=flatten,
+                progress=progress, spill=spill, exclude=exclude,
+                root_id=root_id)
         # SQLite (or any non-DuckDB engine) always flattens -- it has no nested
         # column types -- so the toggle only affects the DuckDB path above.
         return load_json(session.db, path, base_name, progress=progress,

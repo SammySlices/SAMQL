@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>SamQL</title>
+    <!-- Inline before any CSS/JS so WebView2 / first paint is never white.
+         Keep in sync with samql_core._brand.PAGE_BG / styles.css --bg. -->
+    <style>
+      html, body, #root {
+        margin: 0;
+        height: 100%;
+        background: #15171b;
+        color: #d7dae0;
+      }
+    </style>
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" href="/app-icon.png" />
     <link rel="apple-touch-icon" href="/app-icon.png" />

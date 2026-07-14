@@ -130,4 +130,57 @@ describe("DataGrid DOM behavior", () => {
     expect(spy.mock.calls[0][0].result_id).toBe("new");
   });
 
+  it("copies selected cells via the selection bar and Ctrl+C", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    mount(
+      page([
+        [1, "alpha"],
+        [2, "beta"],
+      ]),
+    );
+
+    const cell = screen.getByTestId("result-grid").querySelector(
+      '[data-column="value"][data-row-index="0"]',
+    ) as HTMLElement;
+    expect(cell).toBeTruthy();
+    fireEvent.mouseDown(cell, { button: 0 });
+    fireEvent.mouseUp(cell);
+
+    expect(screen.getByTestId("grid-sel-bar")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("grid-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("alpha"));
+
+    writeText.mockClear();
+    fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("alpha"));
+
+    fireEvent.click(screen.getByTestId("grid-copy-headers"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("value\nalpha"),
+    );
+  });
+
+  it("opens a portaled cell menu with copy actions", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    mount(page([[10, "gamma"]]));
+    const cell = screen.getByTestId("result-grid").querySelector(
+      '[data-column="value"][data-row-index="0"]',
+    ) as HTMLElement;
+    fireEvent.contextMenu(cell);
+
+    expect(screen.getByTestId("grid-cell-menu")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("grid-menu-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("gamma"));
+  });
+
 });

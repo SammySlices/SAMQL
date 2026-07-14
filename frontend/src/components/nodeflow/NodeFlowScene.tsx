@@ -546,7 +546,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
                   ))
                 )}
               </div>
-            ) : node.type === "sql" ? null : (
+            ) : node.type === "sql" || node.type === "python" ? null : (
               <div className="nb2-node-sub">
                 {getNodeCardSummary(node, incomingEdges as NbEdge[])}
               </div>
@@ -560,6 +560,18 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
                 <pre className="nb2-node-sql-text">
                   {(node.config.sql || "").trim() ||
                     "SELECT …   (write your query in the panel →)"}
+                </pre>
+              </div>
+            )}
+
+            {node.type === "python" && (
+              <div
+                className="nb2-node-sql"
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <pre className="nb2-node-sql-text">
+                  {(node.config.code || "").trim() ||
+                    "# write Python in the panel →"}
                 </pre>
               </div>
             )}
@@ -682,7 +694,8 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
 
             {(((node.type === "chart" || node.type === "dashboard") &&
               nodeShowsBody(node)) ||
-              node.type === "sql") && (
+              node.type === "sql" ||
+              node.type === "python") && (
               <div
                 className="nb2-node-resize"
                 title="Drag to resize"

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { startPointerDrag } from "../lib/pointerDrag";
 import { api, copyText } from "../lib/api";
 import { useWinDrag } from "./ActivityShared";
@@ -6,6 +7,10 @@ import type { Cell, ResultPage } from "../lib/types";
 import { useRenderCount } from "../lib/renderDebug";
 import { menuPos } from "../lib/menuPos";
 import { prettyStruct, looksStructy } from "../lib/prettyStruct";
+
+/** Only the most recently selected grid responds to Ctrl/Cmd+C. */
+let copyOwnerToken = 0;
+let nextCopyOwnerToken = 1;
 
 interface Props {
   page: ResultPage;
@@ -25,6 +30,8 @@ interface Props {
   // showing; the grid's row index is the absolute view index because lazy
   // pages append from offset 0).
   cellFetch?: { resultId?: string | null; filters?: any } | null;
+  /** Report full table pixel size (for dashboard widgets that auto-fit). */
+  onContentMetrics?: (m: { widthPx: number; heightPx: number }) => void;
 }
 
 // display-truncation marker written by the server's _cap_page_rows
@@ -60,6 +67,7 @@ const DataGridImpl: React.FC<Props> = ({
   loadingMore,
   onExportResults,
   cellFetch,
+  onContentMetrics,
 }) => {
   useRenderCount("DataGrid");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -122,6 +130,14 @@ const DataGridImpl: React.FC<Props> = ({
   const colWidth = (c: string) => widths[c] ?? DEFAULT_W;
   const bodyWidth =
     ROWNUM_W + cols.reduce((acc, c) => acc + colWidth(c), 0);
+  const contentHeight = 32 + Math.max(1, rows.length) * ROW_H + 8;
+
+  useEffect(() => {
+    onContentMetrics?.({ widthPx: bodyWidth, heightPx: contentHeight });
+    // Intentionally omit onContentMetrics from deps — callers often pass an
+    // inline function; we only re-report when the measured size changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bodyWidth, contentHeight]);
 
   // column resize via pointer drag
   const dragRef = useRef<{ col: string; startX: number; startW: number } | null>(
@@ -148,7 +164,7 @@ const DataGridImpl: React.FC<Props> = ({
     });
   };
 
-  // ---- cell selection (drag to highlight, right-click to copy) ----
+  // ---- cell selection (drag to highlight, right-click / Ctrl+C to copy) ----
   const [sel, setSel] = useState<{
     aR: number;
     aC: number;
@@ -157,6 +173,7 @@ const DataGridImpl: React.FC<Props> = ({
   } | null>(null);
   const dragging = useRef(false);
   const selMode = useRef<"cell" | "row">("cell");
+  const copyOwnerRef = useRef(0);
   const [cellMenu, setCellMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -168,10 +185,19 @@ const DataGridImpl: React.FC<Props> = ({
     y: number;
     text: string;
   } | null>(null);
+  // Pretty text is computed AFTER the window opens so the first click isn't
+  // blocked on a sync walk of a large JSON/struct string.
+  const [viewerPretty, setViewerPretty] = useState<string>("");
+  const [viewerFormatting, setViewerFormatting] = useState(false);
   // Latest-wins guard for full-cell fetches. A slow response from a prior
   // cell must never replace the viewer after the user opens another cell,
   // closes the viewer, or switches to a different result page.
   const viewerRequestSeq = useRef(0);
+
+  const claimCopyOwner = () => {
+    copyOwnerRef.current = nextCopyOwnerToken++;
+    copyOwnerToken = copyOwnerRef.current;
+  };
 
   useEffect(() => {
     const up = () => {
@@ -180,6 +206,28 @@ const DataGridImpl: React.FC<Props> = ({
     window.addEventListener("mouseup", up);
     return () => window.removeEventListener("mouseup", up);
   }, []);
+
+  useEffect(() => {
+    if (!viewer) {
+      setViewerPretty("");
+      setViewerFormatting(false);
+      return;
+    }
+    const raw = viewer.text || "";
+    // Paint the raw text immediately; format on the next task.
+    setViewerPretty(raw);
+    setViewerFormatting(looksStructy(raw));
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      setViewerPretty(prettyStruct(raw));
+      setViewerFormatting(false);
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [viewer]);
 
   // the value inspector window (.412) rides the shared drag hook (.413)
   const {
@@ -225,6 +273,7 @@ const DataGridImpl: React.FC<Props> = ({
     if (e.button !== 0) return; // left button begins a drag-select
     dragging.current = true;
     selMode.current = "cell";
+    claimCopyOwner();
     setSel({ aR: idx, aC: ci, fR: idx, fC: ci });
     setCellMenu(null);
     scrollRef.current?.focus();
@@ -237,6 +286,7 @@ const DataGridImpl: React.FC<Props> = ({
     if (e.button !== 0) return;
     dragging.current = true;
     selMode.current = "row";
+    claimCopyOwner();
     setSel({ aR: idx, aC: 0, fR: idx, fC: Math.max(0, cols.length - 1) });
     setCellMenu(null);
     scrollRef.current?.focus();
@@ -272,12 +322,33 @@ const DataGridImpl: React.FC<Props> = ({
   };
   const onCellContext = (idx: number, ci: number, e: React.MouseEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    claimCopyOwner();
     if (!inSel(idx, ci)) {
       selMode.current = "cell";
       setSel({ aR: idx, aC: ci, fR: idx, fC: ci });
     }
     setCellMenu({ x: e.clientX, y: e.clientY });
   };
+
+  // Ctrl/Cmd+C works even when focus left the grid (common in dashboard widgets).
+  useEffect(() => {
+    if (!sel) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key !== "c" && e.key !== "C") return;
+      if (copyOwnerToken !== copyOwnerRef.current) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest?.("input, textarea, [contenteditable='true']")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void copySel(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+    // copySel closes over latest bounds/rows via this render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel, page, cols]);
 
   if (cols.length === 0) {
     return (
@@ -298,7 +369,7 @@ const DataGridImpl: React.FC<Props> = ({
   };
 
   return (
-    <>
+    <div className="grid-shell" data-testid="grid-shell">
     <div
       className={"grid" + (hScrolled ? " hscrolled" : "")}
       data-testid="result-grid"
@@ -483,61 +554,111 @@ const DataGridImpl: React.FC<Props> = ({
         </div>
       </div>
     </div>
-    {cellMenu && (
-      <>
-        <div
-          style={{ position: "fixed", inset: 0, zIndex: 120 }}
-          onMouseDown={() => setCellMenu(null)}
-          onContextMenu={(e) => {
-            e.preventDefault();
+    {selCount > 0 ? (
+      <div className="grid-sel-bar" data-testid="grid-sel-bar">
+        <span>
+          {selCount} cell{selCount === 1 ? "" : "s"} selected
+        </span>
+        <button
+          type="button"
+          data-testid="grid-copy"
+          onClick={() => void copySel(false)}
+          title="Copy (Ctrl+C)"
+        >
+          Copy
+        </button>
+        <button
+          type="button"
+          data-testid="grid-copy-headers"
+          onClick={() => void copySel(true)}
+        >
+          Copy with headers
+        </button>
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => {
+            setSel(null);
             setCellMenu(null);
           }}
-        />
-        <div
-          className="ctx-menu"
-          style={{ ...menuPos(cellMenu.x, cellMenu.y, 220), zIndex: 121 }}
-          onMouseDown={(e) => e.stopPropagation()}
         >
-          <div className="label">
-            {selCount} cell{selCount === 1 ? "" : "s"} selected
-          </div>
-          <button onClick={() => copySel(false)}>Copy</button>
-          <button onClick={() => copySel(true)}>Copy with headers</button>
-          {onExportResults && (
-            <>
-              <div className="sep" />
-              <button
-                onClick={() => {
-                  onExportResults("csv");
-                  setCellMenu(null);
-                }}
-              >
-                Export results (CSV)
-              </button>
-              <button
-                onClick={() => {
-                  onExportResults("json");
-                  setCellMenu(null);
-                }}
-              >
-                Export results (JSON)
-              </button>
-            </>
-          )}
-          <div className="sep" />
-          <button
-            onClick={() => {
-              setSel(null);
+          Clear
+        </button>
+      </div>
+    ) : null}
+    {cellMenu &&
+      createPortal(
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 120 }}
+            onMouseDown={() => setCellMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
               setCellMenu(null);
             }}
+          />
+          <div
+            className="ctx-menu"
+            data-testid="grid-cell-menu"
+            style={{ ...menuPos(cellMenu.x, cellMenu.y, 220), zIndex: 121 }}
+            onMouseDown={(e) => e.stopPropagation()}
           >
-            Clear selection
-          </button>
-        </div>
-      </>
-    )}
-    {viewer && (
-      <>
+            <div className="label">
+              {selCount} cell{selCount === 1 ? "" : "s"} selected
+            </div>
+            <button
+              type="button"
+              data-testid="grid-menu-copy"
+              onClick={() => void copySel(false)}
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              data-testid="grid-menu-copy-headers"
+              onClick={() => void copySel(true)}
+            >
+              Copy with headers
+            </button>
+            {onExportResults && (
+              <>
+                <div className="sep" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    onExportResults("csv");
+                    setCellMenu(null);
+                  }}
+                >
+                  Export results (CSV)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onExportResults("json");
+                    setCellMenu(null);
+                  }}
+                >
+                  Export results (JSON)
+                </button>
+              </>
+            )}
+            <div className="sep" />
+            <button
+              type="button"
+              onClick={() => {
+                setSel(null);
+                setCellMenu(null);
+              }}
+            >
+              Clear selection
+            </button>
+          </div>
+        </>,
+        document.body,
+      )}
+    {viewer &&
+      createPortal(
         <div
           ref={vWinRef as React.RefObject<HTMLDivElement>}
           data-testid="structured-value-viewer"
@@ -557,21 +678,28 @@ const DataGridImpl: React.FC<Props> = ({
             height: 380,
           }}
           onMouseDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
         >
           <div
             className="gc-json-head"
             onMouseDown={(e) => {
+              e.stopPropagation();
               if (!vpos) setVposRaw({ x: viewer.x, y: viewer.y });
               startVDrag(e);
             }}
             title="Drag to move; resize from the corner"
           >
             <span className="label">
-              Value{viewer.loading ? " · fetching full…" : ""}
+              Value
+              {viewer.loading
+                ? " · fetching full…"
+                : viewerFormatting
+                  ? " · formatting…"
+                  : ""}
             </span>
             <button
               type="button"
-              onClick={() => copyText(prettyStruct(viewer.text))}
+              onClick={() => copyText(viewerPretty || viewer.text)}
             >
               Copy
             </button>
@@ -588,12 +716,12 @@ const DataGridImpl: React.FC<Props> = ({
               ✕
             </button>
           </div>
-          <pre className="gc-json-body">{prettyStruct(viewer.text)}</pre>
+          <pre className="gc-json-body">{viewerPretty || viewer.text}</pre>
           {viewer.note && <div className="gc-json-note">{viewer.note}</div>}
-        </div>
-      </>
-    )}
-    </>
+        </div>,
+        document.body,
+      )}
+    </div>
   );
 };
 

@@ -24,6 +24,20 @@ import {
   sortSelectFields,
   type SelField,
 } from "../../lib/selectFields";
+import {
+  MsSqlConnectForm,
+  type MsSqlConnectValues,
+  deleteMsSqlProfile,
+  persistMsSqlProfile,
+  sqlProfileToConnectValues,
+} from "../load/MsSqlConnectForm";
+import {
+  type SqlProfile,
+  SQL_PROFILES_KEY,
+  bestOdbcDriver,
+  parseSqlProfiles,
+  sanitizeProfileName,
+} from "../../lib/sqlProfiles";
 
 export interface NodeFlowInspectorContext {
   buildFilterCond: (field: string, op: string, value: string) => string;
@@ -40,7 +54,7 @@ export interface NodeFlowInspectorContext {
   doChart: (node: NbNode) => Promise<void>;
   doCreateTable: (node: NbNode) => Promise<void>;
   doExport: (node: NbNode) => Promise<any>;
-  doFetchApi: (node: NbNode) => Promise<any>;
+  doFetchApi: (node: NbNode, configExtra?: Record<string, unknown>) => Promise<any>;
   doPreview: (node: NbNode, port: string, title: string) => Promise<void>;
   doProfile: (node: NbNode) => Promise<void>;
   doReadDirectory: (node: NbNode, path: string, file: string) => Promise<void>;
@@ -207,13 +221,21 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
   const [apiConnProfiles, setApiConnProfiles] = useState<
     { key: string; name: string; fields: Record<string, unknown> }[]
   >([]);
+  const [mssqlDrivers, setMssqlDrivers] = useState<string[]>([]);
+  const [mssqlProfiles, setMssqlProfiles] = useState<Record<string, SqlProfile>>(
+    {},
+  );
+  const [mssqlSecretsOk, setMssqlSecretsOk] = useState(false);
+  const [mssqlPwd, setMssqlPwd] = useState("");
   useEffect(() => setApiPwDraft(""), [sel?.id]);
+  useEffect(() => setMssqlPwd(""), [sel?.id]);
   useEffect(() => {
     setSelectFieldSearch("");
     setSelectFieldSortDir("asc");
   }, [sel?.id]);
   useEffect(() => {
-    if (!sel || sel.type !== "apinode") {
+    const kind = sel ? getNodeInspectorType(sel.type) : null;
+    if (!sel || (kind !== "apinode" && kind !== "sqlserver")) {
       setApiConnProfiles([]);
       return;
     }
@@ -222,23 +244,95 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
       .connectionProfilesList()
       .then((r) => {
         if (cancelled) return;
-        setApiConnProfiles(
-          (r.profiles || [])
-            .filter((p) => p.kind === "api")
-            .map((p) => ({
-              key: p.key,
-              name: p.name,
-              fields: p.fields || {},
-            })),
-        );
+        setMssqlSecretsOk(!!r.secrets_available);
+        if (kind === "apinode") {
+          setApiConnProfiles(
+            (r.profiles || [])
+              .filter((p) => p.kind === "api")
+              .map((p) => ({
+                key: p.key,
+                name: p.name,
+                fields: p.fields || {},
+              })),
+          );
+        } else {
+          setApiConnProfiles([]);
+          // Merge server mssql profiles into the local map (fields only).
+          const fromServer: Record<string, SqlProfile> = {};
+          for (const p of r.profiles || []) {
+            if (p.kind !== "mssql") continue;
+            const f = (p.fields || {}) as Record<string, unknown>;
+            fromServer[p.name] = {
+              driver: String(f.driver || ""),
+              server: String(f.server || ""),
+              port: String(f.port || ""),
+              auth: (["windows", "sql", "windows_alt"].includes(
+                String(f.auth),
+              )
+                ? String(f.auth)
+                : "windows") as SqlProfile["auth"],
+              user: String(f.user || ""),
+              encrypt: f.encrypt !== false,
+              trust: f.trust !== false,
+              multiSubnet: !!f.multi_subnet,
+              loginTimeout: String(f.login_timeout ?? "15"),
+              stmtTimeout: String(f.stmt_timeout ?? "0"),
+              readOnly: f.read_only !== false,
+              savePassword: !!p.has_secret,
+            };
+          }
+          let local: Record<string, SqlProfile> = {};
+          try {
+            local = parseSqlProfiles(localStorage.getItem(SQL_PROFILES_KEY));
+          } catch {
+            local = {};
+          }
+          setMssqlProfiles({ ...fromServer, ...local });
+        }
       })
       .catch(() => {
-        if (!cancelled) setApiConnProfiles([]);
+        if (!cancelled) {
+          setApiConnProfiles([]);
+          if (kind === "sqlserver") {
+            try {
+              setMssqlProfiles(
+                parseSqlProfiles(localStorage.getItem(SQL_PROFILES_KEY)),
+              );
+            } catch {
+              setMssqlProfiles({});
+            }
+          }
+        }
       });
     return () => {
       cancelled = true;
     };
-    // Reload when the selected API node changes; ignore config edits.
+    // Reload when the selected API / SQL Server node changes; ignore config edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel?.id, sel?.type]);
+  useEffect(() => {
+    const kind = sel ? getNodeInspectorType(sel.type) : null;
+    if (!sel || kind !== "sqlserver") {
+      setMssqlDrivers([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .mssqlDrivers()
+      .then((r) => {
+        if (cancelled) return;
+        const ds = r.drivers || [];
+        setMssqlDrivers(ds);
+        if (ds.length && !(sel.config.driver || "").trim()) {
+          patch(sel.id, { driver: bestOdbcDriver(ds) });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setMssqlDrivers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sel?.id, sel?.type]);
 
@@ -5312,6 +5406,437 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                 </>
               )}
 
+              {(inspectorType === "sqlserver" ||
+                inspectorType === "sharepoint" ||
+                inspectorType === "webscrape") && (
+                <>
+                  {inspectorType === "sqlserver" && (
+                    <>
+                      <div className="nb2-note">
+                        Same connection settings as Load Data → SQL Server.
+                        Save a profile with “Save password” so Dashboard and
+                        NodeFlow runs can reconnect without typing credentials
+                        again. Passwords stay in the OS secret store — never in
+                        the workflow.
+                      </div>
+                      <MsSqlConnectForm
+                        variant="node"
+                        testIdPrefix="sqlserver-node"
+                        values={{
+                          driver: sel.config.driver || "",
+                          server: sel.config.server || "",
+                          port: sel.config.port || "",
+                          auth: (sel.config.auth || "windows") as MsSqlConnectValues["auth"],
+                          user: sel.config.user || "",
+                          encrypt: sel.config.encrypt !== false,
+                          trust: sel.config.trust !== false,
+                          multi_subnet: !!sel.config.multi_subnet,
+                          login_timeout: String(sel.config.login_timeout ?? "15"),
+                          stmt_timeout: String(sel.config.stmt_timeout ?? "0"),
+                          read_only: sel.config.read_only !== false,
+                          save_password: !!sel.config.save_password,
+                          profile_name: sel.config.profile_name || "",
+                          profile_sel: sel.config.profile_name
+                            ? String(sel.config.profile_name)
+                            : (sel.config.profile_key || "")
+                                  .replace(/^mssql:/, "") || "(new)",
+                          secret_saved: !!sel.config.secret_saved,
+                        }}
+                        onChange={(p) => {
+                          const next: Record<string, unknown> = { ...p };
+                          if (p.profile_name != null || p.profile_sel != null) {
+                            const nm = sanitizeProfileName(
+                              String(
+                                p.profile_name ??
+                                  sel.config.profile_name ??
+                                  "",
+                              ),
+                            );
+                            if (nm) {
+                              next.profile_key = "mssql:" + nm;
+                              next.connection = nm;
+                            }
+                          }
+                          patch(sel.id, next);
+                        }}
+                        drivers={mssqlDrivers}
+                        profiles={mssqlProfiles}
+                        secretsOk={mssqlSecretsOk}
+                        pwd={mssqlPwd}
+                        onPwdChange={setMssqlPwd}
+                        onSelectProfile={(name) => {
+                          if (name === "(new)") {
+                            patch(sel.id, {
+                              profile_sel: "(new)",
+                              profile_name: "",
+                              profile_key: "",
+                            });
+                            return;
+                          }
+                          const p = mssqlProfiles[name];
+                          if (!p) return;
+                          const fields = sqlProfileToConnectValues(p, name);
+                          patch(sel.id, {
+                            ...fields,
+                            profile_key: "mssql:" + name,
+                            connection: name,
+                            secret_saved: !!p.savePassword,
+                          });
+                          setMssqlPwd("");
+                        }}
+                        onSaveProfile={async () => {
+                          const values: MsSqlConnectValues = {
+                            driver: sel.config.driver || "",
+                            server: sel.config.server || "",
+                            port: sel.config.port || "",
+                            auth: (sel.config.auth ||
+                              "windows") as MsSqlConnectValues["auth"],
+                            user: sel.config.user || "",
+                            encrypt: sel.config.encrypt !== false,
+                            trust: sel.config.trust !== false,
+                            multi_subnet: !!sel.config.multi_subnet,
+                            login_timeout: String(
+                              sel.config.login_timeout ?? "15",
+                            ),
+                            stmt_timeout: String(
+                              sel.config.stmt_timeout ?? "0",
+                            ),
+                            read_only: sel.config.read_only !== false,
+                            save_password: !!sel.config.save_password,
+                            profile_name: sel.config.profile_name || "",
+                            profile_sel:
+                              sel.config.profile_name ||
+                              (sel.config.profile_key || "").replace(
+                                /^mssql:/,
+                                "",
+                              ) ||
+                              "(new)",
+                            secret_saved: !!sel.config.secret_saved,
+                          };
+                          const r = await persistMsSqlProfile(
+                            values.profile_name || values.profile_sel,
+                            values,
+                            mssqlProfiles,
+                            mssqlPwd,
+                          );
+                          if (!r.ok) {
+                            onToast(
+                              "error",
+                              "Could not save profile",
+                              r.error || "",
+                            );
+                            return;
+                          }
+                          setMssqlProfiles(r.profiles);
+                          const nm = sanitizeProfileName(
+                            values.profile_name || values.profile_sel,
+                          );
+                          patch(sel.id, {
+                            profile_name: nm,
+                            profile_key: r.secretKey || "mssql:" + nm,
+                            connection: nm,
+                            secret_key: r.secretKey,
+                            secret_saved: r.secretSaved,
+                            save_password: !!values.save_password,
+                          });
+                          if (r.secretSaved) setMssqlPwd("");
+                          onToast(
+                            "ok",
+                            "Profile saved",
+                            r.secretSaved
+                              ? "Connection settings + password stored."
+                              : "Connection settings saved (no password).",
+                          );
+                        }}
+                        onDeleteProfile={async () => {
+                          const nm =
+                            sel.config.profile_name ||
+                            (sel.config.profile_key || "").replace(
+                              /^mssql:/,
+                              "",
+                            );
+                          const next = await deleteMsSqlProfile(
+                            String(nm),
+                            mssqlProfiles,
+                          );
+                          setMssqlProfiles(next);
+                          patch(sel.id, {
+                            profile_name: "",
+                            profile_key: "",
+                            connection: "",
+                            secret_key: "",
+                            secret_saved: false,
+                          });
+                        }}
+                      />
+                      <label className="nb2-lbl">Database (optional)</label>
+                      <input
+                        className="nb2-in"
+                        data-testid="sqlserver-node-database"
+                        value={sel.config.database || ""}
+                        placeholder="USE this database before the query"
+                        onChange={(e) =>
+                          patch(sel.id, { database: e.target.value })
+                        }
+                      />
+                      <label className="nb2-lbl">
+                        Active connection name (optional)
+                      </label>
+                      <input
+                        className="nb2-in"
+                        data-testid="sqlserver-node-connection"
+                        value={sel.config.connection || ""}
+                        placeholder="reuse a Load Data session connection"
+                        onChange={(e) =>
+                          patch(sel.id, { connection: e.target.value })
+                        }
+                      />
+                      <label className="nb2-lbl">Query</label>
+                      <textarea
+                        className="nb2-in"
+                        data-testid="sqlserver-node-query"
+                        rows={5}
+                        value={sel.config.query || ""}
+                        onChange={(e) =>
+                          patch(sel.id, { query: e.target.value })
+                        }
+                      />
+                    </>
+                  )}
+                  {inspectorType === "sharepoint" && (
+                    <>
+                      <div className="nb2-note">
+                        Browse a SharePoint list or a document library (folders +
+                        files). Store a bearer token under a secret key — it is
+                        never saved in the workflow. Download writes the chosen
+                        file into Downloads.
+                      </div>
+                      <label className="nb2-lbl">Site URL</label>
+                      <input
+                        className="nb2-in"
+                        value={sel.config.site_url || ""}
+                        placeholder="https://contoso.sharepoint.com/sites/Finance"
+                        onChange={(e) =>
+                          patch(sel.id, { site_url: e.target.value })
+                        }
+                      />
+                      <label className="nb2-lbl">Mode</label>
+                      <select
+                        className="nb2-in"
+                        value={sel.config.mode || "list"}
+                        onChange={(e) => patch(sel.id, { mode: e.target.value })}
+                      >
+                        <option value="list">List items</option>
+                        <option value="drive">Browse folders &amp; files</option>
+                      </select>
+                      {(sel.config.mode || "list") === "list" ? (
+                        <>
+                          <label className="nb2-lbl">List title</label>
+                          <input
+                            className="nb2-in"
+                            value={sel.config.list_title || ""}
+                            placeholder="Invoices"
+                            onChange={(e) =>
+                              patch(sel.id, { list_title: e.target.value })
+                            }
+                          />
+                        </>
+                      ) : (
+                        <>
+                          <label className="nb2-lbl">Folder path</label>
+                          <input
+                            className="nb2-in"
+                            value={sel.config.folder_path || ""}
+                            placeholder="Shared Documents/Reports (blank = root)"
+                            onChange={(e) =>
+                              patch(sel.id, { folder_path: e.target.value })
+                            }
+                          />
+                          <label className="nb2-lbl">File id (for download)</label>
+                          <input
+                            className="nb2-in"
+                            value={sel.config.item_id || ""}
+                            placeholder="from the id column after Browse/Fetch"
+                            onChange={(e) =>
+                              patch(sel.id, { item_id: e.target.value })
+                            }
+                          />
+                          <label className="nb2-lbl">Download URL (optional)</label>
+                          <input
+                            className="nb2-in"
+                            value={sel.config.download_url || ""}
+                            placeholder="from downloadUrl column"
+                            onChange={(e) =>
+                              patch(sel.id, { download_url: e.target.value })
+                            }
+                          />
+                        </>
+                      )}
+                      <label className="nb2-lbl">Token secret key</label>
+                      <input
+                        className="nb2-in"
+                        value={sel.config.secret_key || ""}
+                        placeholder="sharepoint:Finance"
+                        onChange={(e) =>
+                          patch(sel.id, { secret_key: e.target.value })
+                        }
+                      />
+                    </>
+                  )}
+                  {inspectorType === "webscrape" && (
+                    <>
+                      <div className="nb2-note">
+                        Fetches a public page and extracts HTML tables, links,
+                        plain text, or JSON objects into a relation.
+                        Private/local URLs follow the same SSRF policy as the API
+                        node.
+                      </div>
+                      <label className="nb2-lbl">URL</label>
+                      <input
+                        className="nb2-in"
+                        value={sel.config.url || ""}
+                        placeholder="https://example.com/report"
+                        onChange={(e) => patch(sel.id, { url: e.target.value })}
+                      />
+                      <label className="nb2-lbl">Mode</label>
+                      <select
+                        className="nb2-in"
+                        value={sel.config.mode || "tables"}
+                        onChange={(e) => patch(sel.id, { mode: e.target.value })}
+                      >
+                        <option value="tables">HTML tables</option>
+                        <option value="links">Links</option>
+                        <option value="text">Page text</option>
+                        <option value="json">JSON objects</option>
+                      </select>
+                      {(sel.config.mode || "tables") === "tables" ? (
+                        <>
+                          <label className="nb2-lbl">Table index</label>
+                          <input
+                            className="nb2-in"
+                            type="number"
+                            min={0}
+                            value={sel.config.table_index ?? 0}
+                            onChange={(e) =>
+                              patch(sel.id, {
+                                table_index: Number(e.target.value) || 0,
+                              })
+                            }
+                          />
+                        </>
+                      ) : null}
+                      {(sel.config.mode || "tables") === "json" ||
+                      (sel.config.mode || "tables") === "tables" ? (
+                        <>
+                          <label className="nb2-lbl">
+                            JSON path (optional, e.g. data.items)
+                          </label>
+                          <input
+                            className="nb2-in"
+                            value={sel.config.json_path || ""}
+                            placeholder="data.items"
+                            onChange={(e) =>
+                              patch(sel.id, { json_path: e.target.value })
+                            }
+                          />
+                        </>
+                      ) : null}
+                    </>
+                  )}
+                  <button
+                    className="btn sm primary nb2-prev"
+                    disabled={running}
+                    style={{ marginTop: 8 }}
+                    data-testid={
+                      inspectorType === "sqlserver"
+                        ? "sqlserver-node-fetch"
+                        : undefined
+                    }
+                    onClick={() =>
+                      doFetchApi(
+                        sel,
+                        inspectorType === "sqlserver" && mssqlPwd
+                          ? { pwd: mssqlPwd }
+                          : undefined,
+                      )
+                    }
+                  >
+                    <Icon.Globe size={13} />{" "}
+                    {inspectorType === "sharepoint" &&
+                    (sel.config.mode || "list") === "drive"
+                      ? "Browse / Fetch"
+                      : "Fetch"}
+                  </button>
+                  {inspectorType === "sharepoint" &&
+                    (sel.config.mode || "list") === "drive" && (
+                      <button
+                        type="button"
+                        className="btn sm nb2-prev"
+                        data-testid="sharepoint-download"
+                        disabled={running}
+                        style={{ marginTop: 6 }}
+                        onClick={async () => {
+                          if (
+                            !(sel.config.item_id || "").trim() &&
+                            !(sel.config.download_url || "").trim()
+                          ) {
+                            onToast(
+                              "warn",
+                              "Pick a file",
+                              "Set File id or Download URL from the browse results.",
+                            );
+                            return;
+                          }
+                          try {
+                            const r = await api.sharepointDownload({
+                              config: sel.config,
+                            });
+                            if (r.error || !r.ok) {
+                              onToast(
+                                "error",
+                                "Download failed",
+                                r.error || "Failed.",
+                              );
+                              return;
+                            }
+                            onToast(
+                              "ok",
+                              "Downloaded",
+                              r.path || r.filename || "Saved to Downloads.",
+                            );
+                          } catch (e: any) {
+                            onToast(
+                              "error",
+                              "Download failed",
+                              e?.message || String(e),
+                            );
+                          }
+                        }}
+                      >
+                        <Icon.Download size={13} /> Download file
+                      </button>
+                    )}
+                  {sel.config.table && (
+                    <>
+                      <div className="nb2-note" style={{ marginTop: 8 }}>
+                        {(sel.config.rows ?? 0).toLocaleString()} row(s) ·{" "}
+                        {(sel.config.columns || []).length} column(s) loaded
+                        {sel.config.engine ? ` (${sel.config.engine})` : ""}.
+                      </div>
+                      <button
+                        className="btn sm primary nb2-prev"
+                        disabled={running}
+                        onClick={() =>
+                          doPreview(sel, "out", `${sel.config.label} · output`)
+                        }
+                      >
+                        <Icon.Table size={13} /> Preview output
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+
               {inspectorType === "iterator" && (
                 <>
                   <div className="nb2-note">
@@ -5667,6 +6192,57 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                 </>
               )}
 
+              {inspectorType === "python" && (
+                <>
+                  <label className="nb2-lbl">Python script</label>
+                  <textarea
+                    className="nb2-in nb2-sql-area"
+                    rows={12}
+                    spellCheck={false}
+                    value={sel.config.code || ""}
+                    placeholder={
+                      "# columns / rows / df from optional input\nout = df"
+                    }
+                    onChange={(e) => patch(sel.id, { code: e.target.value })}
+                  />
+                  <div className="nb2-hint-sm">
+                    Runs inside SamQL&apos;s bundled Python — no separate
+                    install needed. Optional input exposes{" "}
+                    <code>columns</code>, <code>rows</code>, and{" "}
+                    <code>df</code> (list of dicts). Assign <code>out</code> to
+                    a list of dicts,{" "}
+                    <code>{`{"columns": [...], "rows": [...]}`}</code>, or a
+                    pandas DataFrame when available. Allowed imports: math,
+                    datetime, json, re, collections, itertools, statistics, …
+                  </div>
+                  <label className="nb2-lbl">Timeout (seconds)</label>
+                  <input
+                    className="nb2-in"
+                    type="number"
+                    min={1}
+                    max={300}
+                    value={sel.config.timeout_s ?? 30}
+                    onChange={(e) =>
+                      patch(sel.id, {
+                        timeout_s: Math.max(
+                          1,
+                          Math.min(300, Number(e.target.value) || 30),
+                        ),
+                      })
+                    }
+                  />
+                  <button
+                    className="btn sm primary nb2-prev"
+                    disabled={running}
+                    onClick={() =>
+                      doPreview(sel, "out", `${sel.config.label} · output`)
+                    }
+                  >
+                    <Icon.Table size={13} /> Preview output
+                  </button>
+                </>
+              )}
+
               {inspectorType === "write" && (
                 <>
                   <label className="nb2-lbl">Table name</label>
@@ -5813,6 +6389,21 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                       </>
                     );
                   })()}
+                </>
+              )}
+
+              {inspectorType === "samqldash" && (
+                <>
+                  <div className="nb2-note">
+                    Marks this workflow as Dashboard-ready. Wire a chart, pivot,
+                    reconcile, or data node into this sink, then save the
+                    workflow. It becomes selectable from the Dashboard tab’s +
+                    button.
+                  </div>
+                  <div className="nb2-hint-sm">
+                    The Dashboard Run button executes the upstream NodeFlow and
+                    renders the result in a widget cell.
+                  </div>
                 </>
               )}
 
