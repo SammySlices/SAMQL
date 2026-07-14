@@ -8,8 +8,8 @@
 // quoted spans so punctuation inside a string is left alone -- and is tolerant
 // of unbalanced/truncated input (it never throws).
 
-/** Cap sync pretty-print work so opening the viewer stays responsive. */
-export const PRETTY_STRUCT_MAX_CHARS = 120_000;
+/** Cap sync pretty-print work so the viewer stays responsive after paint. */
+export const PRETTY_STRUCT_MAX_CHARS = 48_000;
 
 export function looksStructy(text: string): boolean {
   const t = (text || "").trim();
@@ -90,4 +90,54 @@ export function prettyStruct(text: string, indent = "  "): string {
       " chars]";
   }
   return out;
+}
+
+/**
+ * Run ``task`` only after the browser has had a chance to paint.
+ *
+ * ``setTimeout(0)`` alone can still run before the first paint, so a sync
+ * pretty-print inside it freezes the UI and the formatted viewer appears to
+ * ignore the first click. Double-rAF waits for paint; idle (with a short
+ * timeout) yields to input before the heavy walk.
+ */
+export function runAfterPaint(task: () => void): () => void {
+  let cancelled = false;
+  let raf2 = 0;
+  let idleId: number | undefined;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const raf1 = requestAnimationFrame(() => {
+    raf2 = requestAnimationFrame(() => {
+      if (cancelled) return;
+      const ric =
+        typeof window !== "undefined" &&
+        typeof window.requestIdleCallback === "function"
+          ? window.requestIdleCallback.bind(window)
+          : null;
+      if (ric) {
+        idleId = ric(
+          () => {
+            if (!cancelled) task();
+          },
+          { timeout: 80 },
+        );
+      } else {
+        timeoutId = setTimeout(() => {
+          if (!cancelled) task();
+        }, 0);
+      }
+    });
+  });
+  return () => {
+    cancelled = true;
+    cancelAnimationFrame(raf1);
+    if (raf2) cancelAnimationFrame(raf2);
+    if (
+      idleId != null &&
+      typeof window !== "undefined" &&
+      typeof window.cancelIdleCallback === "function"
+    ) {
+      window.cancelIdleCallback(idleId);
+    }
+    if (timeoutId != null) clearTimeout(timeoutId);
+  };
 }

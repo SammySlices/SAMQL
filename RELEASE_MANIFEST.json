@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "product": "SamQL",
   "version": "2.16.4",
-  "build": "2026-07-14.601",
+  "build": "2026-07-14.602",
   "phase": 10,
-  "generatedAt": "2026-07-14T19:34:00Z",
+  "generatedAt": "2026-07-14T20:04:24Z",
   "sourceManifest": "SOURCE_MANIFEST.txt",
   "sourceFileCount": 313,
   "runtime": {
