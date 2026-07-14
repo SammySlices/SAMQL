@@ -6,15 +6,18 @@ profiler, result paging, and persistence stores. The HTTP server
 (``server.py``) is a thin transport layer over :class:`Session`.
 
 Nothing in here imports tkinter. Heavy third-party packages (duckdb,
-pyarrow, sqlglot, pyodbc, openpyxl, orjson) are all optional and probed
-at import time; the stdlib path (SQLite + CSV/JSON) always works.
+pyarrow, sqlglot, pyodbc, openpyxl, ijson) are optional and probed at
+import time; the stdlib path (SQLite + CSV/JSON) always works. ``orjson``
+is required for fast JSON rewrite / API payloads
+(``backend/requirements.txt`` + distribution builds); a stdlib fallback
+remains if it is missing.
 """
 from __future__ import annotations
 
 __version__ = "2.16.4"
 # Iteration / build label. Bump the trailing sequence each delivered round so
 # the exact build can be confirmed in the UI (top bar) and the source bundle.
-BUILD = "2026-07-14.595"
+BUILD = "2026-07-14.601"
 APP_NAME = "SamQL"
 
 # ---- session orchestration -----------------------------------------

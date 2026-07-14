@@ -2,13 +2,19 @@
 
 The script runs inside SamQL's own Python process (bundled in packaged
 builds), so recipients do not need a separate Python install. An optional
-upstream table is exposed as ``columns`` / ``rows`` / ``df``; the script
-must assign ``out`` to emit the result table.
+upstream table is exposed as:
+
+  * ``df`` — a pandas ``DataFrame`` when pandas is available (always in
+    distribution builds); otherwise a list of row dicts
+  * ``columns`` / ``rows`` — column names and row tuples
+  * ``records`` — list of row dicts (always, when an input is wired)
+
+The script must assign ``out`` to emit the result table.
 
 Accepted ``out`` shapes:
   * list of row dicts: ``[{"a": 1}, {"a": 2}]``
   * ``{"columns": [...], "rows": [[...], ...]}``
-  * pandas ``DataFrame`` when pandas is importable in this build
+  * pandas ``DataFrame`` (preferred when using pandas)
 """
 from __future__ import annotations
 
@@ -40,6 +46,15 @@ _SAFE_BUILTIN_NAMES = (
 
 class PythonNodeError(Exception):
     """User-facing failure from a Python node."""
+
+
+def pandas_available() -> bool:
+    """True when this build can import pandas (distribution builds do)."""
+    try:
+        import importlib.util
+        return importlib.util.find_spec("pandas") is not None
+    except Exception:
+        return False
 
 
 def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -101,6 +116,31 @@ def _rows_as_dicts(columns, rows):
     if columns is None:
         return None
     return [dict(zip(columns, row)) for row in rows]
+
+
+def _as_dataframe(columns, rows):
+    """Build a pandas DataFrame, or ``None`` when pandas is unavailable."""
+    if columns is None:
+        return None
+    try:
+        import pandas as pd  # type: ignore
+    except ImportError:
+        return None
+    return pd.DataFrame(list(rows or []), columns=list(columns))
+
+
+def _input_frame(columns, rows):
+    """Return ``(records, df)`` for script bindings.
+
+    ``records`` is always a list of dicts (or ``None`` when unwired).
+    ``df`` is a pandas DataFrame when pandas is available; otherwise the
+    same list of dicts so scripts written against ``df`` still run.
+    """
+    records = _rows_as_dicts(columns, rows) if columns is not None else None
+    frame = _as_dataframe(columns, rows)
+    if frame is not None:
+        return records, frame
+    return records, records
 
 
 def _normalize_out(out) -> tuple[list[str], list[tuple]]:
@@ -252,11 +292,12 @@ def run_script(
         timeout_s = 30.0
     timeout_s = max(1.0, min(timeout_s, 300.0))
 
-    df = _rows_as_dicts(columns, rows) if columns is not None else None
+    records, df = _input_frame(columns, rows)
     ns: dict[str, Any] = {
         "__builtins__": _restricted_builtins(),
         "columns": list(columns) if columns is not None else None,
         "rows": list(rows) if rows is not None else None,
+        "records": records,
         "df": df,
         "out": None,
     }

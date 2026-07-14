@@ -5606,10 +5606,11 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   {inspectorType === "sharepoint" && (
                     <>
                       <div className="nb2-note">
-                        Browse a SharePoint list or a document library (folders +
-                        files). Store a bearer token under a secret key — it is
-                        never saved in the workflow. Download writes the chosen
-                        file into Downloads.
+                        Browse a SharePoint list or a document library. Sign in
+                        with Microsoft when you are already logged into work
+                        accounts, use Windows Integrated for classic on-prem, or
+                        paste a bearer token. Tokens stay in the OS secret store
+                        — never in the workflow.
                       </div>
                       <label className="nb2-lbl">Site URL</label>
                       <input
@@ -5620,6 +5621,210 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           patch(sel.id, { site_url: e.target.value })
                         }
                       />
+                      <label className="nb2-lbl">Auth</label>
+                      <select
+                        className="nb2-in"
+                        data-testid="sharepoint-auth-mode"
+                        value={sel.config.auth_mode || "bearer"}
+                        onChange={(e) =>
+                          patch(sel.id, { auth_mode: e.target.value })
+                        }
+                      >
+                        <option value="bearer">Bearer token (secret key)</option>
+                        <option value="device_code">
+                          Sign in — device code (already logged into Microsoft)
+                        </option>
+                        <option value="interactive">
+                          Sign in — browser / Microsoft account
+                        </option>
+                        <option value="windows">
+                          Windows Integrated (classic on-prem)
+                        </option>
+                      </select>
+                      {(sel.config.auth_mode || "bearer") !== "windows" && (
+                        <>
+                          <label className="nb2-lbl">Token secret key</label>
+                          <input
+                            className="nb2-in"
+                            value={sel.config.secret_key || ""}
+                            placeholder="sharepoint:Finance"
+                            onChange={(e) =>
+                              patch(sel.id, { secret_key: e.target.value })
+                            }
+                          />
+                        </>
+                      )}
+                      {((sel.config.auth_mode || "bearer") === "device_code" ||
+                        (sel.config.auth_mode || "bearer") ===
+                          "interactive") && (
+                        <>
+                          <label className="nb2-lbl">
+                            Tenant (optional)
+                          </label>
+                          <input
+                            className="nb2-in"
+                            value={sel.config.tenant_id || ""}
+                            placeholder="organizations"
+                            onChange={(e) =>
+                              patch(sel.id, { tenant_id: e.target.value })
+                            }
+                          />
+                          <label className="nb2-lbl">
+                            App client id (optional)
+                          </label>
+                          <input
+                            className="nb2-in"
+                            value={sel.config.client_id || ""}
+                            placeholder="Azure public client id (default built-in)"
+                            onChange={(e) =>
+                              patch(sel.id, { client_id: e.target.value })
+                            }
+                          />
+                          {(sel.config.auth_mode || "") === "device_code" ? (
+                            <div className="nb2-row" style={{ gap: 8 }}>
+                              <button
+                                type="button"
+                                className="nb2-btn"
+                                data-testid="sharepoint-device-start"
+                                onClick={async () => {
+                                  const caps =
+                                    await api.sharepointAuthCapabilities();
+                                  if (caps.msal === false) {
+                                    onToast(
+                                      "error",
+                                      "Sign-in",
+                                      "msal is not available in this SamQL build. Re-run the build to bundle it.",
+                                    );
+                                    return;
+                                  }
+                                  const r = await api.sharepointAuthDeviceStart({
+                                    config: sel.config,
+                                  });
+                                  if (r.error || !r.ok) {
+                                    onToast(
+                                      "error",
+                                      "Sign-in",
+                                      r.error || "Could not start device code.",
+                                    );
+                                    return;
+                                  }
+                                  if (r.secret_key) {
+                                    patch(sel.id, { secret_key: r.secret_key });
+                                  }
+                                  patch(sel.id, {
+                                    _device_flow_id: r.flow_id,
+                                    _device_user_code: r.user_code,
+                                    _device_uri: r.verification_uri,
+                                    _device_message: r.message,
+                                  });
+                                  onToast(
+                                    "ok",
+                                    "Enter this code",
+                                    r.message ||
+                                      `${r.verification_uri} → ${r.user_code}`,
+                                  );
+                                }}
+                              >
+                                Get device code
+                              </button>
+                              <button
+                                type="button"
+                                className="nb2-btn"
+                                data-testid="sharepoint-device-poll"
+                                disabled={!sel.config._device_flow_id}
+                                onClick={async () => {
+                                  const r = await api.sharepointAuthDevicePoll({
+                                    flow_id: String(
+                                      sel.config._device_flow_id || "",
+                                    ),
+                                    block: true,
+                                  });
+                                  if (r.error) {
+                                    onToast("error", "Sign-in", r.error);
+                                    return;
+                                  }
+                                  if (r.pending) {
+                                    onToast(
+                                      "warn",
+                                      "Waiting",
+                                      "Finish signing in at the device login page, then try again.",
+                                    );
+                                    return;
+                                  }
+                                  if (r.secret_key) {
+                                    patch(sel.id, { secret_key: r.secret_key });
+                                  }
+                                  onToast(
+                                    "ok",
+                                    "Signed in",
+                                    "Microsoft token saved under the secret key.",
+                                  );
+                                }}
+                              >
+                                I&apos;ve signed in
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="nb2-btn"
+                              data-testid="sharepoint-interactive"
+                              onClick={async () => {
+                                const caps =
+                                  await api.sharepointAuthCapabilities();
+                                if (caps.msal === false) {
+                                  onToast(
+                                    "error",
+                                    "Sign-in",
+                                    "msal is not available in this SamQL build. Re-run the build to bundle it.",
+                                  );
+                                  return;
+                                }
+                                const r = await api.sharepointAuthInteractive({
+                                  config: sel.config,
+                                });
+                                if (r.error || !r.ok) {
+                                  onToast(
+                                    "error",
+                                    "Sign-in",
+                                    r.error || "Interactive sign-in failed.",
+                                  );
+                                  return;
+                                }
+                                if (r.secret_key) {
+                                  patch(sel.id, { secret_key: r.secret_key });
+                                }
+                                onToast(
+                                  "ok",
+                                  "Signed in",
+                                  "Microsoft token saved under the secret key.",
+                                );
+                              }}
+                            >
+                              Sign in with Microsoft
+                            </button>
+                          )}
+                          {sel.config._device_user_code ? (
+                            <div className="nb2-hint-sm">
+                              Code <code>{sel.config._device_user_code}</code> at{" "}
+                              <code>{sel.config._device_uri}</code>
+                            </div>
+                          ) : null}
+                        </>
+                      )}
+                      {(sel.config.auth_mode || "bearer") === "windows" && (
+                        <div className="nb2-hint-sm">
+                          Uses your Windows login (Negotiate/NTLM) against
+                          classic on-prem <code>/_api</code> sites on the
+                          corporate network. Not for sharepoint.com online.
+                        </div>
+                      )}
+                      {(sel.config.auth_mode || "bearer") === "bearer" && (
+                        <div className="nb2-hint-sm">
+                          Store a Graph bearer token under the secret key via
+                          Settings secrets / another tool, then Fetch.
+                        </div>
+                      )}
                       <label className="nb2-lbl">Mode</label>
                       <select
                         className="nb2-in"
@@ -5672,15 +5877,6 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           />
                         </>
                       )}
-                      <label className="nb2-lbl">Token secret key</label>
-                      <input
-                        className="nb2-in"
-                        value={sel.config.secret_key || ""}
-                        placeholder="sharepoint:Finance"
-                        onChange={(e) =>
-                          patch(sel.id, { secret_key: e.target.value })
-                        }
-                      />
                     </>
                   )}
                   {inspectorType === "webscrape" && (
@@ -6206,14 +6402,18 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     onChange={(e) => patch(sel.id, { code: e.target.value })}
                   />
                   <div className="nb2-hint-sm">
-                    Runs inside SamQL&apos;s bundled Python — no separate
-                    install needed. Optional input exposes{" "}
+                    Runs inside SamQL&apos;s bundled Python (pandas included
+                    in distribution builds). Wire an upstream table into the
+                    input: the script sees{" "}
+                    <code>df</code> (a pandas DataFrame),{" "}
                     <code>columns</code>, <code>rows</code>, and{" "}
-                    <code>df</code> (list of dicts). Assign <code>out</code> to
-                    a list of dicts,{" "}
-                    <code>{`{"columns": [...], "rows": [...]}`}</code>, or a
-                    pandas DataFrame when available. Allowed imports: math,
-                    datetime, json, re, collections, itertools, statistics, …
+                    <code>records</code> (list of dicts). Example:{" "}
+                    <code>{`out = df[df["score"] > 50]`}</code>. Assign{" "}
+                    <code>out</code> to a DataFrame, a list of dicts, or{" "}
+                    <code>{`{"columns": [...], "rows": [...]}`}</code>.{" "}
+                    <code>import pandas as pd</code> is allowed. Other allowed
+                    imports: math, datetime, json, re, collections, itertools,
+                    statistics, …
                   </div>
                   <label className="nb2-lbl">Timeout (seconds)</label>
                   <input

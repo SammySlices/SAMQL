@@ -45,8 +45,23 @@ binaries = []
 hiddenimports = ["samql_core"]
 
 # ---- bundle the built frontend (served from sys._MEIPASS/frontend_dist) ----
-if os.path.isdir(FRONTEND_DIST):
-    datas.append((FRONTEND_DIST, "frontend_dist"))
+# Refuse to ship a placeholder UI. An empty/missing dist used to only WARN
+# (and the warning was accidentally attached to the icon for/else), so builds
+# could succeed while SamQL.exe showed "React frontend has not been built".
+_fe_index = os.path.join(FRONTEND_DIST, "index.html")
+_fe_assets = os.path.join(FRONTEND_DIST, "assets")
+if not (os.path.isdir(FRONTEND_DIST)
+        and os.path.isfile(_fe_index)
+        and os.path.isdir(_fe_assets)):
+    raise SystemExit(
+        "\n[samql.spec] refusing to package: frontend/dist is missing or "
+        "incomplete (need index.html + assets/).\n"
+        "             Build it first:  cd frontend && npm ci && npm run build\n"
+        "             Or re-run build.ps1 / build.sh from the repo root.\n"
+    )
+datas.append((FRONTEND_DIST, "frontend_dist"))
+print("[samql.spec] bundling frontend_dist from %s" % FRONTEND_DIST)
+
 # .519: the SERVER exe bundles samql.ico too -- SamQL.exe --window now sets
 # the Form icon exactly like the AppWindow launcher, so it needs the art.
 for _ic in (os.path.join(REPO, "samql.ico"), os.path.join(HERE, "samql.ico")):
@@ -55,11 +70,8 @@ for _ic in (os.path.join(REPO, "samql.ico"), os.path.join(HERE, "samql.ico")):
         break
 else:
     print(
-        "\n[samql.spec] WARNING: frontend/dist not found.\n"
-        "             Build it first:  cd frontend && npm install && "
-        "npm run build\n"
-        "             The executable will still run but show a "
-        "placeholder page.\n"
+        "\n[samql.spec] NOTE: no samql.ico found at repo root or backend/.\n"
+        "             The exe will use the generated brand icon.\n"
     )
 
 # ---- required load/export stack (must be present for distribution) ----
@@ -68,9 +80,11 @@ else:
 # analysis misses them -- which is why a frozen build could report "pytz not
 # installed" on a query with TIMESTAMP WITH TIME ZONE columns even though it
 # was installed in the build environment.
-REQUIRED = ["duckdb", "pyarrow", "sqlglot", "openpyxl", "orjson",
+# pandas is required so Python nodes get a real DataFrame as `df`.
+REQUIRED = ["duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "orjson",
             "ijson", "tzdata"]
-OPTIONAL = REQUIRED + ["pyodbc", "pytz"]
+OPTIONAL = REQUIRED + ["pyodbc", "pytz", "msal", "requests",
+                       "requests_negotiate_sspi"]
 _missing_required = [pkg for pkg in REQUIRED
                      if importlib.util.find_spec(pkg) is None]
 if _missing_required:

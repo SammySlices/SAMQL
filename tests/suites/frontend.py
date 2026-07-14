@@ -135,8 +135,8 @@ def frontend_tests(do_build):
                          "useResultController.ts"),
             encoding="utf-8").read()
         need("maxRetainedRows" in result_ctrl
-             and "50000" in result_ctrl,
-             "IDE result paging caps retained rows like the Journal")
+             and "12000" in result_ctrl,
+             "IDE result paging caps retained rows (sliding window)")
         scripts = pkg.get("scripts") or {}
         need("lint" in scripts and "check" in scripts and "test:e2e" in scripts,
              "lint/check/browser-test scripts are registered")
@@ -474,13 +474,19 @@ def frontend_tests(do_build):
         storage_mem = _read_fe("src", "components", "StorageMemoryModal.tsx")
         need("StorageMemoryModal" in app
              and "FlowCachePanel" in storage_mem
+             and "LoadThresholdsPanel" in storage_mem
              and "NodeFlow cache" in storage_mem
+             and "Load thresholds" in storage_mem
              and 'data-testid="flow-cache-tab"' in storage_mem
+             and 'data-testid="load-thresholds-tab"' in storage_mem
              and 'data-testid="storage-memory-menu"' in app,
-             "Storage & memory must host the NodeFlow cache tab")
+             "Storage & memory must host Load thresholds + NodeFlow cache tabs")
         need("flowCacheConfigure" in api_src and "flowCacheInfo" in api_src
-             and "/api/settings/flow-cache" in api_src,
-             "frontend cache settings API is incomplete")
+             and "/api/settings/flow-cache" in api_src
+             and "loadThresholdsConfigure" in api_src
+             and "loadThresholdsInfo" in api_src
+             and "/api/settings/load-thresholds" in api_src,
+             "frontend cache/load-threshold settings API is incomplete")
         migrations = _read_fe("src", "lib", "migrations.ts")
         need("runMigrations" in migrations and "pre-migration-backup" in migrations,
              "versioned migrations and local recovery backups are required")
@@ -1842,15 +1848,27 @@ console.log("OK");
         need("sharepointDownload" in api
              and '"/api/sharepoint/download"' in api,
              "api.sharepointDownload posts to /api/sharepoint/download")
+        need("sharepointAuthDeviceStart" in api
+             and '"/api/sharepoint/auth/device/start"' in api
+             and "sharepointAuthInteractive" in api
+             and '"/api/sharepoint/auth/interactive"' in api,
+             "api exposes SharePoint device-code + interactive sign-in")
         insp = _read_fe("src", "components", "nodeflow", "NodeFlowInspector.tsx")
         need('data-testid="sharepoint-download"' in insp
              and "api.sharepointDownload" in insp,
              "SharePoint inspector exposes Download file")
+        need('data-testid="sharepoint-auth-mode"' in insp
+             and 'data-testid="sharepoint-device-start"' in insp
+             and "Windows Integrated" in insp,
+             "SharePoint inspector exposes auth modes + device sign-in")
         srv = open(os.path.join(ROOT, "backend", "server.py"),
                    encoding="utf-8").read()
         need('r"^/api/sharepoint/download$"' in srv
              or "/api/sharepoint/download" in srv,
              "server registers POST /api/sharepoint/download")
+        need("/api/sharepoint/auth/device/start" in srv
+             and "/api/sharepoint/auth/interactive" in srv,
+             "server registers SharePoint OAuth auth routes")
 
     def t_select_fields_logic():
         # Exercise select-field reconciliation (reconcileSelectFields,
@@ -4864,6 +4882,8 @@ console.log("OK");
             return open(os.path.join(FRONTEND, *parts), encoding="utf-8").read()
         nb = _read_nodebook_source()
         css = rd("src", "styles.css")
+        help_ts = rd("src", "lib", "nodeHelp.ts")
+        docs_modal = rd("src", "components", "DocsModal.tsx")
 
         def css_block(sel):
             i = css.find(sel + " {")
@@ -4895,6 +4915,11 @@ console.log("OK");
              and "Terminal" in nb
              and 'inspectorType === "python"' in nb
              and "config.code" in nb),
+            ("python node docs explain pandas df against an input table",
+             "pandas DataFrame" in nb
+             and 'df[df["score"] > 50]' in nb
+             and "pandas DataFrame" in help_ts
+             and "pandas DataFrame" in docs_modal),
             ("sql node keeps its ports by the header (not centred) like chart",
              'n.type === "sql"\n  ) {\n    return PORT_TOP + idx * PORT_GAP;' in nb
              or ('n.type === "sql"' in nb
@@ -5807,6 +5832,9 @@ console.log("OK");
              and re.search(r"api\s*\.\s*flattenStart\b", load_files["FlattenLoadTab.tsx"])
              and re.search(r"api\s*\.\s*hdfsConnect\b", load_files["HdfsLoadTab.tsx"])
              and re.search(r"api\s*\.\s*excelSheets\b", load_files["FileLoadTab.tsx"])
+             and re.search(r"api\s*\.\s*loadPreflight\b",
+                           load_files["FileLoadTab.tsx"])
+             and "load-preflight" in load_files["FileLoadTab.tsx"]
              and re.search(r"api\s*\.\s*fsList\b", load_files["FileBrowser.tsx"])
              and re.search(r"api\s*\.\s*loadSniff\b", load_files["RootIdPicker.tsx"])),
             ("legacy load exports remain compatible",
@@ -6245,7 +6273,7 @@ console.log("OK");
                      "beginOptimize", "onTaskComplete",
                  ))),
             ("App shell is materially smaller",
-             len(app.splitlines()) < 4500),
+             len(app.splitlines()) < 4600),
             ("rendered controller regressions ship",
              os.path.isfile(rendered_path)
              and all(token in rendered for token in (

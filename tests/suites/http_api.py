@@ -1637,6 +1637,57 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             sess.configure_flow_cache(enabled=old_enabled,
                                       max_entries=old_entries, max_mb=old_mb)
 
+    def t_load_thresholds_settings_endpoint():
+        sess = server.SESSION
+        prev = dict(sess.config.get("load_thresholds") or {})
+        try:
+            st, info = c.js("GET", "/api/settings/load-thresholds")
+            eq(st, 200, "load-thresholds GET status")
+            need(isinstance(info.get("thresholds"), dict),
+                 "thresholds map present")
+            need("ondisk_mb" in info["thresholds"], "ondisk_mb field")
+            st, changed = c.js("POST", "/api/settings/load-thresholds", {
+                "thresholds": {"ondisk_mb": 77, "filecache_gb": 12},
+            })
+            eq(st, 200, "load-thresholds POST status")
+            eq(changed["thresholds"]["ondisk_mb"]["value"], 77,
+               "ondisk applied via API")
+            eq(changed["thresholds"]["ondisk_mb"]["source"], "override",
+               "source is override")
+            st, reset = c.js("POST", "/api/settings/load-thresholds",
+                             {"reset": True})
+            eq(st, 200, "load-thresholds reset status")
+            need(reset["thresholds"]["ondisk_mb"]["source"] in
+                 ("default", "env"),
+                 "reset drops override source")
+        finally:
+            if prev:
+                sess.configure_load_thresholds(updates=prev)
+            else:
+                sess.configure_load_thresholds(reset=True)
+
+    def t_load_preflight_endpoint():
+        st, miss = c.js("POST", "/api/load/preflight", {"path": ""})
+        eq(st, 200, "preflight empty path status")
+        need(not miss.get("ok") and miss.get("blockers"),
+             "empty path blocked: %r" % miss)
+        # Real tiny file — should be ok with optional warnings only.
+        p = os.path.join(tempfile.gettempdir(), "samql_preflight_api.csv")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("a,b\n1,2\n")
+        try:
+            st, ok = c.js("POST", "/api/load/preflight", {"path": p})
+            eq(st, 200, "preflight existing file status")
+            need(ok.get("exists") and ok.get("ok"),
+                 "tiny csv preflight ok: %r" % ok)
+            need("warnings" in ok and "blockers" in ok,
+                 "shape includes warnings/blockers")
+        finally:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
     def t_engine_reset_endpoint():
         # Point the server at a throwaway session so the reset (which wipes +
         # rebuilds engines) can't disturb the shared suite session. Verifies the
@@ -1768,6 +1819,10 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             ("POST /api/settings/concurrent-reads (toggle + status reflects it)", t_concurrent_reads_endpoint),
             ("GET/POST /api/settings/flow-cache (telemetry + live limits)",
              t_flow_cache_settings_endpoint),
+            ("GET/POST /api/settings/load-thresholds (load size gates)",
+             t_load_thresholds_settings_endpoint),
+            ("POST /api/load/preflight (large-file checklist)",
+             t_load_preflight_endpoint),
             ("POST /api/flatten/start + progress", t_flatten_progress),
             ("POST /api/load/start big-int JSON", t_load_json_bigint),
             ("GET /api/tables", t_tables),

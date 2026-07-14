@@ -15,6 +15,8 @@ export interface PagedResultSnapshot {
   sortCol?: string | null;
   descending?: boolean;
   filters?: ColumnFilter[];
+  /** Optional column projection for page fetches (server-side). */
+  visibleColumns?: string[] | null;
   queryId?: string;
   loadingMore?: boolean;
   released?: boolean;
@@ -35,6 +37,7 @@ export interface PageRequestOptions {
   sort_col?: string | null;
   descending?: boolean;
   filters?: ColumnFilter[];
+  columns?: string[];
   query_id?: string;
 }
 
@@ -105,12 +108,14 @@ function requestOptions(
   offset: number,
   limit: number,
 ): PageRequestOptions {
+  const cols = item.visibleColumns;
   return {
     offset,
     limit,
     sort_col: view.sortCol ?? undefined,
     descending: view.descending,
     filters: view.filters.length ? copyFilters(view.filters) : undefined,
+    columns: cols && cols.length ? [...cols] : undefined,
     query_id: item.queryId,
   };
 }
@@ -384,7 +389,8 @@ export function usePagedResult<T extends PagedResultSnapshot>(
       const have = item.page.rows?.length || 0;
       const total = item.page.total_rows || 0;
       if (have >= total) return;
-      if (opts.maxRetainedRows != null && have >= opts.maxRetainedRows) return;
+      // Sliding window: keep loading past the retain ceiling by dropping
+      // oldest rows (bounded browser RAM for multi-million grids).
       if (loadingMore.current.has(id)) return;
 
       const view = currentView(item);
@@ -394,12 +400,13 @@ export function usePagedResult<T extends PagedResultSnapshot>(
       opts.patchItem(id, { loadingMore: true });
       const controller = registerController(id);
       try {
+        const windowStart = item.page.offset || 0;
         const page = await opts.fetchPage(
           item.resultId,
           requestOptions(
             item,
             view,
-            have,
+            windowStart + have,
             opts.pageSize || DEFAULT_PAGE_SIZE,
           ),
           controller.signal,
@@ -418,20 +425,25 @@ export function usePagedResult<T extends PagedResultSnapshot>(
         const latest = opts.getItem(id);
         if (!latest?.page || latest.resultId !== item.resultId) return;
         if ((latest.page.rows?.length || 0) !== have) return;
+        if ((latest.page.offset || 0) !== windowStart) return;
         const latestView = currentView(latest);
         if (!latestView || !sameView(latestView, view)) return;
 
-        const room =
-          opts.maxRetainedRows == null
-            ? page.rows.length
-            : Math.max(0, opts.maxRetainedRows - have);
-        const rows = page.rows.slice(0, room);
+        let rows = [...(latest.page.rows || []), ...page.rows];
+        let offset = windowStart;
+        const cap = opts.maxRetainedRows;
+        if (cap != null && rows.length > cap) {
+          const drop = rows.length - cap;
+          rows = rows.slice(drop);
+          offset += drop;
+        }
         opts.patchItem(id, {
           loadingMore: false,
           page: {
             ...latest.page,
             ...page,
-            rows: [...(latest.page.rows || []), ...rows],
+            offset,
+            rows,
             total_rows: page.total_rows ?? latest.page.total_rows,
           },
         });

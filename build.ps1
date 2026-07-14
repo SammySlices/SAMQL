@@ -90,14 +90,68 @@ if ($ico) {
 Write-Host "==> 1/4  Building the React frontend"
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
   Write-Error "npm not found. Install Node.js 18+ from https://nodejs.org"
+  exit 1
 }
+
+# Make package-lock portable (strip absolute registry URLs) then install with
+# integrity-safe recovery -- same path Test-SamQL-All uses. Direct ``npm ci``
+# under $ErrorActionPreference=Stop fails on harmless npm stderr warnings
+# (e.g. Unknown env config "devdir") even when the install succeeded.
+$lock = Join-Path $Root "frontend\package-lock.json"
+& $py (Join-Path $Root "tools\normalize_npm_lock.py") --write $lock
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "normalize_npm_lock.py failed (exit $LASTEXITCODE)."
+  exit 1
+}
+$npmCache = Join-Path $env:TEMP ("samql-npm-build-cache-" + $PID)
+& $py (Join-Path $Root "tools\install_frontend_deps.py") `
+  --frontend (Join-Path $Root "frontend") `
+  --cache $npmCache
+if ($LASTEXITCODE -ne 0) {
+  Write-Error ("frontend npm install failed (exit $LASTEXITCODE). " +
+               "Fix frontend deps / registry, then re-run.")
+  exit 1
+}
+
+# npm/vite also warn on stderr; keep Stop from treating that as failure.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 Push-Location frontend
-npm ci
-npm run build
-Pop-Location
+try {
+  & npm run build
+  $buildCode = $LASTEXITCODE
+} finally {
+  Pop-Location
+  $ErrorActionPreference = $prevEap
+}
+if ($buildCode -ne 0) {
+  Write-Error "npm run build failed (exit $buildCode). The packaged app would show the placeholder page."
+  exit 1
+}
+$feIndex = Join-Path $Root "frontend\dist\index.html"
+$feAssets = Join-Path $Root "frontend\dist\assets"
+if (-not (Test-Path $feIndex)) {
+  Write-Error "frontend/dist/index.html missing after npm run build -- refusing to package a placeholder UI."
+  exit 1
+}
+if (-not (Test-Path $feAssets)) {
+  Write-Error "frontend/dist/assets missing after npm run build -- refusing to package an incomplete UI."
+  exit 1
+}
+Write-Host ("    OK: frontend/dist ready ({0} bytes index.html)" -f (Get-Item $feIndex).Length)
 
 Write-Host "==> 2/4  Ensuring Python dependencies (engines, formats, build)"
 Write-Host "    build Python: $pyExe"
+
+# Install core required packages first (orjson, ...), then the full optional
+# analytics stack. requirements-optional.txt also lists orjson so a single
+# -r still works; installing backend/requirements.txt first makes the
+# "always installed" contract explicit for source + packaging.
+$reqCore = Join-Path $PSScriptRoot "backend\requirements.txt"
+if (Test-Path $reqCore) {
+  Write-Host "    installing core requirements from backend/requirements.txt"
+  & $py -m pip install -r $reqCore
+}
 
 # Install EVERYTHING the packaged app can use from the ONE manifest
 # (requirements-optional.txt). This must land in the SAME interpreter that
@@ -127,7 +181,7 @@ if ($LASTEXITCODE -ne 0) {
 # CRITICAL load/export stack -- a binary without these fails on first use or
 # silently falls back to SQLite (the on-box openpyxl incident, 2026-07-02).
 $critical = @(
-  "duckdb", "pyarrow", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata"
+  "duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata"
 )
 foreach ($m in $critical) {
   & $py -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$m') else 1)"
@@ -256,6 +310,25 @@ if ($OneDir) {
   exit 1
 }
 Write-Host "==> 4/4  Both targets present (SamQL.exe + SamQL-AppWindow)"
+
+# Always ship a real UI folder next to the exe as well as inside the frozen
+# bundle. Frozen apps resolve sys._MEIPASS/frontend_dist; the adjacent copy is
+# the .467 hot-swap path and a safety net when MEIPASS extraction is incomplete.
+$feSrc = Join-Path $Root "frontend\dist"
+$feAdj = Join-Path $Root "dist\frontend_dist"
+if (Test-Path $feAdj) { Remove-Item -Recurse -Force $feAdj }
+Copy-Item -Recurse -Force $feSrc $feAdj
+if (-not (Test-Path (Join-Path $feAdj "index.html"))) {
+  Write-Error "Failed to stage dist\frontend_dist\index.html beside the executable."
+  exit 1
+}
+Write-Host "    OK: staged dist\frontend_dist (exe-adjacent UI)"
+if ($OneDir) {
+  $feOnedir = Join-Path $Root "dist\SamQL-AppWindow\frontend_dist"
+  if (Test-Path $feOnedir) { Remove-Item -Recurse -Force $feOnedir }
+  Copy-Item -Recurse -Force $feSrc $feOnedir
+  Write-Host "    OK: staged dist\SamQL-AppWindow\frontend_dist"
+}
 
 function Find-SignTool {
   $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue

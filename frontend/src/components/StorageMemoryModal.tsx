@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import type { MemInfo } from "../lib/types";
 import { Modal } from "./Modal";
 import { FlowCachePanel } from "./FlowCacheModal";
+import { LoadThresholdsPanel } from "./LoadThresholdsPanel";
 
 type ToastFn = (
   kind: "ok" | "error" | "warn",
@@ -12,7 +13,7 @@ type ToastFn = (
 
 type StorageReport = Awaited<ReturnType<typeof api.storageReport>>;
 
-export type StorageMemoryTab = "storage" | "cache";
+export type StorageMemoryTab = "storage" | "cache" | "loads";
 
 const gb = (n: number) =>
   n >= 1e9 ? (n / 1e9).toFixed(2) + " GB" : Math.round(n / 1e6) + " MB";
@@ -42,7 +43,7 @@ export const StorageMemoryModal: React.FC<{
     <Modal
       title="Storage & memory"
       onClose={onClose}
-      wide={tab === "cache"}
+      wide={tab === "cache" || tab === "loads"}
       testId="storage-memory-modal"
     >
       <div
@@ -69,6 +70,17 @@ export const StorageMemoryModal: React.FC<{
         <button
           type="button"
           role="tab"
+          aria-selected={tab === "loads"}
+          data-testid="load-thresholds-tab"
+          className={"btn sm" + (tab === "loads" ? " primary" : " ghost")}
+          onClick={() => setTab("loads")}
+          title="Parquet conversion, JSON stream, upload, and cache size limits"
+        >
+          Load thresholds
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={tab === "cache"}
           data-testid="flow-cache-tab"
           className={"btn sm" + (tab === "cache" ? " primary" : " ghost")}
@@ -81,6 +93,8 @@ export const StorageMemoryModal: React.FC<{
 
       {tab === "cache" ? (
         <FlowCachePanel embedded onToast={onToast} />
+      ) : tab === "loads" ? (
+        <LoadThresholdsPanel onToast={onToast} />
       ) : busy || !report ? (
         <div className="faint">
           <span className="spin" /> measuring…

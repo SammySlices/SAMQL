@@ -12,7 +12,7 @@ so a restart re-attaches the existing Parquet in milliseconds. The source
 changing in any way changes the key, which is a miss -- stale entries are
 never served, only aged out.
 
-Budgeted + aged: SAMQL_FILECACHE_GB (default 10) caps total size with
+Budgeted + aged: SAMQL_FILECACHE_GB (default 32) caps total size with
 least-recently-USED eviction (a cache hit touches the file's mtime), and
 SAMQL_FILECACHE_DAYS (default 14) drops anything unused for that long.
 SAMQL_FILECACHE=0 disables the cache entirely (conversions fall back to the
@@ -128,10 +128,11 @@ def abort(tmp_path):
 
 
 def _budget_bytes():
+    from . import load_thresholds as LT
     try:
-        gb = float(os.environ.get("SAMQL_FILECACHE_GB") or 10)
+        gb = float(LT.get_float("filecache_gb"))
     except Exception:
-        gb = 10.0
+        gb = 32.0
     return max(1, int(gb * (1024 ** 3)))
 
 

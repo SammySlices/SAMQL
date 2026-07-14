@@ -138,8 +138,20 @@ _SCRIPT_JSON_RE = re.compile(
 )
 
 
-def _fetch_url(url, timeout=30, user_agent=None, accept=None):
+def _fetch_url(url, timeout=30, user_agent=None, accept=None, max_bytes=None):
+    """Fetch a URL with a hard body-size cap.
+
+    Web scrape is for HTML tables / small JSON pages — not multi-GB payloads.
+    Override with ``SAMQL_WEBSCRAPE_MB`` (default 32). ``0`` disables the cap.
+    """
+    import os
     validate_outbound_http_url(url, purpose="web scrape")
+    if max_bytes is None:
+        try:
+            mb = float(os.environ.get("SAMQL_WEBSCRAPE_MB", "32"))
+        except Exception:
+            mb = 32.0
+        max_bytes = None if mb <= 0 else int(mb * 1024 * 1024)
     req = urllib.request.Request(
         url,
         headers={
@@ -153,7 +165,15 @@ def _fetch_url(url, timeout=30, user_agent=None, accept=None):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
-            raw = resp.read()
+            if max_bytes is None:
+                raw = resp.read()
+            else:
+                raw = resp.read(max_bytes + 1)
+                if len(raw) > max_bytes:
+                    raise ValueError(
+                        "Page larger than %d MiB — too big for web scrape. "
+                        "Download the file and use Load, or raise "
+                        "SAMQL_WEBSCRAPE_MB." % (max_bytes // (1024 * 1024)))
             ctype = (resp.headers.get_content_type() or "").lower()
             return (
                 raw.decode(charset, errors="replace"),

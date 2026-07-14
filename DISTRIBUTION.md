@@ -2,7 +2,7 @@
 
 SamQL can be built two ways. Both are fully self-contained — **recipients
 do NOT need Python or Node.js installed.** Everything (the Python runtime,
-DuckDB, pyarrow, the compiled React UI) is bundled into the build.
+DuckDB, pyarrow, pandas, the compiled React UI) is bundled into the build.
 
 Node.js and Python are only needed on the BUILD machine, to compile the
 frontend and package the app. The people you send it to run a finished,
@@ -75,7 +75,7 @@ pre-extracted `_internal\` with everything it needs — and zips it to
     ├── SamQL.ico               <- shortcut icon
     ├── python3xx.dll           <- the bundled Python runtime
     └── _internal\              <- everything else, pre-extracted
-        ├── (DuckDB, pyarrow, sqlglot, openpyxl, pywebview, …)
+        ├── (DuckDB, pyarrow, pandas, sqlglot, openpyxl, orjson, ijson, msal, pywebview, …)
         ├── frontend_dist\      <- the compiled SamQL UI
         └── base_library.zip, …
 

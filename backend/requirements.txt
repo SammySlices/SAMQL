@@ -1,23 +1,24 @@
 # =====================================================================
 # SamQL backend dependencies
 # =====================================================================
-# The SamQL backend runs on the Python standard library alone. None of
-# the packages below are required to load CSV/JSON files, run SQL on the
-# built-in SQLite engine, profile tables, chart results, or serve the UI.
+# Core runtime extras that every source install should have. Distribution
+# builds also install requirements-optional.txt (DuckDB, pyarrow, …) and
+# hard-verify those imports before packaging.
 #
-# Install only what you need. Each unlocks an optional capability and is
-# detected at runtime (and bundled by PyInstaller only if present).
+#   pip install -r backend/requirements.txt
+#   pip install -r requirements-optional.txt   # full analytics stack
 #
-#   pip install -r requirements.txt
-#
+# orjson is required for fast JSON array → NDJSON rewrite and API payloads.
+orjson>=3.9.0
+
 # ---------------------------------------------------------------------
-# Optional acceleration / format support
+# Optional acceleration / format support (see requirements-optional.txt)
 # ---------------------------------------------------------------------
 # duckdb         # fast analytical engine + native Parquet querying
 # pyarrow        # Parquet read/write, Arrow interchange
+# pandas         # Python node DataFrames (bundled in distribution builds)
 # sqlglot        # SQL formatting and cross-dialect transpilation
 # openpyxl       # .xlsx export
-# orjson         # faster JSON: API/JSON load parsing + result-page encoding
 # ijson          # streaming parser for very large JSON arrays (lower memory)
 # pyodbc         # connect to Microsoft SQL Server
 # pywebview      # open SamQL in a native desktop window instead of a tab

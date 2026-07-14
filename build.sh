@@ -37,6 +37,12 @@ pushd frontend >/dev/null
 npm ci
 npm run build
 popd >/dev/null
+if [ ! -f frontend/dist/index.html ] || [ ! -d frontend/dist/assets ]; then
+  echo "ERROR: frontend/dist incomplete after npm run build (need index.html + assets/)." >&2
+  echo "       Refusing to package a placeholder UI." >&2
+  exit 1
+fi
+echo "    OK: frontend/dist ready"
 
 echo "==> 2/4  Ensuring PyInstaller is available"
 if ! "$PY" -c "import PyInstaller" >/dev/null 2>&1; then
@@ -45,6 +51,12 @@ if ! "$PY" -c "import PyInstaller" >/dev/null 2>&1; then
 fi
 
 echo "==> 3/4  Installing full dependency set (bundled into the executable)"
+# Core required packages first (orjson, …), then the full optional stack.
+REQ_CORE="$ROOT/backend/requirements.txt"
+if [ -f "$REQ_CORE" ]; then
+  echo "    installing from backend/requirements.txt"
+  "$PY" -m pip install -r "$REQ_CORE" || true
+fi
 # Distribution builds MUST install the entire optional manifest into THIS
 # Python (the one running PyInstaller). Missing packages are not bundled and
 # recipients then see load failures that work on the builder's machine.
@@ -82,7 +94,7 @@ if ! "$PY" -c "import webview, webview.platforms.edgechromium, clr" >/dev/null 2
   echo ""
 fi
 # CRITICAL load/export stack must import or the build stops.
-for mod in duckdb pyarrow sqlglot openpyxl ijson orjson tzdata; do
+for mod in duckdb pyarrow pandas sqlglot openpyxl ijson orjson tzdata; do
   if ! "$PY" -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$mod') else 1)"; then
     echo "    *** critical dependency '$mod' is not importable after" \
          "install -- the packaged app would break. Fix the environment" \
@@ -90,7 +102,7 @@ for mod in duckdb pyarrow sqlglot openpyxl ijson orjson tzdata; do
     exit 1
   fi
 done
-echo "    OK: load stack importable (duckdb, pyarrow, sqlglot, openpyxl, ijson, orjson, tzdata)"
+echo "    OK: load stack importable (duckdb, pyarrow, pandas, sqlglot, openpyxl, ijson, orjson, tzdata)"
 if "$PY" -c "import duckdb" >/dev/null 2>&1; then
   echo "    OK: DuckDB is available -- the executable will use DuckDB by default."
 fi
@@ -119,6 +131,20 @@ if [ ! -e "$APP_OUT" ] && [ ! -d "dist/SamQL-AppWindow" ]; then
   exit 1
 fi
 echo "    OK: both targets present (SamQL + SamQL-AppWindow), shared payload"
+
+# Stage an exe-adjacent frontend_dist copy (frozen MEIPASS + .467 hot-swap).
+rm -rf dist/frontend_dist
+cp -R frontend/dist dist/frontend_dist
+if [ ! -f dist/frontend_dist/index.html ]; then
+  echo "ERROR: failed to stage dist/frontend_dist/index.html" >&2
+  exit 1
+fi
+echo "    OK: staged dist/frontend_dist (exe-adjacent UI)"
+if [ -d dist/SamQL-AppWindow ]; then
+  rm -rf dist/SamQL-AppWindow/frontend_dist
+  cp -R frontend/dist dist/SamQL-AppWindow/frontend_dist
+  echo "    OK: staged dist/SamQL-AppWindow/frontend_dist"
+fi
 
 # .500: the app icon SOURCE is the user's own file in the repo ROOT (samql.ico),
 # which the spec reads and embeds. The build must NOT write over it -- that

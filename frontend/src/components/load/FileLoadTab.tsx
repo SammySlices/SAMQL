@@ -64,9 +64,48 @@ export const FileLoadTab: React.FC<{
   const [skip, setSkip] = useState<Set<string>>(new Set());
   // fallback / override: type extra field names to skip (union with checkboxes)
   const [manualSkip, setManualSkip] = useState("");
+  const [preflight, setPreflight] = useState<{
+    ok: boolean;
+    size_mb: number;
+    warnings: string[];
+    blockers: string[];
+  } | null>(null);
+  const [preflightBusy, setPreflightBusy] = useState(false);
 
   const isExcel = /\.(xlsx|xlsm|xls)$/i.test(path.trim());
   const isJson = /\.(json|ndjson|jsonl)$/i.test(path.trim());
+
+  // Advise before large loads: DuckDB required, temp disk, Excel limits.
+  useEffect(() => {
+    const p = path.trim();
+    setPreflight(null);
+    if (!p) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setPreflightBusy(true);
+      api
+        .loadPreflight(p)
+        .then((r) => {
+          if (cancelled) return;
+          setPreflight({
+            ok: !!r.ok,
+            size_mb: r.size_mb || 0,
+            warnings: r.warnings || [],
+            blockers: r.blockers || [],
+          });
+        })
+        .catch(() => {
+          if (!cancelled) setPreflight(null);
+        })
+        .finally(() => {
+          if (!cancelled) setPreflightBusy(false);
+        });
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [path]);
 
   // When the chosen file is an Excel workbook, fetch its sheet names so the
   // user can pick which sheet to load and which row the header starts on.
@@ -146,6 +185,7 @@ export const FileLoadTab: React.FC<{
 
   const go = () => {
     if (!path.trim()) return;
+    if (preflight?.blockers?.length) return;
     const merged = new Set(skip);
     for (const t of manualSkip.split(","))
       if (t.trim()) merged.add(t.trim());
@@ -268,8 +308,8 @@ export const FileLoadTab: React.FC<{
               checked={shredOn}
               onChange={(e) => setShredOn(e.target.checked)}
             />{" "}
-            Flatten into relational tables (one per nested array, with join
-            keys)
+            Flatten into relational tables (off by default — slower on large
+            nested files; leave off unless you need joinable child tables)
           </label>
         </div>
       )}
@@ -437,8 +477,54 @@ export const FileLoadTab: React.FC<{
           </>
         ) : null}
       </div>
+      {(preflightBusy ||
+        (preflight &&
+          (preflight.warnings.length > 0 || preflight.blockers.length > 0))) && (
+        <div
+          data-testid="load-preflight"
+          style={{
+            marginTop: 12,
+            padding: "10px 12px",
+            borderRadius: 6,
+            border: "1px solid rgba(255,255,255,0.14)",
+            background: "rgba(0,0,0,0.18)",
+          }}
+        >
+          {preflightBusy && !preflight ? (
+            <div className="hint" style={{ margin: 0 }}>
+              Checking file size, temp disk, and engine…
+            </div>
+          ) : null}
+          {preflight && preflight.size_mb > 0 && (
+            <div className="hint" style={{ margin: "0 0 6px" }}>
+              About {preflight.size_mb.toLocaleString()} MB on disk.
+            </div>
+          )}
+          {preflight?.blockers.map((msg) => (
+            <div
+              key={msg}
+              style={{ color: "#e07070", fontSize: 12.5, marginBottom: 4 }}
+            >
+              {msg}
+            </div>
+          ))}
+          {preflight?.warnings.map((msg) => (
+            <div
+              key={msg}
+              style={{ color: "#c98a2b", fontSize: 12.5, marginBottom: 4 }}
+            >
+              {msg}
+            </div>
+          ))}
+        </div>
+      )}
       <div style={{ marginTop: 14, display: "flex", gap: 8 }}>
-        <button data-testid="load-submit" className="btn primary" disabled={!path.trim()} onClick={go}>
+        <button
+          data-testid="load-submit"
+          className="btn primary"
+          disabled={!path.trim() || !!preflight?.blockers?.length}
+          onClick={go}
+        >
           <Icon.Database size={15} /> Load
         </button>
         <button

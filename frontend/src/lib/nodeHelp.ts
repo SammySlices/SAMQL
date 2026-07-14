@@ -256,8 +256,8 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   },
   sharepoint: {
     title: "SharePoint",
-    what: "Loads items from a SharePoint list (Microsoft Graph or classic REST) into a table.",
-    use: "Set the site URL + list title, store a bearer token under a secret key, then Fetch.",
+    what: "Loads items from a SharePoint list or document library (Microsoft Graph or classic REST) into a table.",
+    use: "Pick an auth mode: pasted bearer token, Sign in (device code or browser — uses your Microsoft account), or Windows Integrated for classic on-prem. Set the site URL + list/folder, then Fetch.",
   },
   webscrape: {
     title: "Web scrape",
@@ -286,14 +286,18 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   },
   python: {
     title: "Python",
-    what: "Runs a Python script inside SamQL (bundled runtime — no separate install).",
-    use: "Wire an optional input for `df` / `rows` / `columns`, assign `out` to emit a table. Leave the input unwired to generate data from scratch.",
+    what: "Runs a Python script inside SamQL's bundled runtime (pandas included in distribution builds — no separate install).",
+    use:
+      "Wire an upstream table into the node's input. The script sees that table as `df` (a pandas DataFrame), plus `columns` / `rows` / `records`. Assign `out` to emit a table — typically `out = df` or another DataFrame. Leave the input unwired to generate data from scratch.",
     funcs: {
       label: "Script bindings",
       items: [
-        "df — list of row dicts (None if unwired)",
-        "rows / columns — raw tuples + names",
-        "out — list of dicts, {columns, rows}, or pandas DataFrame",
+        "df — pandas DataFrame of the input (None if unwired)",
+        "columns / rows — column names + row tuples",
+        "records — list of row dicts (same data as df)",
+        "out — DataFrame, list of dicts, or {columns, rows}",
+        "Example: out = df[df[\"score\"] > 50][[\"name\", \"score\"]]",
+        "import pandas as pd is allowed when pandas is bundled",
       ],
     },
   },

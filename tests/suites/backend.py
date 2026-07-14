@@ -85,7 +85,7 @@ def backend_tests(datadir, csv_path, json_path):
         need(isinstance(__version__, str) and __version__, "no version")
 
     def t_features():
-        for k in ("duckdb", "pyarrow", "sqlglot", "pyodbc", "openpyxl"):
+        for k in ("duckdb", "pyarrow", "sqlglot", "pyodbc", "openpyxl", "pandas"):
             need(k in feats, f"missing feature key {k}")
             need(isinstance(feats[k], bool), f"{k} not bool")
 
@@ -1638,7 +1638,8 @@ def backend_tests(datadir, csv_path, json_path):
             ("a truncated cell is expandable even when not structy",
              "looksStructy(f.text) || truncated" in dg),
             ("the fetch addresses the grid's exact view",
-             "row: idx" in dg and "sort_col: sortCol" in dg
+             ("row: rowBase + idx" in dg or "row: idx" in dg)
+             and "sort_col: sortCol" in dg
              and "descending," in dg and "cellFetch.filters" in dg),
             ("fetch failure keeps the preview and says why",
              "couldn't fetch full value" in dg),
@@ -1830,6 +1831,7 @@ def backend_tests(datadir, csv_path, json_path):
         views = []
         stub = _t.SimpleNamespace(
             write_lock=_th.Lock(), _cancel=_th.Event(), conn=FakeConn(),
+            table_origins={}, table_sources={},
             create_view_from_file=lambda name, p, kind:
                 views.append((name, p, kind)) or name)
         load = DuckDBManager.load_file_to_parquet_view.__get__(
@@ -2318,10 +2320,10 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
-    def t_orderby_skips_parquet_path():
-        # Querying gap: a query with an explicit ORDER BY must take the
-        # order-preserving drain, NOT the parquet store (whose paging relies
-        # on a synthetic row order).
+    def t_orderby_uses_parquet_path():
+        # Large-result fix: ORDER BY stays on the Parquet COPY path (with
+        # preserve_insertion_order) instead of draining millions of rows
+        # through Python / DiskBackedRows.
         import types as _t
         from samql_core import session as S
         hits = {"pq": 0, "cursor": 0}
@@ -2338,11 +2340,43 @@ def backend_tests(datadir, csv_path, json_path):
             _qualify_catalog_sql=lambda sql, t: sql)
         inner = S.Session._exec_target_inner.__get__(sess, S.Session)
         inner("SELECT * FROM t ORDER BY a", "__duckdb__", eng, "duckdb")
-        need(hits["pq"] == 0 and hits["cursor"] == 1,
-             "ORDER BY routes to the drain, not the parquet store")
+        need(hits["pq"] == 1 and hits["cursor"] == 0,
+             "ORDER BY routes to the parquet store, not the Python drain")
         inner("SELECT * FROM t", "__duckdb__", eng, "duckdb")
-        need(hits["pq"] == 1,
-             "without ORDER BY the parquet fast path is used")
+        need(hits["pq"] == 2,
+             "unordered reads still use the parquet fast path")
+
+    def t_result_byte_cap_and_export_stream():
+        # Byte ceiling + streaming parquet export (large-result priority fixes).
+        import inspect
+        from samql_core import session as S
+        old = os.environ.get("SAMQL_MAX_RESULT_GB")
+        try:
+            os.environ.pop("SAMQL_MAX_RESULT_GB", None)
+            eq(S.Session()._result_byte_cap(), 8 * 1024 ** 3,
+               "default result byte cap is 8 GiB")
+            os.environ["SAMQL_MAX_RESULT_GB"] = "2"
+            eq(S.Session()._result_byte_cap(), 2 * 1024 ** 3,
+               "SAMQL_MAX_RESULT_GB override")
+            os.environ["SAMQL_MAX_RESULT_GB"] = "0"
+            need(S.Session()._result_byte_cap() is None,
+                 "0 disables the byte cap")
+        finally:
+            if old is None:
+                os.environ.pop("SAMQL_MAX_RESULT_GB", None)
+            else:
+                os.environ["SAMQL_MAX_RESULT_GB"] = old
+        # Streaming export never builds one giant column dict.
+        src = inspect.getsource(S.Session._export_parquet)
+        need("ParquetWriter" in src and "chunk" in src
+             and "data[c].append" not in src.replace("batch_cols[c].append", ""),
+             "parquet export streams via ParquetWriter batches")
+        need("query_id" in inspect.signature(S.Session.page).parameters,
+             "page() accepts query_id for cancellable sorts")
+        need("_materialize_snapshot" in open(
+                os.path.join(BACKEND, "samql_core", "rows.py"),
+                encoding="utf-8").read(),
+             "sort/filter materialize snapshot exists")
 
     def t_node_cycle_rejected():
         # Node connections: a cyclic edge set is REJECTED with a clear
@@ -3042,8 +3076,8 @@ def backend_tests(datadir, csv_path, json_path):
         # Uploads stream to disk, but a finite default prevents a request from
         # filling the drive. Administrators can tune it or set 0 explicitly.
         import server as _srv
-        eq(_srv._upload_cap_bytes(), 4096 * 1024 * 1024,
-           "finite 4 GB ceiling by default")
+        eq(_srv._upload_cap_bytes(), 16384 * 1024 * 1024,
+           "finite 16 GB ceiling by default (multi-GB CSV drag-drop)")
         os.environ["SAMQL_UPLOAD_MB"] = "1"
         try:
             eq(_srv._upload_cap_bytes(), 1024 * 1024, "env cap honored")
@@ -3866,13 +3900,17 @@ def backend_tests(datadir, csv_path, json_path):
              "pip install -r" in ps and "requirements-optional" in ps
              and "pip install -r" in sh and "requirements-optional" in sh),
             ("both builds HARD-VERIFY the full load stack",
-             '"duckdb", "pyarrow", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata"'
+             '"duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata"'
              in ps
              and "exit 1" in ps
-             and "for mod in duckdb pyarrow sqlglot openpyxl ijson orjson tzdata"
+             and "for mod in duckdb pyarrow pandas sqlglot openpyxl ijson orjson tzdata"
              in sh),
+            ("both builds install core backend/requirements.txt (orjson)",
+             "backend/requirements.txt" in ps.replace("\\", "/")
+             or "backend\\requirements.txt" in ps
+             or "backend/requirements.txt" in sh),
             ("PyInstaller refuses an incomplete load stack",
-             'REQUIRED = ["duckdb", "pyarrow", "sqlglot", "openpyxl", "orjson"'
+             'REQUIRED = ["duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "orjson"'
              in spec
              and "refusing to package an incomplete app" in spec),
             ("probes are stderr-free (PS 5.1 Stop+redirect immunity, "
@@ -11327,8 +11365,10 @@ def backend_tests(datadir, csv_path, json_path):
              "reuse cleanup retries an interrupted DROP")
         need('DROP VIEW IF EXISTS "temp"."main"."%s"' in sess
              and 'for reg in ("view_backing", "table_sources",'
-                 ' "table_columns"):' in sess,
-             "_drop_named kills temp squatters and purges engine registries")
+                 ' "table_columns",' in sess
+             and '"table_origins")' in sess,
+             "_drop_named kills temp squatters and purges engine registries "
+             "(including table_origins)")
         la = open(os.path.join(BACKEND, "launcher_app.py"),
                   encoding="utf-8").read()
         need("SetCurrentProcessExplicitAppUserModelID" in la
@@ -15901,8 +15941,9 @@ def backend_tests(datadir, csv_path, json_path):
             need("disk full" in str(e), "the original error surfaces")
         src = open(os.path.join(BACKEND, "samql_core", "engines.py"),
                    encoding="utf-8").read()
-        eq(src.count("exec_copy_parquet(self.conn,"), 2,
-           "both cache writers route through the retrying copy")
+        need(src.count("exec_copy_parquet(") >= 3,
+             "def + both cache writers route through the retrying copy "
+             "(got %d refs)" % src.count("exec_copy_parquet("))
 
         class _ThrConn:
             def __init__(self, threads):
@@ -17498,6 +17539,10 @@ def backend_tests(datadir, csv_path, json_path):
 
         class _O:
             _BARE_SELECT = S.Session._BARE_SELECT
+            _SIMPLE_SELECT = S.Session._SIMPLE_SELECT
+            _parse_simple_select_cols = staticmethod(
+                S.Session._parse_simple_select_cols)
+            _parquet_table_source = S.Session._parquet_table_source
         zc = S.Session._zero_copy_source
         o = _O()
         r = zc(o, _Eng(), "SELECT * FROM sophis_trade")
@@ -17508,8 +17553,14 @@ def backend_tests(datadir, csv_path, json_path):
              "uncapped, case-insensitively")
         need(zc(o, _Eng(), 'select * from "sophis_Trade" ;') is not None,
              "quoted + trailing semicolon still matches")
+        # Simple projections zero-copy too (column list pushed at read time).
+        r2 = zc(o, _Eng(), "SELECT code FROM sophis_trade")
+        need(r2 is not None and r2[0] == ["code"]
+             and r2[1]._path == "C:/t/fc_a.parquet",
+             "simple projection borrows the source parquet: %r" % (r2,))
         for bad in ("SELECT * FROM sophis_trade WHERE 1=1",
-                    "SELECT code FROM sophis_trade",
+                    "SELECT code AS c FROM sophis_trade",
+                    "SELECT f(code) FROM sophis_trade",
                     "SELECT * FROM plain",
                     "SELECT * FROM missing"):
             need(zc(o, _Eng(), bad) is None,
@@ -17806,10 +17857,25 @@ def backend_tests(datadir, csv_path, json_path):
              and '"__rn"' not in ran[-1]
              and "WHERE" not in ran[-1],
              "an export streams in raw file order (no synthesized sort)")
+        # Sorted pages materialize once to a snapshot, then page with
+        # file_row_number ranges (not repeating TopN every scroll).
+        mat_calls = []
+
+        def _fake_mat(order, where="", params=None):
+            mat_calls.append(order)
+            snap = ParquetResultStore(_Eng(), "C:\\t\\qv_sorted.parquet",
+                                      ["a", "b"])
+            snap._n = 1000
+            return snap
+
+        store._materialize_snapshot = _fake_mat
         sv = store.sorted_view(0, descending=True)
+        need(mat_calls and 'ORDER BY "a" DESC' in mat_calls[0],
+             "sorted_view materializes with the user ORDER BY")
         _ = sv[0:50]
-        need('ORDER BY "a" DESC' in ran[-1] and "LIMIT 50" in ran[-1],
-             "a USER sort keeps the legacy TopN path")
+        need("WHERE file_row_number >= 0" in ran[-1]
+             and "file_row_number < 50" in ran[-1],
+             "after materialize, sorted pages use file_row_number ranges")
 
     def t_stall_escalation():
         # On-box 2026-07-02: a cancelled query stayed wedged in a native
@@ -18251,20 +18317,26 @@ def backend_tests(datadir, csv_path, json_path):
              "a tolerant newline-delimited retry skips bad lines")
         need(any("read_json_auto" in r for r in nd),
              "a final auto-detect fallback covers a mislabelled extension")
-        need(all("maximum_object_size=268435456" in r for r in nd),
-             "every ndjson reader uses the bounded 256 MiB default")
+        need(any("read_ndjson_objects" in r for r in nd),
+             "typed JSON falls back to JSON-objects (VARCHAR-safe) reader")
+        need(all("maximum_object_size=268435456" in r
+                 for r in nd if "read_ndjson_objects" not in r),
+             "every typed ndjson reader uses the bounded 256 MiB default")
         # Adaptive engines can sit at the 512 MiB floor; without a clamp the
         # default 256 MiB object size alone requests a ~512 MiB parser buffer
         # and nested JSON loads OOM before any rows are read.
         tight = E._json_readers(fwd, ndjson=True, memory_limit_mb=512)
-        need(all("maximum_object_size=134217728" in r for r in tight),
+        need(all("maximum_object_size=134217728" in r
+                 for r in tight if "read_ndjson_objects" not in r),
              "object cap clamps to ~1/4 of a tight engine budget")
         eq(E._json_object_cap_bytes(512), 134217728,
            "_json_object_cap_bytes honors memory_limit_mb")
         eq(E._json_object_cap_bytes(None), 268435456,
            "no memory hint keeps the 256 MiB default")
         shallow = E._json_readers(fwd, ndjson=True, maximum_depth=2)
-        need(all("maximum_depth=2" in r for r in shallow),
+        need(all("maximum_depth=2" in r for r in shallow
+                 if "read_ndjson_objects" not in r
+                 and "read_json_objects" not in r),
              "flatten-off readers can pin maximum_depth")
         as_json = E._json_readers(fwd, ndjson=True, maximum_depth=0)
         need(all("read_ndjson_objects" in r or "read_json_objects" in r
@@ -18294,7 +18366,8 @@ def backend_tests(datadir, csv_path, json_path):
         try:
             os.environ["SAMQL_JSON_OBJECT_MB"] = "64"
             need(all("maximum_object_size=67108864" in r
-                     for r in E._json_readers(fwd, ndjson=True)),
+                     for r in E._json_readers(fwd, ndjson=True)
+                     if "read_ndjson_objects" not in r),
                  "SAMQL_JSON_OBJECT_MB overrides the parser ceiling")
         finally:
             if old_cap is None:
@@ -18308,6 +18381,8 @@ def backend_tests(datadir, csv_path, json_path):
         need(any("auto_detect=true" in r and "ignore_errors=true" in r
                  for r in js),
              "plain json keeps a tolerant retry")
+        need(any("read_json_objects" in r for r in js),
+             "plain json falls back to objects reader on type failures")
         old_j = os.environ.get("SAMQL_JSON_ONDISK_MB")
         try:
             os.environ.pop("SAMQL_JSON_ONDISK_MB", None)
@@ -18369,9 +18444,8 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_duckdb_ndjson_array_wrapped():
         # End-to-end: NDJSON whose every line is a single-element array wrapping
-        # an object ([{...}]) used to load as one opaque STRUCT[] column. Flatten
-        # on shreds that list so the JSON keys become real columns. Skips when
-        # duckdb is absent.
+        # an object ([{...}]) used to load as one opaque STRUCT[] column. With
+        # flatten/shred ON, keys become real columns. Skips when duckdb is absent.
         if not feats["duckdb"]:
             skip("duckdb not installed")
         s = _fresh_session()
@@ -18381,27 +18455,45 @@ def backend_tests(datadir, csv_path, json_path):
             for i in range(120):
                 f.write(json.dumps([{"id": i, "name": f"r{i}"}]) + "\n")
         try:
-            out = s.load_file(p, destination="duckdb", base_name="wrap")
+            out = s.load_file(p, destination="duckdb", base_name="wrap",
+                              flatten=False, shred=True)
             need(out and (out[0].get("table") or out[0].get("name")),
                  "array-wrapped load returned a table: %r" % out)
-            tbl = out[0].get("table") or out[0].get("name")
-            cols = [c.lower() for c in (
-                getattr(s, "duckdb", None)
-                and getattr(s.duckdb, "table_columns", {}).get(tbl)
-                or out[0].get("columns")
-                or [])]
-            if not cols:
-                cols = [c.lower() for c in s.run_query(
-                    'SELECT * FROM "%s" LIMIT 0' % tbl,
-                    target="__duckdb__")["columns"]]
-            need("id" in cols and "name" in cols,
-                 "array-wrapped ndjson keys became columns: %s" % cols)
+            # Prefer a shredded child/expanded table that exposes id+name.
+            candidates = []
+            for t in out:
+                nm = t.get("table") or t.get("name")
+                if nm:
+                    candidates.append(nm)
+                for child in (t.get("shredded") or []):
+                    candidates.append(child)
+            found = None
+            cols = []
+            for tbl in candidates:
+                c = [x.lower() for x in (
+                    getattr(s, "duckdb", None)
+                    and getattr(s.duckdb, "table_columns", {}).get(tbl)
+                    or [])]
+                if not c:
+                    try:
+                        c = [x.lower() for x in s.run_query(
+                            'SELECT * FROM "%s" LIMIT 0' % tbl,
+                            target="__duckdb__")["columns"]]
+                    except Exception:
+                        c = []
+                if "id" in c and "name" in c:
+                    found, cols = tbl, c
+                    break
+            need(found and "id" in cols and "name" in cols,
+                 "array-wrapped ndjson keys became columns: %s (tables=%r)"
+                 % (cols, candidates))
             need(len(cols) >= 2, "expanded to multiple columns, not one struct")
-            n = s.run_query('SELECT COUNT(*) FROM "%s"' % tbl,
+            n = s.run_query('SELECT COUNT(*) FROM "%s"' % found,
                             target="__duckdb__")["rows"][0][0]
             eq(n, 120, "one row per wrapped object")
         finally:
             s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
 
     def t_json_stream_to_ndjson():
         # The large-array pre-pass now reuses the shared streaming reader
@@ -18468,6 +18560,26 @@ def backend_tests(datadir, csv_path, json_path):
             raised.append(True)
         need(raised,
              "should_cancel() True aborts the read with InterruptedError")
+
+        # ijson yajl yields decimal.Decimal for numbers. Rewrite must serialize
+        # them (orjson default / use_float) — otherwise the first record raises
+        # and flatten-off falls into a multi-GB stream-flatten stall.
+        from decimal import Decimal as _Dec
+        need(E._json_dumps_default(_Dec("42")) == 42,
+             "Decimal integers dump as int")
+        need(isinstance(E._json_dumps_default(_Dec("1.5")), float),
+             "Decimal fractions dump as float")
+        deep = [{"id": i, "qty": i + 0.5,
+                 "nest": {"a": i, "b": {"c": [i, i + 1]}}}
+                for i in range(80)]
+        deep_path = write("deep_arr.json", json.dumps(deep))
+        deep_dst = os.path.join(dd, "deep.ndjson")
+        nd = E._write_ndjson_from_stream(deep_path, deep_dst)
+        eq(nd, 80, "deep array rewrite survives ijson Decimals")
+        got_d = [json.loads(x) for x in open(deep_dst, encoding="utf-8")
+                 if x.strip()]
+        eq(len(got_d), 80, "deep NDJSON line count")
+        eq(got_d[7]["id"], 7, "deep rewrite preserves ids")
 
         # _json_source_for_read rewrites every non-NDJSON shape to NDJSON;
         # true NDJSON is read in place.
@@ -18554,8 +18666,12 @@ def backend_tests(datadir, csv_path, json_path):
                         root_name = root.get("name") or root.get("table")
                         eq(root.get("json_depth"), 2,
                            "%s flatten-off uses depth=2" % fmt)
-                        eq(root.get("storage"), "parquet-cache",
-                           "%s flatten-off is Parquet cache: %s" % (fmt, root))
+                        # Small fixtures materialize in-engine (CTAS + expand).
+                        # Parquet cache is reserved for files at/above the
+                        # JSON on-disk threshold (see large-load tests).
+                        need(root.get("storage") in (None, "parquet-cache",
+                                                     "duckdb", "table"),
+                             "%s flatten-off storage ok: %s" % (fmt, root))
                         if fmt == "object":
                             n = s.run_query(
                                 'SELECT COUNT(*) FROM "%s"' % root_name,
@@ -18637,7 +18753,8 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_duckdb_json_depth0_parquet_column():
         # Flatten-off with SAMQL_JSON_MAX_DEPTH=0 lands one JSON column per row
-        # (the safest nested-off shape for multi-GB files).
+        # (the safest nested-off shape for multi-GB files). Small fixtures stay
+        # in-engine CTAS; Parquet is used once size hits the on-disk threshold.
         if not feats["duckdb"]:
             skip("duckdb not installed")
         s = _fresh_session()
@@ -18652,8 +18769,9 @@ def backend_tests(datadir, csv_path, json_path):
             out = s.load_file(p, destination="duckdb", base_name="j0",
                               flatten=False)
             eq(out[0].get("json_depth"), 0, "depth 0 recorded on load")
-            eq(out[0].get("storage"), "parquet-cache",
-               "depth 0 still uses Parquet cache")
+            need(out[0].get("storage") in (None, "parquet-cache",
+                                           "duckdb", "table"),
+                 "depth 0 storage ok: %s" % out[0])
             cols = [c.lower() for c in out[0]["columns"]]
             need(cols == ["json"] or "json" in cols,
                  "depth 0 exposes a json column: %s" % cols)
@@ -18762,6 +18880,293 @@ def backend_tests(datadir, csv_path, json_path):
                 os.environ["SAMQL_JSON_STREAM_FLATTEN_MB"] = old
             s.shutdown()
 
+    def t_flatten_off_array_stays_nested_not_stream_flatten():
+        # Regression: array→NDJSON rewrite used to TypeError on ijson Decimals,
+        # then flatten-off silently stream-flattened into many relational
+        # tables (looked like a stall on multi-GB files). Flatten-off must
+        # keep a single nested / Parquet-backed table.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        dd = tempfile.mkdtemp()
+        rows = [{"id": i, "sym": "X%d" % i,
+                 "legs": [{"n": i, "cf": [{"a": i}, {"a": i + 1}]}],
+                 "nest": {"lvl": {"deep": {"v": i}}}}
+                for i in range(120)]
+        p = os.path.join(dd, "arr.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(rows, f)
+        old = {k: os.environ.get(k) for k in (
+            "SAMQL_JSON_ONDISK_MB", "SAMQL_JSON_STREAM_MB",
+            "SAMQL_ONDISK_MB", "SAMQL_ONDISK_HARD_MB", "SAMQL_FILECACHE")}
+        os.environ["SAMQL_JSON_ONDISK_MB"] = "0.000001"
+        os.environ["SAMQL_JSON_STREAM_MB"] = "0.000001"
+        os.environ["SAMQL_ONDISK_MB"] = "0.000001"
+        os.environ["SAMQL_ONDISK_HARD_MB"] = "0"
+        os.environ["SAMQL_FILECACHE"] = "0"
+        try:
+            out = s.load_file(p, destination="duckdb", base_name="nestarr",
+                              flatten=False, shred=False)
+            eq(len(out), 1, "flatten-off keeps one table, not stream-flatten: %r"
+               % out)
+            need(not any(t.get("shredded") or t.get("method") == "stream-flatten"
+                         for t in out),
+                 "no shred/stream-flatten on flatten-off: %r" % out)
+            need(out[0].get("storage") in (None, "parquet-cache", "duckdb",
+                                           "table"),
+                 "flatten-off storage ok: %r" % out[0])
+            n = s.run_query('SELECT COUNT(*) FROM "nestarr"',
+                            target="__duckdb__")["rows"][0][0]
+            eq(n, 120, "every array element loaded")
+            cols = [c.lower() for c in (out[0].get("columns") or [])]
+            need("id" in cols or "json" in cols,
+                 "nested columns present (not shredded soup): %s" % cols)
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
+
+    def t_flatten_off_native_fail_does_not_stream_flatten():
+        # Flatten-off must not recover via stream-flatten (relational shred).
+        from samql_core import loaders as L
+        calls = {"stream": 0}
+
+        def _fake_stream(*_a, **_k):
+            calls["stream"] += 1
+            return [{"name": "t", "engine": "duckdb",
+                     "method": "stream-flatten"}]
+
+        def _fake_native(*_a, **_k):
+            raise RuntimeError("simulated nested load failure")
+
+        o_sf, o_n = L._stream_flatten_into_duckdb, L._load_into_duckdb
+        L._stream_flatten_into_duckdb = _fake_stream
+        L._load_into_duckdb = _fake_native
+        dd = tempfile.mkdtemp()
+        try:
+            p = os.path.join(dd, "arr.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write('[{"a":1}]')
+
+            class _Sess:
+                def get_duckdb(self):
+                    raise AssertionError("should not open duckdb here")
+
+            raised = None
+            try:
+                L._load_json_duckdb(_Sess(), p, "arr", flatten=False)
+            except RuntimeError as e:
+                raised = e
+            need(raised is not None, "flatten-off surfaces the error")
+            need("Flatten off" in str(raised),
+                 "error mentions Flatten off: %s" % raised)
+            eq(calls["stream"], 0,
+               "stream-flatten must not run on flatten-off failure")
+        finally:
+            L._stream_flatten_into_duckdb = o_sf
+            L._load_into_duckdb = o_n
+            shutil.rmtree(dd, ignore_errors=True)
+
+    def t_flatten_off_parquet_nested_field_tree_and_page():
+        # Flatten-off Parquet cache: DESCRIBE shows opaque JSON / JSON[] so the
+        # sidebar used to say "no nested fields". Sample live values for a real
+        # field tree. Also: SELECT * via zero-copy ParquetResultStore must page
+        # non-empty rows (count matching a non-empty first page).
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        from samql_core.diagnostics import profile_json_load, _resolve_path
+        s = _fresh_session()
+        dd = tempfile.mkdtemp()
+        rows = [{"id": i,
+                 "legs": [{"n": i, "cf": [{"amt": i, "ccy": "USD"}]}],
+                 "nest": {"deep": {"v": i, "tag": "t%d" % i}}}
+                for i in range(40)]
+        p = os.path.join(dd, "nested.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(rows, f)
+        old = {k: os.environ.get(k) for k in (
+            "SAMQL_JSON_ONDISK_MB", "SAMQL_ONDISK_MB",
+            "SAMQL_ONDISK_HARD_MB", "SAMQL_FILECACHE")}
+        os.environ["SAMQL_ONDISK_MB"] = "0.000001"
+        os.environ["SAMQL_ONDISK_HARD_MB"] = "0"
+        os.environ["SAMQL_FILECACHE"] = "0"
+        try:
+            out = s.load_file(p, destination="duckdb", base_name="nested_ft",
+                              flatten=False)
+            need(out and out[0].get("storage") == "parquet-cache",
+                 "forced Parquet-cache load: %r" % out)
+            name = out[0]["name"]
+            src = s.duckdb.table_sources.get(name)
+            need(str(src).lower().endswith(".parquet"),
+                 "table_sources is the Parquet cache: %r" % src)
+            origin = (getattr(s.duckdb, "table_origins", {}) or {}).get(name)
+            need(origin and os.path.samefile(origin, p),
+                 "table_origins keeps the original JSON: %r" % origin)
+            resolved = _resolve_path(s, name, None)
+            need(resolved and os.path.samefile(resolved, p),
+                 "_resolve_path prefers origin over cache: %r" % resolved)
+
+            types = s.duckdb._column_types_raw(name)
+            # Opaque JSON column (depth=0 style) via a dedicated load
+            opaque = s.duckdb.load_file_to_parquet_view(
+                "opaque_ft", p, "json", json_depth=0)
+            otypes = s.duckdb._column_types_raw(opaque)
+            ocol = next(iter(otypes))
+            ot = s.column_field_tree("duckdb", opaque, ocol)
+            onames = [f["name"] for f in ot.get("fields") or []]
+            need("legs" in onames and "nest" in onames and "id" in onames,
+                 "sampled field tree lists real JSON keys: %r" % onames[:12])
+            need(ot.get("source") == "sampled-values",
+                 "opaque JSON tree marks sampled-values source")
+
+            # Depth-2 columns: JSON[] / STRUCT(... JSON) also need sampling
+            for col in types:
+                if "JSON" not in (types[col] or "").upper():
+                    continue
+                tree = s.column_field_tree("duckdb", name, col)
+                names = [f["name"] for f in tree.get("fields") or []]
+                need(names and names != ["(element)"],
+                     "%s field tree not empty/opaque: type=%s names=%r"
+                     % (col, types[col], names[:10]))
+                if col == "legs":
+                    need("n" in names or "cf" in names or "amt" in names,
+                         "legs samples nested keys: %r" % names[:12])
+                if col == "nest":
+                    need("deep" in names or "v" in names or "tag" in names,
+                         "nest samples nested keys: %r" % names[:12])
+
+            q = s.run_query('SELECT * FROM "%s"' % name, target="__duckdb__")
+            eq(q.get("total_rows"), len(rows), "query total_rows")
+            need(len(q.get("rows") or []) > 0,
+                 "inline first page is non-empty")
+            store = s._results[q["result_id"]].store
+            need(type(store).__name__ == "ParquetResultStore",
+                 "zero-copy ParquetResultStore path: %s"
+                 % type(store).__name__)
+            page = s.page(q["result_id"], 0, 10)
+            eq(page.get("total_rows"), len(rows), "page total_rows")
+            need(len(page.get("rows") or []) == 10,
+                 "page returns 10 rows, not empty: %r"
+                 % (page.get("rows") or [])[:1])
+            need(page["rows"][0][0] is not None
+                 or any(c is not None for c in page["rows"][0]),
+                 "first page row has cell data: %r" % page["rows"][0])
+
+            # Profiler includes the flatten-off Parquet path timing
+            pr = profile_json_load(p, max_records=15, session=s)
+            need(isinstance(pr.get("flatten_off_parquet"), dict),
+                 "profiler reports flatten_off_parquet: %r"
+                 % list(pr.keys())[:20])
+            fop = pr["flatten_off_parquet"]
+            need(not fop.get("skipped") or fop.get("reason"),
+                 "parquet profile ran or explained skip: %r" % fop)
+            if not fop.get("skipped") and not fop.get("error"):
+                need(fop.get("maximum_depth") == 2,
+                     "profiler uses depth=2: %r" % fop)
+                need("native_parquet_s" in fop,
+                     "profiler times native Parquet COPY: %r" % fop)
+            need("sampling" in (pr.get("nested_discovery") or "").lower()
+                 and "live cell" in (pr.get("nested_discovery") or "").lower(),
+                 "profiler notes live-cell nested discovery: %r"
+                 % pr.get("nested_discovery"))
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
+
+    def t_json_array_element_field_tree_double_encoded():
+        # Flatten-off / opaque JSON often stores arrays as JSON / JSON[] whose
+        # elements are *stringified* objects (double-encoded). Field discovery
+        # must expand those under "(element)" so the sidebar shows real keys
+        # (id, version, cashflow, ...) — not a dead-end "(element)" leaf.
+        from samql_core.diagnostics import (json_values_to_field_tree,
+                                            _coerce_json_sample)
+        objs = [
+            {"id": 1, "version": 5,
+             "cashflow": [{"type": "FIXED", "amt": 1.0, "ccy": "USD"}]},
+            {"id": 2, "version": 6,
+             "cashflow": [{"type": "FLOAT", "amt": 2.0, "ccy": "EUR"}]},
+        ]
+        # Cell is a JSON array of stringified objects (user-reported shape).
+        cell = json.dumps([json.dumps(o) for o in objs])
+        coerced = _coerce_json_sample(cell)
+        need(isinstance(coerced, list) and isinstance(coerced[0], dict),
+             "coerce peels double-encoded array elements: %r"
+             % (type(coerced[0]).__name__ if coerced else None,))
+        need(coerced[0].get("id") == 1 and "cashflow" in coerced[0],
+             "coerced element has object keys: %r" % (coerced[0] if coerced else None,))
+        ft = json_values_to_field_tree([cell], colname="data")
+        names = [n["name"] for n in ft.get("nodes") or []]
+        need("(element)" in names, "array wrapper present: %r" % names[:12])
+        for key in ("id", "version", "cashflow"):
+            need(key in names,
+                 "nested key %r under (element): %r" % (key, names[:16]))
+        need("type" in names or "amt" in names or "ccy" in names,
+             "cashflow element fields visible: %r" % names[:20])
+
+        # JSON[] cell: Python list of stringified objects (DuckDB read shape).
+        listed = [json.dumps(o) for o in objs]
+        ft2 = json_values_to_field_tree([listed], colname="data")
+        names2 = [n["name"] for n in ft2.get("nodes") or []]
+        need("id" in names2 and "cashflow" in names2,
+             "JSON[] of stringified objects expands: %r" % names2[:16])
+
+        if not feats["duckdb"]:
+            return
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            # Live DuckDB JSON cell matching the double-encoded array shape.
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE dbl_el AS SELECT ?::JSON AS data",
+                [cell])
+            tree = s.column_field_tree("duckdb", "dbl_el", "data")
+            tnames = [f["name"] for f in tree.get("fields") or []]
+            need(tree.get("source") == "sampled-values",
+                 "sampled-values source for opaque JSON array")
+            need(tnames != ["(element)"],
+                 "not a dead-end (element) leaf: %r" % tnames[:12])
+            for key in ("id", "version", "cashflow"):
+                need(key in tnames,
+                     "column_field_tree lists %r under (element): %r"
+                     % (key, tnames[:16]))
+            by = {f["name"] + ":" + str(f["depth"]): f for f in tree["fields"]}
+            el = by.get("(element):1") or {}
+            need(el.get("kind") in ("struct", "array"),
+                 "(element) is expandable, not opaque scalar: %r" % el)
+            # Access recipes still hop the array for nested keys.
+            id_acc = (by.get("id:2") or {}).get("access") or {}
+            need(id_acc.get("first") and "[1]" in id_acc["first"],
+                 "id recipe hops array: %r" % id_acc)
+            cf = by.get("cashflow:2") or {}
+            need((cf.get("access") or {}).get("recursive")
+                 or (cf.get("kind") == "array"),
+                 "cashflow keeps array access recipe: %r" % cf.get("access"))
+
+            # JSON[] column of stringified records (flatten-off nested array).
+            duck.conn.execute("""
+                CREATE OR REPLACE TABLE jarr_el AS
+                SELECT CAST([
+                  '{"id":1,"version":5,"cashflow":[{"type":"FIXED","amt":1.0}]}',
+                  '{"id":2,"version":6,"cashflow":[{"type":"FLOAT","amt":2.0}]}'
+                ] AS JSON[]) AS data
+            """)
+            jt = s.column_field_tree("duckdb", "jarr_el", "data")
+            jnames = [f["name"] for f in jt.get("fields") or []]
+            need("id" in jnames and "version" in jnames and "cashflow" in jnames,
+                 "JSON[] field tree nests object keys under (element): %r"
+                 % jnames[:16])
+        finally:
+            s.shutdown()
+
     def t_duckdb_load_cancel_aborts_read():
         # interrupt() trips the cooperative flag so the Python array pre-pass
         # aborts mid-read -- conn.interrupt() alone can't stop it, since no
@@ -18805,13 +19210,14 @@ def backend_tests(datadir, csv_path, json_path):
         from samql_core import engines as E
         r = E._csv_readers("d/f.csv")
         eq(len(r), 2, "fast + tolerant reader")
-        eq(r[0], "read_csv_auto('d/f.csv', sample_size=204800)",
-           "fast typed reader")
+        eq(r[0], "read_csv_auto('d/f.csv', sample_size=204800, nullstr='')",
+           "fast typed reader treats blanks as NULL")
         eq(r[1], "read_csv_auto('d/f.csv', all_varchar=true, "
                  "ignore_errors=true, sample_size=204800)",
            "tolerant all-text reader")
         rt = E._csv_readers("d/f.tsv", "\t")
-        need("delim='\\t'" in rt[0], "tab delimiter pinned: %s" % rt[0])
+        need("delim='\\t'" in rt[0] and "nullstr=''" in rt[0],
+             "tab delimiter pinned: %s" % rt[0])
         rp = E._csv_readers("d/f.psv", "|")
         need("delim='|'" in rp[0], "other delimiter pinned: %s" % rp[0])
 
@@ -19192,6 +19598,177 @@ def backend_tests(datadir, csv_path, json_path):
              "columnarize stringifies only the text columns")
         need(E._columnarize([], ["a", "b"], {"b"}) == [([], False), ([], True)],
              "columnarize handles an empty batch")
+        blank = E._columnarize([("", 1), ("  ", 2), (3, 3)],
+                               ["a", "b"], set())
+        need(blank[0][0] == [None, None, 3] and blank[0][1] is False,
+             "columnarize maps blank strings to NULL on typed columns")
+
+    def t_conversion_errors_fall_back_to_varchar():
+        # Blank / mixed cells must never abort CSV or JSON loads with
+        # "Could not convert string '' to INT". DuckDB streaming inserts
+        # coerce blanks to NULL and widen to VARCHAR on harder mismatches;
+        # CSV readers use nullstr='' then all_varchar.
+        from samql_core import engines as E
+        need(E._is_type_conversion_error(
+                RuntimeError("Conversion Error: Could not convert string "
+                             "'' to INT64")),
+             "classic empty→int is classified as conversion")
+        need(E._is_type_conversion_error(
+                RuntimeError("ConversionException: could not convert string "
+                             "x to INTEGER")),
+             "ConversionException phrasing is classified")
+        need(not E._is_type_conversion_error(RuntimeError("out of memory")),
+             "OOM is not a type conversion")
+        eq(E._empty_to_null(""), None, "empty → NULL")
+        eq(E._empty_to_null("  "), None, "whitespace → NULL")
+        eq(E._empty_to_null("0"), "0", "non-blank kept")
+
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        duck = s.get_duckdb()
+        need(duck is not None, "DuckDB manager available")
+        dd = tempfile.mkdtemp()
+        try:
+            # Streaming insert: ints in sample, blank later (the reported bug).
+            name, n = duck.add_table_streaming(
+                "blank_int", ["id", "qty"],
+                iter([(1, 10), (2, 20), (3, ""), (4, 40), (5, "x")]),
+                chunk=2)
+            eq(n, 5, "every row survived blank/mixed qty: %s" % n)
+            rows = s.run_query(
+                'SELECT id, qty FROM "%s" ORDER BY id' % name,
+                target="__duckdb__")["rows"]
+            eq(len(rows), 5, "all five rows queryable")
+            # Blank became NULL (or '', after varchar widen); 'x' must exist.
+            need(any(r[0] == 5 for r in rows), "mixed non-numeric row kept")
+
+            # CSV with blank numeric cells.
+            csv_path = os.path.join(dd, "blank.csv")
+            with open(csv_path, "w", encoding="utf-8") as f:
+                f.write("id,qty,note\n")
+                for i in range(200):
+                    f.write("%d,%s,n%d\n" % (i, i if i % 17 else "", i))
+            out = s.load_file(csv_path, destination="duckdb",
+                              base_name="blank_csv")
+            need(out and out[0].get("name"), "csv load returned a table")
+            cnt = s.run_query(
+                'SELECT COUNT(*) FROM "%s"' % out[0]["name"],
+                target="__duckdb__")["rows"][0][0]
+            eq(cnt, 200, "csv blank cells did not abort the load")
+
+            # Nested JSON array with blank numeric fields → stream/Parquet path.
+            js_path = os.path.join(dd, "blank.json")
+            payload = [{"id": i, "qty": (i if i % 11 else ""),
+                        "meta": {"code": (i if i % 13 else "")}}
+                       for i in range(500)]
+            with open(js_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            jout = s.load_file(js_path, destination="duckdb",
+                               base_name="blank_json", flatten=False)
+            need(jout and jout[0].get("name"), "json load returned a table")
+            jcnt = s.run_query(
+                'SELECT COUNT(*) FROM "%s"' % jout[0]["name"],
+                target="__duckdb__")["rows"][0][0]
+            eq(jcnt, 500, "json blank cells did not abort the load")
+
+            # Stream-flatten path (Python insert) with blanks.
+            old = os.environ.get("SAMQL_JSON_STREAM_FLATTEN_MB")
+            os.environ["SAMQL_JSON_STREAM_FLATTEN_MB"] = "0"
+            try:
+                # Force streamer via giant-object gate: single object + low floor.
+                one = os.path.join(dd, "one_blank.json")
+                blob = {"code": 1,
+                        "items": [{"i": i, "n": ("" if i % 9 == 0 else i)}
+                                  for i in range(800)]}
+                with open(one, "w", encoding="utf-8") as f:
+                    json.dump(blob, f)
+                os.environ["SAMQL_JSON_STREAM_FLATTEN_MB"] = "1"
+                fout = s.load_file(one, destination="duckdb",
+                                   base_name="one_blank", flatten=True)
+                need(fout, "stream-flatten load returned tables")
+                need(all(t.get("engine") == "duckdb" for t in fout),
+                     "streamer tables in duckdb despite blank numerics")
+            finally:
+                if old is None:
+                    os.environ.pop("SAMQL_JSON_STREAM_FLATTEN_MB", None)
+                else:
+                    os.environ["SAMQL_JSON_STREAM_FLATTEN_MB"] = old
+        finally:
+            s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
+
+    def t_large_csv_json_ondisk_loads_fast():
+        # Multi-MB CSV / JSON must take the on-disk Parquet path (bounded RAM)
+        # and finish quickly -- no full-file type scan, no in-engine materialize.
+        # Size here is large enough to cross soft on-disk floors when lowered.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        from samql_core import engines as E
+        s = _fresh_session()
+        dd = tempfile.mkdtemp()
+        old_od = os.environ.get("SAMQL_ONDISK_MB")
+        old_jod = os.environ.get("SAMQL_JSON_ONDISK_MB")
+        old_hard = os.environ.get("SAMQL_ONDISK_HARD_MB")
+        os.environ["SAMQL_ONDISK_MB"] = "1"
+        os.environ["SAMQL_JSON_ONDISK_MB"] = "1"
+        os.environ["SAMQL_ONDISK_HARD_MB"] = "1"
+        try:
+            # ~2.5 MB CSV
+            csv_path = os.path.join(dd, "big.csv")
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                f.write("id,name,score,tag\n")
+                for i in range(80000):
+                    f.write("%d,name_%d,%.2f,t%d\n"
+                            % (i, i, i * 0.5, i % 9))
+            t0 = time.time()
+            cout = s.load_file(csv_path, destination="duckdb",
+                               base_name="bigcsv")
+            csv_s = time.time() - t0
+            need(cout and cout[0].get("storage") == "parquet-cache",
+                 "large csv uses parquet-cache: %r" % cout)
+            ccnt = s.run_query(
+                'SELECT COUNT(*) FROM "%s"' % cout[0]["name"],
+                target="__duckdb__")["rows"][0][0]
+            eq(ccnt, 80000, "large csv row count")
+            need(csv_s < 45.0,
+                 "large csv load finished quickly (%.1fs)" % csv_s)
+
+            # ~2 MB nested JSON array (NDJSON rewrite + Parquet)
+            js_path = os.path.join(dd, "big.json")
+            rows = [{"id": i, "sym": "S%d" % (i % 11),
+                     "qty": i, "nested": {"a": i % 5, "b": "x"}}
+                    for i in range(25000)]
+            with open(js_path, "w", encoding="utf-8") as f:
+                json.dump(rows, f)
+            t1 = time.time()
+            jout = s.load_file(js_path, destination="duckdb",
+                               base_name="bigjson", flatten=False)
+            js_s = time.time() - t1
+            need(jout and jout[0].get("storage") == "parquet-cache",
+                 "large json uses parquet-cache: %r" % jout)
+            jcnt = s.run_query(
+                'SELECT COUNT(*) FROM "%s"' % jout[0]["name"],
+                target="__duckdb__")["rows"][0][0]
+            eq(jcnt, 25000, "large json row count")
+            need(js_s < 60.0,
+                 "large json load finished quickly (%.1fs)" % js_s)
+
+            # NDJSON rewrite prefers orjson when available (speed contract).
+            import inspect
+            src = inspect.getsource(E._write_ndjson_from_stream)
+            need("orjson" in src,
+                 "NDJSON rewrite uses orjson when installed")
+        finally:
+            for key, old in (("SAMQL_ONDISK_MB", old_od),
+                             ("SAMQL_JSON_ONDISK_MB", old_jod),
+                             ("SAMQL_ONDISK_HARD_MB", old_hard)):
+                if old is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old
+            s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
 
     def t_json_reader_large_records_linear():
         # Regression: the streaming readers decode by advancing an INDEX and grow
@@ -19390,23 +19967,27 @@ def backend_tests(datadir, csv_path, json_path):
         eq(fl.row_count("trades_legs"), 3, "all legs across both trades")
 
     def t_flatten_json_setting():
-        # The 'flatten JSON on load' setting defaults on, toggles, and persists
-        # to the config store. Restores the real config file EXACTLY afterward
-        # (removing the key if it was absent) so running the suite never flips
-        # the user's default. Pure -> runs everywhere.
+        # The 'flatten JSON on load' setting defaults OFF (nested Parquet is
+        # the fast path), toggles, and persists to the config store. Restores
+        # the real config file EXACTLY afterward (removing the key if it was
+        # absent) so running the suite never flips the user's default.
         s = _fresh_session()
         had = "flatten_json" in s.config.data
         orig_val = s.config.data.get("flatten_json")
-        orig_attr = getattr(s, "flatten_on_load", True)
+        orig_attr = getattr(s, "flatten_on_load", False)
         try:
             s.config.data.pop("flatten_json", None)
-            need(bool(s.config.get("flatten_json", True)) is True,
-                 "flatten defaults on when the key is unset")
-            need(s.set_flatten_json(False) is False, "set returns new state")
-            need(s.flatten_json_enabled() is False, "reads back off")
-            need(s.config.get("flatten_json") is False, "persisted to config")
-            need(s.set_flatten_json(True) is True and s.flatten_json_enabled(),
-                 "toggled back on")
+            need(bool(s.config.get("flatten_json", False)) is False,
+                 "flatten defaults off when the key is unset")
+            # Session attribute follows the same default when re-read from config
+            s.flatten_on_load = bool(s.config.get("flatten_json", False))
+            need(s.flatten_json_enabled() is False,
+                 "session reports flatten off by default")
+            need(s.set_flatten_json(True) is True, "set returns new state")
+            need(s.flatten_json_enabled() is True, "reads back on")
+            need(s.config.get("flatten_json") is True, "persisted to config")
+            need(s.set_flatten_json(False) is False and not s.flatten_json_enabled(),
+                 "toggled back off")
         finally:
             s.flatten_on_load = orig_attr
             if had:
@@ -19414,6 +19995,37 @@ def backend_tests(datadir, csv_path, json_path):
             else:
                 s.config.data.pop("flatten_json", None)
                 s.config.save()
+
+    def t_json_load_shred_only_when_toggled():
+        # Relational shred runs only when shred=True / flatten-on-load is on.
+        # Default flatten is off so a plain DuckDB JSON load stays one nested
+        # table (the fast path for multi-GB files).
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        # Force the session default off regardless of the user's config file.
+        s.flatten_on_load = False
+        dd = tempfile.mkdtemp()
+        try:
+            p = os.path.join(dd, "nested.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump([{"id": i, "legs": [{"n": i}, {"n": i + 1}]}
+                           for i in range(20)], f)
+            out = s.load_file(p, destination="duckdb", base_name="nest",
+                              flatten=False, shred=False)
+            names = {t.get("name") for t in out}
+            eq(names, {"nest"},
+               "no shred without toggle: single table %r" % names)
+            need(not any(t.get("shredded") for t in out),
+                 "shredded list absent when shred off")
+
+            out2 = s.load_file(p, destination="duckdb", base_name="nest2",
+                               flatten=False, shred=True)
+            need(any(t.get("shredded") for t in out2),
+                 "shred=True produces relational child tables: %r" % out2)
+        finally:
+            s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
 
     def t_flatten_json_load_routing():
         # .423 routing: a JSON load routes by the flatten setting and
@@ -19539,21 +20151,438 @@ def backend_tests(datadir, csv_path, json_path):
         # The size threshold that routes a load to an on-disk Parquet cache
         # (view) instead of an in-memory table. Pure -> runs everywhere.
         from samql_core import engines as E
+        from samql_core import load_thresholds as LT
         old = os.environ.get("SAMQL_ONDISK_MB")
+        old_h = os.environ.get("SAMQL_ONDISK_HARD_MB")
+        LT.clear_overrides()
         try:
             os.environ.pop("SAMQL_ONDISK_MB", None)
             eq(E._ondisk_min_bytes(), 512 * 1024 * 1024, "default is 512 MB")
             os.environ["SAMQL_ONDISK_MB"] = "128"
             eq(E._ondisk_min_bytes(), 128 * 1024 * 1024, "override honored")
             os.environ["SAMQL_ONDISK_MB"] = "0"
-            need(E._ondisk_min_bytes() is None, "0 disables (always in-memory)")
+            need(E._ondisk_min_bytes() is None,
+                 "0 disables soft threshold")
             os.environ["SAMQL_ONDISK_MB"] = "junk"
             eq(E._ondisk_min_bytes(), 512 * 1024 * 1024, "bad value -> default")
+            os.environ.pop("SAMQL_ONDISK_HARD_MB", None)
+            eq(E._ondisk_hard_floor_bytes(), 256 * 1024 * 1024,
+               "hard floor default 256 MB")
+            os.environ["SAMQL_ONDISK_HARD_MB"] = "0"
+            need(E._ondisk_hard_floor_bytes() is None,
+                 "hard floor can be disabled for tests")
+            # UI overrides beat env
+            LT.apply_overrides({"ondisk_mb": 64})
+            eq(E._ondisk_min_bytes(), 64 * 1024 * 1024,
+               "UI override wins over env")
         finally:
+            LT.clear_overrides()
             if old is None:
                 os.environ.pop("SAMQL_ONDISK_MB", None)
             else:
                 os.environ["SAMQL_ONDISK_MB"] = old
+            if old_h is None:
+                os.environ.pop("SAMQL_ONDISK_HARD_MB", None)
+            else:
+                os.environ["SAMQL_ONDISK_HARD_MB"] = old_h
+
+    def t_load_thresholds_configure():
+        # Session configure_load_thresholds persists and applies live.
+        from samql_core import load_thresholds as LT
+        from samql_core import engines as E
+        LT.clear_overrides()
+        s = _fresh_session()
+        prev = dict(s.config.get("load_thresholds") or {})
+        try:
+            info = s.configure_load_thresholds(
+                updates={"ondisk_mb": 100, "upload_mb": 2048})
+            need(info.get("ok"), "info ok")
+            eq(info["thresholds"]["ondisk_mb"]["value"], 100,
+               "ondisk applied")
+            eq(info["thresholds"]["ondisk_mb"]["source"], "override",
+               "marked as override")
+            eq(E._ondisk_min_bytes(), 100 * 1024 * 1024,
+               "engines see live override")
+            snap = s.config.get("load_thresholds") or {}
+            eq(snap.get("ondisk_mb"), 100, "persisted in config")
+            s.configure_load_thresholds(reset=True)
+            need(E._ondisk_min_bytes() == 512 * 1024 * 1024
+                 or isinstance(E._ondisk_min_bytes(), (int, type(None))),
+                 "reset restores env/default path")
+            need(not (s.config.get("load_thresholds") or {}),
+                 "config key cleared on reset")
+        finally:
+            try:
+                if prev:
+                    s.configure_load_thresholds(updates=prev)
+                else:
+                    s.configure_load_thresholds(reset=True)
+            except Exception:
+                LT.clear_overrides()
+            s.shutdown()
+
+    def t_load_preflight():
+        # Advise before large loads: missing file, Excel guidance, DuckDB gate.
+        s = _fresh_session()
+        td = tempfile.mkdtemp(prefix="samql_preflight_")
+        try:
+            miss = s.load_preflight("")
+            need(not miss.get("ok") and miss.get("blockers"),
+                 "empty path is a blocker")
+            miss2 = s.load_preflight(os.path.join(td, "no-such-file-xyz.csv"))
+            need(not miss2.get("ok")
+                 and any("not found" in b.lower()
+                         for b in (miss2.get("blockers") or [])),
+                 "missing file blocks: %r" % miss2)
+            xlsx = os.path.join(td, "preflight_tiny.xlsx")
+            # Touch a fake workbook path (size/ext only — no real Excel bytes).
+            with open(xlsx, "wb") as f:
+                f.write(b"PK" + b"\0" * 200)
+            xl = s.load_preflight(xlsx)
+            need(xl.get("exists") and xl.get("ok"),
+                 "tiny fake workbook is not a hard block")
+            need(any("Excel" in w for w in (xl.get("warnings") or [])),
+                 "Excel guidance warning present: %r" % xl)
+            # Large CSV without DuckDB -> blocker. Force HAS_DUCKDB off.
+            from samql_core import engines as E
+            big = os.path.join(td, "preflight_big.csv")
+            with open(big, "wb") as f:
+                f.write(b"a,b\n" + b"1,2\n" * (70 * 1024))  # ~few hundred KB
+            # Inflate reported size via patched getsize for the gate.
+            real_getsize = os.path.getsize
+            try:
+                os.path.getsize = lambda p: (
+                    600 * 1024 * 1024 if os.path.abspath(p) == os.path.abspath(big)
+                    else real_getsize(p))
+                old = E.HAS_DUCKDB
+                E.HAS_DUCKDB = False
+                try:
+                    blocked = s.load_preflight(big)
+                    need(not blocked.get("ok"),
+                         "large CSV without DuckDB blocks")
+                    need(any("DuckDB" in b
+                             for b in (blocked.get("blockers") or [])),
+                         "DuckDB required message: %r" % blocked)
+                finally:
+                    E.HAS_DUCKDB = old
+            finally:
+                os.path.getsize = real_getsize
+        finally:
+            s.shutdown()
+            shutil.rmtree(td, ignore_errors=True)
+
+    def t_copy_parquet_midflight_abort():
+        # Mid-flight COPY monitor: byte ceiling and cancel interrupt early.
+        from samql_core import engines as E
+        import tempfile
+        import time
+
+        dest = tempfile.mktemp(suffix=".parquet")
+        fwd = dest.replace("\\", "/")
+
+        class _Cur:
+            def __init__(self):
+                self.interrupted = False
+                self.calls = 0
+
+            def execute(self, sql):
+                self.calls += 1
+                # Simulate a long COPY that grows the dest file.
+                with open(dest, "wb") as f:
+                    f.write(b"x" * (256 * 1024))
+                t0 = time.time()
+                while time.time() - t0 < 6.0:
+                    if self.interrupted:
+                        raise RuntimeError("INTERRUPT")
+                    try:
+                        with open(dest, "ab") as f:
+                            f.write(b"y" * (512 * 1024))
+                    except OSError:
+                        pass
+                    time.sleep(0.2)
+                raise RuntimeError("COPY finished without interrupt")
+
+            def interrupt(self):
+                self.interrupted = True
+
+        try:
+            c = _Cur()
+            try:
+                E.exec_copy_parquet(
+                    c, "SELECT 1", fwd, max_bytes=1024 * 1024)
+                need(False, "byte ceiling must abort COPY")
+            except RuntimeError as e:
+                msg = str(e).lower()
+                need("ceiling" in msg or "exceeded" in msg or "gib" in msg,
+                     "ceiling error surfaces: %r" % e)
+            need(c.interrupted, "interrupt was called")
+
+            c2 = _Cur()
+            try:
+                E.exec_copy_parquet(
+                    c2, "SELECT 1", fwd,
+                    should_cancel=lambda: True)
+                need(False, "cancel must abort COPY")
+            except RuntimeError as e:
+                need("cancel" in str(e).lower(),
+                     "cancel error surfaces: %r" % e)
+        finally:
+            try:
+                os.unlink(dest)
+            except OSError:
+                pass
+
+    def t_ondisk_parquet_fail_no_ctas_fallthrough():
+        # Large JSON: Parquet-route failure must NOT fall through to in-engine
+        # CREATE TABLE AS (OOM risk). It raises a recoverable error so the
+        # JSON loader can stream-flatten instead.
+        from samql_core import loaders as L
+
+        class _FakeDuck:
+            def __init__(self):
+                self.table_columns = {}
+                self.ctas = 0
+
+            def load_file_to_parquet_view(self, *a, **k):
+                raise RuntimeError("simulated parquet COPY failure")
+
+            def create_view_from_file(self, *a, **k):
+                raise RuntimeError("simulated view failure")
+
+            def create_table_from_file(self, *a, **k):
+                self.ctas += 1
+                raise AssertionError("CTAS must not run for large JSON")
+
+            def apply_resource_memory_mb(self, *_a, **_k):
+                return False
+
+            def execute(self, _sql):
+                return (None, [[0]])
+
+        class _Sess:
+            def get_duckdb(self):
+                return duck
+
+        duck = _FakeDuck()
+        try:
+            L._load_into_duckdb(_Sess(), "/tmp/big.json", "big", "json",
+                                force_ondisk=True)
+            need(False, "expected RuntimeError (no CTAS for large JSON)")
+        except RuntimeError as e:
+            need("Streaming flatten will be tried" in str(e)
+                 or "On-disk Parquet load failed" in str(e),
+                 "error signals stream recovery: %s" % e)
+            need("simulated parquet" in str(e).lower()
+                 or "COPY failure" in str(e),
+                 "original failure preserved: %s" % e)
+        eq(duck.ctas, 0, "create_table_from_file must not be called")
+
+    def t_json_parquet_fail_stream_flatten_fallback():
+        # Flatten-on: any Parquet conversion failure (not only OOM) must
+        # stream-flatten so the load succeeds instead of hard-failing.
+        from samql_core import loaders as L
+
+        calls = {"stream": 0}
+
+        def _fake_stream(*_a, **_k):
+            calls["stream"] += 1
+            return [{"name": "t", "rows": 1, "columns": ["a"],
+                     "engine": "duckdb", "method": "stream-flatten"}]
+
+        def _fake_native(*_a, **_k):
+            raise RuntimeError(
+                "On-disk Parquet load failed for large JSON x "
+                "(simulated). Streaming flatten will be tried next.")
+
+        o_sf, o_n = L._stream_flatten_into_duckdb, L._load_into_duckdb
+        L._stream_flatten_into_duckdb = _fake_stream
+        L._load_into_duckdb = _fake_native
+        old_mb = os.environ.get("SAMQL_JSON_STREAM_FLATTEN_MB")
+        # Keep giant-object short-circuit off so we exercise the Parquet path.
+        os.environ["SAMQL_JSON_STREAM_FLATTEN_MB"] = "0"
+        try:
+            class _Sess:
+                def get_duckdb(self):
+                    raise AssertionError("should not open duckdb here")
+
+            dd = tempfile.mkdtemp()
+            p = os.path.join(dd, "arr.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write('[{"a":1},{"a":2}]')
+            out = L._load_json_duckdb(_Sess(), p, "arr", flatten=True)
+            eq(calls["stream"], 1, "stream flatten invoked once")
+            eq(out[0]["method"], "stream-flatten", "stream result returned")
+        finally:
+            L._stream_flatten_into_duckdb = o_sf
+            L._load_into_duckdb = o_n
+            if old_mb is None:
+                os.environ.pop("SAMQL_JSON_STREAM_FLATTEN_MB", None)
+            else:
+                os.environ["SAMQL_JSON_STREAM_FLATTEN_MB"] = old_mb
+
+    def t_large_csv_sqlite_upgrades_to_duckdb():
+        # Multi-hundred-MiB CSV with destination=sqlite must auto-upgrade to
+        # DuckDB on-disk Parquet when DuckDB is available (never fail the load).
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        from samql_core import loaders as L
+        old = os.environ.get("SAMQL_ONDISK_MB")
+        old_h = os.environ.get("SAMQL_ONDISK_HARD_MB")
+        dd = tempfile.mkdtemp()
+        p = os.path.join(dd, "wide.csv")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("a,b\n")
+            for i in range(500):
+                f.write("%d,%d\n" % (i, i * 2))
+        # Pretend the file is huge via a tiny soft threshold.
+        os.environ["SAMQL_ONDISK_MB"] = "0.000001"  # ~1 byte
+        os.environ["SAMQL_ONDISK_HARD_MB"] = "0"    # don't also trip floor
+        s = _fresh_session()
+        try:
+            out = L.load_file(s, p, destination="sqlite", base_name="wide")
+            eq(out[0].get("engine"), "duckdb",
+               "large CSV upgraded off SQLite: %s" % out)
+            eq(out[0].get("storage"), "parquet-cache",
+               "lands as on-disk Parquet: %s" % out)
+            n = s.run_query('SELECT COUNT(*) FROM "%s"' % out[0]["name"],
+                            target="__duckdb__")["rows"][0][0]
+            eq(n, 500, "every row queryable after upgrade")
+        finally:
+            s.shutdown()
+            if old is None:
+                os.environ.pop("SAMQL_ONDISK_MB", None)
+            else:
+                os.environ["SAMQL_ONDISK_MB"] = old
+            if old_h is None:
+                os.environ.pop("SAMQL_ONDISK_HARD_MB", None)
+            else:
+                os.environ["SAMQL_ONDISK_HARD_MB"] = old_h
+
+    def t_large_csv_sqlite_fail_without_duckdb():
+        # Without DuckDB, a large CSV→SQLite still fails loud (no silent thrash).
+        from samql_core import loaders as L
+        from samql_core import engines as E
+        old = os.environ.get("SAMQL_ONDISK_MB")
+        old_h = os.environ.get("SAMQL_ONDISK_HARD_MB")
+        dd = tempfile.mkdtemp()
+        p = os.path.join(dd, "wide.csv")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("a,b\n1,2\n")
+        os.environ["SAMQL_ONDISK_MB"] = "0.000001"
+        os.environ["SAMQL_ONDISK_HARD_MB"] = "0"
+        prev = E.HAS_DUCKDB
+        E.HAS_DUCKDB = False
+        try:
+            class _Sess:
+                db = object()
+
+                def default_destination(self):
+                    return "sqlite"
+
+                def get_duckdb(self):
+                    raise AssertionError("must not open DuckDB")
+
+            try:
+                L.load_file(_Sess(), p, destination="sqlite", base_name="sq")
+                need(False, "expected RuntimeError without DuckDB")
+            except RuntimeError as e:
+                need("too large for SQLite" in str(e),
+                     "fail-loud message: %s" % e)
+                need("duckdb" in str(e).lower(),
+                     "mentions install duckdb: %s" % e)
+        finally:
+            E.HAS_DUCKDB = prev
+            if old is None:
+                os.environ.pop("SAMQL_ONDISK_MB", None)
+            else:
+                os.environ["SAMQL_ONDISK_MB"] = old
+            if old_h is None:
+                os.environ.pop("SAMQL_ONDISK_HARD_MB", None)
+            else:
+                os.environ["SAMQL_ONDISK_HARD_MB"] = old_h
+
+    def t_duckdb_large_csv_parquet_view():
+        # Large CSV loads as a Parquet cache (not in-memory CTAS), queryable.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        dd = tempfile.mkdtemp()
+        p = os.path.join(dd, "big.csv")
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write("id,sym,qty\n")
+            for i in range(20000):
+                f.write("%d,X%d,%d\n" % (i, i % 7, i * 3))
+        old = os.environ.get("SAMQL_ONDISK_MB")
+        old_h = os.environ.get("SAMQL_ONDISK_HARD_MB")
+        os.environ["SAMQL_ONDISK_MB"] = "0.1"  # ~100 KB -> force on-disk
+        os.environ["SAMQL_ONDISK_HARD_MB"] = "0"
+        try:
+            out = s.load_file(p, destination="duckdb", base_name="bigcsv")
+            eq(out[0].get("storage"), "parquet-cache",
+               "large CSV stored as Parquet cache: %s" % out)
+            n = s.run_query("SELECT COUNT(*) FROM bigcsv",
+                            target="__duckdb__")["rows"][0][0]
+            eq(n, 20000, "every CSV row queryable through Parquet view")
+            src = s.duckdb.table_sources.get(out[0]["name"], "")
+            need(str(src).lower().endswith(".parquet"),
+                 "backed by Parquet file, not in-memory: %s" % src)
+        finally:
+            for k, v in (("SAMQL_ONDISK_MB", old),
+                         ("SAMQL_ONDISK_HARD_MB", old_h)):
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            s.shutdown()
+
+    def t_csv_parquet_fail_promotes_via_ctas():
+        # When direct COPY→Parquet fails for CSV, CTAS then promote-to-Parquet
+        # so the load still ends as an efficient cache (never a hard fail).
+        from samql_core import loaders as L
+
+        class _FakeDuck:
+            def __init__(self):
+                self.table_columns = {"t": ["a", "b"]}
+                self.promoted = False
+                self.ctas = 0
+
+            def load_file_to_parquet_view(self, *a, **k):
+                raise RuntimeError("simulated csv parquet COPY failure")
+
+            def create_table_from_file(self, name, *a, **k):
+                self.ctas += 1
+                self.table_columns[name] = ["a", "b"]
+                return name
+
+            def view_to_parquet(self, table_name, cache, cancel=None):
+                with open(cache, "wb") as f:
+                    f.write(b"PAR1")  # stub bytes; view path mocked below
+                self.promoted = True
+
+            def drop_table(self, _name):
+                pass
+
+            def create_view_from_file(self, name, path, kind, delimiter=None):
+                self.table_columns[name] = ["a", "b"]
+                return name
+
+            def apply_resource_memory_mb(self, *_a, **_k):
+                return False
+
+            def execute(self, _sql):
+                return (None, [[2]])
+
+        class _Sess:
+            def get_duckdb(self):
+                return duck
+
+        duck = _FakeDuck()
+        out = L._load_into_duckdb(_Sess(), "/tmp/big.csv", "big", "csv",
+                                  force_ondisk=True)
+        eq(duck.ctas, 1, "CTAS ran as Parquet recovery")
+        need(duck.promoted, "table promoted to Parquet")
+        eq(out[0].get("storage"), "parquet-cache",
+           "final storage is parquet-cache: %s" % out)
 
     def t_duckdb_large_load_parquet_view():
         # End-to-end: a load at/above the on-disk threshold lands as a Parquet
@@ -21694,6 +22723,39 @@ def backend_tests(datadir, csv_path, json_path):
         need(cancels(s.flatten_json, "j", "sqlite"),
              "flatten_json must return cancelled when its query id is cancelled")
         s.shutdown()
+
+    def t_profile_survives_sticky_engine_cancel():
+        # After a stalled load is cancelled, DuckDBManager._cancel stays SET.
+        # BeatDaemon would interrupt every later statement — right-click Profile
+        # returned cancelled immediately. Fresh profile must clear the sticky
+        # flag and complete.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        dd = tempfile.mkdtemp()
+        try:
+            p = os.path.join(dd, "t.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump([{"id": i, "v": i * 2} for i in range(40)], f)
+            out = s.load_file(p, destination="duckdb", base_name="prof",
+                              flatten=False, shred=False)
+            need(out and out[0].get("name") == "prof", "loaded: %r" % out)
+            # Simulate cancel after stall: interrupt leaves _cancel set.
+            s.duckdb.interrupt()
+            need(s.duckdb._cancel.is_set(), "interrupt left sticky cancel set")
+            r = s.profile("prof", "duckdb", query_id="prof_after_stall")
+            need(not r.get("cancelled"),
+                 "profile must not auto-cancel after sticky load cancel: %r" % r)
+            need(not s.duckdb._cancel.is_set(),
+                 "fresh profile cleared sticky engine cancel")
+            need((r.get("total_rows") or 0) >= 40
+                 or len(r.get("columns") or []) >= 1,
+                 "profile returned data: %r" % r)
+            # Intentional cancel is covered by t_bg_ops_server_cancel (cache
+            # would short-circuit a second profile of the same table here).
+        finally:
+            s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
 
     def t_rest_and_mssql_cancel():
         # Part 3: the IDE REST API fetch (load_api) and the MSSQL import
@@ -24416,11 +25478,75 @@ def backend_tests(datadir, csv_path, json_path):
             need(r_py2.get("rows"), "python with input returns rows")
             need(int((r_py2.get("rows") or [[0]])[0][0]) > 0,
                  "python saw upstream rows")
+            # pandas path: df is a DataFrame; filter + assign DataFrame to out
+            from samql_core import python_node as _pyn
+            need(_pyn.pandas_available(),
+                 "distribution builds bundle pandas for Python nodes")
+            g_pd = {"nodes": [
+                {"id": "i", "type": "input", "config": {"table": "data"}},
+                {"id": "p", "type": "python",
+                 "config": {
+                     "code": (
+                         "import pandas as pd\n"
+                         "need_df = isinstance(df, pd.DataFrame)\n"
+                         "filtered = df[df['score'] > 50]"
+                         "[['name', 'score']]\n"
+                         "out = filtered if need_df else "
+                         "[{'name': 'x', 'score': 1}]\n"
+                     )
+                 }}],
+                "edges": [{"from": {"node": "i", "port": "out"},
+                           "to": {"node": "p", "port": "in"}}]}
+            r_pd = s.run_nodeflow(g_pd, "p", "out")
+            need(not r_pd.get("error"), "pandas python node runs: %s"
+                 % r_pd.get("error"))
+            eq(r_pd.get("columns"), ["name", "score"],
+               "pandas filter keeps projected columns")
+            need(len(r_pd.get("rows") or []) == 26,
+                 "score > 50 keeps 26 fixture rows, got %r"
+                 % (len(r_pd.get("rows") or []),))
+            # unit: bindings expose DataFrame + records; out accepts DataFrame
+            cols_u, rows_u = _pyn.run_script(
+                "import pandas as pd\n"
+                "assert isinstance(df, pd.DataFrame)\n"
+                "assert records is not None and len(records) == len(df)\n"
+                "out = df.assign(twice=df['score'] * 2)"
+                "[['name', 'twice']]\n",
+                columns=["name", "score"],
+                rows=[("a", 10.0), ("b", 20.0)],
+            )
+            eq(cols_u, ["name", "twice"], "DataFrame out columns")
+            eq(rows_u, [("a", 20.0), ("b", 40.0)], "DataFrame out rows")
         finally:
             s.shutdown()
 
+    def t_python_node_pandas_bindings():
+        # Direct python_node coverage: df is a DataFrame after build deps,
+        # pandas import is allowed, and DataFrame out normalizes cleanly.
+        from samql_core import python_node as pn
+        need(pn.pandas_available(), "pandas must be installed for builds/tests")
+        cols, rows = pn.run_script(
+            "import pandas as pd\n"
+            "assert list(df.columns) == columns\n"
+            "assert len(rows) == len(df)\n"
+            "out = pd.DataFrame({'n': [len(df)], 'ok': [True]})\n",
+            columns=["id", "v"],
+            rows=[(1, "x"), (2, "y"), (3, "z")],
+        )
+        eq(cols, ["n", "ok"], "constructed DataFrame columns")
+        eq(rows, [(3, True)], "constructed DataFrame rows: %r" % (rows,))
+        # Forbidden import stays blocked
+        try:
+            pn.run_script("import os\nout = [{'a': 1}]")
+            raise AssertionError("os import should be blocked")
+        except pn.PythonNodeError as exc:
+            need("not allowed" in str(exc).lower()
+                 or "ImportError" in str(exc),
+                 "blocked import surfaces cleanly: %s" % exc)
+
     def t_nodeflow_write_to_table():
         # The write node materialises its upstream into a real loaded table.
+        from samql_core import nodeflow
         s = _loaded_session()
         try:
             g = {"nodes": [
@@ -24447,14 +25573,10 @@ def backend_tests(datadir, csv_path, json_path):
             need(not [n for n in s.db.table_columns
                       if n.startswith("__nbflow")],
                  "no flow temp tables are left behind")
-            eq(nodeflow_ports_write(), {"in": ["in"], "out": ["out"]},
+            eq(nodeflow.NODE_PORTS["write"], {"in": ["in"], "out": ["out"]},
                "write node has an input (sink)")
         finally:
             s.shutdown()
-
-    def nodeflow_ports_write():
-        from samql_core import nodeflow
-        return nodeflow.NODE_PORTS["write"]
 
     def t_apiload_scheme_guard():
         # The REST loader only fetches http(s); other schemes (file://, ftp://,
@@ -29011,8 +30133,14 @@ def backend_tests(datadir, csv_path, json_path):
 
         orig = _sp.download_drive_item
 
-        def fake_download(site, item_id, token, download_url=None, timeout=120):
-            return (b"hello-file", "report.xlsx", {"via": "test"})
+        def fake_download(site, item_id, token, download_url=None, timeout=120,
+                          dest_path=None, auth_mode="bearer", **_kw):
+            payload = b"hello-file"
+            if dest_path:
+                with open(dest_path, "wb") as f:
+                    f.write(payload)
+                return (len(payload), "report.xlsx", {"via": "test"})
+            return (payload, "report.xlsx", {"via": "test"})
 
         _sp.download_drive_item = fake_download
         try:
@@ -29051,6 +30179,182 @@ def backend_tests(datadir, csv_path, json_path):
                 _sh.rmtree(d, ignore_errors=True)
         finally:
             _sp.download_drive_item = orig
+
+    def t_sharepoint_sign_in_and_windows_auth():
+        # Device-code / interactive OAuth persist under SecretStore; Windows
+        # Integrated Auth hits classic _api with Negotiate (no bearer).
+        import json as _json
+        import types as _types
+        from samql_core import sharepoint as _sp
+        from samql_core import sharepoint_auth as _spa
+        from samql_core.secretstore import SecretStore
+        from samql_core.session import Session
+
+        eq(_spa.normalize_auth_mode("device-code"), "device_code")
+        eq(_spa.normalize_auth_mode("negotiate"), "windows")
+        eq(_spa.normalize_auth_mode("browser"), "interactive")
+        caps = _spa.auth_capabilities()
+        need("msal" in caps and "windows_negotiate" in caps
+             and "device_code" in caps["modes"],
+             "auth capabilities expose modes: %r" % caps)
+
+        # Windows mode refuses Graph/online hosts
+        try:
+            _sp.fetch_sharepoint_items(
+                "https://contoso.sharepoint.com/sites/X", "List", "",
+                auth_mode="windows")
+            raise AssertionError("windows+graph should fail")
+        except ValueError as e:
+            need("on-prem" in str(e).lower() or "classic" in str(e).lower()
+                 or "windows" in str(e).lower(),
+                 "windows auth rejects sharepoint.com: %s" % e)
+
+        # Classic on-prem + windows: no token, Negotiate transport
+        seen = []
+
+        def fake_win(url, headers=None, timeout=60):
+            seen.append((url, headers or {}))
+            body = _json.dumps({
+                "d": {"results": [{"Title": "row1", "Id": 7}]}
+            }).encode("utf-8")
+            return body, url, {"Content-Type": "application/json"}
+
+        prev = _sp._WINDOWS_GET
+        _sp._WINDOWS_GET = fake_win
+        try:
+            recs, meta = _sp.fetch_sharepoint_items(
+                "https://example.com/sites/Finance", "Invoices", "",
+                auth_mode="windows")
+            need(recs and recs[0].get("Title") == "row1",
+                 "windows classic list returns rows: %r" % recs)
+            need(seen and "Authorization" not in (seen[0][1] or {}),
+                 "windows mode must not send a Bearer header")
+            need("/_api/" in (seen[0][0] or ""),
+                 "classic list URL used: %s" % (seen[0][0],))
+            need(meta.get("auth_mode") == "windows", "meta stamps auth_mode")
+        finally:
+            _sp._WINDOWS_GET = prev
+
+        # OAuth blob round-trip via SecretStore (no live MSAL)
+        import tempfile, os as _os, time as _time, shutil as _sh
+
+        def protect(p):
+            return ("ENC:" + p).encode("utf-8")
+
+        def unprotect(b):
+            return b.decode("utf-8")[4:]
+
+        td = tempfile.mkdtemp(prefix="samql_spauth_")
+        store = SecretStore(protector=(protect, unprotect))
+        store.path = _os.path.join(td, "secrets.json")
+        store._data = {}
+        blob = _spa._oauth_blob(
+            "ACCESS", "REFRESH", _time.time() + 3600,
+            "client-x", "organizations", list(_spa.DEFAULT_SCOPES))
+        need(store.set("sharepoint:Finance", blob), "oauth blob stores")
+        tok = _spa.load_access_token(
+            store, {"secret_key": "sharepoint:Finance"})
+        eq(tok, "ACCESS", "load_access_token reads oauth access_token")
+
+        # Plain bearer still works
+        store.set("sharepoint:Plain", "raw-bearer-token")
+        eq(_spa.load_access_token(store, {"secret_key": "sharepoint:Plain"}),
+           "raw-bearer-token", "plain bearer secrets still load")
+
+        # Device-code start/poll with fake MSAL
+        class FakeApp:
+            def __init__(self, *a, **k):
+                pass
+
+            def initiate_device_flow(self, scopes=None):
+                return {
+                    "user_code": "ABCD",
+                    "verification_uri": "https://microsoft.com/devicelogin",
+                    "message": "enter ABCD",
+                    "device_code": "dev",
+                    "expires_in": 900,
+                    "interval": 1,
+                }
+
+            def acquire_token_by_device_flow(self, flow):
+                return {
+                    "access_token": "NEWACCESS",
+                    "refresh_token": "NEWREFRESH",
+                    "expires_in": 3600,
+                }
+
+            def get_accounts(self):
+                return []
+
+            def acquire_token_silent(self, *a, **k):
+                return None
+
+            def acquire_token_interactive(self, scopes=None):
+                return {
+                    "access_token": "INTACCESS",
+                    "refresh_token": "INTREFRESH",
+                    "expires_in": 3600,
+                }
+
+        s = Session()
+        s._secrets = SecretStore(protector=(protect, unprotect))
+        s._secrets.path = _os.path.join(td, "secrets2.json")
+        s._secrets._data = {}
+        prev_pca = _spa._pca
+        prev_msal = _spa.msal_available
+        _spa.msal_available = lambda: True
+        _spa._pca = lambda client_id, tenant_id: FakeApp()
+        try:
+            started = _spa.start_device_code(s, {
+                "site_url": "https://contoso.sharepoint.com/sites/X",
+                "secret_key": "sharepoint:Dev",
+            })
+            need(started.get("ok") and started.get("user_code") == "ABCD",
+                 "device start returns user code: %r" % started)
+            polled = _spa.poll_device_code(
+                s, started["flow_id"], block=True)
+            need(polled.get("stored") and polled.get("secret_key")
+                 == "sharepoint:Dev",
+                 "device poll stores token: %r" % polled)
+            eq(_spa.load_access_token(
+                s.secrets, {"secret_key": "sharepoint:Dev"}),
+               "NEWACCESS", "stored device token is loadable")
+
+            inter = _spa.interactive_sign_in(s, {
+                "secret_key": "sharepoint:Int",
+                "site_url": "https://contoso.sharepoint.com/sites/X",
+            })
+            need(inter.get("stored"), "interactive stores: %r" % inter)
+            eq(_spa.load_access_token(
+                s.secrets, {"secret_key": "sharepoint:Int"}),
+               "INTACCESS", "interactive token loadable")
+
+            auth = _spa.resolve_auth(s, {
+                "auth_mode": "windows",
+                "site_url": "https://example.com/sites/X",
+            })
+            eq(auth["mode"], "windows", "resolve_auth windows mode")
+            eq(auth["token"], "", "windows has no bearer token")
+        finally:
+            _spa._pca = prev_pca
+            _spa.msal_available = prev_msal
+            _sh.rmtree(td, ignore_errors=True)
+
+        # Session fetch with windows auth (mocked transport)
+        _sp._WINDOWS_GET = fake_win
+        seen.clear()
+        try:
+            s2 = Session()
+            out = s2.fetch_sharepoint_node("n1", {
+                "site_url": "https://example.com/sites/Finance",
+                "list_title": "Invoices",
+                "auth_mode": "windows",
+                "mode": "list",
+            })
+            need(not out.get("error"),
+                 "no error on windows fetch: %r" % out)
+        finally:
+            _sp._WINDOWS_GET = prev
 
     def t_webscrape_tables_and_json():
         # Nested HTML tables must keep the outer table intact; JSON mode flattens
@@ -31034,15 +32338,16 @@ def backend_tests(datadir, csv_path, json_path):
             else:
                 os.environ["SAMQL_CONCURRENT_READS"] = prev
 
-    def t_concurrent_reads_default_off():
-        # A fresh session defaults to off, so the change is opt-in / A/B-able.
+    def t_concurrent_reads_default_on():
+        # Concurrent reads default ON so catalog/page peeks stay live during
+        # multi-GB COPY. SAMQL_CONCURRENT_READS=0 restores full serialization.
         import os
         prev = os.environ.pop("SAMQL_CONCURRENT_READS", None)
         try:
             s = _fresh_session()
             try:
-                need(s.concurrent_reads_enabled() is False,
-                     "concurrent reads default to off (opt-in)")
+                need(s.concurrent_reads_enabled() is True,
+                     "concurrent reads default to on (large-load friendly)")
             finally:
                 s.shutdown()
         finally:
@@ -31210,6 +32515,7 @@ def backend_tests(datadir, csv_path, json_path):
             def __init__(self):
                 self.table_columns = {"gone": ["x"], "keep": ["old"]}
                 self.table_sources = {"gone": "", "keep": ""}
+                self.table_origins = {"gone": "/tmp/gone.json", "keep": "/tmp/keep.json"}
                 self._catalog_lock = _th.Lock()
                 self._types_cache = {}
 
@@ -31231,9 +32537,12 @@ def backend_tests(datadir, csv_path, json_path):
            "new table columns come from DESCRIBE")
         eq(st.table_columns["keep"], ["k1"], "existing columns refreshed")
         need("gone" not in st.table_columns
-             and "gone" not in st.table_sources,
-             "a table no longer present is removed from both caches")
+             and "gone" not in st.table_sources
+             and "gone" not in st.table_origins,
+             "a table no longer present is removed from columns/sources/origins")
         need("new" in st.table_sources, "the new table gets a source entry")
+        need("keep" in st.table_origins,
+             "surviving tables keep their origin path")
 
     def t_concurrent_reads_source_guards():
         # Structural guarantees on the concurrent-read implementation.
@@ -32941,6 +34250,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("cancel running query", t_cancel_query),
         ("bg ops (profile/materialize/change-type/flatten) cancel server-side",
          t_bg_ops_server_cancel),
+        ("profile survives sticky engine cancel after stalled load Stop",
+         t_profile_survives_sticky_engine_cancel),
         ("REST API fetch + MSSQL import cancel server-side",
          t_rest_and_mssql_cancel),
         ("iterator/while per-pass fetch shares run cancel w/o clobbering",
@@ -33038,6 +34349,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("drop_table escapes quote-named identifiers", t_drop_table_escapes_identifier),
         ("fields with spaces + quotes survive CSV/grid/node", t_fields_with_spaces_and_quotes),
         ("NodeFlow SQL node (source / {{in}} transform / routing)", t_nodeflow_sql_node),
+        ("Python node: pandas DataFrame bindings + DataFrame out",
+         t_python_node_pandas_bindings),
         ("NodeFlow column-level data lineage export (Excel, 2 tabs)", t_nodeflow_lineage),
         ("cancel an in-flight load: unwind + drop partial table + cleanup helpers", t_load_cancel),
         ("cancel a folder load between files (should_cancel)", t_load_folder_cancel),
@@ -33147,6 +34460,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("filter node [field] + regex condition", t_filter_brackets),
         ("workflow store is kind-aware (IDE/Journal/Node/Dashboard)", t_workflow_store_kinds),
         ("SharePoint drive browse + download helpers", t_sharepoint_drive_download),
+        ("SharePoint sign-in (device/interactive) + Windows Integrated Auth",
+         t_sharepoint_sign_in_and_windows_auth),
         ("Web scrape nested tables + JSON objects", t_webscrape_tables_and_json),
         ("legacy saved queries migrate into Saved Workflows", t_saved_queries_migrate_to_workflows),
         ("graceful shutdown drops tables + clears restore manifest", t_shutdown_clears_tables_and_manifest),
@@ -33234,8 +34549,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_page_clamps_and_budget),
         ("query: the run_query reuse gate bounces non-DuckDB runs (executed)",
          t_run_query_reuse_gate),
-        ("query: ORDER BY routes around the parquet store",
-         t_orderby_skips_parquet_path),
+        ("query: ORDER BY uses the parquet store (not Python drain)",
+         t_orderby_uses_parquet_path),
+        ("query: result byte cap + streaming parquet export + page cancel",
+         t_result_byte_cap_and_export_stream),
         ("nodes: a cyclic connection is rejected, never hangs",
          t_node_cycle_rejected),
         ("nodes: a missing input names AND highlights the node",
@@ -33854,6 +35171,10 @@ def backend_tests(datadir, csv_path, json_path):
         ("JSON NDJSON load (streamed)", t_json_load_ndjson),
         ("DuckDB JSON readers are NDJSON-aware (skips the format sniff)",
          t_duckdb_json_readers),
+        ("conversion errors fall back to VARCHAR (CSV + JSON)",
+         t_conversion_errors_fall_back_to_varchar),
+        ("large CSV/JSON use on-disk Parquet and finish quickly",
+         t_large_csv_json_ondisk_loads_fast),
         ("DuckDB loads .ndjson end-to-end (load_file -> table)",
          t_duckdb_loads_ndjson),
         ("DuckDB one-struct JSON column expands to named columns",
@@ -33872,6 +35193,14 @@ def backend_tests(datadir, csv_path, json_path):
          t_duckdb_big_json_array_streams),
         ("DuckDB stream-flattens a large single nested JSON object",
          t_duckdb_large_object_stream_flattens),
+        ("flatten-off array stays nested (no stream-flatten on Decimal rewrite)",
+         t_flatten_off_array_stays_nested_not_stream_flatten),
+        ("flatten-off native failure does not stream-flatten",
+         t_flatten_off_native_fail_does_not_stream_flatten),
+        ("flatten-off Parquet: nested field tree + non-empty page",
+         t_flatten_off_parquet_nested_field_tree_and_page),
+        ("JSON[]/(element): double-encoded objects expand nested keys",
+         t_json_array_element_field_tree_double_encoded),
         ("DuckDB load cancel aborts the JSON array pre-pass",
          t_duckdb_load_cancel_aborts_read),
         ("JSON array pre-pass polls cancel and aborts promptly",
@@ -33898,14 +35227,34 @@ def backend_tests(datadir, csv_path, json_path):
          t_deep_flatten_sophis_shape),
         ("JSON read: stdlib-reader env override + load diagnostic tool",
          t_json_reader_stdlib_override_and_diag),
-        ("settings: flatten-JSON toggle defaults on, persists",
+        ("settings: flatten-JSON toggle defaults off, persists",
          t_flatten_json_setting),
+        ("JSON load shreds only when flatten/shred toggle is on",
+         t_json_load_shred_only_when_toggled),
         ("load routing: flatten-on -> normalized; off -> nested; SQLite always",
          t_flatten_json_load_routing),
         ("total physical RAM detection has one source (both callers delegate)",
          t_ram_detection_one_source),
         ("on-disk load threshold (SAMQL_ONDISK_MB, disable)",
          t_ondisk_threshold),
+        ("load thresholds configure + persist (Storage & memory)",
+         t_load_thresholds_configure),
+        ("load preflight: DuckDB/temp/Excel guidance before start",
+         t_load_preflight),
+        ("COPY parquet mid-flight byte ceiling + cancel abort",
+         t_copy_parquet_midflight_abort),
+        ("on-disk Parquet JSON failure skips CTAS (stream recovery)",
+         t_ondisk_parquet_fail_no_ctas_fallthrough),
+        ("JSON Parquet fail falls back to stream flatten",
+         t_json_parquet_fail_stream_flatten_fallback),
+        ("large CSV→SQLite auto-upgrades to DuckDB Parquet",
+         t_large_csv_sqlite_upgrades_to_duckdb),
+        ("large CSV→SQLite fails loud without DuckDB",
+         t_large_csv_sqlite_fail_without_duckdb),
+        ("DuckDB large CSV lands as a Parquet cache view",
+         t_duckdb_large_csv_parquet_view),
+        ("CSV Parquet fail promotes via CTAS→Parquet",
+         t_csv_parquet_fail_promotes_via_ctas),
         ("CSV reader builder emits the expected SQL (consolidated)",
          t_csv_readers_sql),
         ("DuckDB large load lands as a Parquet cache view (bounded memory)",
@@ -34092,8 +35441,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_apinode_fetch_cancel),
         ("concurrent reads: env flag parsing (default off)",
          t_concurrent_reads_env_flag),
-        ("concurrent reads: a fresh session defaults to off",
-         t_concurrent_reads_default_off),
+        ("concurrent reads: a fresh session defaults to on",
+         t_concurrent_reads_default_on),
         ("concurrent reads: runtime toggle + status visibility",
          t_concurrent_reads_session_toggle),
         ("concurrent reads: SQLite read() == execute()",

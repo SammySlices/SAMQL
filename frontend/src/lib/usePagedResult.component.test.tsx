@@ -285,9 +285,13 @@ describe("shared IDE/Journal paging controller", () => {
     expect(state.page?.rows).toEqual([[7]]);
   });
 
-  it("honors the retained-row memory ceiling", async () => {
+  it("slides the retained window instead of blocking loadMore (retained-row memory ceiling)", async () => {
     const state = makeState({ page: page([[1], [2]], 10) });
-    const fetchPage = vi.fn(async () => page([[3]], 10));
+    state.page!.offset = 0;
+    const fetchPage = vi.fn(async (_id, opts) => {
+      expect(opts.offset).toBe(2);
+      return page([[3]], 10);
+    });
     const { result } = renderHook(() =>
       usePagedResult({
         getItem: () => state,
@@ -300,7 +304,32 @@ describe("shared IDE/Journal paging controller", () => {
     await act(async () => {
       await result.current.loadMore(state.id);
     });
-    expect(fetchPage).not.toHaveBeenCalled();
-    expect(state.page?.rows).toEqual([[1], [2]]);
+    expect(fetchPage).toHaveBeenCalled();
+    expect(state.page?.rows).toEqual([[2], [3]]);
+    expect(state.page?.offset).toBe(1);
+  });
+
+  it("passes visibleColumns through page fetches", async () => {
+    const state = makeState({
+      page: page([[1]], 1),
+      visibleColumns: ["id"],
+    });
+    const fetchPage = vi.fn(async () => page([[1]], 1));
+    const { result } = renderHook(() =>
+      usePagedResult({
+        getItem: () => state,
+        patchItem: (_id, patch) => patchState(state, patch),
+        fetchPage,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.refresh(state.id);
+    });
+    expect(fetchPage).toHaveBeenCalledWith(
+      state.resultId,
+      expect.objectContaining({ columns: ["id"] }),
+      expect.any(AbortSignal),
+    );
   });
 });

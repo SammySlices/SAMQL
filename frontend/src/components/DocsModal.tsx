@@ -62,7 +62,7 @@ const NODE_DOCS: Record<string, string> = {
   group: "A visual container that groups nodes on the canvas.",
   sql: "Free-form SQL over the node's inputs (each input is a named relation).",
   python:
-    "Run Python in SamQL's bundled runtime. Optional input → df/rows/columns; assign out to emit a table.",
+    "Run Python in SamQL's bundled runtime (pandas included). Wire an upstream table into the input: the script gets df (pandas DataFrame), columns, rows, and records. Filter/transform with pandas, then assign out (usually a DataFrame). Example: out = df[df['score'] > 50]. Leave the input unwired to build a table from scratch.",
   output: "Exports the upstream result to a file. Leave the folder blank to write into your Downloads folder, or browse to another location.",
   createtable: "Materializes its input as a permanent table you name.",
   write: "Exports its input to a file (CSV / Parquet / Excel).",
@@ -76,7 +76,8 @@ const NODE_DOCS: Record<string, string> = {
   appendfolder: "Loads and stacks every matching file in a folder.",
   apinode: "Fetches an HTTP API response into a table.",
   sqlserver: "Runs a SQL Server query (Windows / SQL auth / saved mssql profile) into a table.",
-  sharepoint: "Loads SharePoint list items (Graph or classic REST) into a table.",
+  sharepoint:
+    "Loads SharePoint list items or drive files. Auth: pasted bearer token, Sign in with Microsoft (device code / browser — for when you're already logged into work Microsoft), or Windows Integrated for classic on-prem SharePoint on a domain-joined PC.",
   webscrape: "Scrapes a public page (HTML tables, links, text, or JSON) into a table.",
   samqldash: "Marks a workflow for the app Dashboard tab — wire chart / pivot / reconcile / data into it.",
   dyn_input: "Marks an entry port when authoring a Created Node from a tab.",
@@ -471,6 +472,30 @@ FROM raw_events;`}</pre>
               </li>
             ))}
           </ul>
+          <h3 style={{ marginTop: "1.25rem" }}>Python node — using an input table</h3>
+          <p>
+            Place a <b>Python</b> node and wire any upstream node&apos;s
+            output into its input. When you run the flow, SamQL loads
+            that table into the script as <code>df</code> — a{" "}
+            <b>pandas DataFrame</b> in distribution builds (pandas is
+            bundled). You also get <code>columns</code>,{" "}
+            <code>rows</code>, and <code>records</code> (list of dicts).
+            Assign <code>out</code> to emit the result downstream.
+          </p>
+          <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.85em" }}>{
+`# df is the upstream table as a pandas DataFrame
+out = df[df["score"] > 50][["name", "score"]]
+
+# or build a new frame
+import pandas as pd
+out = pd.DataFrame({"n": [len(df)], "cols": [len(columns)]})`
+          }</pre>
+          <p>
+            Leave the input unwired to generate a table from scratch
+            (assign <code>out</code> to a list of dicts or a DataFrame).
+            Scripts run inside SamQL&apos;s own Python — recipients do
+            not need a separate install.
+          </p>
         </div>
       )}
 

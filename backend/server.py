@@ -460,7 +460,10 @@ def _frontend_dir():
     candidates.append(os.path.join(_HERE, "frontend_dist"))
     candidates.append(os.path.join(_HERE, "static"))
     for c in candidates:
-        if c and os.path.isdir(c):
+        # Require a real Vite build (index.html). An empty directory used
+        # to win the probe and then 404 every route -- or, when PyInstaller
+        # omitted an empty tree, fall through to the placeholder page.
+        if c and os.path.isdir(c) and os.path.isfile(os.path.join(c, "index.html")):
             return os.path.abspath(c)
     return None
 
@@ -476,7 +479,13 @@ def _frontend_dir_live():
     extraction, leaving the cached frontend path dangling -> every page
     404'd as 'Not found'. So re-verify on use and re-resolve if the
     cached dir disappeared. Cheap: an isdir() stat on the hot path, a
-    full re-resolve only after the rare vanish."""
+    full re-resolve only after the rare vanish.
+
+    Note: a sticky override may be brand-only (app-icon.png, no
+    index.html) for tests / exe-adjacent icon drops -- do not drop it
+    just because the SPA shell is absent. Discovery via ``_frontend_dir``
+    still requires index.html so empty trees never win the UI probe.
+    """
     global _FRONTEND_DIR
     d = _FRONTEND_DIR
     if d and os.path.isdir(d):
@@ -484,6 +493,8 @@ def _frontend_dir_live():
     d2 = _frontend_dir()
     if d2:
         _FRONTEND_DIR = d2
+    else:
+        _FRONTEND_DIR = None
     return d2
 
 _PNG_ICO_CACHE = {}
@@ -853,13 +864,16 @@ def _close_and_unlink(spooled):
 
 
 def _upload_cap_bytes():
-    """Drag-drop ceiling (SAMQL_UPLOAD_MB). Uploads stream to disk, but a
-    finite default still prevents an unauthenticated or accidental request
-    from filling the drive. Set 0 explicitly to disable the cap."""
+    """Drag-drop ceiling (SAMQL_UPLOAD_MB / Load thresholds). Uploads stream
+    to disk, but a finite default still prevents an unauthenticated or
+    accidental request from filling the drive. Default 16 GiB so multi-GB
+    CSVs can drag-drop; set 0 to disable. Prefer Load-by-path for the
+    largest files."""
     try:
-        mb = int(os.environ.get("SAMQL_UPLOAD_MB", "4096"))
+        from samql_core import load_thresholds as LT
+        mb = int(LT.get_int("upload_mb"))
     except Exception:
-        mb = 4096
+        mb = 16384
     return max(0, mb) * 1024 * 1024
 
 
@@ -1616,11 +1630,12 @@ class Api:
 
     @staticmethod
     def flatten_json_setting(s, m, body, ctx):
-        # Toggle 'flatten JSON on load'. On (default): a JSON load streams into
-        # normalized relational tables. Off: a DuckDB JSON load keeps one nested
-        # table (SQLite always flattens). Persisted; applies to the next load on
-        # every entry point (drag/drop, modal, folder, path) since they all go
-        # through load_file. POST {on: bool} sets it; POST {} reports state.
+        # Toggle 'flatten JSON on load'. Off (default): DuckDB keeps a single
+        # nested table (fast for multi-GB files). On: shred into relational
+        # tables after load (SQLite always flattens). Persisted; applies to the
+        # next load on every entry point that does not pass an explicit flag
+        # (drag/drop, modal, folder, path). POST {on: bool} sets it; POST {}
+        # reports state.
         b = body or {}
         if "on" in b:
             s.set_flatten_json(bool(b.get("on")))
@@ -1861,6 +1876,29 @@ class Api:
                 duck.write_lock.release()
             except Exception:
                 pass
+
+    @staticmethod
+    def load_preflight(s, m, body, ctx):
+        """Advise before starting a large file load (UI pre-check)."""
+        b = body or {}
+        path = _normalize_user_path(b.get("path") or "")
+        return s.load_preflight(path)
+
+    @staticmethod
+    def load_thresholds_settings(s, m, body, ctx):
+        """GET/POST load-file size thresholds (Storage & memory → Load)."""
+        if m == "GET":
+            return s.load_thresholds_info()
+        b = body or {}
+        if b.get("reset"):
+            return s.configure_load_thresholds(reset=True)
+        updates = b.get("thresholds") if isinstance(b.get("thresholds"), dict) \
+            else b
+        # Ignore non-field keys like ok / reset
+        from samql_core import load_thresholds as LT
+        cleaned = {k: v for k, v in (updates or {}).items()
+                   if k in LT.FIELDS}
+        return s.configure_load_thresholds(updates=cleaned)
 
     @staticmethod
     def flow_cache_settings(s, m, body, ctx):
@@ -3022,7 +3060,8 @@ class Api:
                       sort_col=b.get("sort_col"),
                       descending=bool(b.get("descending", False)),
                       filters=b.get("filters"),
-                      columns=b.get("columns"))
+                      columns=b.get("columns"),
+                      query_id=b.get("query_id"))
 
     @staticmethod
     def result_materialize(s, m, body, ctx):
@@ -3354,6 +3393,26 @@ class Api:
         b = body or {}
         return s.download_sharepoint_file(
             b.get("config") or b, query_id=b.get("query_id"))
+
+    @staticmethod
+    def sharepoint_auth_capabilities(s, m, body, ctx):
+        return s.sharepoint_auth_capabilities()
+
+    @staticmethod
+    def sharepoint_auth_device_start(s, m, body, ctx):
+        b = body or {}
+        return s.sharepoint_auth_device_start(b.get("config") or b)
+
+    @staticmethod
+    def sharepoint_auth_device_poll(s, m, body, ctx):
+        b = body or {}
+        return s.sharepoint_auth_device_poll(
+            b.get("flow_id") or "", block=bool(b.get("block")))
+
+    @staticmethod
+    def sharepoint_auth_interactive(s, m, body, ctx):
+        b = body or {}
+        return s.sharepoint_auth_interactive(b.get("config") or b)
 
     @staticmethod
     def iterator_run(s, m, body, ctx):
@@ -4006,6 +4065,8 @@ ROUTES = [
     ("POST", r"^/api/engine/reset$", Api.engine_reset),
     ("POST", r"^/api/settings/concurrent-reads$", Api.concurrent_reads),
     ("POST", r"^/api/settings/flatten-json$", Api.flatten_json_setting),
+    ("GET", r"^/api/settings/load-thresholds$", Api.load_thresholds_settings),
+    ("POST", r"^/api/settings/load-thresholds$", Api.load_thresholds_settings),
     ("GET", r"^/api/tables$", Api.tables),
     ("POST", r"^/api/column/fields$", Api.column_fields),
     ("POST", r"^/api/load/files$", Api.load_files),
@@ -4014,6 +4075,7 @@ ROUTES = [
     ("POST", r"^/api/json/fields$", Api.json_fields),
     ("POST", r"^/api/excel/peek$", Api.excel_peek),
     ("GET", r"^/api/fs/list$", Api.fs_list),
+    ("POST", r"^/api/load/preflight$", Api.load_preflight),
     ("POST", r"^/api/load/start$", Api.load_start),
     ("POST", r"^/api/load/folder$", Api.load_folder_start),
     ("GET", r"^/api/load/jobs$", Api.load_jobs),
@@ -4084,6 +4146,14 @@ ROUTES = [
     ("POST", r"^/api/node-api-fetch$", Api.api_node_fetch),
     ("POST", r"^/api/node-source-fetch$", Api.node_source_fetch),
     ("POST", r"^/api/sharepoint/download$", Api.sharepoint_download),
+    ("POST", r"^/api/sharepoint/auth/capabilities$",
+     Api.sharepoint_auth_capabilities),
+    ("POST", r"^/api/sharepoint/auth/device/start$",
+     Api.sharepoint_auth_device_start),
+    ("POST", r"^/api/sharepoint/auth/device/poll$",
+     Api.sharepoint_auth_device_poll),
+    ("POST", r"^/api/sharepoint/auth/interactive$",
+     Api.sharepoint_auth_interactive),
     ("POST", r"^/api/iterator/run$", Api.iterator_run),
     ("POST", r"^/api/while/run$", Api.while_run),
     ("POST", r"^/api/api-preview$", Api.api_preview),

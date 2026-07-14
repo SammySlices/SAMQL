@@ -45,6 +45,31 @@ describe("DataGrid DOM behavior", () => {
     expect(grid.querySelector('[data-row-index="499"]')).not.toBeInTheDocument();
   });
 
+  it("shows absolute row numbers and capped badge for windowed pages", () => {
+    const result = page(
+      [
+        [101, "a"],
+        [102, "b"],
+      ],
+      ["id", "value"],
+    );
+    result.offset = 100;
+    result.total_rows = 500;
+    result.result_capped = true;
+    result.result_cap = 10_000_000;
+    mount(result);
+    expect(screen.getByTestId("result-capped-badge")).toBeInTheDocument();
+    expect(screen.getByTestId("grid-window-range").textContent).toMatch(
+      /Showing rows 101/,
+    );
+    expect(
+      document.querySelector('.gc-cell.rownum')?.textContent,
+    ).toBe("101");
+    expect(
+      document.querySelector('[data-column="id"][data-row-index="100"]'),
+    ).toBeTruthy();
+  });
+
   it("renders the scrolled window and drops the distant first rows", async () => {
     const rows = Array.from({ length: 500 }, (_, i) => [i + 1, `row-${i + 1}`]);
     const { grid } = mount(page(rows));

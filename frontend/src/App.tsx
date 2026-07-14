@@ -1068,6 +1068,8 @@ export default function App() {
                       sortCol: null,
                       descending: false,
                       filters: [],
+                      allColumns: res.columns || [],
+                      visibleColumns: null,
                       statements:
                         (res.statements?.length ?? 0) > 1
                           ? res.statements
@@ -1094,6 +1096,8 @@ export default function App() {
               page: res,
               sortCol: null,
               descending: false,
+              allColumns: res.columns || [],
+              visibleColumns: null,
               view: "grid",
               sql: trimmed,
               statements:
@@ -2026,6 +2030,9 @@ export default function App() {
                   page: res,
                   sortCol: null,
                   descending: false,
+                  filters: [],
+                  allColumns: res.columns || [],
+                  visibleColumns: null,
                   statements:
                     (res.statements?.length ?? 0) > 1
                       ? res.statements
@@ -3334,6 +3341,40 @@ export default function App() {
                     </b>{" "}
                     rows
                   </span>
+                  {(activeResultTab.page.result_capped ||
+                    activeResultTab.page.truncated) && (
+                    <span
+                      className="chip"
+                      data-testid="result-capped-chip"
+                      title={
+                        activeResultTab.page.result_cap != null
+                          ? `Stopped at the ${activeResultTab.page.result_cap.toLocaleString()}-row safety limit`
+                          : "Result was truncated"
+                      }
+                      style={{ color: "#c98a2b" }}
+                    >
+                      Capped
+                    </span>
+                  )}
+                  {activeResultTab.visibleColumns &&
+                    activeResultTab.visibleColumns.length > 0 &&
+                    (activeResultTab.allColumns?.length || 0) >
+                      activeResultTab.visibleColumns.length && (
+                      <button
+                        className="chip filter-chip"
+                        title="Show all columns"
+                        onClick={() => {
+                          patchRes(activeResultTab.id, {
+                            visibleColumns: null,
+                          });
+                          void resultPaging.refresh(activeResultTab.id);
+                        }}
+                      >
+                        {activeResultTab.visibleColumns.length} of{" "}
+                        {(activeResultTab.allColumns || []).length} cols
+                        <Icon.X size={11} />
+                      </button>
+                    )}
                   {activeResultTab.filters &&
                     activeResultTab.filters.length > 0 && (
                       <button
@@ -3714,6 +3755,57 @@ export default function App() {
                       >
                         Profile field
                       </button>
+                      <button
+                        data-testid="grid-hide-column"
+                        onClick={() => {
+                          const tab = activeResultTab;
+                          if (!tab) return;
+                          const all =
+                            tab.allColumns || tab.page?.columns || [];
+                          const current =
+                            tab.visibleColumns && tab.visibleColumns.length
+                              ? tab.visibleColumns
+                              : all;
+                          if (current.length <= 1) {
+                            toast(
+                              "warn",
+                              "Keep at least one column",
+                              "Hide other columns instead, or clear the projection.",
+                            );
+                            setColMenu(null);
+                            return;
+                          }
+                          const next = current.filter((c) => c !== colMenu.col);
+                          patchRes(tab.id, {
+                            allColumns: all.length ? all : undefined,
+                            visibleColumns: next,
+                          });
+                          setColMenu(null);
+                          void resultPaging.refresh(tab.id);
+                        }}
+                      >
+                        Hide column
+                      </button>
+                      {!!(
+                        activeResultTab?.visibleColumns &&
+                        activeResultTab.visibleColumns.length > 0 &&
+                        (activeResultTab.allColumns?.length || 0) >
+                          activeResultTab.visibleColumns.length
+                      ) && (
+                        <button
+                          data-testid="grid-show-all-columns"
+                          onClick={() => {
+                            if (!activeResultTab) return;
+                            patchRes(activeResultTab.id, {
+                              visibleColumns: null,
+                            });
+                            setColMenu(null);
+                            void resultPaging.refresh(activeResultTab.id);
+                          }}
+                        >
+                          Show all columns
+                        </button>
+                      )}
                       <div className="ctx-sep" />
                       {info ? (
                         TYPE_CHOICES.map(([ty, label]) => (
@@ -4068,8 +4160,8 @@ export default function App() {
                 checked={dropShred}
                 onChange={(e) => setDropShred(e.target.checked)}
               />{" "}
-              Flatten into relational tables (one per nested array, with join
-              keys)
+              Flatten into relational tables (off by default — leave off for
+              large nested JSON unless you need joinable child tables)
             </label>
           ) : null}
           {dropShred &&

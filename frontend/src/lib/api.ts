@@ -245,6 +245,26 @@ export type RootIdCand = RootIdChoice & {
   keys?: string[];
 };
 
+export type LoadThresholdField = {
+  value: number;
+  source: "override" | "env" | "default" | string;
+  default: number;
+  env: string;
+  unit: string;
+  label: string;
+  help: string;
+  min: number;
+  max: number;
+  kind: "int" | "float" | string;
+  zero_means?: string | null;
+};
+
+export type LoadThresholdsInfo = {
+  ok?: boolean;
+  thresholds: Record<string, LoadThresholdField>;
+  overrides?: Record<string, number>;
+};
+
 export interface FlowCacheInfo {
   ok?: boolean;
   error?: string;
@@ -697,6 +717,59 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  sharepointAuthCapabilities: () =>
+    jsonFetch<{
+      msal?: boolean;
+      windows_negotiate?: boolean;
+      default_client_id?: string;
+      default_tenant?: string;
+      modes?: string[];
+      error?: string;
+    }>("/api/sharepoint/auth/capabilities", {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+
+  sharepointAuthDeviceStart: (body: { config: unknown }) =>
+    jsonFetch<{
+      ok?: boolean;
+      flow_id?: string;
+      user_code?: string;
+      verification_uri?: string;
+      message?: string;
+      secret_key?: string;
+      expires_in?: number;
+      error?: string;
+    }>("/api/sharepoint/auth/device/start", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  sharepointAuthDevicePoll: (body: { flow_id: string; block?: boolean }) =>
+    jsonFetch<{
+      ok?: boolean;
+      pending?: boolean;
+      stored?: boolean;
+      secret_key?: string;
+      available?: boolean;
+      error?: string;
+    }>("/api/sharepoint/auth/device/poll", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  sharepointAuthInteractive: (body: { config: unknown }) =>
+    jsonFetch<{
+      ok?: boolean;
+      stored?: boolean;
+      secret_key?: string;
+      available?: boolean;
+      error?: string;
+    }>("/api/sharepoint/auth/interactive", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   iteratorRun: (body: { node_id: string; graph: unknown; query_id?: string }) =>
     jsonFetch<{
       ok?: boolean;
@@ -954,6 +1027,35 @@ export const api = {
     jsonFetch<FlowCacheInfo>("/api/settings/flow-cache", {
       method: "POST",
       body: JSON.stringify(opts),
+    }),
+
+  loadThresholdsInfo: () =>
+    jsonFetch<LoadThresholdsInfo>("/api/settings/load-thresholds"),
+
+  loadThresholdsConfigure: (opts: {
+    thresholds?: Record<string, number>;
+    reset?: boolean;
+  }) =>
+    jsonFetch<LoadThresholdsInfo>("/api/settings/load-thresholds", {
+      method: "POST",
+      body: JSON.stringify(opts),
+    }),
+
+  loadPreflight: (path: string) =>
+    jsonFetch<{
+      ok: boolean;
+      path: string;
+      exists: boolean;
+      size: number;
+      size_mb: number;
+      ext: string;
+      duckdb: boolean;
+      disk_free_gb: number | null;
+      warnings: string[];
+      blockers: string[];
+    }>("/api/load/preflight", {
+      method: "POST",
+      body: JSON.stringify({ path }),
     }),
 
   // Global halt: stop every in-flight background task (load / convert /

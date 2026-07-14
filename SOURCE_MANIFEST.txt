@@ -57,6 +57,7 @@ backend/samql_core/flowcache.py
 backend/samql_core/hdfs.py
 backend/samql_core/inference.py
 backend/samql_core/lineage.py
+backend/samql_core/load_thresholds.py
 backend/samql_core/loaders.py
 backend/samql_core/mssql.py
 backend/samql_core/nodeflow.py
@@ -68,6 +69,7 @@ backend/samql_core/rows.py
 backend/samql_core/secretstore.py
 backend/samql_core/session.py
 backend/samql_core/sharepoint.py
+backend/samql_core/sharepoint_auth.py
 backend/samql_core/shred.py
 backend/samql_core/sqlutil.py
 backend/samql_core/stores.py
@@ -125,6 +127,7 @@ frontend/src/components/Icon.tsx
 frontend/src/components/JournalCancel.component.test.tsx
 frontend/src/components/LoadDataModal.component.test.tsx
 frontend/src/components/LoadDataModal.tsx
+frontend/src/components/LoadThresholdsPanel.tsx
 frontend/src/components/Modal.component.test.tsx
 frontend/src/components/Modal.tsx
 frontend/src/components/MultiSelect.tsx
@@ -211,6 +214,7 @@ frontend/src/lib/CreatedNodeManage.component.test.tsx
 frontend/src/lib/CreatedNodeOpenSave.component.test.tsx
 frontend/src/lib/Dashboard.component.test.tsx
 frontend/src/lib/DashboardSettings.component.test.tsx
+frontend/src/lib/LoadThresholdsPanel.component.test.tsx
 frontend/src/lib/activity.ts
 frontend/src/lib/api.ts
 frontend/src/lib/apiProfiles.ts
@@ -299,9 +303,11 @@ tests/test_wave3_stabilization.py
 tools/aphex_transport.py
 tools/bench_large_load.py
 tools/diag_load.py
+tools/gen_nested_json_stall_sample.py
 tools/install_frontend_deps.py
 tools/normalize_npm_lock.py
 tools/package_release.py
 tools/prune_stale_source.py
 tools/release_artifacts.py
 tools/release_preflight.py
+tools/repro_json_load_stall.py

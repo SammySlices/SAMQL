@@ -904,7 +904,10 @@ def stream_json_records(path, progress=None, should_cancel=None):
                     # objects included). Do NOT pass multiple_values here: it
                     # suppresses that raise AND skips bare objects between arrays,
                     # so a mixed stream would silently lose records.
-                    for item in ijson.items(src, "item"):
+                    # use_float=True: yajl otherwise yields decimal.Decimal for
+                    # every number. That breaks orjson NDJSON rewrite (TypeError)
+                    # and sends multi-GB flatten-off loads into stream-flatten.
+                    for item in ijson.items(src, "item", use_float=True):
                         yielded += 1
                         yield item
                 if progress and total:

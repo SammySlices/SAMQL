@@ -9,10 +9,14 @@ ijson
 tzdata
 pillow
 pandas
+msal
+requests
 # Executes the SQL Server driver/availability boundary on Windows.
 pyodbc; platform_system == "Windows"
 # Executes DPAPI/Windows-auth capability paths on Windows.
 pywin32; platform_system == "Windows"
+# Windows Integrated Auth for classic on-prem SharePoint.
+requests-negotiate-sspi; platform_system == "Windows"
 # Exercises the native-window import path on Windows; pythonnet/WebView2
 # dependencies are resolved transitively by pywebview.
 pywebview; platform_system == "Windows"

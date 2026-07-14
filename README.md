@@ -331,6 +331,12 @@ SmartScreen prompts) and the Windows SDK's `signtool` on the build machine.
 
 ---
 
+## Required acceleration
+
+| Package  | Why |
+| -------- | ---- |
+| `orjson` | Fast JSON array→NDJSON rewrite and API payloads. Install with `pip install -r backend/requirements.txt` (also pulled in by `requirements-optional.txt` / distribution builds). |
+
 ## Optional capabilities
 
 Everything below is optional. Install with `pip install <name>`; the app
@@ -340,9 +346,10 @@ detects each at runtime and shows its status in the top bar.
 | ------------ | ----------------------------------------------------------- |
 | `duckdb`     | **Default engine when installed** — fast analytical queries and native CSV/JSON/Parquet reading; needed for large (multi-GB) datasets |
 | `pyarrow`    | Parquet read/write and Parquet export                       |
+| `pandas`     | Python node: input table as a DataFrame (`df`) and DataFrame `out` (bundled in distribution builds) |
 | `sqlglot`    | SQL formatting and cross-dialect transpilation              |
 | `openpyxl`   | Excel (`.xlsx`) export                                       |
-| `orjson`     | Faster JSON parsing for large files / API responses         |
+| `ijson`      | Streaming parser for very large JSON arrays (lower memory)  |
 | `pyodbc`     | Connect to Microsoft SQL Server                             |
 | `pywebview`  | Open SamQL in a native desktop window instead of a browser  |
 | `pywin32`    | Windows auth / impersonation for SQL Server (Windows only)  |
@@ -392,7 +399,9 @@ flattened rows at once. If the optional `ijson` package is installed, array
 streaming uses it (C-accelerated); otherwise a pure-stdlib incremental
 parser is used. (Loading JSON into DuckDB instead keeps the nesting as
 STRUCT/LIST columns via DuckDB's native reader — a different, non-flattened
-shape; see the note on JSON shapes.)
+shape; see the note on JSON shapes.) **Flatten on load** is **off by default**
+(Storage & memory → Flatten JSON on load, or `POST /api/settings/flatten-json`);
+turn it on only when you want nested JSON shredded into relational tables.
 
 **Robust numbers and shapes.** JSON integers larger than 64-bit (e.g. long
 account numbers) are preserved as exact text instead of crashing the load
@@ -814,13 +823,13 @@ the dev UI runs on another origin, add that exact origin to
 
 Ordinary JSON request bodies are limited to 32 MB before buffering; configure
 that with `SAMQL_JSON_BODY_MB` (`0` disables). Streamed multipart uploads use
-`SAMQL_UPLOAD_MB` and default to 4 GB. `SAMQL_JSON_OBJECT_MB` controls DuckDB's
+`SAMQL_UPLOAD_MB` and default to 16 GB. `SAMQL_JSON_OBJECT_MB` controls DuckDB's
 largest single-record JSON parser buffer (256 MiB by default; raise it only for
 genuinely huge individual records, and only after giving DuckDB enough
 `SAMQL_DUCKDB_MEMORY_GB` — the live engine budget also clamps the parser so a
 tight adaptive floor cannot request a 512 MiB allocation it cannot satisfy).
 Nested JSON loads prefer an on-disk Parquet cache from `SAMQL_JSON_ONDISK_MB`
-(default 64 MiB) so materialising structs/lists does not fill RAM. All JSON
+(64 MiB by default) so materialising structs/lists does not fill RAM. All JSON
 formats (array, NDJSON, concat, single object) are rewritten to NDJSON when
 needed and COPY'd to Parquet for both flatten-on and flatten-off loads. A
 single document at/above `SAMQL_JSON_STREAM_FLATTEN_MB` (default 256 MiB) uses
@@ -828,7 +837,10 @@ the Python streaming flattener with disk spill so multi-GB nested objects
 still land. Flatten-off uses a shallow DuckDB `maximum_depth`
 (default 2 via `SAMQL_JSON_MAX_DEPTH`; `0` = one JSON column per row) so deep
 nesting stays queryable JSON instead of exploding into STRUCTs. Flatten-on
-shreds the Parquet nested table into relational child tables.
+shreds the Parquet nested table into relational child tables. **Load preflight**
+(`POST /api/load/preflight`) warns before large files; Parquet COPY aborts
+mid-flight when temp disk is too low. DuckDB **concurrent reads** default ON
+(`POST /api/settings/concurrent-reads` to toggle).
 `SAMQL_JSON_STREAM_MB` (default 32 MiB) remains available for tuning the
 array-stream pre-pass. The incremental NodeFlow cache uses both
 an entry cap and `SAMQL_FLOW_CACHE_MB` (default 1024 MB). Cache accounting and

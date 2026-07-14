@@ -13,6 +13,7 @@ import time as _time_mod
 import itertools
 import json
 import os
+import shutil
 import sys
 import sqlite3
 import tempfile
@@ -211,21 +212,97 @@ def copy_parquet_options(jumbo=True):
     return " (FORMAT PARQUET)"
 
 
-def exec_copy_parquet(cur, select_sql, dest_fwd):
+def exec_copy_parquet(cur, select_sql, dest_fwd, max_bytes=None,
+                      should_cancel=None, interrupt_fn=None):
     """Run COPY (...) TO parquet with byte-capped row groups, falling
     back to plain options when the local DuckDB does not know
-    ROW_GROUP_SIZE_BYTES. Returns the SQL that actually ran."""
+    ROW_GROUP_SIZE_BYTES. Returns the SQL that actually ran.
+
+    Optional ``max_bytes`` starts a monitor that polls the destination
+    file size (and free disk on its volume). When the file exceeds the
+    ceiling — or free disk drops below a small reserve — the monitor
+    calls ``interrupt_fn`` (or ``cur.interrupt``) so multi-GB COPYs abort
+    before filling the drive. ``should_cancel`` is polled the same way.
+    """
     head = "COPY (%s) TO '%s'" % (select_sql, dest_fwd)
     sql = head + copy_parquet_options(jumbo=True)
+    stop = threading.Event()
+    hit = {"err": None}
+
+    def _interrupt():
+        fn = interrupt_fn
+        if fn is None:
+            fn = getattr(cur, "interrupt", None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _monitor():
+        # Dest may not exist until DuckDB starts writing.
+        dest_path = dest_fwd.replace("/", os.sep)
+        reserve = 512 * 1024 * 1024  # keep ~512 MiB free on the volume
+        while not stop.wait(0.75):
+            try:
+                if should_cancel and should_cancel():
+                    hit["err"] = "cancelled"
+                    _interrupt()
+                    return
+                if max_bytes and os.path.exists(dest_path):
+                    try:
+                        sz = os.path.getsize(dest_path)
+                    except OSError:
+                        sz = 0
+                    if sz > max_bytes:
+                        hit["err"] = (
+                            "Parquet COPY exceeded %.1f GiB ceiling "
+                            "(%.1f GiB written)"
+                            % (max_bytes / (1024 ** 3), sz / (1024 ** 3)))
+                        _interrupt()
+                        return
+                    try:
+                        free = shutil.disk_usage(
+                            os.path.dirname(dest_path) or ".").free
+                    except Exception:
+                        free = None
+                    if free is not None and free < reserve:
+                        hit["err"] = (
+                            "Parquet COPY aborted: only %.1f GiB free on "
+                            "temp volume (need headroom for spill)"
+                            % (free / (1024 ** 3)))
+                        _interrupt()
+                        return
+            except Exception:
+                pass
+
+    mon = None
+    if max_bytes or should_cancel:
+        mon = threading.Thread(target=_monitor, daemon=True,
+                               name="samql-copy-monitor")
+        mon.start()
     try:
-        cur.execute(sql)
+        try:
+            cur.execute(sql)
+        except Exception as e:
+            if "ROW_GROUP_SIZE_BYTES" not in str(e)                 and "row_group_size_bytes" not in str(e).lower():
+                if hit["err"]:
+                    raise RuntimeError(hit["err"]) from e
+                raise
+            sql = head + copy_parquet_options(jumbo=False)
+            try:
+                cur.execute(sql)
+            except Exception as e2:
+                if hit["err"]:
+                    raise RuntimeError(hit["err"]) from e2
+                raise
+        if hit["err"]:
+            raise RuntimeError(hit["err"])
         return sql
-    except Exception as e:
-        if "ROW_GROUP_SIZE_BYTES" not in str(e)                 and "row_group_size_bytes" not in str(e).lower():
-            raise
-        sql = head + copy_parquet_options(jumbo=False)
-        cur.execute(sql)
-        return sql
+    finally:
+        stop.set()
+        if mon is not None:
+            mon.join(timeout=2.0)
 
 
 def shred_thread_throttle(conn, write_lock=None):
@@ -483,8 +560,10 @@ def _columnarize(rows, columns, text_cols):
                     vals.append(sv if isinstance(sv, str) else str(sv))
             out.append((vals, True))
         else:
-            # numeric/boolean/None: no per-cell Python work; Arrow infers
-            out.append((list(col), False))
+            # numeric/boolean/None: blank strings → NULL so Arrow/DuckDB never
+            # hit "Could not convert string '' to INT64" on JSON/CSV empties.
+            vals = [_empty_to_null(v) for v in col]
+            out.append((vals, False))
     return out
 
 
@@ -543,6 +622,9 @@ class DBManager:
         self._beatd = _BeatDaemon(self)
         self.table_columns = {}
         self.table_sources = {}
+        # Original user file path when table_sources points at a converted
+        # Parquet cache (so diagnostics / field trees can still sniff JSON).
+        self.table_origins = {}
         self.type_inference = True
         self._conn = None
         if self.disk_backed and self.db_path != ":memory:":
@@ -698,6 +780,7 @@ class DBManager:
             self._conn = None
             self.table_columns.clear()
             self.table_sources.clear()
+            self.table_origins.clear()
 
     def add_tables(self, tables_dict, source=""):
         added = []
@@ -931,6 +1014,11 @@ class DBManager:
                         n += len(batch)
                         opreg.beat(rows=n)
                         batch = []
+                        # Poll cooperative cancel between batches so Stop is
+                        # visible during multi-million-row Python drains.
+                        cancel = getattr(self, "_cancel", None)
+                        if cancel is not None and cancel.is_set():
+                            raise InterruptedError("load cancelled")
                 if batch:
                     _flush(batch)
                     n += len(batch)
@@ -1062,6 +1150,7 @@ class DBManager:
             finally:
                 self.table_columns.pop(name, None)
                 self.table_sources.pop(name, None)
+                self.table_origins.pop(name, None)
 
     def drop_all(self):
         with self.write_lock:
@@ -1074,6 +1163,7 @@ class DBManager:
             self.conn.commit()
             self.table_columns.clear()
             self.table_sources.clear()
+            self.table_origins.clear()
 
 
     def column_types(self, table):
@@ -1166,6 +1256,9 @@ class DBManager:
             for gone in [n for n in self.table_columns if n not in live_set]:
                 self.table_columns.pop(gone, None)
                 self.table_sources.pop(gone, None)
+                origins = getattr(self, "table_origins", None)
+                if isinstance(origins, dict):
+                    origins.pop(gone, None)
 
 
 # Map the SQLite-style affinities from infer_affinities() onto DuckDB column
@@ -1187,6 +1280,34 @@ class _NullCtx:
         return False
 
 
+def _is_type_conversion_error(exc):
+    """True when ``exc`` is a DuckDB/SQLite typed-bind failure (e.g. '' → INT).
+
+    These are recoverable by widening the column (or the whole table) to
+    VARCHAR/TEXT so a few blank or mixed cells never abort a multi-GB load.
+    """
+    msg = str(exc or "").lower()
+    if not msg:
+        return False
+    if "could not convert string" in msg:
+        return True
+    if "conversion error" in msg or "conversionexception" in msg:
+        return True
+    if "type mismatch" in msg and "convert" in msg:
+        return True
+    # Arrow / binder phrasing
+    if "cannot be converted" in msg or "failed to cast" in msg:
+        return True
+    return False
+
+
+def _empty_to_null(v):
+    """Blank strings become NULL so typed numeric columns stay valid."""
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
 def _json_object_cap_bytes(memory_limit_mb=None):
     """DuckDB JSON parser object ceiling.
 
@@ -1194,7 +1315,7 @@ def _json_object_cap_bytes(memory_limit_mb=None):
     setting that option to 1 GiB can therefore request a 2 GiB allocation even
     for a tiny NDJSON file and fail on a normally configured 2 GiB engine. A
     256 MiB default keeps ordinary loads bounded while still allowing unusually
-    large records through an explicit environment override.
+    large records through an explicit environment / UI override.
 
     When the live DuckDB ``memory_limit`` is known, the cap is also clamped so
     a ~2x parser reservation still fits under that budget. Adaptive resources
@@ -1202,11 +1323,8 @@ def _json_object_cap_bytes(memory_limit_mb=None):
     256 MiB object size alone requests a 512 MiB allocation and the nested
     (non-flatten) JSON load fails before any rows are read.
     """
-    raw = os.environ.get("SAMQL_JSON_OBJECT_MB", "256")
-    try:
-        mb = int(raw)
-    except Exception:
-        mb = 256
+    from . import load_thresholds as LT
+    mb = int(LT.get_int("json_object_mb"))
     mb = max(1, min(1024, mb))
     try:
         lim = int(memory_limit_mb) if memory_limit_mb else 0
@@ -1262,11 +1380,15 @@ def _json_readers(fwd, ndjson=False, memory_limit_mb=None, maximum_depth=None):
             f"read_json('{fwd}', format='newline_delimited', "
             f"ignore_errors=true, {cap}{depth_arg})",
             f"read_json_auto('{fwd}', ignore_errors=true, {cap}{depth_arg})",
+            # Last resort: one JSON value per row (no typed STRUCT/scalar
+            # inference) so '' → INT never aborts a multi-GB load.
+            f"read_ndjson_objects('{fwd}')",
         ]
     return [
         f"read_json_auto('{fwd}', {cap}{depth_arg})",
         f"read_json('{fwd}', auto_detect=true, ignore_errors=true, "
         f"{cap}{depth_arg})",
+        f"read_json_objects_auto('{fwd}')",
     ]
 
 
@@ -1315,16 +1437,17 @@ def _csv_readers(fwd, delimiter=None):
     The first is a fast typed read: DuckDB sniffs types from a bounded head
     sample (not the whole file) and reads in parallel, avoiding the costly
     full-file inference scan that ``sample_size=-1`` forces on multi-GB files.
-    The second is a tolerant fallback for messy files -- everything as text,
-    skipping unparseable rows in a single pass. ``delimiter`` pins the column
-    separator when the caller knows it (e.g. a ``.tsv``)."""
+    ``nullstr=''`` turns blank cells into NULL so ``""`` never fails a
+    BIGINT/DOUBLE column. The second is a tolerant all-VARCHAR fallback for
+    rows that still cannot bind. ``delimiter`` pins the column separator when
+    the caller knows it (e.g. a ``.tsv``)."""
     delim_arg = ""
     if delimiter:
         lit = "\\t" if delimiter == "\t" \
             else str(delimiter).replace("'", "''")
         delim_arg = ", delim='%s'" % lit
     return [
-        f"read_csv_auto('{fwd}', sample_size=204800{delim_arg})",
+        f"read_csv_auto('{fwd}', sample_size=204800, nullstr=''{delim_arg})",
         f"read_csv_auto('{fwd}', all_varchar=true, "
         f"ignore_errors=true, sample_size=204800{delim_arg})",
     ]
@@ -1342,24 +1465,20 @@ def _json_stream_min_bytes():
     reads a raw top-level array as one native call that only observes a Stop
     after it has read the whole array), so the threshold is deliberately modest
     so a mid-size array that a user might want to cancel takes the streaming
-    path. Override with SAMQL_JSON_STREAM_MB."""
-    try:
-        mb = float(os.environ.get("SAMQL_JSON_STREAM_MB", "32"))
-        return int(max(1, mb) * 1024 * 1024)
-    except Exception:
-        return 32 * 1024 * 1024
+    path. Override via Storage & memory → Load thresholds or SAMQL_JSON_STREAM_MB."""
+    from . import load_thresholds as LT
+    mb = float(LT.get_float("json_stream_mb"))
+    return int(max(1, mb) * 1024 * 1024)
 
 
 def _json_stream_flatten_min_bytes():
     """Single-object JSON at/above this size uses the Python streaming flattener
     into DuckDB instead of a native nested materialise. A multi-GB single
     document cannot be buffered as one DuckDB STRUCT; the streamer spills and
-    emits relational tables with bounded memory. Override with
-    ``SAMQL_JSON_STREAM_FLATTEN_MB`` (default 256; ``0`` disables)."""
-    try:
-        mb = float(os.environ.get("SAMQL_JSON_STREAM_FLATTEN_MB", "256"))
-    except Exception:
-        mb = 256.0
+    emits relational tables with bounded memory. Override via Load thresholds
+    or ``SAMQL_JSON_STREAM_FLATTEN_MB`` (``0`` disables)."""
+    from . import load_thresholds as LT
+    mb = float(LT.get_float("json_stream_flatten_mb"))
     if mb <= 0:
         return None
     return int(max(1, mb) * 1024 * 1024)
@@ -1369,12 +1488,24 @@ def _ondisk_min_bytes():
     """Files at/above this size are loaded to an on-disk Parquet cache exposed
     as a query-in-place view (bounded memory for the whole lifecycle -- the rows
     never materialise in the engine), instead of an in-memory table. Returns the
-    byte threshold, or None to disable (always materialise in memory). Override
-    with SAMQL_ONDISK_MB; set it to 0 to disable."""
-    try:
-        mb = float(os.environ.get("SAMQL_ONDISK_MB", "512"))
-    except Exception:
-        mb = 512.0
+    byte threshold, or None to disable the *soft* threshold (the hard floor in
+    ``_ondisk_hard_floor_bytes`` still applies). Override via Load thresholds or
+    SAMQL_ONDISK_MB; set it to 0 to disable the soft threshold."""
+    from . import load_thresholds as LT
+    mb = float(LT.get_float("ondisk_mb"))
+    if mb <= 0:
+        return None
+    return int(mb * 1024 * 1024)
+
+
+def _ondisk_hard_floor_bytes():
+    """Absolute size floor for on-disk Parquet conversion.
+
+    Multi-GB CSVs (e.g. ~6 GiB / ~9M rows) must never land as in-engine CTAS
+    even when ``SAMQL_ONDISK_MB=0``. Default 256 MiB; set
+    ``SAMQL_ONDISK_HARD_MB=0`` (or Load thresholds) to disable."""
+    from . import load_thresholds as LT
+    mb = float(LT.get_float("ondisk_hard_mb"))
     if mb <= 0:
         return None
     return int(mb * 1024 * 1024)
@@ -1386,13 +1517,10 @@ def _json_ondisk_min_bytes():
     Nested JSON expands far beyond file size once DuckDB materialises structs /
     lists, so the generic 512 MiB file threshold is too late -- a few hundred
     MiB of nested JSON can OOM a tight engine budget. Prefer the Parquet-cache
-    path sooner. Override with ``SAMQL_JSON_ONDISK_MB`` (default 64; ``0``
-    disables the JSON-specific floor and uses the generic threshold only)."""
-    raw = os.environ.get("SAMQL_JSON_ONDISK_MB", "64")
-    try:
-        mb = float(raw)
-    except Exception:
-        mb = 64.0
+    path sooner. Override via Load thresholds or ``SAMQL_JSON_ONDISK_MB``
+    (default 64; ``0`` disables the JSON-specific floor)."""
+    from . import load_thresholds as LT
+    mb = float(LT.get_float("json_ondisk_mb"))
     if mb <= 0:
         return None
     return int(max(1, mb) * 1024 * 1024)
@@ -1453,18 +1581,18 @@ def _sniff_json_format(path, sample_size=1024 * 1024):
     return "unknown"
 
 
-def ensure_json_engine_memory(duck, path):
-    """Raise DuckDB's memory ceiling for a large JSON load when the machine
+def ensure_large_file_engine_memory(duck, path, min_size_mb=64):
+    """Raise DuckDB's memory ceiling for a large file load when the machine
     has spare RAM. Explicit ``SAMQL_DUCKDB_MEMORY_GB`` always wins. Targets
-    multi-GB nested / NDJSON / concat loads that otherwise sit on the adaptive
-    512 MiB floor and OOM during parser reservation."""
+    multi-GB CSV / JSON loads (e.g. ~6 GiB CSVs) that otherwise sit on a tight
+    adaptive floor and thrash during COPY → Parquet."""
     if duck is None or os.environ.get("SAMQL_DUCKDB_MEMORY_GB"):
         return False
     try:
         size_mb = os.path.getsize(path) / (1024 * 1024)
     except OSError:
         return False
-    if size_mb < 64:
+    if size_mb < float(min_size_mb):
         return False
     try:
         from . import resourcebudget
@@ -1474,7 +1602,8 @@ def ensure_json_engine_memory(duck, path):
     except Exception:
         avail = total = 0.0
     # Aim for enough headroom to parse + spill: at least 2 GiB, up to 8 GiB,
-    # never more than half of currently available RAM.
+    # never more than half of currently available RAM. For multi-GB inputs
+    # prefer a floor near min(file size, 8 GiB) so COPY stays streaming.
     want = int(max(2048, min(8192, size_mb)))
     if avail > 0:
         want = int(min(want, max(512, avail * 0.5)))
@@ -1487,6 +1616,12 @@ def ensure_json_engine_memory(duck, path):
         return bool(duck.apply_resource_memory_mb(want))
     except Exception:
         return False
+
+
+def ensure_json_engine_memory(duck, path):
+    """Raise DuckDB's memory ceiling for a large JSON load (see
+    ``ensure_large_file_engine_memory``)."""
+    return ensure_large_file_engine_memory(duck, path, min_size_mb=64)
 
 
 def total_physical_ram_bytes():
@@ -1550,12 +1685,49 @@ def _file_starts_with_array(path):
         return False
 
 
+def _json_dumps_default(obj):
+    """orjson / stdlib default for values the streaming JSON reader may emit.
+
+    ijson's yajl backend yields ``decimal.Decimal`` for numbers; without this
+    ``orjson.dumps`` raises and the array→NDJSON rewrite aborts on the first
+    record, forcing the flatten-off path into a multi-GB Python stream-flatten
+    that looks like a stall.
+    """
+    import decimal
+    if isinstance(obj, decimal.Decimal):
+        try:
+            if obj == obj.to_integral_value():
+                return int(obj)
+        except Exception:
+            pass
+        try:
+            f = float(obj)
+            if f == f and f not in (float("inf"), float("-inf")):
+                return f
+        except Exception:
+            pass
+        return str(obj)
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.decode("utf-8", "replace")
+    if hasattr(obj, "isoformat"):
+        try:
+            return obj.isoformat()
+        except Exception:
+            pass
+    raise TypeError("Type is not JSON serializable: %s" % type(obj).__name__)
+
+
 def _write_ndjson_from_stream(src_path, dst_path, should_cancel=None):
     """Rewrite a JSON file to newline-delimited JSON (one compact value per
     line) using the shared streaming reader (``flatten.stream_json_records`` --
     ijson-accelerated when installed, pure-stdlib otherwise), so DuckDB can
     stream it instead of buffering a whole top-level array. Bounded memory
     regardless of file size; returns the number of records written.
+
+    Serialization requires ``orjson`` when installed (distribution builds and
+    ``backend/requirements.txt`` always include it). Falls back to stdlib
+    ``json.dumps`` only if orjson is missing, with a one-time stderr hint.
+    Both paths accept ``decimal.Decimal`` from ijson via ``_json_dumps_default``.
 
     ``should_cancel`` (optional) is polled on every record here and, through the
     shared reader, on every raw chunk read -- so a Stop aborts promptly even in
@@ -1564,14 +1736,31 @@ def _write_ndjson_from_stream(src_path, dst_path, should_cancel=None):
     The reader also stamps a heartbeat while reading, so this pre-pass no longer
     looks like a stall on a slow (e.g. ijson-less) box."""
     from .flatten import stream_json_records
-    import json as _json
+    try:
+        import orjson as _orjson
+
+        def _dumps(rec):
+            # orjson returns bytes; decode once for the text writer.
+            return _orjson.dumps(
+                rec, default=_json_dumps_default).decode("utf-8")
+    except Exception:
+        import json as _json
+        sys.stderr.write(
+            "[samql] orjson is not installed — JSON loads will be slower. "
+            "Install with: pip install orjson  (or: pip install -r "
+            "backend/requirements.txt)\n")
+
+        def _dumps(rec):
+            return _json.dumps(rec, separators=(",", ":"),
+                               ensure_ascii=False,
+                               default=_json_dumps_default)
+
     n = 0
     with open(dst_path, "w", encoding="utf-8", newline="\n") as out:
         for rec in stream_json_records(src_path, should_cancel=should_cancel):
             if should_cancel is not None and should_cancel():
                 raise InterruptedError("load cancelled during JSON read")
-            out.write(_json.dumps(rec, separators=(",", ":"),
-                                  ensure_ascii=False))
+            out.write(_dumps(rec))
             out.write("\n")
             n += 1
     return n
@@ -1804,12 +1993,10 @@ class DuckDBManager:
         # on the concurrent-reads path, so two refreshes can't race it without
         # taking write_lock (which a build holds).
         self._catalog_lock = threading.Lock()
-        # See CONCURRENT_READS_ENV. Off by default.
-        # Concurrent metadata reads (separate cursors, DuckDB's documented
-        # one-cursor-per-thread MVCC model) default ON: they keep the tables
-        # panel / counts / schema live while a build holds the main
-        # connection, and every concurrent path falls back to the locked read
-        # on failure. SAMQL_CONCURRENT_READS=0 restores full serialization.
+        # Concurrent read cursors for SELECT peeks during long COPYs.
+        # On by default so catalog/page peeks do not queue behind multi-GB
+        # writes. Every concurrent path falls back to the locked read on
+        # failure. SAMQL_CONCURRENT_READS=0 restores full serialization.
         self.concurrent_reads = _env_truthy(CONCURRENT_READS_ENV, True)
         # Cap simultaneous read CURSORS (each is a live DuckDB connection):
         # spamming Run must degrade gracefully to the locked path, never
@@ -1822,6 +2009,9 @@ class DuckDBManager:
             max(1, min(_slots, 64)))
         self.table_columns = {}
         self.table_sources = {}
+        # Original user file path when table_sources points at a converted
+        # Parquet cache (so diagnostics / field trees can still sniff JSON).
+        self.table_origins = {}
         self._counter = 0
         self.view_backing = {}
         # Set by interrupt() so a Python-side read loop (the large-JSON-array
@@ -2356,16 +2546,60 @@ class DuckDBManager:
             types = {c: _DUCKDB_TYPE.get(affin.get(c) or "", "VARCHAR")
                      for c in columns}
             text_cols = {c for c in columns if types[c] == "VARCHAR"}
+            widen_all = [False]
 
             def _coerce(c, v):
                 if v is None:
                     return None
-                if c in text_cols:
+                if c in text_cols or widen_all[0]:
                     if isinstance(v, str):
                         return v
                     sv = _bind_safe(v)
                     return sv if isinstance(sv, str) else str(sv)
-                return v
+                # Typed numeric column: blank JSON/CSV cells → NULL, not ''.
+                return _empty_to_null(v)
+
+            def _stringify_rows(rows):
+                out = []
+                for r in rows:
+                    cells = []
+                    for v in r:
+                        if v is None:
+                            cells.append(None)
+                        elif isinstance(v, str):
+                            cells.append(v)
+                        else:
+                            sv = _bind_safe(v)
+                            cells.append(sv if isinstance(sv, str) else str(sv))
+                    out.append(tuple(cells))
+                return out
+
+            def _widen_table_to_varchar():
+                """Rebuild the live table as all-VARCHAR after a conversion
+                failure so remaining rows (and prior rows) stay loadable."""
+                nonlocal types, text_cols, col_def, insert_sql
+                casts = ", ".join(
+                    "CAST(%s AS VARCHAR) AS %s"
+                    % (_quote_ident(c), _quote_ident(c)) for c in columns)
+                tmp = name + "__varchar"
+                self.conn.execute(
+                    f'DROP TABLE IF EXISTS {_quote_ident(tmp)}')
+                self.conn.execute(
+                    f'CREATE TABLE {_quote_ident(tmp)} AS '
+                    f'SELECT {casts} FROM {_quote_ident(name)}')
+                self.conn.execute(
+                    f'DROP TABLE {_quote_ident(name)}')
+                self.conn.execute(
+                    f'ALTER TABLE {_quote_ident(tmp)} '
+                    f'RENAME TO {_quote_ident(name)}')
+                types = {c: "VARCHAR" for c in columns}
+                text_cols = set(columns)
+                widen_all[0] = True
+                col_def = ", ".join(
+                    f'{_quote_ident(c)} VARCHAR' for c in columns)
+                insert_sql = (
+                    f'INSERT INTO {_quote_ident(name)} ({col_list}) '
+                    f"VALUES ({ph})")
 
             col_def = ", ".join(f'{_quote_ident(c)} {types[c]}'
                                 for c in columns)
@@ -2379,18 +2613,11 @@ class DuckDBManager:
             batch = []
 
             def _coerce_rows(rows):
-                # per-cell coercion -- only needed for the executemany fallback
                 return [tuple(_coerce(c, v) for c, v in zip(columns, r))
                         for r in rows]
 
             def _flush(rows):
-                # Columnar bulk insert via Arrow -- one C++ append of the whole
-                # batch instead of a per-row bind, and (new) no per-cell Python
-                # coercion: we transpose once and stringify only the text
-                # columns, which is the big win on wide tables. Each batch is
-                # independent, so a per-batch fallback to executemany (below) is
-                # safe: no partial-insert can be duplicated.
-                if HAS_PYARROW and rows:
+                if HAS_PYARROW and rows and not widen_all[0]:
                     try:
                         import pyarrow as _pa
                         prepared = _columnarize(rows, columns, text_cols)
@@ -2410,14 +2637,23 @@ class DuckDBManager:
                             except Exception:
                                 pass
                         return
-                    except Exception:
-                        # Arrow build/cast/insert failed for this batch -- fall
-                        # back to the row-wise insert, which coerces per value.
+                    except Exception as e:
                         try:
                             self.conn.unregister("_samql_arrow_ins")
                         except Exception:
                             pass
-                self.conn.executemany(insert_sql, _coerce_rows(rows))
+                        if _is_type_conversion_error(e):
+                            _widen_table_to_varchar()
+                            self.conn.executemany(
+                                insert_sql, _stringify_rows(rows))
+                            return
+                try:
+                    self.conn.executemany(insert_sql, _coerce_rows(rows))
+                except Exception as e:
+                    if widen_all[0] or not _is_type_conversion_error(e):
+                        raise
+                    _widen_table_to_varchar()
+                    self.conn.executemany(insert_sql, _stringify_rows(rows))
 
             try:
                 source_rows = (itertools.chain(sample, row_iter)
@@ -2429,6 +2665,8 @@ class DuckDBManager:
                         n += len(batch)
                         opreg.beat(rows=n)
                         batch = []
+                        if self._cancel.is_set():
+                            raise InterruptedError("load cancelled")
                 if batch:
                     _flush(batch)
                     n += len(batch)
@@ -2571,8 +2809,10 @@ class DuckDBManager:
         That covers top-level arrays, concatenated values, and single objects
         with one code path. True NDJSON / ``.ndjson`` / ``.jsonl`` is read in
         place. Returns ``(read_path, is_ndjson, cleanup_path_or_None)``.
-        A cancel during the rewrite raises; any other problem falls back to
-        the original file."""
+        A cancel during the rewrite raises. For large non-NDJSON files a
+        rewrite failure propagates (falling back to the raw array would
+        make DuckDB buffer the whole document). Small files still fall
+        back to the original path so quirky tiny fixtures keep loading."""
         fmt = _sniff_json_format(path)
         if fmt == "ndjson" or _is_ndjson_path(path):
             return path, True, None
@@ -2593,12 +2833,20 @@ class DuckDBManager:
                     pass
             raise
         except Exception:
-            # genuine read/parse failure: fall back to the original file
             if dst:
                 try:
                     os.unlink(dst)
                 except Exception:
                     pass
+            # Large non-NDJSON: do not hand DuckDB the raw file (buffers the
+            # whole array). Let the caller recover via stream-flatten / depth-0.
+            try:
+                sz = os.path.getsize(path)
+            except OSError:
+                sz = 0
+            stream_floor = _json_stream_min_bytes()
+            if sz >= stream_floor:
+                raise
             return path, False, None
         return dst, True, dst
 
@@ -2681,12 +2929,11 @@ class DuckDBManager:
                                     if cur.description else [])
                             self.table_columns[final] = cols
                             self._types_cache_drop(final)
-                            if kind == "json" and json_depth is None:
-                                # Full nested loads: NDJSON/JSON whose rows are
-                                # a single struct -- or a [{...}] array -- land
-                                # as one opaque column; expand it so the table
-                                # shows the JSON keys as headers. Shallow
-                                # (flatten-off) loads already project columns.
+                            if kind == "json":
+                                # Expand a single STRUCT / STRUCT[] column so
+                                # JSON keys become headers -- for both full
+                                # nested loads and shallow flatten-off CTAS.
+                                # No-op when the table already has real columns.
                                 cols = self._maybe_expand_json_struct(final)
                                 self.table_columns[final] = cols
                                 self._types_cache_drop(final)
@@ -2792,6 +3039,7 @@ class DuckDBManager:
                         pass
             self.table_columns.clear()
             self.table_sources.clear()
+            self.table_origins.clear()
 
     def recycle(self):
         with self.write_lock:
@@ -2803,6 +3051,7 @@ class DuckDBManager:
             self._conn = None
             self.table_columns.clear()
             self.table_sources.clear()
+            self.table_origins.clear()
             if self._db_path:
                 for f in (self._db_path, self._db_path + ".wal"):
                     try:
@@ -2866,7 +3115,9 @@ class DuckDBManager:
             if filecache.enabled() else None
         hit = filecache.lookup(fc_key)
         if hit:
-            return self.create_view_from_file(name, hit, "parquet")
+            final = self.create_view_from_file(name, hit, "parquet")
+            DuckDBManager._remember_origin(self, final, path)
+            return final
         if fc_key:
             cache = filecache.begin(fc_key)
         else:
@@ -2878,22 +3129,55 @@ class DuckDBManager:
                 self._cancel.clear()
                 fwd = sqlutil.sql_path(path)
                 if kind == "parquet":
-                    reader = f"read_parquet('{fwd}')"
+                    readers = [f"read_parquet('{fwd}')"]
                 elif kind == "json":
                     read_path, is_nd, cleanup = self._json_source_for_read(path)
                     rfwd = read_path.replace("\\", "/").replace("'", "''")
-                    reader = _json_readers(
+                    readers = _json_readers(
                         rfwd, ndjson=is_nd,
                         memory_limit_mb=self._applied_resource_memory_mb,
-                        maximum_depth=json_depth)[0]
+                        maximum_depth=json_depth)
                 else:  # csv / delimited text
-                    reader = _csv_readers(fwd, delimiter)[0]
+                    readers = _csv_readers(fwd, delimiter)
                 if cancel and cancel():
                     raise LoadCancelled()
-                with _ExecKeepalive(self.conn, self._cancel,
-                                    threading.get_ident()):
-                    exec_copy_parquet(self.conn,
-                                      "SELECT * FROM %s" % reader, cfwd)
+                # Try every reader (typed → tolerant), same ladder as CTAS.
+                # A single first-reader failure used to abort the whole
+                # on-disk path and refuse the load.
+                last = None
+                copied = False
+                for reader in readers:
+                    try:
+                        try:
+                            if os.path.exists(cache):
+                                os.unlink(cache)
+                        except OSError:
+                            pass
+                        if cancel and cancel():
+                            raise LoadCancelled()
+                        with _ExecKeepalive(self.conn, self._cancel,
+                                            threading.get_ident()):
+                            exec_copy_parquet(
+                                self.conn,
+                                "SELECT * FROM %s" % reader, cfwd,
+                                should_cancel=(
+                                    lambda: bool(cancel and cancel())
+                                    or self._cancel.is_set()),
+                                interrupt_fn=getattr(
+                                    self.conn, "interrupt", None))
+                        copied = True
+                        break
+                    except LoadCancelled:
+                        raise
+                    except Exception as e:
+                        if _is_interrupt(e):
+                            raise
+                        last = e
+                        continue
+                if not copied:
+                    raise RuntimeError(
+                        "DuckDB could not COPY %s to Parquet: %s"
+                        % (path, last)) from last
         except BaseException:
             try:
                 os.unlink(cache)
@@ -2924,7 +3208,35 @@ class DuckDBManager:
                     filecache.abort(cache)
                 cache = fallback
         # Expose the cache as a query-in-place view (reuses the parquet path).
-        return self.create_view_from_file(name, cache, "parquet")
+        # Keep the ORIGINAL file path so diagnostics / nested field trees can
+        # still sniff JSON after table_sources points at the Parquet cache.
+        final = self.create_view_from_file(name, cache, "parquet")
+        DuckDBManager._remember_origin(self, final, path)
+        return final
+
+    def _remember_origin(self, name, path):
+        """Record the original load path when it differs from the live source."""
+        if not name or not path:
+            return
+        origins = getattr(self, "table_origins", None)
+        if not isinstance(origins, dict):
+            try:
+                self.table_origins = {}
+                origins = self.table_origins
+            except Exception:
+                return
+        try:
+            src = (getattr(self, "table_sources", {}) or {}).get(name)
+            if src and os.path.normcase(os.path.abspath(str(src))) == \
+                    os.path.normcase(os.path.abspath(str(path))):
+                return
+        except Exception:
+            pass
+        try:
+            if os.path.exists(str(path)):
+                origins[name] = str(path)
+        except Exception:
+            origins[name] = str(path)
 
     def view_to_parquet(self, view_name, parquet_path, cancel=None):
         """Materialise an existing view/table into a Parquet file (columnar +
@@ -2979,6 +3291,7 @@ class DuckDBManager:
                     continue
             self.table_columns.pop(name, None)
             self.table_sources.pop(name, None)
+            self.table_origins.pop(name, None)
             backing = getattr(self, "view_backing", {}).pop(name, None)
         if backing:
             try:
@@ -3183,6 +3496,9 @@ class DuckDBManager:
                              if n not in live_set]:
                     self.table_columns.pop(gone, None)
                     self.table_sources.pop(gone, None)
+                    origins = getattr(self, "table_origins", None)
+                    if isinstance(origins, dict):
+                        origins.pop(gone, None)
             finally:
                 self.write_lock.release()
             return
@@ -3222,3 +3538,6 @@ class DuckDBManager:
                          if n not in live_set]:
                 self.table_columns.pop(gone, None)
                 self.table_sources.pop(gone, None)
+                origins = getattr(self, "table_origins", None)
+                if isinstance(origins, dict):
+                    origins.pop(gone, None)
