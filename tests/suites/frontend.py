@@ -4253,7 +4253,8 @@ console.log("OK");
         installer_text = open(installer, encoding="utf-8").read()
         for marker in ("--prefer-online", "--cache",
                        "EINTEGRITY", "OFFICIAL_REGISTRY",
-                       "npm integrity recovery succeeded"):
+                       "--userconfig=", "is_registry_body_failure",
+                       "npm recovery succeeded with a fresh isolated cache"):
             need(marker in installer_text,
                  "npm integrity installer missing: " + marker)
         need("--force" not in installer_text

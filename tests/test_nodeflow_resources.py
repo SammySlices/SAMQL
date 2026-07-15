@@ -456,13 +456,16 @@ def test_npm_integrity_recovery():
             cleaner=cleaner,
         )
         need(code == 0, "fresh-cache integrity retry did not recover")
-        need(len(calls) == 2, "integrity failure must retry exactly once")
+        need(len(calls) == 2, "integrity failure must retry ci exactly once")
         need(cache.resolve() in cleaned
              and (frontend / "node_modules").resolve() in cleaned,
              "integrity retry did not discard cache and partial node_modules")
         command_text = " ".join(calls[0])
         need("ci" in calls[0] and "--prefer-online" in calls[0]
-             and "--cache" in calls[0],
+             and "--cache" in calls[0]
+             and any(a.startswith("--registry=") for a in calls[0])
+             and any(a.startswith("--userconfig=") for a in calls[0])
+             and any(a.startswith("--globalconfig=") for a in calls[0]),
              "npm recovery install is not a locked online cache-isolated ci")
         need("--force" not in command_text
              and "ignore-integrity" not in command_text,
@@ -470,9 +473,8 @@ def test_npm_integrity_recovery():
 
         mirror_calls = []
         mirror_results = iter([
-            module.CommandResult(0, "https://mirror.example.invalid/npm/\n"),
             module.CommandResult(1, "EINTEGRITY first mirror payload"),
-            module.CommandResult(1, "tarball data seems to be corrupted"),
+            module.CommandResult(1, "invalid json response body Unterminated string in JSON"),
             module.CommandResult(0, "public registry success"),
         ])
 
@@ -484,15 +486,15 @@ def test_npm_integrity_recovery():
             frontend=frontend,
             npm="npm",
             cache=cache,
-            registry=None,
+            registry="https://mirror.example.invalid/npm/",
             allow_public_fallback=True,
             env={},
             runner=mirror_runner,
             cleaner=lambda _path: None,
         )
         need(code == 0, "corporate-mirror integrity fallback did not recover")
-        need(len(mirror_calls) == 4,
-             "mirror recovery must probe config, retry mirror, then try public once")
+        need(len(mirror_calls) == 3,
+             "mirror recovery must retry mirror then fall back to public")
         need(any(arg == "--registry=https://registry.npmjs.org/"
                  for arg in mirror_calls[-1]),
              "final integrity recovery did not use the public registry")
