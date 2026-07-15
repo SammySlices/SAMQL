@@ -204,24 +204,12 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         need(all(os.path.isdir(x["path"]) for x in sc),
              "a shortcut points to a non-directory")
 
-    def t_load_progress():
-        st, d = c.js("POST", "/api/load/start",
-                     {"path": CSV, "destination": "sqlite"})
-        eq(st, 200, "start status")
-        job = d.get("job_id") or d.get("job")
-        need(job, f"no job id: {d}")
-        for _ in range(600):
-            st, p = c.js("GET", f"/api/load/progress/{job}")
-            if p.get("state") in ("done", "error"):
-                break
-            time.sleep(0.02)
-        eq(p.get("state"), "done", f"load did not finish: {p}")
-
     def t_wave1_stateful_server_rail():
         # Wave 1 stabilization: one stateful cross-route journey proves that a
         # real load can feed query -> filtered page -> export, and that a bad
         # query does not poison the next request. Individual routes already
         # have focused tests; this guards their lifecycle glue and cleanup.
+        # (Also covers POST /api/load/start + progress polling.)
         d = tempfile.mkdtemp(prefix="samql_wave1_http_")
         csv_path = os.path.join(d, "wave1_stateful.csv")
         table = None
@@ -510,27 +498,6 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         st, d = c.js("POST", "/api/query/not-a-real-id/cancel")
         eq(st, 200, "status")
         need("ok" in d, f"no ok field: {d}")
-
-    def t_load_json_bigint():
-        # full server path: a JSON file with an int > 64-bit must load
-        # (this is the historical "decimal" crash, end to end).
-        dd = tempfile.mkdtemp()
-        jp = os.path.join(dd, "bigint.json")
-        with open(jp, "w", encoding="utf-8") as f:
-            json.dump([{"id": 1, "acct": 12345678901234567890},
-                       {"id": 2, "acct": 8}], f)
-        st, d = c.js("POST", "/api/load/start",
-                     {"path": jp, "destination": "sqlite"})
-        eq(st, 200, "json load start")
-        job = d.get("job_id") or d.get("job")
-        need(job, f"no job id: {d}")
-        p = {}
-        for _ in range(600):
-            st, p = c.js("GET", f"/api/load/progress/{job}")
-            if p.get("state") in ("done", "error"):
-                break
-            time.sleep(0.02)
-        eq(p.get("state"), "done", f"big-int JSON load did not finish: {p}")
 
     def t_reconcile():
         # Compare the loaded table against a copy whose names all differ.
@@ -1808,7 +1775,6 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
              t_chrome_and_window_launch_paths),
             ("GET /api/features", t_features),
             ("GET /api/fs/list", t_fs_list),
-            ("POST /api/load/start + progress", t_load_progress),
             ("Wave 1 stateful load/query/filter/export/recovery rail",
              t_wave1_stateful_server_rail),
             ("POST /api/load/files-start + cancel (drag-drop background load)", t_load_files_start_cancel),
@@ -1824,7 +1790,6 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             ("POST /api/load/preflight (large-file checklist)",
              t_load_preflight_endpoint),
             ("POST /api/flatten/start + progress", t_flatten_progress),
-            ("POST /api/load/start big-int JSON", t_load_json_bigint),
             ("GET /api/tables", t_tables),
             ("GET /api/load/jobs (reattach list shape)", t_load_jobs_list),
             ("POST /api/query", t_query),

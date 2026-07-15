@@ -220,10 +220,11 @@ def frontend_tests(do_build):
             # .426: async reads are always on; the route survives (clamped,
             # behaviourally tested) but the UI toggle is retired.
             "setConcurrentReads",
-            # .473: the field-explorer shred UI was removed by request
-            # (flatten-on-load is the supported path now). The routes +
-            # api client are kept and behaviourally tested; only the UI
-            # entry point is gone.
+            # .473: the field-explorer shred UI was removed by request.
+            # Flatten defaults OFF; large nested JSON stays on the Parquet
+            # nested path. Relational shred is opt-in via the load shred /
+            # flatten controls. Routes + api client stay behaviourally tested;
+            # only the Field Explorer UI entry point is gone.
             "shredPlan",
             "shredRun",
             "shredPreflight",

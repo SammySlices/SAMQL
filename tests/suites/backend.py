@@ -781,20 +781,6 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
-    def t_flatten_json():
-        from samql_core.flatten import read_json_any_format, JSONFlattener
-        data = read_json_any_format(JSONF)
-        tables = JSONFlattener().flatten(data)
-        need(isinstance(tables, dict) and tables, "flatten returned nothing")
-        allcols = set()
-        for rows in tables.values():
-            for row in rows:
-                allcols.update(row.keys())
-        flat = {c.lower() for c in allcols}
-        need(any("name" in c for c in flat),
-             f"nested user.name not flattened: {sorted(flat)}")
-        need(len(tables) >= 2, f"expected child table for list: {list(tables)}")
-
     def t_flatten_json_selective_exclude():
         # Selective flattening: an `exclude` list skips keys/paths so a heavy
         # nested array is never turned into rows or a child table -- the big
@@ -18437,32 +18423,6 @@ def backend_tests(datadir, csv_path, json_path):
             else:
                 os.environ["SAMQL_JSON_ONDISK_MB"] = old_j
 
-    def t_duckdb_loads_ndjson():
-        # End-to-end: a .ndjson file loaded with destination='duckdb' goes
-        # through Session.load_file -- the same loader the drag-drop and
-        # Load-files flows both call -- and lands a DuckDB table with the
-        # expected columns/rows via the newline-delimited reader. Skips when
-        # duckdb is absent.
-        if not feats["duckdb"]:
-            skip("duckdb not installed")
-        s = _fresh_session()
-        dd = tempfile.mkdtemp()
-        p = os.path.join(dd, "events.ndjson")
-        with open(p, "w", encoding="utf-8") as f:
-            for i in range(200):
-                f.write(json.dumps({"id": i, "kind": "click"}) + "\n")
-        try:
-            out = s.load_file(p, destination="duckdb", base_name="ev")
-            o = out[0]
-            eq(o["engine"], "duckdb", "ndjson landed in duckdb")
-            need("id" in o["columns"] and "kind" in o["columns"],
-                 "ndjson columns parsed: %s" % o["columns"])
-            n = s.run_query("SELECT COUNT(*) FROM ev",
-                            target="__duckdb__")["rows"][0][0]
-            eq(n, 200, "all ndjson rows loaded")
-        finally:
-            s.shutdown()
-
     def t_duckdb_struct_expand():
         # The decision for expanding a one-column JSON load into real columns.
         # A list-of-struct (the [{...}]-per-line NDJSON shape) is unnested
@@ -18857,8 +18817,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_duckdb_big_json_array_streams():
-        # End-to-end: a single top-level JSON array loads via NDJSON→Parquet
-        # then shreds (flatten on). Skips without duckdb.
+        # Flatten-on: large top-level JSON array → NDJSON→Parquet then shred.
+        # Not the Python stream-flatten path (name is historical).
         if not feats["duckdb"]:
             skip("duckdb not installed")
         s = _fresh_session()
@@ -18871,6 +18831,14 @@ def backend_tests(datadir, csv_path, json_path):
         try:
             out = s.load_file(p, destination="duckdb", base_name="trades",
                               flatten=True)
+            need(out and all(t.get("engine") == "duckdb" for t in out),
+                 "large flatten-on array landed in duckdb: %r" % out)
+            need(any(t.get("storage") == "parquet-cache"
+                     or t.get("method") == "flatten-table" for t in out),
+                 "flatten-on array used Parquet/shred, not stream-flatten: %r"
+                 % out)
+            need(not any(t.get("method") == "stream-flatten" for t in out),
+                 "happy-path large array must not stream-flatten: %r" % out)
             cols = [c.lower() for c in out[0]["columns"]]
             need("id" in cols and "sym" in cols and "qty" in cols,
                  "array-of-objects keys became columns: %s" % cols)
@@ -19009,6 +18977,312 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             L._stream_flatten_into_duckdb = o_sf
             L._load_into_duckdb = o_n
+            shutil.rmtree(dd, ignore_errors=True)
+
+    def t_flatten_off_nested_arrays_queryable():
+        # Mantra: flatten-off Parquet keeps nested arrays-in-nested-elements
+        # (legs[].cf[]) and they stay SQL-queryable — not discovery-only.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        dd = tempfile.mkdtemp()
+        rows = [{"id": i, "sym": "X%d" % i,
+                 "legs": [{"n": i,
+                           "cf": [{"amt": i, "ccy": "USD"},
+                                 {"amt": i + 1, "ccy": "EUR"}]}],
+                 "nest": {"lvl": {"deep": {"v": i}}}}
+                for i in range(8)]
+        p = os.path.join(dd, "legs_cf.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(rows, f)
+        old = {k: os.environ.get(k) for k in (
+            "SAMQL_JSON_ONDISK_MB", "SAMQL_JSON_STREAM_MB",
+            "SAMQL_ONDISK_MB", "SAMQL_ONDISK_HARD_MB", "SAMQL_FILECACHE")}
+        os.environ["SAMQL_JSON_ONDISK_MB"] = "0.000001"
+        os.environ["SAMQL_JSON_STREAM_MB"] = "0.000001"
+        os.environ["SAMQL_ONDISK_MB"] = "0.000001"
+        os.environ["SAMQL_ONDISK_HARD_MB"] = "0"
+        os.environ["SAMQL_FILECACHE"] = "0"
+        try:
+            out = s.load_file(p, destination="duckdb", base_name="legscf",
+                              flatten=False, shred=False)
+            eq(len(out), 1, "one nested table: %r" % out)
+            eq(out[0].get("storage"), "parquet-cache",
+               "forced Parquet-cache: %r" % out)
+            need(not any(t.get("method") == "stream-flatten" for t in out),
+                 "no stream-flatten: %r" % out)
+            name = out[0]["name"]
+            sql = (
+                'SELECT id, '
+                "CAST(json_extract(leg, '$.n') AS INTEGER) AS n, "
+                "CAST(json_extract(cf, '$.amt') AS INTEGER) AS amt, "
+                "json_extract_string(cf, '$.ccy') AS ccy "
+                'FROM ('
+                '  SELECT id, json(CAST(unnest(legs) AS VARCHAR)) AS leg '
+                '  FROM "%s"'
+                ') L, '
+                'LATERAL ('
+                "  SELECT unnest(CAST(json_extract(leg, '$.cf') AS JSON[])) AS cf"
+                ') '
+                'ORDER BY id, n, amt'
+            ) % name
+            res = s.run_query(sql, target="__duckdb__")
+            need(not res.get("error"), "nested cf query error: %r" % res.get("error"))
+            got = res["rows"]
+            expect = []
+            for i in range(8):
+                expect.append([i, i, i, "USD"])
+                expect.append([i, i, i + 1, "EUR"])
+            eq(got, expect,
+               "legs[].cf[] amts queryable on flatten-off Parquet: %r" % got)
+            # Re-query the Parquet cache (second pass) stays correct.
+            res2 = s.run_query(sql, target="__duckdb__")
+            need(not res2.get("error"), "re-query error: %r" % res2.get("error"))
+            eq(res2["rows"], expect, "re-query of nested amts matches")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
+
+    def t_shred_two_level_nested_arrays_linkage():
+        # Flatten/shred-on must create child tables for legs AND legs.cf with
+        # parent↔leg↔cf join integrity (_parent_sk / _sk).
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        dd = tempfile.mkdtemp()
+        rows = [{"id": i, "sym": "X%d" % i,
+                 "legs": [{"n": i,
+                           "cf": [{"amt": i, "ccy": "USD"},
+                                 {"amt": i + 1, "ccy": "EUR"}]}]}
+                for i in range(5)]
+        p = os.path.join(dd, "shred_legs.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(rows, f)
+        try:
+            out = s.load_file(p, destination="duckdb", base_name="twolevel",
+                              flatten=False, shred=True)
+            shredded = []
+            for t in out:
+                shredded.extend(t.get("shredded") or [])
+            need("legs" in shredded and "legs_cf" in shredded,
+                 "two-level shred created legs + legs_cf: %r" % out)
+            hub = next((t.get("name") for t in out
+                        if (t.get("name") or "").endswith("_joinkeys")
+                        or t.get("name") == "twolevel_joinkeys"),
+                       "twolevel_joinkeys")
+            # Prefer the known shredded names from the load result.
+            leg_tbl = "legs"
+            cf_tbl = "legs_cf"
+            n_hub = s.run_query('SELECT COUNT(*) FROM "%s"' % hub,
+                                target="__duckdb__")["rows"][0][0]
+            n_leg = s.run_query('SELECT COUNT(*) FROM "%s"' % leg_tbl,
+                                target="__duckdb__")["rows"][0][0]
+            n_cf = s.run_query('SELECT COUNT(*) FROM "%s"' % cf_tbl,
+                               target="__duckdb__")["rows"][0][0]
+            eq(n_hub, 5, "hub rows")
+            eq(n_leg, 5, "one leg per trade")
+            eq(n_cf, 10, "two cf rows per leg")
+            joined = s.run_query(
+                'SELECT h.id, l.n, c.amt, c.ccy '
+                'FROM "%s" h '
+                'JOIN "%s" l ON l._parent_sk = h._sk '
+                'JOIN "%s" c ON c._parent_sk = l._sk '
+                'ORDER BY h.id, c.amt' % (hub, leg_tbl, cf_tbl),
+                target="__duckdb__")["rows"]
+            expect = []
+            for i in range(5):
+                expect.append([i, i, i, "USD"])
+                expect.append([i, i, i + 1, "EUR"])
+            eq(joined, expect,
+               "parent↔leg↔cf linkage intact: %r" % joined)
+        finally:
+            s.shutdown()
+            shutil.rmtree(dd, ignore_errors=True)
+
+    def t_load_type_format_engine_matrix():
+        # Type × format × engine smoke: int/float/bool/null/string/date/
+        # datetime/bigint/empty/scientific across CSV, JSON array, NDJSON,
+        # Excel into DuckDB (and SQLite for JSON/CSV/Excel). Nested tags +
+        # items[] preserved on DuckDB flatten-off JSON.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        import csv as _csv
+        s = _fresh_session()
+        s.flatten_on_load = False
+        dd = tempfile.mkdtemp()
+        big = 12345678901234567890
+        rec = {
+            "id": 7,
+            "qty": 3.5,
+            "active": True,
+            "note": None,
+            "name": "alpha",
+            "when": "2024-06-15",
+            "ts": "2024-06-15T12:30:00",
+            "acct": big,
+            "empty": "",
+            "sci": 1.25e-3,
+            "nest": {"flag": False,
+                     "tags": ["a", "b"],
+                     "items": [{"amt": 1}, {"amt": 2}]},
+        }
+        jp = os.path.join(dd, "types.json")
+        with open(jp, "w", encoding="utf-8") as f:
+            json.dump([rec], f)
+        np = os.path.join(dd, "types.ndjson")
+        with open(np, "w", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+        cp = os.path.join(dd, "types.csv")
+        flat_fields = ["id", "qty", "active", "note", "name", "when", "ts",
+                       "acct", "empty", "sci"]
+        with open(cp, "w", encoding="utf-8", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=flat_fields)
+            w.writeheader()
+            row = {k: ("" if rec[k] is None else rec[k]) for k in flat_fields}
+            row["active"] = "true"
+            w.writerow(row)
+        xp = os.path.join(dd, "types.xlsx")
+        if feats["openpyxl"]:
+            import openpyxl as _xl
+            wb = _xl.Workbook()
+            ws = wb.active
+            ws.append(flat_fields)
+            ws.append([7, 3.5, True, None, "alpha", "2024-06-15",
+                       "2024-06-15T12:30:00", str(big), "", 0.00125])
+            wb.save(xp)
+
+        def _assert_duck_json(label, path):
+            out = s.load_file(path, destination="duckdb", base_name=label,
+                              flatten=False)
+            need(out and out[0].get("engine") == "duckdb",
+                 "%s landed in duckdb: %r" % (label, out))
+            need(not any(t.get("method") == "stream-flatten" for t in out),
+                 "%s must not stream-flatten: %r" % (label, out))
+            name = out[0]["name"]
+            types = s.duckdb._column_types_raw(name)
+            for col, want in (("id", "BIGINT"), ("qty", "DOUBLE"),
+                              ("active", "BOOLEAN"), ("name", "VARCHAR"),
+                              ("when", "DATE"), ("ts", "TIMESTAMP"),
+                              ("acct", "HUGEINT"), ("sci", "DOUBLE")):
+                need(want in (types.get(col) or "").upper(),
+                     "%s typeof %s want %s got %s" % (
+                         label, col, want, types.get(col)))
+            row = s.run_query(
+                'SELECT id, qty, active, note, name, CAST(acct AS VARCHAR), '
+                'empty, sci FROM "%s"' % name,
+                target="__duckdb__")["rows"][0]
+            eq(row[0], 7, "%s id" % label)
+            eq(row[1], 3.5, "%s qty" % label)
+            eq(row[2], True, "%s active" % label)
+            eq(row[3], None, "%s null note" % label)
+            eq(row[4], "alpha", "%s name" % label)
+            need(str(row[5]) == str(big) or "12345678901234567890" in str(row[5]),
+                 "%s bigint preserved: %r" % (label, row[5]))
+            eq(row[6], "", "%s empty string" % label)
+            need(abs(float(row[7]) - 0.00125) < 1e-9, "%s sci" % label)
+            # Nested array-in-object stays queryable (items[] length).
+            ires = s.run_query(
+                'SELECT len(CAST(nest.items AS JSON[])) FROM "%s"' % name,
+                target="__duckdb__")
+            need(not ires.get("error"),
+                 "%s nest.items query error: %r" % (label, ires.get("error")))
+            eq(ires["rows"][0][0], 2,
+               "%s nest.items[] preserved" % label)
+            tres = s.run_query(
+                'SELECT len(CAST(nest.tags AS JSON[])) FROM "%s"' % name,
+                target="__duckdb__")
+            need(not tres.get("error"),
+                 "%s nest.tags query error: %r" % (label, tres.get("error")))
+            eq(tres["rows"][0][0], 2, "%s nest.tags[] preserved" % label)
+
+        try:
+            _assert_duck_json("tj", jp)
+            _assert_duck_json("tn", np)
+
+            # DuckDB CSV: scalar types load; blank note → NULL; bigint may
+            # widen to DOUBLE (CSV inference limit) but value is present.
+            cout = s.load_file(cp, destination="duckdb", base_name="tc")
+            need(cout and cout[0].get("engine") == "duckdb", "csv duckdb")
+            ctypes = s.duckdb._column_types_raw(cout[0]["name"])
+            need("BIGINT" in (ctypes.get("id") or "").upper(),
+                 "csv id BIGINT: %s" % ctypes.get("id"))
+            need("DOUBLE" in (ctypes.get("qty") or "").upper(),
+                 "csv qty DOUBLE")
+            need("BOOLEAN" in (ctypes.get("active") or "").upper(),
+                 "csv active BOOLEAN: %s" % ctypes.get("active"))
+            crow = s.run_query(
+                'SELECT id, qty, active, note, name FROM "%s"'
+                % cout[0]["name"], target="__duckdb__")["rows"][0]
+            eq(crow[:5], [7, 3.5, True, None, "alpha"],
+               "csv duckdb scalar values: %r" % crow)
+
+            # Forced Parquet path still preserves JSON types + nested items.
+            old = {k: os.environ.get(k) for k in (
+                "SAMQL_JSON_ONDISK_MB", "SAMQL_ONDISK_MB",
+                "SAMQL_ONDISK_HARD_MB", "SAMQL_FILECACHE")}
+            os.environ["SAMQL_JSON_ONDISK_MB"] = "0.000001"
+            os.environ["SAMQL_ONDISK_MB"] = "0.000001"
+            os.environ["SAMQL_ONDISK_HARD_MB"] = "0"
+            os.environ["SAMQL_FILECACHE"] = "0"
+            try:
+                pout = s.load_file(jp, destination="duckdb", base_name="tpq",
+                                   flatten=False)
+                eq(pout[0].get("storage"), "parquet-cache",
+                   "type matrix Parquet path: %r" % pout)
+                ptypes = s.duckdb._column_types_raw(pout[0]["name"])
+                need("BOOLEAN" in (ptypes.get("active") or "").upper(),
+                     "parquet active BOOLEAN")
+                # NDJSON→Parquet rewrite may widen >64-bit ints to DOUBLE
+                # (precision loss). In-engine CTAS keeps HUGEINT (asserted
+                # above). Parquet path must still load + preserve nesting.
+                need((ptypes.get("acct") or "").upper() in
+                     ("HUGEINT", "DOUBLE", "BIGINT"),
+                     "parquet acct numeric: %s" % ptypes.get("acct"))
+                pi = s.run_query(
+                    'SELECT len(CAST(nest.items AS JSON[])) FROM "%s"'
+                    % pout[0]["name"], target="__duckdb__")
+                need(not pi.get("error"), pi.get("error"))
+                eq(pi["rows"][0][0], 2,
+                   "parquet nest.items[] preserved")
+            finally:
+                for k, v in old.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
+            # SQLite JSON: bigint as text; nested flag flattened.
+            sout = s.load_file(jp, destination="sqlite", base_name="tsq")
+            need(sout and sout[0].get("engine") == "sqlite", "sqlite json")
+            srow = s.run_query(
+                'SELECT id, qty, active, note, name, acct FROM "tsq"',
+                target="__local__")["rows"][0]
+            eq(srow[0], 7, "sqlite id")
+            eq(float(srow[1]), 3.5, "sqlite qty")
+            need(srow[3] is None, "sqlite null note")
+            eq(str(srow[5]), str(big), "sqlite bigint as text")
+
+            if feats["openpyxl"]:
+                xout = s.load_file(xp, destination="duckdb", base_name="tx")
+                need(xout and xout[0].get("engine") == "duckdb",
+                     "excel duckdb: %r" % xout)
+                xrow = s.run_query(
+                    'SELECT id, qty, name, CAST(acct AS VARCHAR) FROM "%s"'
+                    % xout[0]["name"], target="__duckdb__")["rows"][0]
+                eq(xrow[0], 7, "excel id")
+                eq(xrow[1], 3.5, "excel qty")
+                eq(xrow[2], "alpha", "excel name")
+                need(str(big) in str(xrow[3]),
+                     "excel bigint digits preserved: %r" % xrow[3])
+                xsq = s.load_file(xp, destination="sqlite", base_name="txsq")
+                need(xsq and xsq[0].get("engine") == "sqlite", "excel sqlite")
+        finally:
+            s.shutdown()
             shutil.rmtree(dd, ignore_errors=True)
 
     def t_flatten_off_parquet_nested_field_tree_and_page():
@@ -20094,12 +20368,22 @@ def backend_tests(datadir, csv_path, json_path):
             csv_s = time.time() - t0
             need(cout and cout[0].get("storage") == "parquet-cache",
                  "large csv uses parquet-cache: %r" % cout)
+            csrc = s.duckdb.table_sources.get(cout[0]["name"], "")
+            need(str(csrc).lower().endswith(".parquet"),
+                 "large csv backed by Parquet file: %s" % csrc)
             ccnt = s.run_query(
                 'SELECT COUNT(*) FROM "%s"' % cout[0]["name"],
                 target="__duckdb__")["rows"][0][0]
             eq(ccnt, 80000, "large csv row count")
             need(csv_s < 45.0,
                  "large csv load finished quickly (%.1fs)" % csv_s)
+            # Re-query stays fast on the Parquet cache (mantra: load + re-query).
+            t_rq = time.time()
+            crow = s.run_query(
+                'SELECT COUNT(*) FROM "%s" WHERE id %% 9 = 0' % cout[0]["name"],
+                target="__duckdb__")["rows"][0][0]
+            need(crow > 0 and (time.time() - t_rq) < 10.0,
+                 "large csv re-query via Parquet is quick")
 
             # ~2 MB nested JSON array (NDJSON rewrite + Parquet)
             js_path = os.path.join(dd, "big.json")
@@ -20114,12 +20398,24 @@ def backend_tests(datadir, csv_path, json_path):
             js_s = time.time() - t1
             need(jout and jout[0].get("storage") == "parquet-cache",
                  "large json uses parquet-cache: %r" % jout)
+            need(not any(t.get("method") == "stream-flatten" for t in jout),
+                 "large flatten-off JSON must not stream-flatten: %r" % jout)
+            jsrc = s.duckdb.table_sources.get(jout[0]["name"], "")
+            need(str(jsrc).lower().endswith(".parquet"),
+                 "large json backed by Parquet file: %s" % jsrc)
             jcnt = s.run_query(
                 'SELECT COUNT(*) FROM "%s"' % jout[0]["name"],
                 target="__duckdb__")["rows"][0][0]
             eq(jcnt, 25000, "large json row count")
             need(js_s < 60.0,
                  "large json load finished quickly (%.1fs)" % js_s)
+            t_rq2 = time.time()
+            jrow = s.run_query(
+                'SELECT COUNT(*) FROM "%s" WHERE id = 7' % jout[0]["name"],
+                target="__duckdb__")["rows"][0][0]
+            eq(jrow, 1, "large json re-query hits the Parquet cache")
+            need((time.time() - t_rq2) < 10.0,
+                 "large json re-query via Parquet is quick")
 
             # NDJSON rewrite prefers orjson when available (speed contract).
             import inspect
@@ -20701,8 +20997,9 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_ondisk_parquet_fail_no_ctas_fallthrough():
         # Large JSON: Parquet-route failure must NOT fall through to in-engine
-        # CREATE TABLE AS (OOM risk). It raises a recoverable error so the
-        # JSON loader can stream-flatten instead.
+        # CREATE TABLE AS (OOM risk). It raises a recoverable error; flatten-ON
+        # may stream-flatten next, while flatten-OFF must surface the error
+        # (see t_flatten_off_native_fail_does_not_stream_flatten).
         from samql_core import loaders as L
 
         class _FakeDuck:
@@ -20868,40 +21165,6 @@ def backend_tests(datadir, csv_path, json_path):
             else:
                 os.environ["SAMQL_ONDISK_HARD_MB"] = old_h
 
-    def t_duckdb_large_csv_parquet_view():
-        # Large CSV loads as a Parquet cache (not in-memory CTAS), queryable.
-        if not feats["duckdb"]:
-            skip("duckdb not installed")
-        s = _fresh_session()
-        dd = tempfile.mkdtemp()
-        p = os.path.join(dd, "big.csv")
-        with open(p, "w", encoding="utf-8", newline="") as f:
-            f.write("id,sym,qty\n")
-            for i in range(20000):
-                f.write("%d,X%d,%d\n" % (i, i % 7, i * 3))
-        old = os.environ.get("SAMQL_ONDISK_MB")
-        old_h = os.environ.get("SAMQL_ONDISK_HARD_MB")
-        os.environ["SAMQL_ONDISK_MB"] = "0.1"  # ~100 KB -> force on-disk
-        os.environ["SAMQL_ONDISK_HARD_MB"] = "0"
-        try:
-            out = s.load_file(p, destination="duckdb", base_name="bigcsv")
-            eq(out[0].get("storage"), "parquet-cache",
-               "large CSV stored as Parquet cache: %s" % out)
-            n = s.run_query("SELECT COUNT(*) FROM bigcsv",
-                            target="__duckdb__")["rows"][0][0]
-            eq(n, 20000, "every CSV row queryable through Parquet view")
-            src = s.duckdb.table_sources.get(out[0]["name"], "")
-            need(str(src).lower().endswith(".parquet"),
-                 "backed by Parquet file, not in-memory: %s" % src)
-        finally:
-            for k, v in (("SAMQL_ONDISK_MB", old),
-                         ("SAMQL_ONDISK_HARD_MB", old_h)):
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
-            s.shutdown()
-
     def t_csv_parquet_fail_promotes_via_ctas():
         # When direct COPY→Parquet fails for CSV, CTAS then promote-to-Parquet
         # so the load still ends as an efficient cache (never a hard fail).
@@ -20950,51 +21213,6 @@ def backend_tests(datadir, csv_path, json_path):
         need(duck.promoted, "table promoted to Parquet")
         eq(out[0].get("storage"), "parquet-cache",
            "final storage is parquet-cache: %s" % out)
-
-    def t_duckdb_large_load_parquet_view():
-        # End-to-end: a load at/above the on-disk threshold lands as a Parquet
-        # cache exposed as a query-in-place view (bounded memory), not an
-        # in-memory table -- and it's queryable with the right rows/columns.
-        # Threshold dropped so a small fixture exercises it. Skips without duckdb.
-        if not feats["duckdb"]:
-            skip("duckdb not installed")
-        s = _fresh_session()
-        # The Parquet cache view is the NESTED large-file route; with flattening
-        # on (the default) a JSON load normalizes instead, so take the nested
-        # path here. Set the attribute DIRECTLY (not set_flatten_json, which
-        # would persist to the real config and flip the user's default off).
-        s.flatten_on_load = False
-        dd = tempfile.mkdtemp()
-        p = os.path.join(dd, "trades.json")
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump([{"id": i, "sym": "X%d" % (i % 5)}
-                       for i in range(30000)], f)      # ~0.6 MB single array
-        old = os.environ.get("SAMQL_ONDISK_MB")
-        old_j = os.environ.get("SAMQL_JSON_STREAM_MB")
-        os.environ["SAMQL_ONDISK_MB"] = "0.1"          # ~100 KB -> force on-disk
-        os.environ["SAMQL_JSON_STREAM_MB"] = "0.1"
-        try:
-            out = s.load_file(p, destination="duckdb", base_name="trades")
-            eq(out[0].get("storage"), "parquet-cache",
-               "a large load is stored as a Parquet cache view")
-            cols = [c.lower() for c in out[0]["columns"]]
-            need("id" in cols and "sym" in cols,
-                 "the array keys became columns: %s" % cols)
-            n = s.run_query("SELECT COUNT(*) FROM trades",
-                            target="__duckdb__")["rows"][0][0]
-            eq(n, 30000, "every row is queryable through the Parquet view")
-            # the source points at a .parquet cache, confirming it's not in-memory
-            src = s.duckdb.table_sources.get(out[0]["name"], "")
-            need(str(src).lower().endswith(".parquet"),
-                 "the table is backed by a Parquet file, not an in-memory copy")
-        finally:
-            for k, v in (("SAMQL_ONDISK_MB", old),
-                         ("SAMQL_JSON_STREAM_MB", old_j)):
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
-            s.shutdown()
 
     def t_flatten_no_source_dumps():
         # Flatten a DuckDB table that has NO file on disk (e.g. loaded from
@@ -21234,6 +21452,38 @@ def backend_tests(datadir, csv_path, json_path):
             eq(out2[0]["engine"], "duckdb", "view lives in DuckDB")
             eq(out2[0]["rows"], None, "a view has no eager row count")
             eq(s.duckdb.view_call, ("inplace", "csv"), "view kind = csv")
+
+            # C) Top-level JSON array must NOT stay a live read_json view
+            #    (re-parses / buffers on every query). Loader falls through to
+            #    materialize / Parquet-cache — the fast re-query path.
+            if feats["duckdb"]:
+                s.duckdb = None  # use a real engine for the JSON fallthrough
+                jp = os.path.join(dd, "arr.json")
+                with open(jp, "w", encoding="utf-8") as f:
+                    json.dump([{"id": i, "nest": {"a": i}} for i in range(30)], f)
+                jout = s.load_file(jp, destination="duckdb",
+                                   base_name="arrview", mode="view",
+                                   flatten=False)
+                need(jout and not jout[0].get("view"),
+                     "JSON array mode=view must fall through (not live view): %r"
+                     % jout)
+                need(jout[0].get("engine") == "duckdb",
+                     "JSON array fallthrough still lands in DuckDB")
+                need(not any(t.get("method") == "stream-flatten" for t in jout),
+                     "view fallthrough must not stream-flatten: %r" % jout)
+                n = s.run_query('SELECT COUNT(*) FROM "arrview"',
+                                target="__duckdb__")["rows"][0][0]
+                eq(n, 30, "JSON array fallthrough is queryable")
+                # Small NDJSON may still be a live view (streamable format).
+                np = os.path.join(dd, "lines.ndjson")
+                with open(np, "w", encoding="utf-8") as f:
+                    for i in range(10):
+                        f.write(json.dumps({"id": i}) + "\n")
+                nout = s.load_file(np, destination="duckdb",
+                                   base_name="ndview", mode="view",
+                                   flatten=False)
+                need(nout and nout[0].get("view") is True,
+                     "small NDJSON mode=view stays a live view: %r" % nout)
         finally:
             s.shutdown()
 
@@ -33279,9 +33529,9 @@ def backend_tests(datadir, csv_path, json_path):
     def t_hdfs_load_file():
         # Load ONE browsed HDFS file (CSV here, JSON below): stream it to a temp
         # file, then the standard loader dispatches on the extension. mode="view"
-        # wants DuckDB; with none available here it falls back to a materialised
-        # load (CSV->SQLite, JSON->SQLite flatten) -- so the stream + load wiring
-        # is verified end to end and the tables come out queryable.
+        # wants DuckDB for streamable formats; top-level JSON arrays fall through
+        # to materialize/Parquet (not a live re-parse view). Without DuckDB the
+        # loader falls back to SQLite (CSV materialize / JSON flatten).
         s = _fresh_session()
         csv = b"id,name\n1,alice\n2,bob\n3,carol\n"
 
@@ -33316,12 +33566,15 @@ def backend_tests(datadir, csv_path, json_path):
             eq(tables[0]["name"], "people", "table named from the file stem")
             names = [t["name"] for t in s.tables_tree()]
             need("people" in names, "loaded table shows in the tree: %r" % names)
+            # DuckDB view when available; else SQLite materialize.
+            target = ("__duckdb__" if tables[0].get("engine") == "duckdb"
+                      else "__local__")
             r = s.run_query('SELECT COUNT(*) AS n FROM "people"',
-                            target="__local__")
+                            target=target)
             eq(r["rows"][0][0], 3, "streamed rows are queryable")
         finally:
             s.shutdown()
-        # JSON loads too (broadened filter): no DuckDB here -> SQLite flatten
+        # JSON array: with DuckDB, mode=view must fall through (not live view).
         s3 = _fresh_session()
         s3._hdfs = _Client(b'[{"id":1,"name":"a"},{"id":2,"name":"b"}]')
         try:
@@ -33330,8 +33583,18 @@ def backend_tests(datadir, csv_path, json_path):
             tables = res.get("tables") or []
             need(tables, "json load produced a table")
             tname = tables[0]["name"]
+            if feats["duckdb"]:
+                need(tables[0].get("engine") == "duckdb",
+                     "JSON HDFS load uses DuckDB when available: %r" % tables)
+                need(not tables[0].get("view"),
+                     "JSON array must not stay a live view: %r" % tables)
+                need(not any(t.get("method") == "stream-flatten" for t in tables),
+                     "HDFS JSON array must not stream-flatten: %r" % tables)
+                target = "__duckdb__"
+            else:
+                target = "__local__"
             r = s3.run_query('SELECT COUNT(*) AS n FROM "%s"' % tname,
-                             target="__local__")
+                             target=target)
             eq(r["rows"][0][0], 2, "json rows are queryable")
         finally:
             s3.shutdown()
@@ -34881,7 +35144,6 @@ def backend_tests(datadir, csv_path, json_path):
         ("default destination", t_default_destination),
         ("DuckDB on-disk flag", t_duckdb_on_disk_flag),
         ("DuckDB load/query/profile", t_duckdb_path),
-        ("JSON flatten", t_flatten_json),
         ("JSON flatten: selective exclude drops fields + heavy child tables",
          t_flatten_json_selective_exclude),
         ("result page: oversized nested cells capped, first page bounded",
@@ -35545,8 +35807,6 @@ def backend_tests(datadir, csv_path, json_path):
          t_conversion_errors_fall_back_to_varchar),
         ("large CSV/JSON use on-disk Parquet and finish quickly",
          t_large_csv_json_ondisk_loads_fast),
-        ("DuckDB loads .ndjson end-to-end (load_file -> table)",
-         t_duckdb_loads_ndjson),
         ("DuckDB one-struct JSON column expands to named columns",
          t_duckdb_struct_expand),
         ("DuckDB array-wrapped .ndjson ([{...}]) shows key columns",
@@ -35559,7 +35819,7 @@ def backend_tests(datadir, csv_path, json_path):
          t_duckdb_json_depth0_parquet_column),
         ("DuckDB flatten-on flat JSON still converts via Parquet",
          t_duckdb_json_flatten_on_flat_still_parquet),
-        ("DuckDB streams a huge top-level JSON array via NDJSON",
+        ("DuckDB large JSON array → NDJSON→Parquet then shred (flatten on)",
          t_duckdb_big_json_array_streams),
         ("DuckDB stream-flattens a large single nested JSON object",
          t_duckdb_large_object_stream_flattens),
@@ -35567,6 +35827,12 @@ def backend_tests(datadir, csv_path, json_path):
          t_flatten_off_array_stays_nested_not_stream_flatten),
         ("flatten-off native failure does not stream-flatten",
          t_flatten_off_native_fail_does_not_stream_flatten),
+        ("flatten-off Parquet: legs[].cf[] nested arrays are SQL-queryable",
+         t_flatten_off_nested_arrays_queryable),
+        ("shred-on: two-level legs + legs_cf linkage (_parent_sk)",
+         t_shred_two_level_nested_arrays_linkage),
+        ("load type×format×engine matrix (CSV/JSON/NDJSON/Excel)",
+         t_load_type_format_engine_matrix),
         ("flatten-off Parquet: nested field tree + non-empty page",
          t_flatten_off_parquet_nested_field_tree_and_page),
         ("JSON[]/(element): double-encoded objects expand nested keys",
@@ -35627,14 +35893,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_large_csv_sqlite_upgrades_to_duckdb),
         ("large CSV→SQLite fails loud without DuckDB",
          t_large_csv_sqlite_fail_without_duckdb),
-        ("DuckDB large CSV lands as a Parquet cache view",
-         t_duckdb_large_csv_parquet_view),
         ("CSV Parquet fail promotes via CTAS→Parquet",
          t_csv_parquet_fail_promotes_via_ctas),
         ("CSV reader builder emits the expected SQL (consolidated)",
          t_csv_readers_sql),
-        ("DuckDB large load lands as a Parquet cache view (bounded memory)",
-         t_duckdb_large_load_parquet_view),
         ("Load: query-in-place view mode (+ materialize fallback)",
          t_load_view_mode),
         ("Load: parquet materializes by default (view via mode=view)",
