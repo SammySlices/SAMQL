@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-14.605
+Current build:   2026-07-14.606
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-14.606  (v2.16.4)
+
+FRONTEND TOOLING INVOKES VIA NODE (NO BARE VITE ON PATH).
+package.json scripts call vite/tsc/eslint/vitest through
+node ./node_modules/... so Windows "'vite' is not recognized" cannot happen
+when .bin shims are missing after a partial install. install_frontend_deps
+verifies vite/tsc binaries after npm ci.
 
 ----------------------------------------------------------------------
 build 2026-07-14.605  (v2.16.4)

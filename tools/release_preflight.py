@@ -559,7 +559,7 @@ def _check_quality_and_ci(root: Path, release: dict[str, Any], checks: Checks) -
     checks.add(
         "release component script",
         scripts.get("test:release")
-        == "vitest run src/lib/releaseHardening.component.test.ts",
+        == "node ./node_modules/vitest/vitest.mjs run src/lib/releaseHardening.component.test.ts",
         str(scripts.get("test:release")),
     )
 
@@ -654,12 +654,12 @@ def _check_complete_test_extract(
     package = _json(root / "frontend/package.json")
     scripts = package.get("scripts") or {}
     required_scripts = {
-        "test:component": "vitest run",
-        "test:e2e": "playwright test",
+        "test:component": "node ./node_modules/vitest/vitest.mjs run",
+        "test:e2e": "node ./node_modules/@playwright/test/cli.js test",
         "test:frontend": "npm run test:component && npm run check",
-        "typecheck": "tsc --noEmit -p tsconfig.json --pretty false",
-        "lint": 'eslint "src/**/*.{ts,tsx}" --max-warnings 0',
-        "build": "vite build",
+        "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit -p tsconfig.json --pretty false",
+        "lint": 'node ./node_modules/eslint/bin/eslint.js "src/**/*.{ts,tsx}" --max-warnings 0',
+        "build": "node ./node_modules/vite/bin/vite.js build",
         "check": "npm run typecheck && npm run lint && npm run build",
     }
     missing_scripts = [

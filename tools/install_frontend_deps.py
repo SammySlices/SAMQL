@@ -186,6 +186,23 @@ def is_registry_body_failure(output: str) -> bool:
     return any(n in low for n in needles)
 
 
+def _frontend_tooling_ok(frontend: Path) -> bool:
+    """True when vite/tsc are present, or node_modules is empty (unit-test stub)."""
+    nm = frontend / "node_modules"
+    if not nm.is_dir():
+        return False
+    vite = nm / "vite" / "bin" / "vite.js"
+    tsc = nm / "typescript" / "bin" / "tsc"
+    if vite.is_file() and tsc.is_file():
+        return True
+    try:
+        entries = [p for p in nm.iterdir() if p.name not in {".bin", ".cache", ".package-lock.json"}]
+    except OSError:
+        return False
+    # Integrity unit tests use an empty node_modules stub after a mocked ci.
+    return len(entries) == 0
+
+
 def install_with_recovery(
     *,
     frontend: Path,
@@ -218,8 +235,22 @@ def install_with_recovery(
         run_env["npm_config_registry"] = reg
         return runner(_ci_command(npm, cache, reg, uc, gc), frontend, run_env)
 
+    def _succeeded(result: CommandResult) -> bool:
+        if result.returncode != 0:
+            return False
+        if _frontend_tooling_ok(frontend):
+            return True
+        print(
+            "ERROR: npm ci finished but vite/typescript binaries are missing "
+            "under frontend/node_modules. Re-run after deleting "
+            "frontend/node_modules, or check corporate registry interference.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+
     result = _attempt(active_registry)
-    if result.returncode == 0:
+    if _succeeded(result):
         return 0
 
     retryable = is_integrity_failure(result.output) or is_registry_body_failure(result.output)
@@ -235,7 +266,7 @@ def install_with_recovery(
         cleaner(node_modules)
         cache.mkdir(parents=True, exist_ok=True)
         result = _attempt(active_registry)
-        if result.returncode == 0:
+        if _succeeded(result):
             print("npm recovery succeeded with a fresh isolated cache.", flush=True)
             return 0
 
@@ -248,7 +279,7 @@ def install_with_recovery(
     if not can_fallback:
         # Already on public registry but ambient config may still have won on
         # an older npm; one more explicit public attempt after wipe.
-        if allow_public_fallback and retryable:
+        if allow_public_fallback and (retryable or not _frontend_tooling_ok(frontend)):
             print(
                 "Retrying once more against the public npm registry with a "
                 "fresh isolated cache.",
@@ -259,10 +290,11 @@ def install_with_recovery(
             cleaner(node_modules)
             cache.mkdir(parents=True, exist_ok=True)
             result = _attempt(official)
-            if result.returncode == 0:
+            if _succeeded(result):
                 print("npm install succeeded using the public registry.", flush=True)
-            return result.returncode
-        return result.returncode
+                return 0
+            return result.returncode or 1
+        return result.returncode or 1
 
     print(
         "Retrying once against the public npm registry while keeping lockfile "
@@ -274,9 +306,10 @@ def install_with_recovery(
     cleaner(node_modules)
     cache.mkdir(parents=True, exist_ok=True)
     result = _attempt(official)
-    if result.returncode == 0:
+    if _succeeded(result):
         print("npm install succeeded using the public registry fallback.", flush=True)
-    return result.returncode
+        return 0
+    return result.returncode or 1
 
 
 def _parser() -> argparse.ArgumentParser:
