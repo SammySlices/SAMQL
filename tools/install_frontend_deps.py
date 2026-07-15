@@ -106,27 +106,50 @@ def _configured_registry(
     return None
 
 
-# Cursor / agent sandboxes inject npm_config_devdir (and sometimes a sandbox
-# npm cache). npm 11+ treats unknown ``devdir`` as a warning on stderr; under
-# PowerShell $ErrorActionPreference=Stop that can abort the build even when
-# ``npm ci`` succeeded. Strip those so SamQL installs use a clean npm env.
-_SANDBOX_NPM_ENV_KEYS = (
-    "npm_config_devdir",
-    "NPM_CONFIG_DEVDIR",
-    "npm_config_cache",
-    "NPM_CONFIG_CACHE",
-)
-
-
+# Cursor sandboxes inject npm_config_devdir / sandbox caches. Corporate
+# shells often set npm_config_registry to an internal Artifactory (e.g.
+# rp.td.com) that returns truncated JSON. Strip every npm_config_* so
+# SamQL's --registry + project .npmrc win; never inherit the ambient
+# registry from the user environment.
 def _scrub_sandbox_npm_env(env: Mapping[str, str]) -> dict[str, str]:
-    cleaned = dict(env)
-    for key in _SANDBOX_NPM_ENV_KEYS:
-        cleaned.pop(key, None)
+    cleaned: dict[str, str] = {}
+    for key, value in env.items():
+        low = key.lower()
+        if low.startswith("npm_config_"):
+            continue
+        cleaned[key] = value
     return cleaned
 
 
-def _ci_command(npm: str, cache: Path, registry: str | None) -> list[str]:
-    command = [
+def _norm_registry(value: str | None) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    return text if text.endswith("/") else text + "/"
+
+
+def _write_isolated_npmrc(cache: Path, registry: str) -> tuple[Path, Path]:
+    """Project + empty global npmrc so user/corporate mirrors cannot win."""
+    cache.mkdir(parents=True, exist_ok=True)
+    user = cache / "samql-user.npmrc"
+    glob = cache / "samql-global.npmrc"
+    user.write_text(
+        f"registry={registry}\nfund=false\naudit=false\n",
+        encoding="utf-8",
+    )
+    # Empty global config: blocks HKCU / %APPDATA%\npm\etc\npmrc mirrors.
+    glob.write_text("", encoding="utf-8")
+    return user, glob
+
+
+def _ci_command(
+    npm: str,
+    cache: Path,
+    registry: str,
+    userconfig: Path,
+    globalconfig: Path,
+) -> list[str]:
+    return [
         npm,
         "ci",
         "--no-audit",
@@ -134,14 +157,33 @@ def _ci_command(npm: str, cache: Path, registry: str | None) -> list[str]:
         "--prefer-online",
         "--cache",
         str(cache),
+        f"--registry={registry}",
+        f"--userconfig={userconfig}",
+        f"--globalconfig={globalconfig}",
     ]
-    if registry:
-        command.append(f"--registry={registry}")
-    return command
 
 
 def is_integrity_failure(output: str) -> bool:
     return bool(_INTEGRITY_RE.search(output))
+
+
+def is_registry_body_failure(output: str) -> bool:
+    """Corporate mirrors often return truncated / non-JSON package metadata."""
+    text = output or ""
+    needles = (
+        "invalid json",
+        "unterminated string in json",
+        "unexpected end of json",
+        "unexpected token",
+        "einvalid",
+        "error parsing json",
+        "registry returned 404",
+        "registry returned 500",
+        "registry returned 502",
+        "registry returned 503",
+    )
+    low = text.lower()
+    return any(n in low for n in needles)
 
 
 def install_with_recovery(
@@ -155,67 +197,83 @@ def install_with_recovery(
     runner: Runner = _run_streaming,
     cleaner: Cleaner = _remove_tree,
 ) -> int:
-    """Run a locked npm install, recovering only from integrity corruption."""
+    """Run a locked npm install against an isolated public (or explicit) registry."""
     frontend = frontend.resolve()
     cache = cache.resolve()
     node_modules = frontend / "node_modules"
     run_env = _scrub_sandbox_npm_env(os.environ if env is None else env)
+    # Force the chosen registry into the child env as well as CLI flags.
+    # Do not probe ambient `npm config get registry` here: that call can
+    # itself hit a broken corporate mirror and is unnecessary once we pin
+    # --registry / --userconfig / --globalconfig.
+    active_registry = _norm_registry(registry) or OFFICIAL_REGISTRY
+    run_env["npm_config_registry"] = active_registry
     cache.parent.mkdir(parents=True, exist_ok=True)
 
-    configured = registry or _configured_registry(npm, frontend, run_env, runner)
-    active_registry = registry
-    if configured:
-        print(f"Configured npm registry: {_redact_url(configured)}", flush=True)
+    print(f"Using npm registry: {_redact_url(active_registry)}", flush=True)
     print(f"SamQL isolated npm cache: {cache}", flush=True)
 
-    result = runner(_ci_command(npm, cache, active_registry), frontend, run_env)
+    def _attempt(reg: str) -> CommandResult:
+        uc, gc = _write_isolated_npmrc(cache, reg)
+        run_env["npm_config_registry"] = reg
+        return runner(_ci_command(npm, cache, reg, uc, gc), frontend, run_env)
+
+    result = _attempt(active_registry)
     if result.returncode == 0:
         return 0
-    if not is_integrity_failure(result.output):
-        return result.returncode
 
-    print(
-        "npm reported a package-integrity failure. Removing the isolated cache "
-        "and partial node_modules tree, then retrying the exact lockfile.",
-        file=sys.stderr,
-        flush=True,
-    )
-    cleaner(cache)
-    cleaner(node_modules)
-    cache.mkdir(parents=True, exist_ok=True)
+    retryable = is_integrity_failure(result.output) or is_registry_body_failure(result.output)
+    if retryable:
+        print(
+            "npm reported a package-integrity or registry-body failure. "
+            "Removing the isolated cache and partial node_modules tree, "
+            "then retrying the exact lockfile.",
+            file=sys.stderr,
+            flush=True,
+        )
+        cleaner(cache)
+        cleaner(node_modules)
+        cache.mkdir(parents=True, exist_ok=True)
+        result = _attempt(active_registry)
+        if result.returncode == 0:
+            print("npm recovery succeeded with a fresh isolated cache.", flush=True)
+            return 0
 
-    result = runner(_ci_command(npm, cache, active_registry), frontend, run_env)
-    if result.returncode == 0:
-        print("npm integrity recovery succeeded with a fresh isolated cache.", flush=True)
-        return 0
-    if not is_integrity_failure(result.output):
-        return result.returncode
-
-    configured_normalized = (configured or "").rstrip("/").lower()
-    official_normalized = OFFICIAL_REGISTRY.rstrip("/").lower()
+    official = OFFICIAL_REGISTRY
     can_fallback = (
         allow_public_fallback
-        and registry is None
-        and configured_normalized
-        and configured_normalized != official_normalized
+        and _norm_registry(active_registry).rstrip("/").lower()
+        != official.rstrip("/").lower()
     )
     if not can_fallback:
+        # Already on public registry but ambient config may still have won on
+        # an older npm; one more explicit public attempt after wipe.
+        if allow_public_fallback and retryable:
+            print(
+                "Retrying once more against the public npm registry with a "
+                "fresh isolated cache.",
+                file=sys.stderr,
+                flush=True,
+            )
+            cleaner(cache)
+            cleaner(node_modules)
+            cache.mkdir(parents=True, exist_ok=True)
+            result = _attempt(official)
+            if result.returncode == 0:
+                print("npm install succeeded using the public registry.", flush=True)
+            return result.returncode
         return result.returncode
 
     print(
-        "The configured npm mirror returned corrupt bytes twice. Retrying once "
-        "against the public npm registry while keeping lockfile integrity checks enabled.",
+        "Retrying once against the public npm registry while keeping lockfile "
+        "integrity checks enabled.",
         file=sys.stderr,
         flush=True,
     )
     cleaner(cache)
     cleaner(node_modules)
     cache.mkdir(parents=True, exist_ok=True)
-    result = runner(
-        _ci_command(npm, cache, OFFICIAL_REGISTRY),
-        frontend,
-        run_env,
-    )
+    result = _attempt(official)
     if result.returncode == 0:
         print("npm install succeeded using the public registry fallback.", flush=True)
     return result.returncode
@@ -229,7 +287,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--registry",
         default=os.environ.get("SAMQL_NPM_REGISTRY") or None,
-        help="Explicit npm registry. Defaults to npm's configured registry.",
+        help="Explicit npm registry. Defaults to https://registry.npmjs.org/ "
+             "(ignores corporate/user npmrc mirrors).",
     )
     parser.add_argument(
         "--no-public-fallback",

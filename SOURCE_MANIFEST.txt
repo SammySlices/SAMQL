@@ -56,6 +56,7 @@ backend/samql_core/webscrape.py
 backend/server.py
 build.sh
 build.ps1
+frontend/.npmrc
 frontend/e2e/cancellation-recovery.spec.ts
 frontend/e2e/dashboard-smoke.spec.ts
 frontend/e2e/eye-care.spec.ts
