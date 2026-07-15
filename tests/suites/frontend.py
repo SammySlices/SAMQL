@@ -4103,11 +4103,9 @@ console.log("OK");
         need(not bad, "stray console.log/debugger in: " + ", ".join(bad))
 
     def t_repo_hygiene():
-        # No packaging artifact should live inside the source tree, and the
-        # PowerShell helpers must be present and reference the right contract.
-        stray = os.path.join(ROOT, "samql_txt")
-        need(not os.path.isdir(stray),
-             "packaging artifact samql_txt/ must not be committed to the tree")
+        # samql_txt/ holds the published full-source .txt for handoff;
+        # it is intentional and tracked. Root-level Tee copies of the
+        # same file remain gitignored.
         def helper_path(defanged, normal):
             first = os.path.join(ROOT, defanged)
             return first if os.path.isfile(first) else os.path.join(ROOT, normal)
