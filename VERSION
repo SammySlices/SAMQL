@@ -2,12 +2,20 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-14.606
+Current build:   2026-07-15.607
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-15.607  (v2.16.4)
+
+CANONICAL TEXT AND AMBIENT NPM REGISTRY RESTORE.
+Managed release text is LF-canonical across platforms. Frontend dependency
+recovery preserves corporate npm registry, authentication, and proxy settings
+while removing only sandbox-injected devdir and cache configuration.
 
 ----------------------------------------------------------------------
 build 2026-07-14.606  (v2.16.4)

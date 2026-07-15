@@ -1,0 +1,18 @@
+---
+description: Regenerate managed SamQL full source before committing product changes
+alwaysApply: true
+---
+
+# Managed full-source commit order
+
+For every SamQL product or release commit that changes managed source:
+
+1. Update the release identity when the release process requires it.
+2. Regenerate and verify the canonical full-source bundle under `samql_txt/`
+   from the current intended source tree, using the project release tooling.
+3. Commit all intended changes, including the updated
+   `samql_txt/samql_full_source_all_tests_ui_<build>.txt`, in the same commit.
+
+Do not commit managed-source changes first and defer the `samql_txt/` refresh
+to a later commit. Leave generated release packaging artifacts untracked unless
+they are explicitly intended product files.

@@ -1,8 +1,13 @@
 # Keep release manifests and managed source text LF-only so release_preflight
 # ("manifest text is canonical") stays green across Windows/macOS/Linux clones.
+.gitattributes text eol=lf
 SOURCE_MANIFEST.txt text eol=lf
 RELEASE_MANIFEST.json text eol=lf
 VERSION text eol=lf
+*.spec text eol=lf
+.npmrc text eol=lf
+*.npmrc text eol=lf
+*.csv text eol=lf
 *.py text eol=lf
 *.ts text eol=lf
 *.tsx text eol=lf
