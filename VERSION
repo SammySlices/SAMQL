@@ -2,12 +2,20 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-15.613
+Current build:   2026-07-15.614
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-15.614  (v2.16.4)
+
+SIDEBAR: REMOVE FAR-LEFT FAMILY EXPAND CARET.
+Relational loaded-table families always show children; the redundant
+fam-caret twist is gone (per-table column expand twists remain).
+Refreshed samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-15.613  (v2.16.4)
