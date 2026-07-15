@@ -589,20 +589,31 @@ textarea:focus {
   border-radius: 999px;
   padding: 0 6px;
 }
-/* Always reserve the action-button slot so hover does not grow the row.
-   Icons stay invisible until hover (opacity/visibility), but layout size
-   matches the hovered state. */
+/* Idle: the action slot collapses to zero width so the table name gets the
+   full row -- no dead space. Hover: it animates open (width + fade + slide)
+   while the name reflows left, so the buttons arrive in an elegant sweep.
+   The 30px button height is unchanged whether open or collapsed, so the row
+   never grows vertically. */
 .tree-row .row-actions {
   display: inline-flex;
   flex: 0 0 auto;
+  flex-wrap: nowrap;
   gap: 2px;
+  max-width: 0;
+  overflow: hidden;
   opacity: 0;
-  visibility: hidden;
+  transform: translateX(8px);
   pointer-events: none;
+  transition:
+    max-width 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    opacity 0.16s ease,
+    transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
 }
-.tree-row:hover .row-actions {
+.tree-row:hover .row-actions,
+.tree-row:focus-within .row-actions {
+  max-width: 100px;
   opacity: 1;
-  visibility: visible;
+  transform: translateX(0);
   pointer-events: auto;
 }
 .tree-cols {
@@ -2957,6 +2968,20 @@ kbd {
   word-break: break-all;
 }
 .fx-note { font-size: 12px; margin-top: 4px; }
+.fx-shred {
+  margin: 4px 0 12px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.fx-shred .fx-note { margin-top: 6px; }
+.fx-shred code {
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--panel, rgba(127, 127, 127, 0.15));
+}
 .fx-shred-row {
   display: flex;
   align-items: baseline;

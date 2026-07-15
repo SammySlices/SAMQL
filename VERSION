@@ -2,12 +2,30 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-15.607
+Current build:   2026-07-15.608
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-15.608  (v2.16.4)
+
+FIELD EXPLORER MEMORY-SAFE JSON STEERING, FIRST-RECORD LIMIT, HOVER POLISH.
+Field Explorer now steers array / opaque-JSON nodes to the memory-safe path:
+shred-eligible arrays offer "Shred to tables" (the relational family joined on
+_sk/_parent_sk) and deep opaque-JSON columns offer "Flatten to tables" (reuses
+the tested flatten_json deep re-read), instead of a full UNNEST that loads the
+whole column into memory. The "First record ([1] path)" recipe appends LIMIT 1
+so it returns a single record rather than evaluating the first-element
+expression over every row -- on a multi-GB opaque-JSON table that materialized
+one JSON value per record and raised OutOfMemory. DuckDB out-of-memory query
+errors now explain that the reported size is the failed allocation, not the
+limit, and suggest shred / flatten / filter-first. Loaded-table rows collapse
+the action-button slot when idle so the table name uses the full width, then
+animate the buttons open (width + fade + slide) on hover without changing row
+height.
 
 ----------------------------------------------------------------------
 build 2026-07-15.607  (v2.16.4)
