@@ -1,20 +1,31 @@
 ---
-description: Do not break or degrade existing features; call out cross-cutting impacts
+description: Production-ready SamQL — enhance only; never degrade features or performance
 alwaysApply: true
 ---
 
-# Preserve existing functionality and performance
+# Production-ready posture
 
-When implementing any change:
+**SamQL’s current state is production-ready.** Further work must **only enhance** the product. Do not ship changes that degrade working features, performance, correctness, or UX unless the user explicitly requests that tradeoff.
 
-1. **Do not regress working features.** New work must leave existing behavior and performance intact unless the user explicitly asks to change that feature.
-2. **Especially never degrade or remove** (unless explicitly requested):
-   - **JSON joins** performance and correctness
-   - **Nested fields** shown on loaded JSON tables / Field Explorer (discovery under opaque JSON, `(element)`, deep nests, arrays)
-   - Large-file load posture (Parquet thresholds, flatten/shred opt-in, no silent stream-flatten)
-3. **Before changing shared load / query / field-tree / join paths**, identify what already works and keep those code paths stable. Prefer additive fixes (sampling when opaque, higher caps, UI loading states) over rewriting or narrowing the happy path.
-4. **Verify non-regression** with focused tests that cover the existing capability (joins, nested field tree, flatten-off load), not only the new bug. If a change touches those areas, say what was preserved and how it was checked.
-5. If a fix appears to require slowing or narrowing an existing feature, **stop and explain the tradeoff** before applying it — do not silently accept the degradation.
+When implementing a change:
+
+1. **Read the previous code first.** Compare the proposed edit to what already works. Ask: does this improve clarity, correctness, and performance — or only paper over a local symptom?
+2. **Prefer improvement over churn.** A change that is not clearly better (behavior, speed, memory, maintainability) should not land.
+3. **Check cross-cutting impact.** Trace shared modules (load, join, Field Explorer, Profile, View Formatted, NodeFlow, diagnostics/profiler, Parquet cache / `table_origins`, sticky cancel, UI paging, session/query paths). Name what else could be affected.
+4. **If the change would degrade another area:** stop. Either **rethink the original approach** so the adjacent feature stays intact, **or** update **both** areas so the net result **enhances both**. Never leave a silent regression in an adjacent feature.
+5. **Do not regress working features** unless the user explicitly asks to change that feature.
+
+# Especially never degrade or remove (unless explicitly requested)
+
+- **JSON joins** — performance and correctness
+- **Nested fields** on loaded JSON tables / Field Explorer (discovery under opaque JSON, `(element)`, deep nests, arrays)
+- Large-file load posture (Parquet thresholds, flatten/shred opt-in, no silent stream-flatten)
+
+# Shared-path discipline
+
+1. **Before changing shared load / query / field-tree / join paths**, identify what already works and keep those code paths stable. Prefer additive fixes (sampling when opaque, higher caps, UI loading states) over rewriting or narrowing the happy path.
+2. **Verify non-regression** with focused tests that cover the existing capability (joins, nested field tree, flatten-off load), not only the new bug. If a change touches those areas, say what was preserved and how it was checked.
+3. If a fix appears to require slowing or narrowing an existing feature, **stop and explain the tradeoff** before applying it — do not silently accept the degradation. Prefer redesigning so both the new work and the existing feature improve.
 
 # Call out cross-cutting impacts
 
@@ -22,6 +33,7 @@ Before or when implementing a change, **explicitly call out** any other SamQL ar
 
 - Name the shared modules/paths involved and the risk (behavior, performance, or UX).
 - If impact is possible but mitigated, say how.
+- If both areas must change, say how each is enhanced.
 - Do not treat a “local” fix as isolated when it touches shared JSON/load/query/session code.
 
 # Baseline adjacent features first
