@@ -378,22 +378,36 @@ def frontend_tests(do_build):
         return shutil.which("node")
 
     def _frontend_bin(name):
-        # Invoke the lockfile-pinned tool directly. npm/npx wrappers can retain
-        # child handles after the underlying tool has finished, which used to
-        # hang the complete release rail despite a green Vitest/Vite summary.
+        # Prefer lockfile-pinned tools. On Windows a broken/partial npm ci can
+        # leave node_modules/.bin shims missing ("'vite' is not recognized");
+        # fall back to invoking the package entry via node.
         names = ([name + ".cmd", name + ".exe", name]
                  if os.name == "nt" else [name])
         for candidate in names:
             path = os.path.join(FRONTEND, "node_modules", ".bin", candidate)
             if os.path.isfile(path):
                 return path
+        node = shutil.which("node")
+        js_entry = {
+            "vite": os.path.join("vite", "bin", "vite.js"),
+            "vitest": os.path.join("vitest", "vitest.mjs"),
+            "tsc": os.path.join("typescript", "bin", "tsc"),
+            "eslint": os.path.join("eslint", "bin", "eslint.js"),
+        }.get(name)
+        if node and js_entry:
+            js_path = os.path.join(FRONTEND, "node_modules", js_entry)
+            if os.path.isfile(js_path):
+                return [node, js_path]
         return None
 
     def _run_frontend_tool(name, args, label, timeout_seconds):
         executable = _frontend_bin(name)
         if not executable:
             skip("run `npm ci` in frontend/ first (missing %s)" % name)
-        command = [executable, *args]
+        if isinstance(executable, list):
+            command = [*executable, *args]
+        else:
+            command = [executable, *args]
         # Do not capture through PIPE: Node worker children can retain an
         # inherited pipe after the parent has printed its final green summary,
         # leaving communicate() blocked forever. A real temporary file provides
