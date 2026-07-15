@@ -978,6 +978,10 @@ textarea:focus {
   display: block;
   width: 100%;
   height: 100%;
+  /* Scroll must live on .scroll so the absolute highlight transform tracks.
+     Without this, long lines scroll inside the textarea and the visible
+     highlight stays clipped at the viewport edge. */
+  overflow: hidden;
   background: transparent;
   color: transparent;
   caret-color: var(--accent-hi);

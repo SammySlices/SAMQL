@@ -116,18 +116,20 @@ def recommend(temp_dir=None):
     disk_free = s["disk_free"]
 
     # Keep the engine, result stores, browser and OS ahead of the flow cache.
+    # Engine budget is intentionally generous: flatten/shred CTAS over nested
+    # JSON must not trip a low artificial ceiling when the machine has RAM.
     if total:
-        flow_mb = int(max(128, min(2048, total * 0.10 / _MIB)))
-        engine_mb = int(max(512, min(16384, total * 0.50 / _MIB)))
+        flow_mb = int(max(128, min(4096, total * 0.10 / _MIB)))
+        engine_mb = int(max(1024, min(262144, total * 0.75 / _MIB)))
     else:
-        flow_mb, engine_mb = 512, 2048
+        flow_mb, engine_mb = 512, 8192
 
     # Persistent intermediates are disk-backed and may be larger, but retain a
     # large reserve for DuckDB spill, exports, uploads and the OS temp volume.
     if disk_free:
-        persist_mb = int(max(512, min(16384, disk_free * 0.20 / _MIB)))
+        persist_mb = int(max(512, min(65536, disk_free * 0.25 / _MIB)))
     else:
-        persist_mb = 4096
+        persist_mb = 8192
 
     # Independent branches each run a DuckDB pipeline.  More than four workers
     # usually oversubscribes DuckDB's own threads, and low available memory is a
@@ -151,12 +153,17 @@ def effective_limits(configured_flow_mb, configured_persist_mb,
 
     Explicit settings remain ceilings rather than being silently increased.
     When adaptive mode is off, the configured values are returned unchanged.
+
+    Engine memory is never crushed to sub-GiB floors under mild pressure —
+    that made flatten/shred CTAS fail with OutOfMemory after a large load
+    had already reduced "available" RAM. Under hard pressure we still trim
+    workers/caches, but keep a workable engine floor from total RAM.
     """
     r = recommend(temp_dir)
     flow = max(0, int(configured_flow_mb or 0))
     persist = max(0, int(configured_persist_mb or 0))
     workers = max(1, int(configured_workers or 1))
-    engine = max(512, int(r["recommended_engine_mb"] or 2048))
+    engine = max(1024, int(r["recommended_engine_mb"] or 8192))
     if not adaptive:
         return {**r, "engine_memory_mb": engine,
                 "flow_cache_mb": flow,
@@ -164,21 +171,27 @@ def effective_limits(configured_flow_mb, configured_persist_mb,
                 "parallel_workers": workers, "pressure": "manual"}
 
     available = r["memory_available"]
+    total = r["memory_total"]
     disk_free = r["disk_free"]
     pressure = "normal"
+    # Floor: at least ~50% of machine RAM (capped by the recommendation),
+    # never the old 768/1536 crush that aborted nested flatten mid-pipeline.
+    # 25% still left ~3.4 GiB ceilings on 8 GiB boxes after a load depressed
+    # OS "available"; flatten then failed allocating another 64 MiB.
+    engine_floor = 2048
+    if total:
+        engine_floor = max(2048, min(engine, int(total * 0.50 / _MIB)))
     if available:
-        # Keep room for Python, browser state, result pages and the OS. The
-        # engine budget can recover upward as pressure clears, but never above
-        # the machine-sized recommendation.
-        engine = min(engine, max(512, int(available * 0.50 / _MIB)))
-        flow = min(flow, max(64, int(available * 0.25 / _MIB)))
+        # Prefer available RAM, but never below the machine-sized floor.
+        engine = max(engine_floor,
+                     min(engine, max(engine_floor,
+                                     int(available * 0.70 / _MIB))))
+        flow = min(flow, max(64, int(available * 0.20 / _MIB)))
         if available < 1536 * _MIB:
             workers = 1
-            engine = min(engine, 768)
             pressure = "memory"
         elif available < 3 * _GIB:
             workers = min(workers, 2)
-            engine = min(engine, 1536)
             pressure = "memory"
     if disk_free:
         # Leave at least 2 GiB and 35% of the temp disk untouched.
@@ -187,7 +200,7 @@ def effective_limits(configured_flow_mb, configured_persist_mb,
         if disk_free < 5 * _GIB:
             pressure = "disk" if pressure == "normal" else "memory+disk"
     workers = min(workers, r["recommended_parallel_workers"])
-    return {**r, "engine_memory_mb": max(512, engine),
+    return {**r, "engine_memory_mb": max(engine_floor, engine),
             "flow_cache_mb": max(0, flow),
             "persistent_cache_mb": max(0, persist),
             "parallel_workers": max(1, workers), "pressure": pressure}

@@ -189,6 +189,15 @@ export const SqlEditor: React.FC<Props> = ({
 
   const syncScroll = useCallback(() => {
     const sc = scrollRef.current;
+    const ta = taRef.current;
+    // If the textarea scrolled internally (should not, with overflow:hidden),
+    // fold that into .scroll so the highlight transform stays aligned.
+    if (sc && ta && (ta.scrollLeft || ta.scrollTop)) {
+      sc.scrollLeft += ta.scrollLeft;
+      sc.scrollTop += ta.scrollTop;
+      ta.scrollLeft = 0;
+      ta.scrollTop = 0;
+    }
     const g = gutterRef.current;
     if (sc && g) g.scrollTop = sc.scrollTop;
     const pre = preRef.current;
@@ -201,21 +210,6 @@ export const SqlEditor: React.FC<Props> = ({
     if (sc && fp) fp.style.transform = tf;
   }, []);
 
-  useLayoutEffect(() => {
-    // .424: the textarea is the scroll extent of .scroll (the highlight
-    // <pre> is an absolute overlay and sizes nothing). At width:100% a
-    // long line never overflowed the container, so horizontal scrolling
-    // moved NOTHING inside journal cells. Sync the textarea's min-width
-    // to the highlight's real content width and the container gets a
-    // true horizontal range everywhere.
-    const ta = taRef.current;
-    const pre = preRef.current;
-    if (ta && pre) ta.style.minWidth = pre.scrollWidth + "px";
-    syncScroll();
-  }, [value, syncScroll]);
-
-  const closeMenu = useCallback(() => setMenu(null), []);
-
   // measure monospace character width once (cached on the canvas ref)
   const charWidth = (ta: HTMLTextAreaElement): number => {
     if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
@@ -226,6 +220,47 @@ export const SqlEditor: React.FC<Props> = ({
     const w = ctx.measureText("0").width;
     return w > 0 ? w : 7.8;
   };
+
+  /** Pixel width of the longest line (tabs expanded to tab-size 2). */
+  const maxLineWidthPx = (ta: HTMLTextAreaElement, text: string): number => {
+    if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
+    const ctx = canvasRef.current.getContext("2d");
+    const cs = getComputedStyle(ta);
+    if (ctx) ctx.font = cs.font || `${cs.fontSize} ${cs.fontFamily}`;
+    const cw = charWidth(ta);
+    let max = 0;
+    for (const line of text.split("\n")) {
+      const expanded = line.replace(/\t/g, "  ");
+      const w = ctx ? ctx.measureText(expanded).width : expanded.length * cw;
+      if (w > max) max = w;
+    }
+    const pad =
+      (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    return Math.ceil(max + pad + 2);
+  };
+
+  useLayoutEffect(() => {
+    // .424 / long-line fix: the textarea is the scroll extent of .scroll
+    // (the highlight <pre> is an absolute overlay and sizes nothing).
+    // Relying on pre.scrollWidth alone is unreliable for absolute+inset
+    // overlays — long single-line SQL then never widens the scroller and
+    // the highlight clips. Measure the real content width (and height)
+    // and size the textarea so .scroll can reach every character.
+    const ta = taRef.current;
+    const pre = preRef.current;
+    if (ta && pre) {
+      const cs = getComputedStyle(ta);
+      const lineH = parseFloat(cs.lineHeight) || 20;
+      const padY =
+        (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+      const contentW = Math.max(maxLineWidthPx(ta, value), pre.scrollWidth);
+      ta.style.minWidth = contentW + "px";
+      ta.style.minHeight = Math.ceil(lineCount * lineH + padY) + "px";
+    }
+    syncScroll();
+  }, [value, lineCount, syncScroll]);
+
+  const closeMenu = useCallback(() => setMenu(null), []);
 
   // recompute suggestions from the current caret; positions the dropdown
   const refresh = useCallback(

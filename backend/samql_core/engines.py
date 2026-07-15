@@ -1601,14 +1601,13 @@ def ensure_large_file_engine_memory(duck, path, min_size_mb=64):
         total = float(snap.get("memory_total_mb") or 0)
     except Exception:
         avail = total = 0.0
-    # Aim for enough headroom to parse + spill: at least 2 GiB, up to 8 GiB,
-    # never more than half of currently available RAM. For multi-GB inputs
-    # prefer a floor near min(file size, 8 GiB) so COPY stays streaming.
-    want = int(max(2048, min(8192, size_mb)))
+    # Aim for enough headroom to parse + spill: at least 2 GiB, up to 75% of
+    # RAM (capped), never more than ~70% of currently available RAM.
+    want = int(max(2048, min(262144, size_mb * 2)))
+    if total > 0:
+        want = int(min(want, max(2048, total * 0.75)))
     if avail > 0:
-        want = int(min(want, max(512, avail * 0.5)))
-    elif total > 0:
-        want = int(min(want, max(512, total * 0.35)))
+        want = int(min(want, max(2048, avail * 0.70)))
     current = int(getattr(duck, "_applied_resource_memory_mb", 0) or 0)
     if want <= current:
         return False
@@ -1622,6 +1621,38 @@ def ensure_json_engine_memory(duck, path):
     """Raise DuckDB's memory ceiling for a large JSON load (see
     ``ensure_large_file_engine_memory``)."""
     return ensure_large_file_engine_memory(duck, path, min_size_mb=64)
+
+
+def ensure_heavy_op_engine_memory(duck):
+    """Raise DuckDB memory before flatten / shred CTAS over nested JSON.
+
+    After a large flatten-off load, OS "available" RAM dips because DuckDB's
+    own buffer pool already holds the table. Clamping the ceiling to
+    available*0.7 left engines stuck around ~3–4 GiB (``3.4 of 3.4 GiB
+    used``) so the next 64 MiB UNNEST/CTAS allocation failed. Size from
+    **total** RAM only (~75%), and wait briefly for the write lock so the
+    raise lands even when a prior statement just released it.
+    """
+    if duck is None or os.environ.get("SAMQL_DUCKDB_MEMORY_GB"):
+        return False
+    try:
+        from . import resourcebudget
+        snap = resourcebudget.recommend()
+        total = float(snap.get("memory_total_mb") or 0)
+    except Exception:
+        total = 0.0
+    # Do NOT clamp to OS available — that value is depressed by DuckDB's
+    # own pool after a load and is the wrong signal for memory_limit.
+    want = 8192
+    if total > 0:
+        want = int(max(4096, min(262144, total * 0.75)))
+    current = int(getattr(duck, "_applied_resource_memory_mb", 0) or 0)
+    if want <= current:
+        return False
+    try:
+        return bool(duck.apply_resource_memory_mb(want, wait=True))
+    except Exception:
+        return False
 
 
 def total_physical_ram_bytes():
@@ -2046,14 +2077,16 @@ class DuckDBManager:
             pass
         ram = cls._total_ram_gb()
         if ram <= 0:
-            return 4  # unknown: safe default
+            return 8  # unknown: workable default for nested flatten
         if ram <= 6:
-            frac = 0.5
-        elif ram <= 32:
-            frac = 0.6
-        else:
             frac = 0.65
-        return max(1, min(int(ram * frac), 48))
+        elif ram <= 32:
+            frac = 0.75
+        else:
+            frac = 0.80
+        # Cap high enough that multi-GB nested flatten/shred is not aborted
+        # by an artificial 48 GiB ceiling on large workstations.
+        return max(2, min(int(ram * frac), 256))
 
     @staticmethod
     def _thread_count(low_memory=False):
@@ -2255,11 +2288,19 @@ class DuckDBManager:
     def cursor(self):
         return self.conn.cursor()
 
-    def apply_resource_memory_mb(self, memory_mb):
+    def apply_resource_memory_mb(self, memory_mb, allow_decrease=False,
+                                 wait=False):
         """Apply an adaptive memory ceiling without waiting behind a query.
 
         Explicit ``SAMQL_DUCKDB_MEMORY_GB`` configuration always wins. A busy
-        engine simply keeps its current limit until the next budget sync.
+        engine simply keeps its current limit until the next budget sync
+        (unless ``wait=True``, used by flatten/shred so a raise is not
+        skipped the instant a CTAS releases the lock).
+
+        By default adaptive sync only RAISES the ceiling. Shrinking after a
+        large load (when "available" RAM dips) made flatten/shred CTAS fail
+        with OutOfMemory; pass ``allow_decrease=True`` only for explicit UI
+        / low-memory mode.
         """
         if os.environ.get("SAMQL_DUCKDB_MEMORY_GB") or self._conn is None:
             return False
@@ -2269,12 +2310,21 @@ class DuckDBManager:
             return False
         if self._low_memory:
             mb = min(mb, 1024)
-        if mb == self._applied_resource_memory_mb:
+            allow_decrease = True
+        current = int(self._applied_resource_memory_mb or 0)
+        if mb == current:
             return True
+        if not allow_decrease and current and mb < current:
+            return False
         try:
             got = self.write_lock.acquire(blocking=False)
         except Exception:
             got = False
+        if not got and wait:
+            try:
+                got = self.write_lock.acquire(blocking=True)
+            except Exception:
+                got = False
         if not got:
             return False
         try:

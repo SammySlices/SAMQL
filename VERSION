@@ -2,12 +2,25 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-15.609
+Current build:   2026-07-15.610
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-15.610  (v2.16.4)
+
+FLATTEN MEMORY CEILING + FIELD EXPLORER / IDE SQL FIXES.
+DuckDB flatten/shred now raises the engine memory ceiling from total RAM
+(~75%) instead of clamping to depressed OS "available" after a large load
+(the "3.4 of 3.4 GiB used / failed to allocate 64 MiB" failure). Adaptive
+budget keeps a higher floor; OOM retry checkpoints before re-attempting.
+Field Explorer no longer reloads the nested field tree after a failed
+Flatten/Shred (post-OOM sample had wiped shredded fields down to top-level
+until the table was re-selected). The IDE SQL editor sizes long single-line
+statements for true horizontal scroll so content is not clipped.
 
 ----------------------------------------------------------------------
 build 2026-07-15.609  (v2.16.4)

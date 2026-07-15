@@ -126,6 +126,39 @@ describe("FieldExplorer shred steering", () => {
     expect(screen.queryByTestId("fx-shred-run")).toBeNull();
   });
 
+  it("keeps the nested field tree when Flatten fails (does not re-sample)", async () => {
+    vi.mocked(api.shredPlan).mockResolvedValue({ tables: [] } as any);
+    const onFlatten = vi
+      .fn()
+      .mockResolvedValue({ error: "OutOfMemoryException: 3.4 of 3.4 GiB used" });
+    const onTablesChanged = vi.fn();
+
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+        onShred={vi.fn()}
+        onFlatten={onFlatten}
+        onTablesChanged={onTablesChanged}
+      />,
+    );
+
+    const legRow = await screen.findByText("legs");
+    fireEvent.click(legRow);
+    const fieldsCallsBefore = vi.mocked(api.columnFields).mock.calls.length;
+
+    fireEvent.click(await screen.findByTestId("fx-flatten-run"));
+    await waitFor(() => expect(onFlatten).toHaveBeenCalled());
+
+    // Failed flatten must not refresh tables or re-fetch fields — a post-OOM
+    // sample falls back to DESCRIBE-only top-level fields.
+    expect(onTablesChanged).not.toHaveBeenCalled();
+    expect(vi.mocked(api.columnFields).mock.calls.length).toBe(fieldsCallsBefore);
+    expect(screen.getAllByText("legs").length).toBeGreaterThan(0);
+  });
+
   it("guides to Flatten-on when the column is not shreddable and no flatten handler", async () => {
     vi.mocked(api.shredPlan).mockResolvedValue({ tables: [] } as any);
 
