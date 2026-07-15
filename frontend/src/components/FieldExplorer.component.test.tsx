@@ -16,6 +16,7 @@ import type { TableInfo } from "../lib/types";
 vi.mock("../lib/api", () => ({
   api: {
     columnFields: vi.fn(),
+    columnAccessPreview: vi.fn(),
     shredPlan: vi.fn(),
   },
   copyText: vi.fn(() => Promise.resolve()),
@@ -52,6 +53,13 @@ describe("FieldExplorer shred steering", () => {
   beforeEach(() => {
     localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
     vi.mocked(api.columnFields).mockResolvedValue(arrayFieldTree as any);
+    vi.mocked(api.columnAccessPreview).mockResolvedValue({
+      ok: true,
+      sample: "preview-ok",
+      sql: "SELECT json ->> '$.legs[0]' FROM \"orders\"",
+      all_sql: "SELECT json(e1) FROM \"orders\", UNNEST(...)",
+      access: arrayFieldTree.fields[0].access,
+    } as any);
   });
 
   it("offers 'Shred to tables' for an array node when the column is shreddable", async () => {
@@ -138,11 +146,32 @@ describe("FieldExplorer shred steering", () => {
     expect(guide.textContent).toContain("Flatten into relational tables");
     expect(screen.queryByTestId("fx-shred-run")).toBeNull();
   });
+
+  it("previews validated SQL sample on field select", async () => {
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+        onShred={vi.fn()}
+      />,
+    );
+    const legRow = await screen.findByText("legs");
+    fireEvent.click(legRow);
+    await waitFor(() =>
+      expect(api.columnAccessPreview).toHaveBeenCalled(),
+    );
+    const sample = await screen.findByTestId("fx-preview-sample");
+    expect(sample.textContent).toContain("preview-ok");
+  });
 });
 
 describe("FieldExplorer minimize", () => {
   beforeEach(() => {
     localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
+    vi.mocked(api.columnFields).mockResolvedValue({ fields: [] } as any);
+    vi.mocked(api.columnAccessPreview).mockResolvedValue({ ok: false } as any);
   });
 
   it("minimizes to an icon and expands on click", () => {

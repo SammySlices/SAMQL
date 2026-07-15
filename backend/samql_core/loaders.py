@@ -757,8 +757,10 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
                         raise
                     e = e2
             if kind == "json":
-                # Do not CTAS nested JSON. Surface a recoverable error so
-                # _load_json_duckdb can stream-flatten into DuckDB tables.
+                # Do not CTAS nested JSON into engine RAM when size/force_ondisk
+                # required the Parquet path. Surface a recoverable error so
+                # _load_json_duckdb can stream-flatten (bounded memory) instead
+                # of a silent in-engine materialize of multi-GB STRUCT nests.
                 raise RuntimeError(
                     "On-disk Parquet load failed for large JSON %s (%s). "
                     "Streaming flatten will be tried next."

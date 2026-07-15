@@ -557,10 +557,11 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
     """Opaque JSON / JSON[] / STRUCT::JSON recipes (0-based JSONPath).
 
     Nested JSON arrays are not DuckDB LIST values, so all-rows hops use
-    ``UNNEST(from_json(<array>, '["VARCHAR"]'))`` plus ``json(eN)`` so both
-    object elements and double-encoded string elements (``["{...}"]``) work.
-    A root JSON[] / LIST column still uses a native UNNEST for its first
-    ``(element)`` hop (1-based ``[1]`` on the list)."""
+    ``UNNEST(from_json(<array>, '["JSON"]'))`` (objects/arrays as JSON).
+    An ``alt`` recipe uses ``["VARCHAR"]`` + ``json(eN)`` for double-encoded
+    string elements (``["{...}"]``). Preview / Field Explorer tries primary
+    then alt. A root JSON[] / LIST column still uses a native UNNEST for its
+    first ``(element)`` hop (1-based ``[1]`` on the list)."""
     def q(name):
         return '"%s"' % name.replace('"', '""') if _needs_quote(name) else name
 
@@ -579,23 +580,93 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
             "first_base": parent["first_base"] + "[1]" + elem_cast,
         }
 
-    def json_array_hop(parent):
-        # Decode each element via text→json so double-encoded string
-        # elements and real JSON objects share one working recipe.
+    def json_array_hop(parent, schema='"JSON"', decode_elem=False):
+        # Primary schema '"JSON"': object/array elements stay JSON.
+        # Alt schema '"VARCHAR"' + decode_elem: double-encoded string elems.
         counter[0] += 1
         n = counter[0]
         arr = _json_array_sql(parent["all_base"], parent["all_jptr"])
         elem0_text = _json_extract_expr(
             parent["first_base"], parent["first_jptr"] + "[0]", as_text=True)
+        elem0_json = _json_extract_expr(
+            parent["first_base"], parent["first_jptr"] + "[0]", as_text=False)
+        if decode_elem:
+            first_base = "json(%s)" % elem0_text
+            all_base = "json(e%d)" % n
+        else:
+            first_base = ("CAST(%s AS JSON)" % elem0_text
+                          if "->>" in (elem0_json or "")
+                          else elem0_json)
+            all_base = "e%d" % n
         return {
             "unnests": parent["unnests"]
-            + ["UNNEST(from_json(%s, '[\"VARCHAR\"]')) AS x%d(e%d)"
-               % (arr, n, n)],
-            "all_base": "json(e%d)" % n,
-            "first_base": "json(%s)" % elem0_text,
+            + ["UNNEST(from_json(%s, '[%s]')) AS x%d(e%d)"
+               % (arr, schema, n, n)],
+            "all_base": all_base,
+            "first_base": first_base,
             "first_jptr": "$",
             "all_jptr": "$",
         }
+
+    def _attach_json_array_acc(acc, ent, kind, double_encoded=False):
+        """Primary JSON hop + VARCHAR alt for Field Explorer preview.
+
+        When ``double_encoded`` (elements are JSON text strings), VARCHAR +
+        ``json(eN)`` is the primary recipe — ``->>`` on a string element is NULL.
+        """
+        primary_schema = '"VARCHAR"' if double_encoded else '"JSON"'
+        primary_decode = bool(double_encoded)
+        alt_schema = '"JSON"' if double_encoded else '"VARCHAR"'
+        alt_decode = not double_encoded
+
+        h = json_array_hop(ent, schema=primary_schema,
+                           decode_elem=primary_decode)
+        acc["sel"] = h["all_base"]
+        acc["unnests"] = h["unnests"]
+        arr = _json_array_sql(ent["all_base"], ent["all_jptr"])
+        n = counter[0]
+        alt_unnests = list(ent["unnests"]) + [
+            "UNNEST(from_json(%s, '[%s]')) AS x%d(e%d)"
+            % (arr, alt_schema, n, n)]
+        elem0_text = _json_extract_expr(
+            ent["first_base"], ent["first_jptr"] + "[0]", as_text=True)
+        elem0_json = _json_extract_expr(
+            ent["first_base"], ent["first_jptr"] + "[0]", as_text=False)
+        if alt_decode:
+            alt_first_base = "json(%s)" % elem0_text
+            alt_all_base = "json(e%d)" % n
+        else:
+            alt_first_base = ("CAST(%s AS JSON)" % elem0_text
+                              if "->>" in (elem0_json or "")
+                              else elem0_json)
+            alt_all_base = "e%d" % n
+        arr_first = _json_array_sql(ent["first_base"], ent["first_jptr"])
+        if kind == "array":
+            acc["recursive"] = (
+                "UNNEST(from_json(%s, '[%s]'))"
+                % (arr_first, primary_schema))
+            if double_encoded:
+                acc["note"] = (
+                    "one row per double-encoded JSON element; "
+                    "%s decodes each string" % h["all_base"])
+            else:
+                acc["note"] = (
+                    "one row per JSON array element; %s is each "
+                    "element as JSON" % h["all_base"])
+        else:
+            acc["note"] = "one row per JSON array element (scalar)"
+        acc["alt"] = {
+            "first": _json_extract_expr(
+                alt_first_base, "$", as_text=False),
+            "sel": alt_all_base,
+            "unnests": alt_unnests,
+            "recursive": (
+                "UNNEST(from_json(%s, '[%s]'))"
+                % (arr_first, alt_schema)),
+            "note": ("fallback for typed JSON elements" if double_encoded
+                     else "fallback for double-encoded string elements"),
+        }
+        return h
 
     for r in rows:
         while stack and stack[-1]["depth"] >= r["depth"]:
@@ -609,6 +680,7 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
                 "first_base": base0, "all_base": base0,
                 "first_jptr": "$", "all_jptr": "$",
                 "unnests": [], "native_list": bool(root_is_list),
+                "double_encoded": bool(r.get("double_encoded")),
             }
         elif name == "(element)":
             # Root LIST/JSON[]: native UNNEST. Nested arrays: JSON explode.
@@ -623,9 +695,14 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
                     "first_base": h["first_base"], "all_base": h["all_base"],
                     "first_jptr": "$", "all_jptr": "$",
                     "unnests": h["unnests"], "native_list": False,
+                    "double_encoded": False,
                 }
             else:
-                h = json_array_hop(parent)
+                dec = bool(parent.get("double_encoded"))
+                h = json_array_hop(
+                    parent,
+                    schema='"VARCHAR"' if dec else '"JSON"',
+                    decode_elem=dec)
                 ent = {
                     "depth": r["depth"], "kind": kind,
                     "first_base": h["first_base"],
@@ -633,6 +710,7 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
                     "first_jptr": h["first_jptr"],
                     "all_jptr": h["all_jptr"],
                     "unnests": h["unnests"], "native_list": False,
+                    "double_encoded": False,
                 }
         else:
             seg = _json_path_seg(name)
@@ -644,6 +722,7 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
                 "all_jptr": parent["all_jptr"] + seg,
                 "unnests": list(parent["unnests"]),
                 "native_list": False,
+                "double_encoded": bool(r.get("double_encoded")),
             }
 
         as_text = kind == "scalar"
@@ -670,21 +749,18 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
                 else:
                     acc["note"] = "one row per element (JSON[] / list)"
             else:
-                h = json_array_hop(ent)
-                acc["sel"] = h["all_base"]
-                acc["unnests"] = h["unnests"]
-                arr_first = _json_array_sql(
-                    ent["first_base"], ent["first_jptr"])
-                if kind == "array":
-                    acc["recursive"] = (
-                        "UNNEST(from_json(%s, '[\"VARCHAR\"]'))" % arr_first)
-                    acc["note"] = (
-                        "one row per JSON array element; %s is each "
-                        "element decoded as JSON" % h["all_base"])
-                else:
-                    acc["note"] = "one row per JSON array element (scalar)"
+                _attach_json_array_acc(
+                    acc, ent, kind,
+                    double_encoded=bool(r.get("double_encoded")
+                                        or ent.get("double_encoded")))
             acc["first"] = _json_extract_expr(
                 ent["first_base"], ent["first_jptr"], as_text=False)
+            # Double-encoded array first-element: decode the string cell.
+            if r.get("double_encoded") or ent.get("double_encoded"):
+                elem0_text = _json_extract_expr(
+                    ent["first_base"], ent["first_jptr"] + "[0]",
+                    as_text=True)
+                acc["first"] = "json(%s)" % elem0_text
         elif kind == "struct":
             acc["first"] = _json_extract_expr(
                 ent["first_base"], ent["first_jptr"], as_text=False)
@@ -705,6 +781,43 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
         r["access"] = acc
         stack.append(ent)
     return rows
+
+
+def field_access_sql(table, access, which="first"):
+    """Build a runnable SELECT from a Field Explorer access recipe."""
+    if not access:
+        return None
+    tbl = '"%s"' % str(table).replace('"', '""')
+    if which == "first":
+        expr = access.get("first")
+        if not expr:
+            return None
+        return "SELECT %s FROM %s LIMIT 1" % (expr, tbl)
+    if which == "all":
+        expr = access.get("sel")
+        if expr is None:
+            return None
+        unnests = "".join(", " + u for u in (access.get("unnests") or []))
+        return "SELECT %s FROM %s%s LIMIT 50" % (expr, tbl, unnests)
+    if which == "recursive":
+        expr = access.get("recursive")
+        if not expr:
+            return None
+        return "SELECT %s FROM %s LIMIT 50" % (expr, tbl)
+    return None
+
+
+def access_recipe_variants(access):
+    """Primary recipe then optional ``alt`` (VARCHAR hop) for preview fallback."""
+    if not access:
+        return []
+    out = [access]
+    alt = access.get("alt")
+    if isinstance(alt, dict) and alt.get("sel") is not None:
+        merged = dict(access)
+        merged.update(alt)
+        out.append(merged)
+    return out
 
 
 # Field-discovery caps (shape sampling only — not a full data dump).
@@ -769,6 +882,14 @@ def _json_tree_merge(node, val, depth):
             if (n - 1) not in idxs:
                 idxs.append(n - 1)
         for i in idxs:
+            item = val[i]
+            # Double-encoded: element is a JSON text string. Tree merge still
+            # decodes for key discovery, but recipes must use json(->>) on the
+            # live cell — mark the array so access_recipes prefers VARCHAR.
+            if isinstance(item, str):
+                s = item.strip()
+                if s[:1] in "{[":
+                    node["double_encoded"] = True
             _json_tree_merge(node["elem"], val[i], depth + 1)
     else:
         if node["kind"] is None:
@@ -871,7 +992,8 @@ def _field_tree_from_root(root, colname="json", access_style="json",
                                   else "array"),
                          "path": None if in_array else expr(jptr),
                          "note": ("array — expand with UNNEST" if not in_array
-                                  else "nested array — UNNEST after the parent")})
+                                  else "nested array — UNNEST after the parent"),
+                         "double_encoded": bool(nd.get("double_encoded"))})
             if nd["elem"]:
                 walk("(element)", nd["elem"], depth + 1, None, True)
         else:
@@ -887,6 +1009,86 @@ def _field_tree_from_root(root, colname="json", access_style="json",
     return out
 
 
+def json_samples_to_type_node(values):
+    """Infer a shred/flatten type node ({t:list|struct|scalar}) from live cells.
+
+    Used when DESCRIBE only shows opaque JSON / JSON[] so planning can still
+    see nested arrays without raising the load-time maximum_depth."""
+    root = _json_tree_new()
+    for raw in values or []:
+        _json_tree_merge(root, _coerce_json_sample(raw), 0)
+    if root.get("kind") is None:
+        return None
+    return _json_shape_to_type_node(root)
+
+
+def _json_shape_to_type_node(node):
+    """Convert a merged ``_json_tree`` shape into a ``parse_duckdb_type`` node."""
+    kind = (node or {}).get("kind")
+    if kind == "array":
+        elem = node.get("elem") or _json_tree_new()
+        of_node = _json_shape_to_type_node(elem)
+        if of_node is None:
+            of_node = {"t": "scalar", "type": "JSON"}
+        return {"t": "list", "of": of_node}
+    if kind == "object":
+        fields = []
+        for k, ch in sorted((node.get("children") or {}).items(),
+                            key=lambda kv: kv[0]):
+            child = _json_shape_to_type_node(ch)
+            if child is None:
+                child = {"t": "scalar", "type": "VARCHAR"}
+            fields.append((k, child))
+        return {"t": "struct", "fields": fields}
+    types = set(node.get("types") or ())
+    if not types or types == {"null"}:
+        return {"t": "scalar", "type": "VARCHAR"}
+    non_null = types - {"null"}
+    if non_null <= {"integer"}:
+        return {"t": "scalar", "type": "BIGINT"}
+    if non_null <= {"integer", "double"}:
+        return {"t": "scalar", "type": "DOUBLE"}
+    if non_null <= {"boolean"}:
+        return {"t": "scalar", "type": "BOOLEAN"}
+    return {"t": "scalar", "type": "VARCHAR"}
+
+
+def is_opaque_json_type(raw_type):
+    """True when the column itself is opaque JSON / JSON[] (no deep schema).
+
+    STRUCT shells that merely *contain* a JSON leaf are False here — those
+    keep STRUCT flatten/shred SQL; Field Explorer sampling still deepens their
+    JSON leaves separately via ``_field_tree_needs_json_sample``.
+    """
+    tu = (raw_type or "").strip().upper()
+    if not tu:
+        return False
+    if tu == "JSON" or tu == "JSON[]":
+        return True
+    # LIST of JSON (e.g. JSON[]) already covered; also "JSON []" variants.
+    if tu.replace(" ", "") == "JSON[]":
+        return True
+    return False
+
+
+def column_needs_json_shred(raw_type, node=None):
+    """True when shred/flatten should plan from sampled JSON shape.
+
+    Covers plain JSON, JSON[], and LIST-of-JSON where DESCRIBE has no
+    STRUCT element schema. Does not fire for typed STRUCT/LIST columns.
+    """
+    if is_opaque_json_type(raw_type):
+        return True
+    n = node or {}
+    if n.get("t") == "list":
+        ofn = n.get("of") or {}
+        if ofn.get("t") == "scalar" and "JSON" in (ofn.get("type") or "").upper():
+            return True
+    if n.get("t") == "scalar" and (n.get("type") or "").upper() == "JSON":
+        return True
+    return False
+
+
 def json_values_to_field_tree(values, colname="json", access_style="json"):
     """Build a nested field tree from already-sampled Python/JSON values.
 
@@ -896,12 +1098,60 @@ def json_values_to_field_tree(values, colname="json", access_style="json"):
     root = _json_tree_new()
     n = 0
     for raw in values or []:
+        _mark_double_encoded_arrays(root, raw)
         _json_tree_merge(root, _coerce_json_sample(raw), 0)
         n += 1
     return _field_tree_from_root(root, colname=colname,
                                  access_style=access_style,
                                  sampled=n, complete=True, scan_s=0.0,
                                  source="sampled-values")
+
+
+def _mark_double_encoded_arrays(node, val, depth=0):
+    """Flag array nodes whose live elements are JSON text (before coerce).
+
+    Tree merge decodes those strings for key discovery, but Field Explorer
+    recipes must still wrap with ``json()`` / VARCHAR from_json against the
+    live cell — otherwise ``->>`` on a string element returns NULL.
+    """
+    if depth > JSON_TREE_MAX_DEPTH or node is None:
+        return
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            val = val.decode("utf-8", "replace")
+        except Exception:
+            return
+    if isinstance(val, str):
+        s = val.strip()
+        if not s or s[0] not in "{[":
+            return
+        try:
+            import orjson
+            val = orjson.loads(s)
+        except Exception:
+            try:
+                import json as _json
+                val = _json.loads(s)
+            except Exception:
+                return
+    if isinstance(val, dict):
+        if node.get("kind") != "array":
+            node["kind"] = "object"
+        for k, v in val.items():
+            ch = node["children"].get(str(k))
+            if ch is None:
+                ch = _json_tree_new()
+                node["children"][str(k)] = ch
+            _mark_double_encoded_arrays(ch, v, depth + 1)
+    elif isinstance(val, list):
+        node["kind"] = "array"
+        if node.get("elem") is None:
+            node["elem"] = _json_tree_new()
+        if any(isinstance(x, str) and str(x).strip()[:1] in "{["
+               for x in val[:JSON_TREE_ARRAY_ELEMS]):
+            node["double_encoded"] = True
+        for x in val[:JSON_TREE_ARRAY_ELEMS]:
+            _mark_double_encoded_arrays(node["elem"], x, depth + 1)
 
 
 def json_field_tree(path, colname="json", access_style="json",

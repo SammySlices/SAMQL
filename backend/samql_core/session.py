@@ -78,6 +78,19 @@ _MISSING_TABLE_PATTERNS = (
 )
 
 
+# Substrings (lower-cased) DuckDB uses when it runs out of working memory.
+# Shared by the query- and flow-error enrichers and by the read-path fallback
+# guard so all three agree on what "an OOM" looks like.
+_OOM_MARKERS = ("outofmemoryexception", "out of memory",
+                "failed to allocate", "could not allocate")
+
+
+def _looks_like_oom(message):
+    """True when an engine error text is a DuckDB out-of-memory failure."""
+    lowered = str(message or "").lower()
+    return any(m in lowered for m in _OOM_MARKERS)
+
+
 def _duckdb_oom_query_message(message, engine=None):
     """Add actionable context to a DuckDB query out-of-memory error.
 
@@ -86,11 +99,7 @@ def _duckdb_oom_query_message(message, engine=None):
     query has already exhausted the larger working-memory budget.
     """
     text = str(message or "")
-    lowered = text.lower()
-    if not ("outofmemoryexception" in lowered
-            or "out of memory" in lowered
-            or "failed to allocate" in lowered
-            or "could not allocate" in lowered):
+    if not _looks_like_oom(text):
         return text
     budget = getattr(engine, "_applied_resource_memory_mb", None)
     try:
@@ -106,6 +115,28 @@ def _duckdb_oom_query_message(message, engine=None):
         "extract/project the fields you need before UNNEST; expand one array "
         "at a time and avoid recursive or sibling-array cross-products."
         % (text, budget_note)
+    )
+
+
+def _duckdb_oom_flow_message(message, engine=None):
+    """OOM guidance for a NodeFlow node/branch failure.
+
+    Mirrors :func:`_duckdb_oom_query_message` (keeps the raw error, notes the
+    failed-alloc vs limit distinction and the engine budget) and adds the same
+    memory-safe next steps NodeFlow already exposes -- so a large-data flow OOM
+    gets the actionable guidance IDE/Journal queries already get, instead of a
+    bare ``OutOfMemoryException``. A non-OOM message is returned unchanged.
+    """
+    text = str(message or "")
+    if not _looks_like_oom(text):
+        return text
+    base = _duckdb_oom_query_message(text, engine)
+    return (
+        "%s\n\nIn a flow, add a Filter or a row limit before the heavy node "
+        "and connect only the columns you need. For a nested/opaque JSON "
+        "column, turn it into real columns with a Shred node (or Flatten it "
+        "upstream) instead of UNNEST-ing the whole column in one step."
+        % base
     )
 
 
@@ -1355,7 +1386,9 @@ class Session:
         except Exception:
             return None
         nodes = list(ft.get("nodes") or [])
+        root_node = None
         if nodes and nodes[0].get("depth") == 0:
+            root_node = nodes[0]
             nodes = nodes[1:]
         if not nodes:
             return None
@@ -1365,8 +1398,15 @@ class Session:
             root_kind = ("array" if root_is_list
                          else "struct" if path_style == "struct"
                          else "scalar")
+            # Sampled shape wins for opaque JSON (array/object cell).
+            if root_node and root_node.get("kind") in ("array", "array-scalar"):
+                root_kind = "array"
+            elif root_node and root_node.get("kind") == "struct":
+                root_kind = "struct"
             root = {"depth": 0, "name": column, "type": raw_type,
-                    "kind": root_kind, "path": column, "note": None}
+                    "kind": root_kind, "path": column, "note": None,
+                    "double_encoded": bool(
+                        (root_node or {}).get("double_encoded"))}
             full = [root] + [
                 dict(n, depth=int(n.get("depth") or 0)) for n in nodes]
             access_recipes(column, full, access_style="json",
@@ -1377,6 +1417,117 @@ class Session:
             pass
         return {"type": raw_type, "fields": nodes,
                 "sampled": ft.get("sampled"), "source": "sampled-values"}
+
+    def preview_column_access(self, engine, table, column, field_idx=None,
+                              field_path=None):
+        """Execute Field Explorer First SQL (LIMIT 1) and return a working recipe.
+
+        Tries the primary access recipe, then the VARCHAR ``alt``, then a
+        mechanical ``["JSON"]``→``["VARCHAR"]`` rewrite. Used so copy-SQL is
+        never a NULL/error path for opaque JSON.
+        """
+        from .diagnostics import (field_access_sql, access_recipe_variants)
+        from .sqlutil import quote_ident as _qid
+        mgr = self.duckdb if engine == "duckdb" else self.db
+        if mgr is None:
+            return {"ok": False, "error": "No engine."}
+        tree = self.column_field_tree(engine, table, column)
+        fields = list(tree.get("fields") or [])
+        if not fields:
+            return {"ok": False, "error": "No nested fields for this column.",
+                    "type": tree.get("type"), "fields": []}
+        sel = None
+        if field_idx is not None:
+            try:
+                sel = fields[int(field_idx)]
+            except Exception:
+                sel = None
+        if sel is None and field_path:
+            for f in fields:
+                if (f.get("path") or "") == field_path \
+                        or (f.get("name") or "") == field_path:
+                    sel = f
+                    break
+        if sel is None:
+            sel = fields[0]
+        access = dict(sel.get("access") or {})
+        variants = access_recipe_variants(access)
+
+        def _run(sql):
+            reader = getattr(mgr, "read", None) or getattr(
+                mgr, "execute_read", None)
+            if reader is not None:
+                _c, rows = reader(sql)
+            else:
+                _c, rows = mgr.execute(sql)
+            return rows
+
+        last_err = None
+        tried = []
+        for variant in variants:
+            sql = field_access_sql(table, variant, which="first")
+            if not sql:
+                continue
+            tried.append(sql)
+            try:
+                rows = _run(sql)
+                sample = rows[0][0] if rows and rows[0] else None
+                if sample is not None:
+                    all_sql = field_access_sql(table, variant, which="all")
+                    return {
+                        "ok": True, "sample": sample, "sql": sql,
+                        "all_sql": all_sql, "access": variant,
+                        "field": {k: sel.get(k) for k in (
+                            "depth", "name", "type", "kind", "path")},
+                        "style": "alt" if variant is not access else "primary",
+                        "type": tree.get("type"),
+                        "fields": fields,
+                    }
+                last_err = "NULL result"
+            except Exception as e:
+                last_err = err_str(e)
+
+        # Mechanical fallback: rewrite JSON schema hops to VARCHAR + json().
+        for sql in list(tried):
+            alt = (sql.replace("'[\"JSON\"]'", "'[\"VARCHAR\"]'")
+                   .replace("['\"JSON\"']", "['\"VARCHAR\"']"))
+            if alt == sql:
+                continue
+            # Wrap bare eN select targets when rewriting.
+            import re as _re
+            alt2 = _re.sub(
+                r"SELECT\s+(e\d+)\s+FROM",
+                r"SELECT json(\1) FROM", alt, count=1)
+            for candidate in (alt2, alt):
+                if candidate in tried:
+                    continue
+                tried.append(candidate)
+                try:
+                    rows = _run(candidate)
+                    sample = rows[0][0] if rows and rows[0] else None
+                    if sample is not None:
+                        return {
+                            "ok": True, "sample": sample, "sql": candidate,
+                            "access": access, "style": "rewrite",
+                            "field": {k: sel.get(k) for k in (
+                                "depth", "name", "type", "kind", "path")},
+                            "type": tree.get("type"),
+                            "fields": fields,
+                        }
+                    last_err = "NULL result"
+                except Exception as e:
+                    last_err = err_str(e)
+
+        return {
+            "ok": False,
+            "error": last_err or "Could not preview this field.",
+            "tried": tried[:6],
+            "access": access,
+            "field": {k: sel.get(k) for k in (
+                "depth", "name", "type", "kind", "path")} if sel else None,
+            "type": tree.get("type"),
+            "fields": fields,
+        }
 
     @staticmethod
     def _safe_count(engine, name):
@@ -3434,7 +3585,8 @@ class Session:
             return self._flow_err(e, graph)
         if _is_interrupt(e):
             return {"error": "cancelled", "cancelled": True}
-        return {"error": err_str(e)}
+        return {"error": _duckdb_oom_flow_message(
+            err_str(e), getattr(self, "duckdb", None))}
 
     def _flow_err(self, e, graph=None):
         """Error envelope for a flow failure. A NodeRunError also carries the
@@ -3446,6 +3598,12 @@ class Session:
         msg = str(e)
         if graph is not None:
             msg = _iter_missing_accum_hint(msg, graph)
+        # A NodeRunError already carries the raw engine text (e.g. a DuckDB
+        # OutOfMemoryException from a node's CREATE ... AS): enrich it with the
+        # same failed-alloc/limit + shred/flatten/filter-first guidance the
+        # IDE/Journal query path surfaces, so a large-data flow OOM is
+        # actionable rather than a bare allocation error.
+        msg = _duckdb_oom_flow_message(msg, getattr(self, "duckdb", None))
         out = {"error": msg}
         nid = getattr(e, "node_id", None)
         if nid:
@@ -3489,8 +3647,9 @@ class Session:
             self._flow_cleanup(query_id, et, created)
             if _is_interrupt(e):
                 return {"error": "cancelled", "cancelled": True}
-            return {"error": _iter_missing_accum_hint(
-                err_str(e), graph)}
+            return {"error": _duckdb_oom_flow_message(
+                _iter_missing_accum_hint(err_str(e), graph),
+                getattr(self, "duckdb", None))}
         res = self.run_query('SELECT * FROM "%s"' % tmp, target=et,
                              query_id=query_id)
         if preview_limit and not res.get("error"):
@@ -3578,7 +3737,9 @@ class Session:
         except Exception as e:
             if _is_interrupt(e):
                 return {"error": "cancelled", "cancelled": True}
-            return {"error": _iter_missing_accum_hint(err_str(e), graph)}
+            return {"error": _duckdb_oom_flow_message(
+                _iter_missing_accum_hint(err_str(e), graph),
+                getattr(self, "duckdb", None))}
         finally:
             self._flow_cleanup(query_id, et, created)
 
@@ -6109,6 +6270,16 @@ class Session:
                     raise
                 if self._run_is_cancelled(query_id):
                     raise InterruptedError("cancelled") from e
+                # An out-of-memory failure is a property of the query, not the
+                # cursor: re-running it through the generic in-memory drain
+                # below would execute the same explode a second time on a
+                # HEAVIER (row-materialising) path and hold the connection
+                # longer. Surface it now so _query_error attaches the OOM
+                # guidance immediately. Other cursor problems (a TEMP table a
+                # fresh cursor can't see, a jumbo-option rejection) still fall
+                # through to the drain fallback unchanged.
+                if _looks_like_oom(err_str(e)):
+                    raise
                 pass  # non-cancel cursor problem: generic drain fallback
         cols, first, cursor = engine.execute_cursor(
             sql, batch=self._RESULT_BATCH)
@@ -6613,9 +6784,15 @@ class Session:
 
     def shred_plan(self, engine, table, column, base=None):
         """The relational-shred plan for a nested column: one table per array
-        level with deterministic keys. Pure -- nothing is created."""
-        from .diagnostics import parse_duckdb_type
+        level with deterministic keys. Pure -- nothing is created.
+
+        Opaque JSON / JSON[] (flatten-off) columns have no DESCRIBE LIST type;
+        sample live cells and plan from the inferred shape, marking the plan
+        for JSON-access CTAS over Parquet."""
+        from .diagnostics import (parse_duckdb_type, json_samples_to_type_node,
+                                  column_needs_json_shred)
         from .shred import plan_shred
+        from .sqlutil import quote_ident as _qid
         mgr = self.duckdb if engine == "duckdb" else None
         if mgr is None:
             return {"error": "Shredding runs on the DuckDB engine."}
@@ -6634,10 +6811,37 @@ class Session:
             node = parse_duckdb_type(raw)
         except Exception as e:
             return {"error": "Couldn't read the column's type: " + err_str(e)}
+        json_access = False
+        root_is_json_list = False
+        # Opaque / shallow DESCRIBE: infer LIST/STRUCT from sampled cells.
+        if column_needs_json_shred(raw, node) and engine == "duckdb":
+            try:
+                sql = ('SELECT %s FROM %s LIMIT %d'
+                       % (_qid(column), _qid(table),
+                          int(Session._FIELD_TREE_SAMPLE_ROWS)))
+                reader = getattr(mgr, "read", None) or getattr(
+                    mgr, "execute_read", None)
+                if reader is not None:
+                    _c, rows = reader(sql)
+                else:
+                    _c, rows = mgr.execute(sql)
+                values = [r[0] for r in (rows or []) if r]
+                syn = json_samples_to_type_node(values) if values else None
+                if syn and syn.get("t") == "list":
+                    node = syn
+                    json_access = True
+                    tu = (raw or "").strip().upper()
+                    root_is_json_list = (tu == "JSON[]"
+                                         or tu.replace(" ", "") == "JSON[]")
+            except Exception:
+                pass
         plan = plan_shred(column, node,
                           base=(base or table or "rec"))
         plan["source"] = src
         plan["needs_cache"] = needs_cache
+        plan["json_access"] = json_access
+        plan["root_is_json_list"] = root_is_json_list
+        plan["raw_type"] = raw
         return plan
 
 
@@ -6877,7 +7081,32 @@ class Session:
         except Exception as e:
             return {"error": "Couldn't read the table's columns: "
                     + err_str(e)}
-        columns = [(name, _P(t)) for name, t in raw.items()]
+        from .diagnostics import (json_samples_to_type_node,
+                                  column_needs_json_shred)
+        from .sqlutil import quote_ident as _qid
+        columns = []
+        json_access_cols = set()
+        for name, typ in raw.items():
+            node = _P(typ)
+            if column_needs_json_shred(typ, node):
+                try:
+                    sql = ('SELECT %s FROM %s LIMIT %d'
+                           % (_qid(name), _qid(table),
+                              int(Session._FIELD_TREE_SAMPLE_ROWS)))
+                    reader = getattr(mgr, "read", None) or getattr(
+                        mgr, "execute_read", None)
+                    if reader is not None:
+                        _c, rows = reader(sql)
+                    else:
+                        _c, rows = mgr.execute(sql)
+                    values = [r[0] for r in (rows or []) if r]
+                    syn = json_samples_to_type_node(values) if values else None
+                    if syn and syn.get("t") in ("list", "struct"):
+                        node = syn
+                        json_access_cols.add(name)
+                except Exception:
+                    pass
+            columns.append((name, node))
         # .501: uniquify planned names against the live catalog (minus this
         # base, which re-flatten replaces) so path-only child names ("legs",
         # "json") from two different files can't clobber each other.
@@ -6950,7 +7179,13 @@ class Session:
         # the records table, carrying the record's top-level fields; children
         # keep element-path names.
         _b0 = plan["tables"][0]
-        _list_specs = [t for t in plan["tables"] if t.get("kind") == "list"]
+        # Only TOP-LEVEL lists count for promotion / deep routing — nested
+        # list-inside-list-element children (compound keys) are not
+        # independent top-level nests.
+        _list_specs = [t for t in plan["tables"]
+                       if t.get("kind") == "list"
+                       and len(t.get("list_path") or []) == 1
+                       and not t.get("parent_ords")]
         _other_kids = [t for t in plan["tables"]
                        if t.get("kind") in ("map", "jsonside")]
         promote = (not _b0.get("scalars") and not _b0.get("inline_structs")
@@ -6992,10 +7227,14 @@ class Session:
 
         def _shallow_spec_replaced(spec):
             """The shallow list child / joinkeys for a DEEP top-level column is
-            dropped here -- that column's full shred hierarchy replaces it."""
+            dropped here -- that column's full shred hierarchy replaces it.
+
+            Compound-key children planned under a deep list (list_path starting
+            with the deep column) are also skipped — deep shred owns them.
+            """
             if spec.get("kind") == "list":
                 p = spec.get("list_path") or []
-                return len(p) == 1 and p[0] in deep_set
+                return bool(p) and p[0] in deep_set
             if spec.get("kind") == "joinkeys":
                 ps = spec.get("list_paths") or []
                 return (len(ps) == 1 and len(ps[0]) == 1
@@ -7122,7 +7361,17 @@ class Session:
                     pass
                 if _rex_t0:
                     spec = dict(spec, root_expr=_rex_t0)
-                sql = _shred.build_flatten_sql(spec, read_src, row_expr)
+                _ja = False
+                if spec.get("kind") == "list":
+                    _lp = spec.get("list_path") or []
+                    if _lp and _lp[0] in json_access_cols:
+                        _ja = True
+                elif spec.get("kind") == "jsonside":
+                    if (spec.get("column") or "") in json_access_cols:
+                        # deepened away from jsonside — shouldn't happen
+                        pass
+                sql = _shred.build_flatten_sql(
+                    spec, read_src, row_expr, json_access=_ja)
                 _par = None if spec["kind"] == "joinkeys" else _hub_name
                 early = _materialize(
                     sql, spec["name"], spec["kind"], parent=_par)
@@ -7165,13 +7414,18 @@ class Session:
                     _specs = ([t for t in _specs if t["name"] == _sub_hub]
                               + [t for t in _specs
                                  if t["name"] not in (deep_base, _sub_hub)])
+                _use_json = name in json_access_cols
                 for spec in _specs:
                     if self._run_is_cancelled(query_id):
                         return {"cancelled": True, "created": created}
                     if _rex_e0 or _rex_t0:
                         spec = dict(spec, root_expr=(
                             _rex_e0 if _promoted_here else _rex_t0))
-                    sql = _shred.build_table_sql(spec, name, parquet)
+                    sql = _shred.build_table_sql(
+                        spec, name, parquet,
+                        json_access=_use_json,
+                        json_arr_schema='"JSON"',
+                        root_is_json_list=False)
                     _par = spec.get("parent")
                     if _promoted_here:
                         if spec["name"] == _sub_hub:
@@ -7327,7 +7581,11 @@ class Session:
             for i, spec in enumerate(todo):
                 if self._run_is_cancelled(query_id):
                     return {"cancelled": True, "created": created}
-                sql = build_table_sql(spec, column, plan["source"])
+                sql = build_table_sql(
+                    spec, column, plan["source"],
+                    json_access=bool(plan.get("json_access")),
+                    json_arr_schema='"JSON"',
+                    root_is_json_list=bool(plan.get("root_is_json_list")))
                 # .427 (on-box CatalogException "... is not a table"):
                 # a query-in-place load is a VIEW, and the root spec
                 # deliberately takes the source name (root replaces
@@ -7353,48 +7611,84 @@ class Session:
                                                 threading.get_ident()):
                                 xc.execute(_sql)
 
+                def _build_sql(schema='"JSON"', row_range=None, insert=False):
+                    return build_table_sql(
+                        spec, column, plan["source"],
+                        row_range=row_range, insert=insert,
+                        json_access=bool(plan.get("json_access")),
+                        json_arr_schema=schema,
+                        root_is_json_list=bool(
+                            plan.get("root_is_json_list")))
+
                 batched = 0
                 try:
                     _exec_one(sql)
                 except Exception as e:
-                    if _is_intr(e) or not _is_oom(e):
+                    if _is_intr(e):
                         raise
-                    # .430: OOM fallback -- rebuild THIS table in row
-                    # ranges (bounded working set), CREATE for the first
-                    # range then INSERT for the rest, halving the batch
-                    # on a repeat OOM down to a floor. Zero cost on the
-                    # healthy path (we only get here after the single
-                    # statement actually failed), and a cancel between
-                    # batches keeps the ranges already landed.
-                    total = self._parquet_rowcount(mgr, plan["source"])
-                    if not total:
+                    recovered = False
+                    # Ordered fallback: JSON from_json schema → VARCHAR +
+                    # json(e) for double-encoded arrays.
+                    if plan.get("json_access") and not _is_oom(e):
+                        try:
+                            _exec_one(_build_sql('"VARCHAR"'))
+                            recovered = True
+                        except Exception as e_alt:
+                            if _is_intr(e_alt):
+                                raise
+                            e = e_alt
+                    if not recovered and _is_oom(e):
+                        # .430: OOM fallback -- rebuild THIS table in row
+                        # ranges (bounded working set), CREATE for the first
+                        # range then INSERT for the rest, halving the batch
+                        # on a repeat OOM down to a floor.
+                        total = self._parquet_rowcount(mgr, plan["source"])
+                        if not total:
+                            raise
+                        size = max(1, (total + 7) // 8)
+                        lo, first = 1, True
+                        schemas = (['"JSON"', '"VARCHAR"']
+                                   if plan.get("json_access")
+                                   else ['"JSON"'])
+                        while lo <= total:
+                            if self._run_is_cancelled(query_id):
+                                return {"cancelled": True,
+                                        "created": created}
+                            hi = min(total, lo + size - 1)
+                            ok_batch = False
+                            last_batch_err = None
+                            for sch in schemas:
+                                bsql = _build_sql(
+                                    sch, row_range=(lo, hi),
+                                    insert=not first)
+                                try:
+                                    _exec_one(bsql)
+                                    ok_batch = True
+                                    break
+                                except Exception as e2:
+                                    if _is_intr(e2):
+                                        raise
+                                    last_batch_err = e2
+                                    if _is_oom(e2):
+                                        break
+                            if not ok_batch:
+                                if last_batch_err is not None \
+                                        and _is_oom(last_batch_err):
+                                    if size <= 50:
+                                        raise last_batch_err
+                                    size = max(50, size // 2)
+                                    continue
+                                raise last_batch_err
+                            first = False
+                            batched += 1
+                            lo = hi + 1
+                            try:
+                                opreg.beat(rows=hi, op_id=query_id)
+                            except Exception:
+                                pass
+                        recovered = True
+                    if not recovered:
                         raise
-                    size = max(1, (total + 7) // 8)
-                    lo, first = 1, True
-                    while lo <= total:
-                        if self._run_is_cancelled(query_id):
-                            return {"cancelled": True,
-                                    "created": created}
-                        hi = min(total, lo + size - 1)
-                        bsql = build_table_sql(
-                            spec, column, plan["source"],
-                            row_range=(lo, hi), insert=not first)
-                        try:
-                            _exec_one(bsql)
-                        except Exception as e2:
-                            if _is_intr(e2) or not _is_oom(e2):
-                                raise
-                            if size <= 50:
-                                raise
-                            size = max(50, size // 2)
-                            continue  # retry the SAME range, smaller
-                        first = False
-                        batched += 1
-                        lo = hi + 1
-                        try:
-                            opreg.beat(rows=hi, op_id=query_id)
-                        except Exception:
-                            pass
                 created.append({"name": spec["name"],
                                 "keys": spec["keys"],
                                 "batched": batched or None})

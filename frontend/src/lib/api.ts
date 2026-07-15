@@ -401,11 +401,58 @@ export const api = {
           unnests?: string[];
           recursive?: string;
           note?: string;
+          alt?: {
+            first?: string;
+            sel?: string;
+            unnests?: string[];
+            recursive?: string;
+            note?: string;
+          };
         };
       }[];
     }>("/api/column/fields", {
       method: "POST",
       body: JSON.stringify({ engine, table, column }),
+    }),
+
+  columnAccessPreview: (
+    engine: string,
+    table: string,
+    column: string,
+    opts?: { field_idx?: number; field_path?: string },
+  ) =>
+    jsonFetch<{
+      ok: boolean;
+      sample?: unknown;
+      sql?: string;
+      all_sql?: string;
+      error?: string;
+      style?: string;
+      access?: {
+        first?: string;
+        sel?: string;
+        unnests?: string[];
+        recursive?: string;
+        note?: string;
+      };
+      field?: {
+        depth?: number;
+        name?: string;
+        type?: string;
+        kind?: string;
+        path?: string | null;
+      };
+      fields?: unknown[];
+      type?: string;
+    }>("/api/column/access-preview", {
+      method: "POST",
+      body: JSON.stringify({
+        engine,
+        table,
+        column,
+        field_idx: opts?.field_idx,
+        field_path: opts?.field_path,
+      }),
     }),
 
   // --- loading ---

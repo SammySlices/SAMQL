@@ -2344,6 +2344,88 @@ def backend_tests(datadir, csv_path, json_path):
            "Binder Error: bad column",
            "ordinary DuckDB errors remain unchanged")
 
+    def t_nodeflow_oom_guidance():
+        # A large-data flow OOM happens inside a node's CREATE ... AS, whose
+        # error is wrapped as a NodeRunError and returned through _flow_err /
+        # _flow_exc -- paths that historically did NOT enrich OOM (only the
+        # IDE/Journal _query_error did). Confirm the flow error path now
+        # attaches the failed-alloc/limit note AND flow-specific memory-safe
+        # steps (shred/flatten/filter-first), and leaves non-OOM untouched.
+        import types as _t
+        from samql_core import session as S
+        from samql_core.nodeflow import NodeRunError
+        raw = ("OutOfMemoryException: Failed to allocate data of size "
+               "16.0 MiB")
+        flow_msg = S._duckdb_oom_flow_message(
+            raw, _t.SimpleNamespace(_applied_resource_memory_mb=2048))
+        need(raw in flow_msg, "flow OOM guidance keeps the raw engine error")
+        need("~2048 MiB" in flow_msg
+             and "not the configured memory limit" in flow_msg,
+             "flow OOM guidance reuses the query failed-alloc/limit note")
+        need("Shred" in flow_msg and "Flatten" in flow_msg
+             and "Filter" in flow_msg,
+             "flow OOM guidance steers to shred/flatten/filter-first")
+        eq(S._duckdb_oom_flow_message("Binder Error: bad column"),
+           "Binder Error: bad column",
+           "ordinary flow errors remain unchanged")
+        # End-to-end through the shared envelopes, with a stub engine budget.
+        s = S.Session.__new__(S.Session)
+        s.duckdb = _t.SimpleNamespace(_applied_resource_memory_mb=4096)
+        err = NodeRunError('The sql node couldn\'t run: %s' % raw,
+                           node_id="n7", node_type="sql")
+        out = s._flow_err(err)
+        need("Shred" in out["error"] and "~4096 MiB" in out["error"],
+             "_flow_err enriches a NodeRunError OOM and names the culprit")
+        eq(out.get("node"), "n7",
+           "_flow_err still points at the failing node")
+        out2 = s._flow_exc(RuntimeError(raw))
+        need("Shred" in out2["error"] and "~4096 MiB" in out2["error"],
+             "_flow_exc enriches a bare engine OOM too")
+        # A non-OOM generic exception is unchanged (guards the existing
+        # t_flow_exc_shared contract that boom -> "ValueError: boom").
+        s2 = S.Session.__new__(S.Session)
+        eq(s2._flow_exc(ValueError("boom")), {"error": "ValueError: boom"},
+           "non-OOM flow exceptions map to err_str unchanged")
+
+    def t_query_oom_skips_drain_fallback():
+        # An out-of-memory failure is a property of the QUERY, not the cursor:
+        # the parquet read path must NOT fall through to the generic in-memory
+        # drain (execute_cursor) on OOM -- that re-runs the same explode on a
+        # heavier row-materialising path. Confirm OOM re-raises (so the caller
+        # attaches OOM guidance) while an ordinary cursor problem still drains.
+        import types as _t
+        from samql_core import session as S
+        s = S.Session.__new__(S.Session)
+        drained = {"n": 0}
+
+        def _execute_cursor(sql, batch=None):
+            drained["n"] += 1
+            return None, None, None   # (cols=None) -> DDL-style short return
+
+        eng = _t.SimpleNamespace(execute_cursor=_execute_cursor)
+        sql = "SELECT * FROM t"
+
+        # (a) OOM -> re-raise, drain NOT attempted.
+        s._exec_duckdb_parquet = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("OutOfMemoryException: Failed to allocate 16.0 MiB"))
+        raised = False
+        try:
+            s._exec_target_inner(sql, S.DUCKDB_TARGET, eng, "duckdb")
+        except RuntimeError as e:
+            raised = "OutOfMemory" in str(e)
+        need(raised, "a DuckDB OOM in the parquet path re-raises")
+        eq(drained["n"], 0,
+           "OOM does not fall through to the in-memory drain fallback")
+
+        # (b) an ordinary cursor problem still falls through to the drain.
+        s._exec_duckdb_parquet = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("a temp view this cursor cannot see"))
+        res = s._exec_target_inner(sql, S.DUCKDB_TARGET, eng, "duckdb")
+        eq(drained["n"], 1,
+           "a non-OOM cursor problem still uses the drain fallback")
+        eq(res, (None, None, 0, "duckdb"),
+           "the drain fallback returns its normal short-result shape")
+
     def t_orderby_uses_parquet_path():
         # Large-result fix: ORDER BY stays on the Parquet COPY path (with
         # preserve_insertion_order) instead of draining millions of rows
@@ -7181,13 +7263,31 @@ def backend_tests(datadir, csv_path, json_path):
              in _bsql(tl_lst, _SRC, _RID),
              "a top-level list's SQL is unchanged")
 
-        # a list nested inside a LIST element still needs a COMPOUND key --
-        # out of scope, but NOTED (never silently lost)
+        # a list nested inside a LIST element becomes its own child table with
+        # compound keys (_rid + parent ordinal + own ordinal).
         en = _plan([("orders",
                      _P("STRUCT(oid INTEGER, li STRUCT(sku VARCHAR)[])[]"))],
                    base="o")
-        need(any("compound key" in n and "li" in n for n in en["notes"]),
-             "a list inside a list element is noted, not dropped silently")
+        nested = [t for t in en["tables"]
+                  if t.get("kind") == "list"
+                  and (t.get("list_path") or []) == ["orders", "li"]]
+        need(len(nested) == 1,
+             "list inside a list element is planned as a child table")
+        need(nested[0].get("parent_ords") == ["orders_ord"],
+             "nested list carries parent ordinal for compound key")
+        need(nested[0].get("parent_list_path") == ["orders"],
+             "nested list records its parent list path")
+        need(not any("compound key" in n and "not broken out" in n
+                     for n in en["notes"]),
+             "no longer notes nested lists as skipped")
+        nsql = _bsql(nested[0], _SRC, _RID)
+        need('generate_subscripts(t0."orders", 1)' in nsql
+             and 'AS "orders_ord"' in nsql,
+             "nested-list SQL unnests the parent list")
+        need('"li"' in nsql and "li_ord" in nsql,
+             "nested-list SQL unnests the child list under each parent elem")
+        need('"_parent_sk"' in nsql and '"_sk"' in nsql,
+             "nested-list SQL emits joinable surrogate keys")
 
         # ---- end-to-end on a real DuckDB engine (Sam's box). Skipped in the
         # DuckDB-less sandbox, so the pure checks above still gate every
@@ -12132,8 +12232,13 @@ def backend_tests(datadir, csv_path, json_path):
                                       "legs STRUCT(rate DOUBLE)[])[]"))],
                       base="deep")
         eq([t["name"] for t in _plg["tables"]
-            if t["kind"] == "list"], ["json"],
+            if t["kind"] == "list" and len(t.get("list_path") or []) == 1],
+           ["json"],
            "the shallow list child of table 'deep' is named 'json' (.501)")
+        need(any(t["kind"] == "list"
+                 and (t.get("list_path") or []) == ["json", "legs"]
+                 for t in _plg["tables"]),
+             "nested legs under json elements are planned with compound keys")
 
         from samql_core.engines import HAS_DUCKDB
         if not HAS_DUCKDB:
@@ -19560,6 +19665,106 @@ def backend_tests(datadir, csv_path, json_path):
             nrows = duck.conn.execute(ns2).fetchall()
             need(sorted(r[0] for r in nrows) == ["test", "test2"],
                  "native STRUCT UNNEST recipe still works: %r" % nrows)
+
+            # 5) Nested array-inside-array element (list under list element)
+            nest = [{"oid": 1, "li": [{"sku": "a"}, {"sku": "b"}]},
+                    {"oid": 2, "li": [{"sku": "c"}]}]
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE fx_nest AS SELECT ?::JSON AS payload",
+                [json.dumps(nest)])
+            nt2 = s.column_field_tree("duckdb", "fx_nest", "payload")
+            sku_hits = [f for f in (nt2.get("fields") or [])
+                        if f.get("name") == "sku"]
+            need(sku_hits, "nested sku under li appears in field tree")
+            sacc = sku_hits[-1].get("access") or {}
+            need(sacc.get("first") and "->>" in (sacc.get("first") or ""),
+                 "nested-array sku has JSON recipe: %r" % sacc)
+            ss1, ss2 = _recipe_sqls("fx_nest", sacc)
+            eq(duck.conn.execute(ss1).fetchall(), [("a",)],
+               "nested-array first recipe returns sku")
+            srows = duck.conn.execute(ss2).fetchall()
+            need(sorted(r[0] for r in srows) == ["a", "b", "c"],
+                 "nested-array all-rows recipe retains every sku: %r" % srows)
+
+            # 6) access-preview validates + falls back
+            prev = s.preview_column_access(
+                "duckdb", "fx_json", "payload", field_path="fixingdate")
+            need(prev.get("ok"), "preview ok for opaque JSON: %r" % prev)
+            need(prev.get("sample") == "test",
+                 "preview sample is non-NULL: %r" % prev.get("sample"))
+            need(prev.get("sql"), "preview returns validated SQL")
+        finally:
+            s.shutdown()
+
+    def t_opaque_json_shred_and_nested_flatten():
+        # Flatten-off opaque JSON must shred via sample-derived plan (no
+        # DESCRIBE LIST), and flatten must keep list-inside-list-element
+        # rows with compound keys.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        from samql_core.diagnostics import json_samples_to_type_node
+        shape = [
+            {"id": 1, "legs": [{"cf": [{"amt": 1.0}, {"amt": 2.0}]}]},
+            {"id": 2, "legs": [{"cf": [{"amt": 3.0}]}]},
+        ]
+        node = json_samples_to_type_node([shape])
+        need(node and node.get("t") == "list",
+             "samples infer a list root: %r" % node)
+        elem = (node or {}).get("of") or {}
+        kids = [fn for fn, n in (elem.get("fields") or [])
+                if (n or {}).get("t") == "list"]
+        need("legs" in kids, "inferred element has legs list")
+
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE opaque_trades AS "
+                "SELECT ?::JSON AS json",
+                [json.dumps(shape)])
+            # Materialize a parquet cache like shred_run does for non-parquet
+            # tables so CTAS can use file_row_number.
+            plan = s.shred_plan("duckdb", "opaque_trades", "json",
+                                base="opaque_trades")
+            need(plan.get("json_access"),
+                 "opaque JSON shred plan uses json_access: %r" % plan)
+            need(any(t.get("child_arrays") for t in plan.get("tables") or []),
+                 "sample plan sees nested arrays: %r" % plan.get("tables"))
+            res = s.shred_run("duckdb", "opaque_trades", "json",
+                              base="opaque_trades")
+            need(res.get("ok"), "opaque shred succeeds: %r" % res)
+            created = {c["name"] for c in (res.get("created") or [])}
+            need(any("legs" in n for n in created),
+                 "shred creates a legs child: %r" % created)
+            need(any("cf" in n for n in created),
+                 "shred creates nested cf child (not dropped): %r" % created)
+
+            # Typed flatten: list-inside-list-element retention
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE nest_orders AS "
+                "SELECT 1 AS id, "
+                "[{'oid': 1, 'li': [{'sku': 'a'}, {'sku': 'b'}]}, "
+                " {'oid': 2, 'li': [{'sku': 'c'}]}]::"
+                "STRUCT(oid INTEGER, li STRUCT(sku VARCHAR)[])[] AS orders")
+            fres = s.flatten_table("nest_orders", base="nest_orders")
+            need(not fres.get("error"),
+                 "flatten nested orders succeeds: %r" % fres)
+            made = {c["name"] for c in (fres.get("created") or [])}
+            need(any("orders_li" == n or n.endswith("_li") or "li" in n
+                     for n in made),
+                 "flatten creates orders/li child table: %r" % made)
+            # Find the li table and count skus
+            li_name = next((n for n in made
+                            if n == "orders_li" or n.endswith("orders_li")
+                            or (n.endswith("_li") and "order" in n)), None)
+            if li_name is None:
+                li_name = next((n for n in made if "li" in n), None)
+            need(li_name, "li child table name found in %r" % made)
+            _c, rows = duck.execute(
+                'SELECT "sku" FROM %s ORDER BY 1'
+                % s._rq(li_name))
+            eq([r[0] for r in (rows or [])], ["a", "b", "c"],
+               "nested li skus retained with compound-key flatten")
         finally:
             s.shutdown()
 
@@ -34951,6 +35156,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_orderby_uses_parquet_path),
         ("query: DuckDB OOM guidance distinguishes failed alloc from limit",
          t_duckdb_query_oom_guidance),
+        ("nodeflow: a flow node OOM gets shred/flatten/filter-first guidance",
+         t_nodeflow_oom_guidance),
+        ("query: a DuckDB OOM re-raises instead of the in-memory drain retry",
+         t_query_oom_skips_drain_fallback),
         ("query: result byte cap + streaming parquet export + page cancel",
          t_result_byte_cap_and_export_stream),
         ("nodes: a cyclic connection is rejected, never hangs",
@@ -35610,6 +35819,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_cashflows_receiving_leg_field_tree),
         ("Field Explorer recipes execute on flatten-off JSON / JSON[] / STRUCT+JSON",
          t_field_explorer_recipes_execute),
+        ("Opaque JSON shred + nested-list flatten retain compound-key children",
+         t_opaque_json_shred_and_nested_flatten),
         ("DuckDB load cancel aborts the JSON array pre-pass",
          t_duckdb_load_cancel_aborts_read),
         ("JSON array pre-pass polls cancel and aborts promptly",

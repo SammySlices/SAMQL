@@ -132,8 +132,52 @@ export const FieldExplorer: React.FC<Props> = ({
   // shreddable in place (e.g. deep opaque JSON with no relational backing).
   const [shredInfo, setShredInfo] = useState<ShredInfo | null>(null);
   const [shredBusy, setShredBusy] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const [previewSample, setPreviewSample] = useState<string | null>(null);
+  const [validatedAccess, setValidatedAccess] = useState<FieldRow["access"] | null>(
+    null,
+  );
+  const [validatedFirstSql, setValidatedFirstSql] = useState<string | null>(null);
+  const [validatedAllSql, setValidatedAllSql] = useState<string | null>(null);
   const src = sources.find((s) => s.key === srcKey) || null;
 
+  const reloadFields = (engine: string, table: string, column: string, key: string) => {
+    setBusy(true);
+    setSelIdx(null);
+    setValidatedAccess(null);
+    setValidatedFirstSql(null);
+    setValidatedAllSql(null);
+    setPreviewErr(null);
+    setPreviewSample(null);
+    api
+      .columnFields(engine, table, column)
+      .then((r) => {
+        if (key !== srcKey) return;
+        setFields((r.fields || []) as FieldRow[]);
+      })
+      .catch(() => {
+        if (key === srcKey) setFields([]);
+      })
+      .finally(() => {
+        if (key === srcKey) setBusy(false);
+      });
+    if (engine === "duckdb") {
+      api
+        .shredPlan(engine, table, column)
+        .then((r) => {
+          if (key !== srcKey) return;
+          setShredInfo({
+            tables: (r.tables || []).map((t) => ({ name: t.name })),
+            notes: r.notes,
+            error: r.error,
+          });
+        })
+        .catch(() => {
+          if (key === srcKey) setShredInfo(null);
+        });
+    }
+  };
   const initPos = {
     x: typeof saved.x === "number" ? saved.x : 120,
     y: typeof saved.y === "number" ? saved.y : 90,
@@ -151,35 +195,63 @@ export const FieldExplorer: React.FC<Props> = ({
       setShredInfo(null);
       return;
     }
-    setBusy(true);
-    setSelIdx(null);
-    setShredInfo(null);
-    api
-      .columnFields(src.engine, src.table, src.column)
-      .then((r) => setFields((r.fields || []) as FieldRow[]))
-      .catch(() => setFields([]))
-      .finally(() => setBusy(false));
-    // Shred runs on DuckDB only. Ask the planner whether this column can be
-    // shredded in place so array nodes can steer to the memory-safe path
-    // instead of an OOM-prone full UNNEST. Discovery-only: nothing is created.
-    if (src.engine === "duckdb") {
-      const forKey = src.key;
-      api
-        .shredPlan(src.engine, src.table, src.column)
-        .then((r) => {
-          if (forKey !== srcKey) return; // source changed mid-flight
-          setShredInfo({
-            tables: (r.tables || []).map((t) => ({ name: t.name })),
-            notes: r.notes,
-            error: r.error,
-          });
-        })
-        .catch(() => {
-          if (forKey === srcKey) setShredInfo(null);
-        });
-    }
+    reloadFields(src.engine, src.table, src.column, src.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey]);
+
+  // Validate Field Explorer SQL when a field is selected (primary → alt → rewrite).
+  useEffect(() => {
+    if (!src || selIdx == null || !fields || !fields[selIdx]) {
+      setValidatedAccess(null);
+      setValidatedFirstSql(null);
+      setValidatedAllSql(null);
+      setPreviewErr(null);
+      setPreviewSample(null);
+      return;
+    }
+    const forKey = src.key;
+    const idx = selIdx;
+    setPreviewBusy(true);
+    setPreviewErr(null);
+    setPreviewSample(null);
+    api
+      .columnAccessPreview(src.engine, src.table, src.column, {
+        field_idx: idx,
+      })
+      .then((r) => {
+        if (forKey !== srcKey || idx !== selIdx) return;
+        if (r.ok && r.access) {
+          setValidatedAccess(r.access);
+          setValidatedFirstSql(r.sql || null);
+          setValidatedAllSql(r.all_sql || null);
+          setPreviewSample(
+            r.sample == null ? null : String(r.sample).slice(0, 200),
+          );
+          setPreviewErr(null);
+          // Keep the tree's recipe in sync with the validated one.
+          setFields((prev) => {
+            if (!prev || !prev[idx]) return prev;
+            const next = prev.slice();
+            next[idx] = { ...next[idx], access: r.access };
+            return next;
+          });
+        } else {
+          setValidatedAccess(fields[idx]?.access || null);
+          setValidatedFirstSql(null);
+          setValidatedAllSql(null);
+          setPreviewErr(r.error || "Preview returned NULL");
+        }
+      })
+      .catch((e) => {
+        if (forKey !== srcKey || idx !== selIdx) return;
+        setPreviewErr(String(e?.message || e || "Preview failed"));
+        setValidatedAccess(fields[idx]?.access || null);
+      })
+      .finally(() => {
+        if (forKey === srcKey && idx === selIdx) setPreviewBusy(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selIdx, srcKey]);
 
   // ---- close: X button, and Esc anywhere while the panel is open (not mini) ----
   useEffect(() => {
@@ -258,19 +330,19 @@ export const FieldExplorer: React.FC<Props> = ({
   }
 
   const sel = selIdx != null && fields ? fields[selIdx] : null;
-  const acc = sel?.access;
+  const acc = validatedAccess || sel?.access;
   const tbl = src ? `"${src.table.replace(/"/g, '""')}"` : '"table"';
-  // LIMIT 1 keeps "First record" literally the first record. Without it the
-  // expression is evaluated over every source row -- on a multi-GB opaque-JSON
-  // table that materializes one (often JSON-blob) value per record and OOMs.
-  const firstSql = acc?.first
-    ? `SELECT ${acc.first}\nFROM ${tbl}\nLIMIT 1;`
-    : null;
-  const allSql = acc?.sel
-    ? `SELECT ${acc.sel}\nFROM ${tbl}${(acc.unnests || [])
-        .map((u) => `,\n     ${u}`)
-        .join("")};`
-    : null;
+  // Prefer server-validated SQL (survives NULL / wrong from_json schema).
+  const firstSql =
+    validatedFirstSql ||
+    (acc?.first ? `SELECT ${acc.first}\nFROM ${tbl}\nLIMIT 1;` : null);
+  const allSql =
+    validatedAllSql ||
+    (acc?.sel
+      ? `SELECT ${acc.sel}\nFROM ${tbl}${(acc.unnests || [])
+          .map((u) => `,\n     ${u}`)
+          .join("")};`
+      : null);
   const recSql = acc?.recursive
     ? `SELECT ${acc.recursive}\nFROM ${tbl};`
     : null;
@@ -287,12 +359,17 @@ export const FieldExplorer: React.FC<Props> = ({
   const runShred = () => {
     if (!src || !onShred || !shredEligible || shredBusy) return;
     setShredBusy(true);
+    const key = src.key;
     onShred(
       src.engine,
       src.table,
       src.column,
       shredTables.map((t) => t.name),
     )
+      .then(() => {
+        onTablesChanged?.();
+        reloadFields(src.engine, src.table, src.column, key);
+      })
       .catch(() => {
         /* onShred surfaces its own error toast */
       })
@@ -302,7 +379,12 @@ export const FieldExplorer: React.FC<Props> = ({
   const runFlatten = () => {
     if (!src || !onFlatten || shredBusy) return;
     setShredBusy(true);
+    const key = src.key;
     onFlatten(src.engine, src.table)
+      .then(() => {
+        onTablesChanged?.();
+        reloadFields(src.engine, src.table, src.column, key);
+      })
       .catch(() => {
         /* onFlatten surfaces its own error toast */
       })
@@ -457,6 +539,21 @@ export const FieldExplorer: React.FC<Props> = ({
                   {sel.kind}
                 </span>
               </div>
+              {previewBusy && (
+                <div className="faint" style={{ padding: "4px 0" }}>
+                  <span className="spin" /> validating SQL…
+                </div>
+              )}
+              {!previewBusy && previewSample != null && (
+                <div className="fx-note faint" data-testid="fx-preview-sample">
+                  Sample: <code>{previewSample}</code>
+                </div>
+              )}
+              {!previewBusy && previewErr && (
+                <div className="fx-note" style={{ color: "#c44" }} data-testid="fx-preview-error">
+                  Preview: {previewErr}
+                </div>
+              )}
               {firstSql && block("First record ([1] path)", firstSql)}
               {isArray && (
                 <div className="fx-shred" data-testid="fx-shred">
