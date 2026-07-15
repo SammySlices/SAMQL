@@ -12182,6 +12182,34 @@ def backend_tests(datadir, csv_path, json_path):
              and "making public logos transparent" in bp
              and "making public logos transparent" in bs,
              "build.ps1 / build.sh strip public logo backgrounds before vite")
+        need("ensure_public_brand_pngs" in bp and "ensure_public_brand_pngs" in bs
+             and "ensuring public logos" in bp
+             and "ensuring public logos" in bs,
+             "build seeds embedded splash/tab logos when public/ is empty")
+        # ensure_public_brand_pngs writes the embedded mark without clobbering
+        # a user drop-in (splash + Vite need a real file; HTTP already fell back).
+        with tempfile.TemporaryDirectory() as td:
+            r1 = B.ensure_public_brand_pngs(td)
+            by_name = {r["name"]: r for r in r1}
+            need(by_name["logo.png"]["written"] is True
+                 and by_name["app-icon.png"]["written"] is True,
+                 "ensure writes logo.png + app-icon.png when missing")
+            p_logo = os.path.join(td, "logo.png")
+            need(os.path.isfile(p_logo)
+                 and open(p_logo, "rb").read() == B.app_icon_png(),
+                 "ensured logo.png matches the embedded SQ mark")
+            # Second pass must keep the on-disk file (user / prior seed).
+            marker = b"user-drop-in-not-embedded"
+            with open(p_logo, "wb") as fh:
+                fh.write(marker)
+            r2 = B.ensure_public_brand_pngs(td)
+            need(all(not r["written"] for r in r2),
+                 "ensure never overwrites an existing brand PNG")
+            need(open(p_logo, "rb").read() == marker,
+                 "user drop-in logo.png is left untouched")
+        need("_splash_logo_path" in splash
+             and "app_icon_png" in splash,
+             "splash soft-falls back to embedded SQ mark when logo.png absent")
 
     def t_flatten_replace_and_naming_501():
         # .501 (on-box: SELECT * on the loaded file returned the raw json
@@ -24346,8 +24374,10 @@ def backend_tests(datadir, csv_path, json_path):
              "the launcher bundles the app icon for the taskbar stamp")
         need("_la_logo" in spec
              and 'os.path.join(REPO, "frontend", "public", "logo.png")' in spec
-             and "la_datas.append((_la_logo" in spec,
-             "the launcher bundles frontend/public/logo.png for the splash")
+             and "la_datas.append((_la_logo" in spec
+             and "wrote embedded splash logo" in spec,
+             "the launcher bundles frontend/public/logo.png for the splash "
+             "(seeds embedded mark when the drop-in is absent)")
 
     def t_launcher_brand_assets_and_onedrive():
         # .500: on-box the exe was run from a OneDrive folder -- first-run _MEI
@@ -35221,6 +35251,154 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s2.shutdown()
 
+    def t_flatten_opaque_json_embedded_not_links():
+        # Field Explorer on opaque JSON (depth-0 / single json column) shows
+        # HAL ``_embedded.items`` (sku/qty) alongside sibling ``_links``
+        # (href/rel). Flatten of the FE ``->>`` path must scope to items —
+        # not walk-up to the whole document and emit only/also links.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        import tempfile
+        rows = [
+            {
+                "id": "1",
+                "code": "A1",
+                "_links": [{"rel": "self", "href": "/1"},
+                           {"rel": "next", "href": "/2"}],
+                "_embedded": {
+                    "items": [{"sku": "A", "qty": 2},
+                              {"sku": "B", "qty": 1}],
+                },
+            },
+            {
+                "id": "2",
+                "code": "A2",
+                "_links": [{"rel": "self", "href": "/2"}],
+                "_embedded": {
+                    "items": [{"sku": "C", "qty": 9}],
+                },
+            },
+        ]
+        fd, path = tempfile.mkstemp(suffix=".ndjson")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            old = os.environ.get("SAMQL_JSON_MAX_DEPTH")
+            os.environ["SAMQL_JSON_MAX_DEPTH"] = "0"
+            s = _fresh_session()
+            try:
+                loaded = s.load_file(path, destination="duckdb",
+                                     flatten=False, shred=False)
+                need(isinstance(loaded, list) and loaded,
+                     "depth-0 NDJSON load ok: %r" % loaded)
+                tbl = loaded[0]["name"]
+                cols = s.duckdb._column_types_raw(tbl) or {}
+                need("json" in cols, "depth-0 single json column: %r" % cols)
+
+                # Parser must not mangle FE opaque paths on '.' splits.
+                parts = s._flatten_path_parts(
+                    "json ->> '$._embedded.items'", column="json")
+                eq(parts, ["json", "_embedded", "items"],
+                   "opaque FE path → nest parts: %r" % parts)
+
+                ft = s.table_field_tree("duckdb", tbl)
+                items = next(
+                    (r for r in (ft.get("fields") or [])
+                     if r.get("name") == "items"
+                     and "embedded" in str(r.get("path") or "").lower()),
+                    None)
+                need(items and items.get("path"),
+                     "FE shows _embedded.items: %r" % items)
+                fe_path = items["path"]
+                need("->>" in fe_path or "embedded" in fe_path,
+                     "items path is opaque or dotted: %r" % fe_path)
+
+                r = s.flatten_table(
+                    tbl, keep_source=True, column="json", path=fe_path)
+                need(not r.get("error"),
+                     "flatten FE items path ok: %r" % r)
+                need(r.get("kept_source") is True, "keeps source table")
+                names = [c["name"] for c in (r.get("created") or [])]
+                need(any(n.endswith("_flattened") for n in names),
+                     "_flattened family names: %r" % names)
+                # Must not create a links/href/rel child for an items flatten.
+                linkish = [n for n in names
+                           if "link" in n.lower()
+                           or n.lower().endswith("_links_flattened")]
+                need(not linkish,
+                     "items flatten must not emit _links child: %r" % names)
+                itemish = [n for n in names
+                           if "item" in n.lower() or "embedded" in n.lower()]
+                need(itemish, "items/embedded child present: %r" % names)
+                # Pick a non-key child and require sku/qty, not href/rel only.
+                child = next(
+                    (n for n in names
+                     if n.endswith("_flattened")
+                     and not n.startswith("Master")
+                     and not n.startswith("Join")
+                     and "link" not in n.lower()),
+                    None)
+                need(child, "flattened child table: %r" % names)
+                ccols = s.duckdb._column_types_raw(child) or {}
+                need("sku" in ccols and "qty" in ccols,
+                     "items child has sku/qty: %r" % list(ccols))
+                need("href" not in ccols and "rel" not in ccols,
+                     "items child is not href/rel links: %r" % list(ccols))
+                need(tbl in (s.duckdb.table_columns or {}),
+                     "source table still loaded")
+            finally:
+                s.shutdown()
+                if old is None:
+                    os.environ.pop("SAMQL_JSON_MAX_DEPTH", None)
+                else:
+                    os.environ["SAMQL_JSON_MAX_DEPTH"] = old
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    def t_field_explorer_toplevel_sel_ide_quote():
+        # Multi-select splices access.sel as-is. Top-level scalars must use
+        # IDE-style quoting (bare ``code`` / ``Code``), not always-quote
+        # ``"code"``. Reserved words stay quoted. Nested JSON recipes untouched.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            duck.conn.execute(
+                """CREATE OR REPLACE TABLE fe_quote_ids AS
+                   SELECT 'A1' AS code, 1 AS "TradeCode", 2 AS "order",
+                          '{"sku": "x"}'::JSON AS payload""")
+            ft = s.table_field_tree("duckdb", "fe_quote_ids")
+            need(not ft.get("error"), "table_field_tree ok: %r" % ft)
+            by = {r["name"]: r for r in (ft.get("fields") or [])
+                  if int(r.get("depth") or 0) == 1}
+            eq((by.get("code") or {}).get("access", {}).get("sel"), "code",
+               "lowercase code stays bare: %r" % by.get("code"))
+            # DESCRIBE-cased mixed name — IDE style leaves it bare (not
+            # always-quoted ``"TradeCode"``).
+            tc = by.get("TradeCode") or by.get("tradecode")
+            need(tc, "TradeCode column present: %r" % list(by))
+            sel_tc = (tc.get("access") or {}).get("sel")
+            need(sel_tc in ("TradeCode", "tradecode")
+                 and not (sel_tc or "").startswith('"'),
+                 "mixed-case TradeCode stays bare: %r" % tc)
+            eq((by.get("order") or {}).get("access", {}).get("sel"), '"order"',
+               "reserved order is quoted: %r" % by.get("order"))
+            # Nested opaque recipe still uses ->> (not broken by quoting change).
+            sku = next((r for r in (ft.get("fields") or [])
+                        if r.get("name") == "sku"), None)
+            need(sku and sku.get("access"), "sku nested field present")
+            sel = (sku.get("access") or {}).get("sel") or ""
+            need("->>" in sel or sel.startswith("e"),
+                 "nested JSON recipe intact: %r" % sku.get("access"))
+        finally:
+            s.shutdown()
+
     def t_sync_ops_cancellable():
         # Synchronous engine reads (reconcile / pivot / chart / field profile)
         # self-register under a query id so /api/status shows Cancel and
@@ -36604,6 +36782,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_flatten_keep_source_deep_nest_children),
         ("flatten keep_source counterparty.contacts child table",
          t_flatten_keep_source_counterparty_contacts),
+        ("opaque JSON flatten scopes _embedded.items not sibling _links",
+         t_flatten_opaque_json_embedded_not_links),
+        ("Field Explorer top-level access.sel uses IDE-style quoting",
+         t_field_explorer_toplevel_sel_ide_quote),
         ("a flatten card's X cancels via the shared job cancel flag",
          t_flatten_tray_cancel),
         ("cancellation contract: every job kind + scoped/panic cancel + rollback",

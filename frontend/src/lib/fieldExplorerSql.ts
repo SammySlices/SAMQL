@@ -19,10 +19,9 @@ export type FieldPick = {
   access?: FieldAccess | null;
 };
 
+/** Always quote AS aliases so multi-select matches ``expr AS "Code"``. */
 function quoteAlias(name: string): string {
-  const safe = name.replace(/"/g, '""');
-  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return safe;
-  return `"${safe}"`;
+  return `"${String(name).replace(/"/g, '""')}"`;
 }
 
 /** Pretty multi-line SELECT for a single-field First / All recipe. */

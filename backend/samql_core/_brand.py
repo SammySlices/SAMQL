@@ -1316,11 +1316,53 @@ def logo_fix_public_dir(public_dir, *, tol=24):
     return results
 
 
+def ensure_public_brand_pngs(public_dir):
+    """Write the embedded SQ mark into ``frontend/public`` when drop-ins are absent.
+
+    Binary brand PNGs are not in the text-only SOURCE_MANIFEST, so a fresh
+    expand / checkout leaves ``frontend/public`` empty. The HTTP server already
+    falls back to ``app_icon_png()`` for ``/logo.png``, but the launcher splash
+    and Vite ``public/`` copy need real files on disk. Never overwrites a
+    user-supplied PNG. Returns a list of
+    ``{path, name, written}`` dicts.
+    """
+    import os as _os
+    out = []
+    if not public_dir:
+        return out
+    try:
+        _os.makedirs(public_dir, exist_ok=True)
+    except OSError:
+        return out
+    data = app_icon_png()
+    for name in _PUBLIC_LOGO_NAMES:
+        path = _os.path.join(public_dir, name)
+        written = False
+        if not _os.path.isfile(path):
+            tmp = path + ".samql-tmp"
+            try:
+                with open(tmp, "wb") as fh:
+                    fh.write(data)
+                _os.replace(tmp, path)
+                written = True
+            except OSError:
+                try:
+                    if _os.path.isfile(tmp):
+                        _os.remove(tmp)
+                except OSError:
+                    pass
+        out.append({"path": path, "name": name, "written": written})
+    return out
+
+
 def _brand_cli(argv):
     import json as _json
     if len(argv) >= 2 and argv[0] == "inspect":
         with open(argv[1], "rb") as fh:
             print(_json.dumps(logo_inspect(fh.read()), indent=2))
+        return 0
+    if len(argv) >= 2 and argv[0] == "ensure-public":
+        print(_json.dumps(ensure_public_brand_pngs(argv[1]), indent=2))
         return 0
     if len(argv) >= 2 and argv[0] == "fix-public":
         # build.ps1 / build.sh: strip opaque mattes from public brand PNGs
@@ -1365,6 +1407,7 @@ def _brand_cli(argv):
           "       python -m samql_core._brand fix LOGO.png OUT.png "
           "[--tol N] [--color RRGGBB[,RRGGBB]] [--flatten RRGGBB] "
           "[--resize N]\n"
+          "       python -m samql_core._brand ensure-public DIR\n"
           "       python -m samql_core._brand fix-public DIR [--tol N]")
     return 2
 

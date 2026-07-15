@@ -99,6 +99,35 @@ def _bundled_asset(name):
     return None
 
 
+def _splash_logo_path():
+    """Resolve a PNG path for the splash mark.
+
+    Prefer a bundled / drop-in ``logo.png``. If absent (text-only tree or an
+    older AppWindow build that omitted the file), soft-import the embedded
+    SQ mark from ``samql_core._brand`` into a temp file -- the same art the
+    HTTP server already serves for ``/logo.png``. Soft import keeps the
+    launcher stdlib-only on the happy path. Returns ``(path, cleanup_path)``
+    where ``cleanup_path`` is removed in ``Splash.close`` when set.
+    """
+    p = _bundled_asset("logo.png")
+    if p:
+        return p, None
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from samql_core import _brand
+        data = _brand.app_icon_png()
+        fd, tmp = tempfile.mkstemp(prefix="samql-splash-", suffix=".png")
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        return tmp, tmp
+    except Exception:
+        return None, None
+
+
 def _temp_root():
     """Mirror tmputil._ROOT without importing samql_core (importing it
     would drag the whole backend into the launcher bundle)."""
@@ -158,9 +187,10 @@ class Splash:
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         # .500: show frontend/public/logo.png (bundled) above the text when
-        # present; fall back to the plain text splash otherwise.
+        # present; fall back to embedded SQ mark, then plain text splash.
         self._logo = None
-        logo_path = _bundled_asset("logo.png")
+        self._logo_cleanup = None
+        logo_path, self._logo_cleanup = _splash_logo_path()
         # build.ps1 / build.sh run the logo doctor so public/logo.png ships
         # with REAL alpha (border-connected background cleared). Keep the
         # dark splash chrome -- matching the corner pixel was only a
@@ -224,6 +254,12 @@ class Splash:
             self.root.destroy()
         except Exception:
             pass
+        cleanup = getattr(self, "_logo_cleanup", None)
+        if cleanup:
+            try:
+                os.remove(cleanup)
+            except Exception:
+                pass
 
 
 def make_splash():

@@ -1402,7 +1402,6 @@ class Session:
         so preview / shred stay column-scoped while multi-select spans the
         whole table.
         """
-        from .sqlutil import quote_ident as _qid
         mgr = self.duckdb if engine == "duckdb" else self.db
         if mgr is None or not hasattr(mgr, "_column_types_raw"):
             return {"fields": [], "error": "Engine not available."}
@@ -1417,7 +1416,9 @@ class Session:
         for col, typ in raw_cols.items():
             sub = self.column_field_tree(engine, table, col)
             nested = list(sub.get("fields") or [])
-            q = _qid(col)
+            # IDE-style SELECT idents (bare when safe). Always-quote made
+            # multi-select emit ``"code" AS …`` instead of ``code AS …``.
+            q = self._fe_quote_select_ident(col)
             if nested:
                 root_kind = "struct"
                 tu = (typ or "").strip().upper()
@@ -1459,6 +1460,22 @@ class Session:
     # opaque JSON (flatten-off maximum_depth). Kept modest — union of shapes,
     # not a full scan.
     _FIELD_TREE_SAMPLE_ROWS = 80
+
+    @staticmethod
+    def _fe_quote_select_ident(name):
+        """Quote a Field Explorer SELECT identifier like the IDE / recipes.
+
+        Safe bare names stay bare (including mixed case). Reserved words and
+        non-plain identifiers are double-quoted. Do not use always-on
+        ``sqlutil.quote_ident`` here — multi-select splices ``access.sel``
+        as-is and over-quoting diverges from IDE insert style.
+        """
+        from .diagnostics import _needs_quote
+        from .shred import _DUCKDB_RESERVED
+        s = str(name)
+        if _needs_quote(s) or s.lower() in _DUCKDB_RESERVED:
+            return '"%s"' % s.replace('"', '""')
+        return s
 
     @staticmethod
     def _field_tree_needs_json_sample(raw_type, fields):
@@ -7226,51 +7243,73 @@ class Session:
             columns.append((name, node))
         return columns, json_access_cols, None
 
+    @staticmethod
+    def _flatten_path_sql_exprs(path_parts):
+        """SQL expressions that may address a Field Explorer nest path.
+
+        Tries STRUCT/LIST dotted access first, then JSON ``->`` / ``::JSON``
+        extracts for opaque JSON columns (flatten-off depth caps).
+        """
+        from .diagnostics import _json_path_seg
+        from .sqlutil import quote_ident as _qid
+        if not path_parts:
+            return []
+        out = [".".join(_qid(p) for p in path_parts)]
+        if len(path_parts) >= 2:
+            col = _qid(path_parts[0])
+            jptr = "$" + "".join(
+                _json_path_seg(p) for p in path_parts[1:])
+            out.append("%s -> '%s'" % (col, jptr))
+            out.append("%s::JSON -> '%s'" % (col, jptr))
+        return out
+
     def _sample_enrich_flatten_path(self, mgr, table, path_parts):
         """Sample a Field Explorer nest path (often opaque JSON under a
         depth-capped STRUCT) into a real list/struct type node.
 
-        Returns (synth_name, node, json_access) or None when the path cannot
-        be enriched into a flattenable nest.
+        Returns (synth_name, node, json_access, sql_expr) or None when the
+        path cannot be enriched into a flattenable nest.
         """
         from .diagnostics import json_samples_to_type_node
         from .sqlutil import quote_ident as _qid
         if not path_parts:
             return None
-        try:
-            acc = ".".join(_qid(p) for p in path_parts)
-            sql = ('SELECT %s FROM %s LIMIT %d'
-                   % (acc, _qid(table),
-                      int(Session._FIELD_TREE_SAMPLE_ROWS)))
-            reader = getattr(mgr, "read", None) or getattr(
-                mgr, "execute_read", None)
-            if reader is not None:
-                _c, rows = reader(sql)
-            else:
-                _c, rows = mgr.execute(sql)
-            values = [r[0] for r in (rows or []) if r and r[0] is not None]
-            if not values:
-                return None
-            syn = json_samples_to_type_node(values)
-            if not syn or syn.get("t") not in ("list", "struct"):
-                return None
-            stem = "_".join(
-                re.sub(r"[^A-Za-z0-9_]+", "_", p).strip("_") or "x"
-                for p in path_parts)
-            synth = (stem + "_nest") if stem else "fx_nest"
-            # Depth-capped loads store nested arrays as JSON text/cells.
-            use_json = True
+        reader = getattr(mgr, "read", None) or getattr(
+            mgr, "execute_read", None)
+        stem = "_".join(
+            re.sub(r"[^A-Za-z0-9_]+", "_", p).strip("_") or "x"
+            for p in path_parts)
+        synth = (stem + "_nest") if stem else "fx_nest"
+        for acc in self._flatten_path_sql_exprs(path_parts):
             try:
-                _, tr = mgr.execute(
-                    "SELECT typeof(%s) FROM %s LIMIT 1"
-                    % (acc, _qid(table)))
-                tu = (str(tr[0][0]) if tr and tr[0] else "").upper()
-                use_json = ("JSON" in tu) or tu in ("VARCHAR", "CHAR")
-            except Exception:
+                sql = ('SELECT %s FROM %s LIMIT %d'
+                       % (acc, _qid(table),
+                          int(Session._FIELD_TREE_SAMPLE_ROWS)))
+                if reader is not None:
+                    _c, rows = reader(sql)
+                else:
+                    _c, rows = mgr.execute(sql)
+                values = [r[0] for r in (rows or [])
+                          if r and r[0] is not None]
+                if not values:
+                    continue
+                syn = json_samples_to_type_node(values)
+                if not syn or syn.get("t") not in ("list", "struct"):
+                    continue
+                # Depth-capped loads store nested arrays as JSON text/cells.
                 use_json = True
-            return synth, syn, use_json
-        except Exception:
-            return None
+                try:
+                    _, tr = mgr.execute(
+                        "SELECT typeof(%s) FROM %s LIMIT 1"
+                        % (acc, _qid(table)))
+                    tu = (str(tr[0][0]) if tr and tr[0] else "").upper()
+                    use_json = ("JSON" in tu) or tu in ("VARCHAR", "CHAR")
+                except Exception:
+                    use_json = True
+                return synth, syn, use_json, acc
+            except Exception:
+                continue
+        return None
 
     def _flatten_promote_col(self, columns):
         """Single wrapping LIST(STRUCT) column to promote, else None."""
@@ -7397,16 +7436,94 @@ class Session:
             },
         }
 
+    # Field Explorer opaque-JSON paths look like:
+    #   json ->> '$._embedded.items'   or   _embedded -> '$.items'
+    # Naively splitting on "." mangles these into garbage STRUCT parts and
+    # walk-up then enriches the whole column (sibling HAL _links → href/rel).
+    _FE_JSON_EXTRACT_PATH_RE = re.compile(
+        r'^((?:"[^"]+")|(?:[A-Za-z_][A-Za-z0-9_]*))'
+        r'(?:\s*::\s*JSON)?'
+        r'\s*(?:->>|->)\s*'
+        r"'(\$[^\']*)'"
+        r'\s*$',
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _json_ptr_keys(jptr):
+        """Split a DuckDB JSON pointer (``$._embedded.items``) into keys."""
+        s = (jptr or "").strip()
+        if not s or s == "$":
+            return []
+        if s.startswith("$"):
+            s = s[1:]
+        keys = []
+        buf = []
+        in_q = False
+        i = 0
+        while i < len(s):
+            ch = s[i]
+            if ch == '"':
+                in_q = not in_q
+                buf.append(ch)
+                i += 1
+                continue
+            if ch == "." and not in_q:
+                if buf:
+                    keys.append("".join(buf))
+                    buf = []
+                i += 1
+                continue
+            if ch == "[" and not in_q:
+                # Keep ``name[0]`` together; start a new key at bare ``[``.
+                if buf:
+                    keys.append("".join(buf))
+                    buf = []
+                j = s.find("]", i)
+                if j < 0:
+                    buf.append(s[i:])
+                    break
+                keys.append(s[i:j + 1])
+                i = j + 1
+                continue
+            buf.append(ch)
+            i += 1
+        if buf:
+            keys.append("".join(buf))
+        out = []
+        for k in keys:
+            if not k:
+                continue
+            if len(k) >= 2 and k[0] == '"' and k[-1] == '"':
+                out.append(k[1:-1].replace('""', '"'))
+            else:
+                # ``items[0]`` → key ``items`` (index is display-only here)
+                m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)(?:\[\d+\])?$', k)
+                out.append(m.group(1) if m else k)
+        return out
+
     @staticmethod
     def _flatten_path_parts(path, column=None):
-        """Normalize a Field Explorer field path into column-rooted parts."""
+        """Normalize a Field Explorer field path into column-rooted parts.
+
+        Accepts STRUCT dotted paths (``_embedded.items``) and opaque JSON
+        extract paths (``json ->> '$._embedded.items'``).
+        """
         if path is None or path is False:
             return None
         if isinstance(path, (list, tuple)):
             parts = [str(p) for p in path if p not in (None, "")]
         else:
-            parts = [p for p in str(path).replace("/", ".").split(".")
-                     if p]
+            s = str(path).strip()
+            m = Session._FE_JSON_EXTRACT_PATH_RE.match(s)
+            if m:
+                col = m.group(1)
+                if len(col) >= 2 and col[0] == '"' and col[-1] == '"':
+                    col = col[1:-1].replace('""', '"')
+                parts = [col] + Session._json_ptr_keys(m.group(2))
+            else:
+                parts = [p for p in s.replace("/", ".").split(".")
+                         if p]
         # Field-tree (element) wrappers are display-only; never STRUCT keys.
         parts = [p for p in parts if p and p != "(element)"]
         if not parts:
@@ -7534,23 +7651,42 @@ class Session:
             # (FE (element) children often have path=null → "phones" becomes
             # counterparty.phones). Prefer the longest enrichable nest so
             # contacts stays a child table, not residual JSON on joinkeys.
+            # Opaque FE paths (``json ->> '$.…'``) are normalized above; do
+            # not settle for the bare column when a deeper nest was requested
+            # — that pulls in sibling HAL ``_links`` (href/rel) tables.
             _enriched = None
             _enrich_parts = None
-            for _end in range(len(path_parts), 0, -1):
+            _path_sql = None
+            _orig_path_parts = list(path_parts)
+            _min_end = 1
+            if len(_orig_path_parts) > 1:
+                # Keep at least the first nest key under the column when the
+                # caller asked for a nested path (items, not whole json).
+                _min_end = 2
+            for _end in range(len(path_parts), _min_end - 1, -1):
                 _try = path_parts[:_end]
                 _got = self._sample_enrich_flatten_path(mgr, table, _try)
                 if _got is not None:
                     _enriched = _got
                     _enrich_parts = _try
                     break
+            # Last resort: bare column (phones → counterparty walk-up).
+            if (_enriched is None and len(_orig_path_parts) > 1
+                    and _min_end > 1):
+                _try = path_parts[:1]
+                _got = self._sample_enrich_flatten_path(mgr, table, _try)
+                if _got is not None:
+                    _enriched = _got
+                    _enrich_parts = _try
             if _enriched is not None and _enrich_parts is not None:
                 if (keep_source and _enrich_parts != path_parts):
                     base = self._flatten_keep_source_base(
                         _enrich_parts, column, table)
                 path_parts = _enrich_parts
-                _synth, _snode, _sjson = _enriched
+                _synth, _snode, _sjson, _path_sql = _enriched
                 from .sqlutil import quote_ident as _qid_path
-                _path_sql = ".".join(_qid_path(p) for p in path_parts)
+                if not _path_sql:
+                    _path_sql = ".".join(_qid_path(p) for p in path_parts)
                 _path_proj = (_path_sql, _synth)
                 columns = [(_synth, _snode)]
                 json_access_cols = {_synth} if _sjson else set()
@@ -7571,9 +7707,17 @@ class Session:
                                 + (re.sub(r"[^A-Za-z0-9_]+", "_",
                                           str(_fname)).strip("_")
                                    or "list"))
-                            _path_peels.append((
-                                "%s.%s" % (_path_sql, _qid_path(_fname)),
-                                _peel))
+                            # Peel off the projected nest expression.
+                            if "->" in _path_sql or "::" in _path_sql:
+                                from .diagnostics import _json_path_seg
+                                _peel_sql = (
+                                    "json_extract(%s, '$%s')"
+                                    % (_path_sql,
+                                       _json_path_seg(_fname)))
+                            else:
+                                _peel_sql = "%s.%s" % (
+                                    _path_sql, _qid_path(_fname))
+                            _path_peels.append((_peel_sql, _peel))
                             _peeled_cols.append((_peel, _fnode))
                             if _sjson:
                                 json_access_cols.add(_peel)

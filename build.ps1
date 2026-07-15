@@ -42,14 +42,28 @@ try {
   exit 1
 }
 
-# .506 / splash: strip baked-in backgrounds from public brand PNGs
-# (logo.png splash mark, app-icon.png tab/PWA icon). The logo doctor keeps
-# interior whites and only clears border-connected background. Missing
-# files are skipped so a text-only extract still builds.
-Write-Host "==> brand: making public logos transparent"
+# .506 / splash: brand PNGs are binary drop-ins (not in SOURCE_MANIFEST).
+# Seed the embedded SQ mark into frontend/public when absent so the launcher
+# splash + Vite copy always have logo.png; never overwrite a user drop-in.
+# Then strip baked-in backgrounds (logo doctor keeps interior whites and only
+# clears border-connected background).
+Write-Host "==> brand: ensuring public logos (embedded SQ mark if missing)"
 $env:PYTHONPATH = (Join-Path $Root "backend")
 & $py -c @"
-import json, sys
+from samql_core import _brand
+for r in _brand.ensure_public_brand_pngs(r'frontend\public'):
+    path = r.get('path') or ''
+    if r.get('written'):
+        print('    wrote (embedded):', path)
+    else:
+        print('    keep (present):', path)
+"@
+if ($LASTEXITCODE -ne 0) {
+  Write-Warning "brand PNG ensure pass failed; continuing"
+}
+
+Write-Host "==> brand: making public logos transparent"
+& $py -c @"
 from samql_core import _brand
 results = _brand.logo_fix_public_dir(r'frontend\public')
 for r in results:
