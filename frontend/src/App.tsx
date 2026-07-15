@@ -1961,6 +1961,115 @@ export default function App() {
     }
   };
 
+  // Shred a nested JSON column into its relational family, launched from the
+  // Field Explorer. Runs the same memory-lean pipeline as the load-time
+  // flatten, tracked as a cancellable background op (Stop it from the activity
+  // panel), and refreshes the table list on success. Steers users off the
+  // OOM-prone full-column UNNEST for large nested data.
+  const onShredColumn = async (
+    engine: string,
+    table: string,
+    column: string,
+    shredTables: string[],
+  ): Promise<{
+    ok?: boolean;
+    error?: string;
+    created?: number;
+    cancelled?: boolean;
+  }> => {
+    const { queryId } = startBgOp();
+    toast(
+      "ok",
+      `Shredding ${column}`,
+      "Building relational tables — tracking in the activity panel.",
+    );
+    try {
+      const r = await api.shredRun(
+        engine,
+        table,
+        column,
+        shredTables,
+        undefined,
+        queryId,
+      );
+      if (r.cancelled) {
+        toast("warn", "Shred cancelled", column);
+        return { cancelled: true };
+      }
+      if (r.error) {
+        toast("error", "Shred failed", r.error);
+        return { error: r.error };
+      }
+      const n = (r.created || []).length;
+      toast(
+        "ok",
+        "Shredded to tables",
+        `${n} table${n === 1 ? "" : "s"} created from ${column}.`,
+      );
+      refreshTables();
+      return { ok: true, created: n };
+    } catch (e: any) {
+      if (isCancelledError(e)) {
+        toast("warn", "Shred cancelled", column);
+        return { cancelled: true };
+      }
+      toast("error", "Shred failed", e?.message || String(e));
+      return { error: e?.message || String(e) };
+    } finally {
+      endBgOp(queryId);
+    }
+  };
+
+  // Flatten a nested JSON table into its relational family from the Field
+  // Explorer. This is the correct, memory-safe path for deep OPAQUE JSON (the
+  // shred planner only sees the shallow declared type): flatten_json re-reads
+  // the source deeply (or dumps the table when there is no file) and builds the
+  // full family. Tracked as a cancellable background op; refreshes on success.
+  const onFlattenColumn = async (
+    engine: string,
+    table: string,
+  ): Promise<{
+    ok?: boolean;
+    error?: string;
+    created?: number;
+    cancelled?: boolean;
+  }> => {
+    const { queryId, ctrl } = startBgOp();
+    toast(
+      "ok",
+      `Flattening ${table}`,
+      "Building relational tables — tracking in the activity panel.",
+    );
+    try {
+      const r = await api.flattenJson(engine, table, queryId, ctrl.signal);
+      if (r.cancelled) {
+        toast("warn", "Flatten cancelled", table);
+        return { cancelled: true };
+      }
+      if (r.error) {
+        toast("error", "Flatten failed", r.error);
+        return { error: r.error };
+      }
+      const n = (r.tables || []).length;
+      toast(
+        "ok",
+        "Flattened to tables",
+        `${n} table${n === 1 ? "" : "s"} created from ${table}.`,
+      );
+      refreshTables();
+      return { ok: true, created: n };
+    } catch (e: any) {
+      if (isCancelledError(e)) {
+        toast("warn", "Flatten cancelled", table);
+        return { cancelled: true };
+      }
+      toast("error", "Flatten failed", e?.message || String(e));
+      return { error: e?.message || String(e) };
+    } finally {
+      endBgOp(queryId);
+    }
+  };
+
   // Reconcile: a run drops a pinned "recon" result tab holding the report.
   const onRunReconcile = (report: ReconcileResult, spec: ReconSpec) => {
     const id = uid();
@@ -2808,6 +2917,8 @@ export default function App() {
             tables={tables}
             onToast={toast}
             onTablesChanged={refreshTables}
+            onShred={onShredColumn}
+            onFlatten={onFlattenColumn}
           />
           <CommandPalette
             open={commandPaletteOpen}

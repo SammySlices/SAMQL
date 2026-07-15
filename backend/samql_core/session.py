@@ -78,6 +78,37 @@ _MISSING_TABLE_PATTERNS = (
 )
 
 
+def _duckdb_oom_query_message(message, engine=None):
+    """Add actionable context to a DuckDB query out-of-memory error.
+
+    DuckDB reports the allocation that *failed*, not its configured
+    ``memory_limit``.  In particular, a 16 MiB request normally means the
+    query has already exhausted the larger working-memory budget.
+    """
+    text = str(message or "")
+    lowered = text.lower()
+    if not ("outofmemoryexception" in lowered
+            or "out of memory" in lowered
+            or "failed to allocate" in lowered
+            or "could not allocate" in lowered):
+        return text
+    budget = getattr(engine, "_applied_resource_memory_mb", None)
+    try:
+        budget_note = (" Current engine budget: ~%d MiB." % int(budget)
+                       if budget else "")
+    except (TypeError, ValueError):
+        budget_note = ""
+    return (
+        "%s\n\nDuckDB exhausted its working-memory budget while executing "
+        "this query.%s The failed allocation size is not the configured "
+        "memory limit. Free unused memory or raise Engine tuning → memory "
+        "only when RAM and temporary-disk capacity allow it. For nested JSON, "
+        "extract/project the fields you need before UNNEST; expand one array "
+        "at a time and avoid recursive or sibling-array cross-products."
+        % (text, budget_note)
+    )
+
+
 def json_safe(v):
     """Coerce one cell value to something json.dumps can serialize."""
     if v is None or isinstance(v, (bool, int, str)):
@@ -6129,6 +6160,9 @@ class Session:
 
     def _query_error(self, sql, target, exc, t0):
         msg = err_str(exc)
+        if target == DUCKDB_TARGET:
+            msg = _duckdb_oom_query_message(
+                msg, getattr(self, "duckdb", None))
         self.history.add(sql, target=target, error=msg,
                          elapsed_sec=round(time.time() - t0, 3))
         return {"error": msg}

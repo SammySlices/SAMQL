@@ -33,7 +33,33 @@ interface Props {
   tables: TableInfo[];
   onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
   onTablesChanged?: () => void;
+  onShred?: (
+    engine: string,
+    table: string,
+    column: string,
+    shredTables: string[],
+  ) => Promise<{
+    ok?: boolean;
+    error?: string;
+    created?: number;
+    cancelled?: boolean;
+  }>;
+  onFlatten?: (
+    engine: string,
+    table: string,
+  ) => Promise<{
+    ok?: boolean;
+    error?: string;
+    created?: number;
+    cancelled?: boolean;
+  }>;
 }
+
+type ShredInfo = {
+  tables: { name: string }[];
+  notes?: string[];
+  error?: string;
+};
 
 type StoredChrome = {
   x?: number;
@@ -72,6 +98,8 @@ export const FieldExplorer: React.FC<Props> = ({
   tables,
   onToast,
   onTablesChanged,
+  onShred,
+  onFlatten,
 }) => {
   // nested columns across loaded tables = the selectable "JSON files"
   const sources = useMemo(() => {
@@ -98,6 +126,12 @@ export const FieldExplorer: React.FC<Props> = ({
   const [fields, setFields] = useState<FieldRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [selIdx, setSelIdx] = useState<number | null>(null);
+  // Shred eligibility for the picked column: whether the relational-shred
+  // planner can build tables from it (the memory-safe alternative to a
+  // full-column UNNEST). null while unknown; an empty tables list = not
+  // shreddable in place (e.g. deep opaque JSON with no relational backing).
+  const [shredInfo, setShredInfo] = useState<ShredInfo | null>(null);
+  const [shredBusy, setShredBusy] = useState(false);
   const src = sources.find((s) => s.key === srcKey) || null;
 
   const initPos = {
@@ -114,15 +148,36 @@ export const FieldExplorer: React.FC<Props> = ({
   useEffect(() => {
     if (!src) {
       setFields(null);
+      setShredInfo(null);
       return;
     }
     setBusy(true);
     setSelIdx(null);
+    setShredInfo(null);
     api
       .columnFields(src.engine, src.table, src.column)
       .then((r) => setFields((r.fields || []) as FieldRow[]))
       .catch(() => setFields([]))
       .finally(() => setBusy(false));
+    // Shred runs on DuckDB only. Ask the planner whether this column can be
+    // shredded in place so array nodes can steer to the memory-safe path
+    // instead of an OOM-prone full UNNEST. Discovery-only: nothing is created.
+    if (src.engine === "duckdb") {
+      const forKey = src.key;
+      api
+        .shredPlan(src.engine, src.table, src.column)
+        .then((r) => {
+          if (forKey !== srcKey) return; // source changed mid-flight
+          setShredInfo({
+            tables: (r.tables || []).map((t) => ({ name: t.name })),
+            notes: r.notes,
+            error: r.error,
+          });
+        })
+        .catch(() => {
+          if (forKey === srcKey) setShredInfo(null);
+        });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey]);
 
@@ -205,7 +260,12 @@ export const FieldExplorer: React.FC<Props> = ({
   const sel = selIdx != null && fields ? fields[selIdx] : null;
   const acc = sel?.access;
   const tbl = src ? `"${src.table.replace(/"/g, '""')}"` : '"table"';
-  const firstSql = acc?.first ? `SELECT ${acc.first}\nFROM ${tbl};` : null;
+  // LIMIT 1 keeps "First record" literally the first record. Without it the
+  // expression is evaluated over every source row -- on a multi-GB opaque-JSON
+  // table that materializes one (often JSON-blob) value per record and OOMs.
+  const firstSql = acc?.first
+    ? `SELECT ${acc.first}\nFROM ${tbl}\nLIMIT 1;`
+    : null;
   const allSql = acc?.sel
     ? `SELECT ${acc.sel}\nFROM ${tbl}${(acc.unnests || [])
         .map((u) => `,\n     ${u}`)
@@ -214,6 +274,40 @@ export const FieldExplorer: React.FC<Props> = ({
   const recSql = acc?.recursive
     ? `SELECT ${acc.recursive}\nFROM ${tbl};`
     : null;
+
+  const isArray = !!sel && (sel.kind === "array" || sel.kind === "array-scalar");
+  const shredTables = shredInfo?.tables || [];
+  const shredEligible = shredTables.length > 0;
+
+  // A deep OPAQUE-JSON column the shred planner can't see as an array (its
+  // declared type is shallow) can still be built into the relational family by
+  // flatten, which re-reads the source deeply. Offer that on DuckDB.
+  const flattenEligible = !!src && src.engine === "duckdb" && !!onFlatten;
+
+  const runShred = () => {
+    if (!src || !onShred || !shredEligible || shredBusy) return;
+    setShredBusy(true);
+    onShred(
+      src.engine,
+      src.table,
+      src.column,
+      shredTables.map((t) => t.name),
+    )
+      .catch(() => {
+        /* onShred surfaces its own error toast */
+      })
+      .finally(() => setShredBusy(false));
+  };
+
+  const runFlatten = () => {
+    if (!src || !onFlatten || shredBusy) return;
+    setShredBusy(true);
+    onFlatten(src.engine, src.table)
+      .catch(() => {
+        /* onFlatten surfaces its own error toast */
+      })
+      .finally(() => setShredBusy(false));
+  };
 
   const copy = (label: string, text: string) => {
     copyText(text)
@@ -364,7 +458,77 @@ export const FieldExplorer: React.FC<Props> = ({
                 </span>
               </div>
               {firstSql && block("First record ([1] path)", firstSql)}
-              {allSql && block("All rows (UNNEST chain)", allSql)}
+              {isArray && (
+                <div className="fx-shred" data-testid="fx-shred">
+                  {shredEligible ? (
+                    <>
+                      <button
+                        className="btn sm"
+                        disabled={shredBusy || !onShred}
+                        data-testid="fx-shred-run"
+                        title="Build the relational family for this column"
+                        onClick={runShred}
+                      >
+                        {shredBusy ? (
+                          <span className="spin" />
+                        ) : (
+                          <Icon.Grid size={12} />
+                        )}
+                        <span style={{ marginLeft: 6 }}>Shred to tables</span>
+                      </button>
+                      <div className="fx-note faint">
+                        Memory-safe: builds the relational family (
+                        {shredTables.length} table
+                        {shredTables.length === 1 ? "" : "s"}) joined on{" "}
+                        <code>_sk</code>/<code>_parent_sk</code>. Recommended for
+                        large data — a full UNNEST loads the whole column into
+                        memory and can exhaust it.
+                      </div>
+                    </>
+                  ) : flattenEligible ? (
+                    <>
+                      <button
+                        className="btn sm"
+                        disabled={shredBusy}
+                        data-testid="fx-flatten-run"
+                        title="Re-read the source deeply and build the relational family"
+                        onClick={runFlatten}
+                      >
+                        {shredBusy ? (
+                          <span className="spin" />
+                        ) : (
+                          <Icon.Grid size={12} />
+                        )}
+                        <span style={{ marginLeft: 6 }}>Flatten to tables</span>
+                      </button>
+                      <div className="fx-note faint">
+                        This column is deep/opaque JSON, so it builds via
+                        Flatten: the source is re-read deeply into the full
+                        relational family (memory-safe). Preferred over a full
+                        UNNEST, which loads the whole column into memory and can
+                        exhaust it on big files.
+                      </div>
+                    </>
+                  ) : (
+                    <div
+                      className="fx-note faint"
+                      data-testid="fx-shred-guide"
+                    >
+                      This column can’t shred in place (deep opaque JSON has no
+                      relational backing yet). For large data, reload it with{" "}
+                      <b>Flatten into relational tables</b> at load time, or
+                      convert to <code>.ndjson</code>. The full UNNEST below
+                      loads the whole column into memory and can exhaust it on
+                      big files.
+                    </div>
+                  )}
+                </div>
+              )}
+              {allSql &&
+                block(
+                  isArray ? "All rows (UNNEST — small data)" : "All rows (UNNEST chain)",
+                  allSql,
+                )}
               {recSql && block("Explode everything under it (recursive)", recSql)}
               {acc?.note && <div className="fx-note faint">{acc.note}</div>}
             </>

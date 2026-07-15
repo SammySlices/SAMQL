@@ -2325,6 +2325,25 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_duckdb_query_oom_guidance():
+        # The allocation size DuckDB reports is the request that failed, not
+        # its configured memory limit. Keep the raw error while making that
+        # distinction and the nested-JSON expansion risk actionable.
+        import types as _t
+        from samql_core import session as S
+        raw = ("OutOfMemoryException: Failed to allocate data of size "
+               "16.0 MiB")
+        msg = S._duckdb_oom_query_message(
+            raw, _t.SimpleNamespace(_applied_resource_memory_mb=2048))
+        need(raw in msg, "raw DuckDB allocation error remains intact")
+        need("~2048 MiB" in msg and "not the configured memory limit" in msg,
+             "OOM guidance distinguishes failed allocation from engine limit")
+        need("before UNNEST" in msg and "cross-products" in msg,
+             "OOM guidance covers nested JSON expansion posture")
+        eq(S._duckdb_oom_query_message("Binder Error: bad column"),
+           "Binder Error: bad column",
+           "ordinary DuckDB errors remain unchanged")
+
     def t_orderby_uses_parquet_path():
         # Large-result fix: ORDER BY stays on the Parquet COPY path (with
         # preserve_insertion_order) instead of draining millions of rows
@@ -2883,19 +2902,22 @@ def backend_tests(datadir, csv_path, json_path):
         fx = rd("frontend", "src", "components", "FieldExplorer.tsx")
         api_src = rd("frontend", "src", "lib", "api.ts")
         app = rd("frontend", "src", "App.tsx")
-        # .473: the shred BACKEND stays (routes + api client), but the
-        # field-explorer UI for it was removed by request -- flatten-on-
-        # load is the supported path to relational tables now.
+        # .607: the field explorer surfaces shred AGAIN (reversing the .473
+        # removal, by explicit request). For an array node it checks shred
+        # eligibility with shredPlan and, when eligible, runs shredRun -- the
+        # memory-safe relational build that steers users off an OOM-prone
+        # full-column UNNEST. App wires both the shred and flatten actions.
         checks = [
             ("both routes still registered",
              "/api/shred/plan" in srv and "/api/shred/run" in srv),
             ("the api client still exposes the calls",
              "shredPlan" in api_src and "shredRun" in api_src),
-            ("the field explorer no longer surfaces shred",
-             "Create relational tables" not in fx
-             and "shredPlan(" not in fx and "shredRun(" not in fx),
+            ("the field explorer surfaces shred (plan eligibility + block)",
+             "shredPlan(" in fx and "fx-shred" in fx),
+            ("the app runs shred + flatten and wires both actions",
+             "shredRun(" in app and "flattenJson(" in app
+             and "onShred=" in app and "onFlatten=" in app),
         ]
-        _ = app
         missing = [n for n, ok in checks if not ok]
         need(not missing, "shred wiring broken: " + "; ".join(missing))
 
@@ -4145,9 +4167,12 @@ def backend_tests(datadir, csv_path, json_path):
                                "Sidebar.tsx"), encoding="utf-8").read()
         app = open(os.path.join(ROOT, "frontend", "src", "App.tsx"),
                    encoding="utf-8").read()
+        # .607: the SIDEBAR right-click "Flatten JSON into tables" stays
+        # removed (the Load-modal checkbox owns table-level flattening). App
+        # may reference onFlatten now -- that is the Field Explorer's flatten
+        # action for deep opaque JSON, not the removed right-click menu.
         need("Flatten JSON into tables" not in sb
-             and "onFlatten" not in sb and "canFlattenTable" not in sb
-             and "onFlatten" not in app,
+             and "onFlatten" not in sb and "canFlattenTable" not in sb,
              "the right-click flatten option is fully removed")
         # (2) Windowed launcher: CREATE_NO_WINDOW and DETACHED_PROCESS
         # are conflicting console dispositions -- combined, the server's
@@ -12582,15 +12607,17 @@ def backend_tests(datadir, csv_path, json_path):
 
         fx = open(os.path.join(FRONTEND, "src", "components",
                                "FieldExplorer.tsx"), encoding="utf-8").read()
-        need("Create relational tables" not in fx
-             and "shredPlan(" not in fx and "shredRun(" not in fx
-             and "shredPreflight(" not in fx
-             and "fx-shred" not in fx,
-             "the field explorer no longer surfaces shred")
+        # .607: the field explorer surfaces shred again -- it checks
+        # eligibility with shredPlan and renders the fx-shred block; the run
+        # itself is wired in App (via the onShred prop). It never uses the
+        # heavier preflight.
+        need("shredPlan(" in fx and "fx-shred" in fx
+             and "shredPreflight(" not in fx,
+             "the field explorer surfaces shred (via plan, not preflight)")
         srv = open(os.path.join(BACKEND, "server.py"),
                    encoding="utf-8").read()
         need("/api/shred/plan" in srv and "/api/shred/run" in srv,
-             "...but the shred backend routes are kept")
+             "...and the shred backend routes are kept")
 
         dm = open(os.path.join(FRONTEND, "src", "components",
                                "DocsModal.tsx"), encoding="utf-8").read()
@@ -16614,8 +16641,12 @@ def backend_tests(datadir, csv_path, json_path):
         import json as _json
         pkg = _json.load(open(os.path.join(ROOT, "frontend",
                                            "package.json")))
+        # .607: the script invokes the local tsc via node (bare `tsc` was not
+        # resolvable behind the corporate npm setup); still non-incremental
+        # (--noEmit, no -b) and verbose (--pretty false) so it can never mute.
         eq(pkg["scripts"]["typecheck"],
-           "tsc --noEmit -p tsconfig.json --pretty false",
+           "node ./node_modules/typescript/bin/tsc --noEmit "
+           "-p tsconfig.json --pretty false",
            "the typecheck script is non-incremental and verbose")
         src = read_test_sources(ROOT)
         need("if p.returncode != 0 and not out:" in src
@@ -17842,10 +17873,11 @@ def backend_tests(datadir, csv_path, json_path):
         fx = open(os.path.join(ROOT, "frontend", "src", "components",
                                "FieldExplorer.tsx"),
                   encoding="utf-8").read()
-        # .473: preflight endpoint stays; the FE no longer calls it
-        # (the whole shred UI was removed from the field explorer).
+        # .607: preflight endpoint stays for the modal, but the field explorer
+        # drives shred through the lighter plan/run pair (shredPlan/shredRun),
+        # not preflight -- so the FE still never calls shredPreflight.
         need("shredPreflight(" not in fx,
-             "the field explorer no longer drives preflight")
+             "the field explorer drives shred via plan/run, not preflight")
 
     def t_store_page_pruning():
         # The stall's true root (.387): unsorted store pages ran
@@ -23922,7 +23954,9 @@ def backend_tests(datadir, csv_path, json_path):
         # .501/.519: the explicit-renderer retry AND the Form-icon callback
         # sit before the fallback now, so the window is wider still.
         # Dark WebView2 background_color comments also sit in this block.
-        _tail = _tail[:6500]
+        # .608: that block kept growing (the fallback now lands past offset
+        # ~9400), so the slice is widened to keep matching the real code.
+        _tail = _tail[:10500]
         need("_launch_browser_window(_url)" in _tail
              and "webbrowser.open(_url)" in _tail,
              "a pywebview start failure falls back to a browser window")
@@ -34915,6 +34949,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_run_query_reuse_gate),
         ("query: ORDER BY uses the parquet store (not Python drain)",
          t_orderby_uses_parquet_path),
+        ("query: DuckDB OOM guidance distinguishes failed alloc from limit",
+         t_duckdb_query_oom_guidance),
         ("query: result byte cap + streaming parquet export + page cancel",
          t_result_byte_cap_and_export_stream),
         ("nodes: a cyclic connection is rejected, never hangs",
