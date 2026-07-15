@@ -23,8 +23,40 @@ describe("FlattenUidModal", () => {
       candidates: [
         { steps: ["id"], label: "id", map: false },
         { steps: ["code"], label: "code", map: false },
+        // HAL _links scalars must not be the only options shown.
+        {
+          steps: ["href"],
+          in_list: ["_links"],
+          label: "_links[1].href -- first element",
+          map: false,
+        },
+        {
+          steps: ["rel"],
+          in_list: ["_links"],
+          label: "_links[1].rel -- first element",
+          map: false,
+        },
       ],
     } as any);
+  });
+
+  it("lists business keys alongside link fields, not href/rel only", async () => {
+    render(
+      <FlattenUidModal
+        open
+        engine="duckdb"
+        table="orders"
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+    const select = await screen.findByTestId("fx-uid-select");
+    const texts = Array.from(select.querySelectorAll("option")).map(
+      (o) => o.textContent || "",
+    );
+    expect(texts.some((t) => t === "id")).toBe(true);
+    expect(texts.some((t) => t === "code")).toBe(true);
+    expect(texts.filter((t) => t === "href" || t === "rel")).toHaveLength(0);
   });
 
   it("lists fields and disables Confirm until the pick is unique", async () => {

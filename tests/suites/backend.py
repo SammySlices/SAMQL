@@ -35360,6 +35360,194 @@ def backend_tests(datadir, csv_path, json_path):
             except Exception:
                 pass
 
+    def t_root_id_options_hal_not_only_links():
+        # Depth-capped HAL NDJSON yields sibling scalars (id/code) plus
+        # ``_links JSON[]``. root_id options must NOT promote into _links
+        # (that collapsed the FE UID picker to href/rel only).
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        import tempfile
+        rows = [
+            {
+                "id": "1",
+                "code": "A1",
+                "_links": [{"rel": "self", "href": "/1"}],
+                "_embedded": {
+                    "items": [{"sku": "A", "qty": 2}],
+                },
+            },
+            {
+                "id": "2",
+                "code": "A2",
+                "_links": [{"rel": "self", "href": "/2"}],
+                "_embedded": {
+                    "items": [{"sku": "C", "qty": 9}],
+                },
+            },
+        ]
+        fd, path = tempfile.mkstemp(suffix=".ndjson")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            # Default flatten-off depth (2): multi-column typed shell.
+            old = os.environ.get("SAMQL_JSON_MAX_DEPTH")
+            os.environ.pop("SAMQL_JSON_MAX_DEPTH", None)
+            s = _fresh_session()
+            try:
+                loaded = s.load_file(path, destination="duckdb",
+                                     flatten=False, shred=False)
+                need(isinstance(loaded, list) and loaded,
+                     "HAL NDJSON load ok: %r" % loaded)
+                tbl = loaded[0]["name"]
+                cols = s.duckdb._column_types_raw(tbl) or {}
+                need("id" in cols and "code" in cols and "_links" in cols,
+                     "depth-capped HAL columns: %r" % cols)
+                opts = s.table_root_id_options("duckdb", tbl)
+                need(not opts.get("error"), "root-id options ok: %r" % opts)
+                need(opts.get("promote") is False
+                     and not opts.get("promote_col"),
+                     "must not promote into _links: %r" % opts)
+                labels = [c.get("label") for c in (opts.get("candidates")
+                                                   or [])]
+                need("id" in labels and "code" in labels,
+                     "UID list includes id/code: %r" % labels)
+                need(set(labels) - {"href", "rel"},
+                     "UID list is not only href/rel: %r" % labels)
+                # Confirm a real key is unique and selectable.
+                choice = next(c for c in opts["candidates"]
+                              if c.get("label") == "id")
+                st = s.table_root_id_stats("duckdb", tbl, {
+                    "steps": choice["steps"],
+                    "in_list": choice.get("in_list"),
+                    "map": False,
+                    "label": choice["label"],
+                })
+                need(st.get("unique") is True,
+                     "id is unique for root_id: %r" % st)
+            finally:
+                s.shutdown()
+                if old is None:
+                    os.environ.pop("SAMQL_JSON_MAX_DEPTH", None)
+                else:
+                    os.environ["SAMQL_JSON_MAX_DEPTH"] = old
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    def t_root_id_options_opaque_json_includes_business_keys():
+        # Opaque single-json-column HAL (depth 0): UID candidates must
+        # include record keys (id/code) and nest keys (sku), not only
+        # _links href/rel.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        import tempfile
+        rows = [
+            {
+                "id": "1",
+                "code": "A1",
+                "_links": [{"rel": "self", "href": "/1"}],
+                "_embedded": {
+                    "items": [{"sku": "A", "qty": 2}],
+                },
+            },
+            {
+                "id": "2",
+                "code": "A2",
+                "_links": [{"rel": "self", "href": "/2"}],
+                "_embedded": {
+                    "items": [{"sku": "C", "qty": 9}],
+                },
+            },
+        ]
+        fd, path = tempfile.mkstemp(suffix=".ndjson")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for r in rows:
+                    f.write(json.dumps(r) + "\n")
+            old = os.environ.get("SAMQL_JSON_MAX_DEPTH")
+            os.environ["SAMQL_JSON_MAX_DEPTH"] = "0"
+            s = _fresh_session()
+            try:
+                loaded = s.load_file(path, destination="duckdb",
+                                     flatten=False, shred=False)
+                tbl = loaded[0]["name"]
+                opts = s.table_root_id_options("duckdb", tbl)
+                need(not opts.get("error"), "opaque root-id options: %r" % opts)
+                labels = [c.get("label") or "" for c in
+                          (opts.get("candidates") or [])]
+                blob = " ".join(labels).lower()
+                need("id" in blob and "code" in blob,
+                     "opaque UID has id/code: %r" % labels)
+                need("sku" in blob,
+                     "opaque UID has sku (items nest): %r" % labels)
+                need(not (set(labels) <= {
+                    "href", "rel",
+                    "json._links[1].href -- first element",
+                    "json._links[1].rel -- first element",
+                }), "opaque UID not links-only: %r" % labels)
+            finally:
+                s.shutdown()
+                if old is None:
+                    os.environ.pop("SAMQL_JSON_MAX_DEPTH", None)
+                else:
+                    os.environ["SAMQL_JSON_MAX_DEPTH"] = old
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
+    def t_root_id_promote_only_single_list_column():
+        # Array-of-records as the sole column may still promote; sibling
+        # scalars next to a lone LIST must not.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        from samql_core import shred as _shred
+        s = _fresh_session()
+        try:
+            multi = [
+                ("id", {"t": "scalar", "type": "VARCHAR"}),
+                ("code", {"t": "scalar", "type": "VARCHAR"}),
+                ("_links", {
+                    "t": "list",
+                    "of": {"t": "struct", "fields": [
+                        ("href", {"t": "scalar", "type": "VARCHAR"}),
+                        ("rel", {"t": "scalar", "type": "VARCHAR"}),
+                    ]},
+                }),
+            ]
+            eq(s._flatten_promote_col(multi), None,
+               "HAL siblings: no promote into _links")
+            cands = _shred.root_id_candidates(
+                multi, promote_col=s._flatten_promote_col(multi))
+            labs = [c["label"] for c in cands]
+            need("id" in labs and "code" in labs,
+                 "sibling scalars offered: %r" % labs)
+            need(set(labs) != {"href", "rel"},
+                 "not href/rel-only: %r" % labs)
+
+            one = [("json", {
+                "t": "list",
+                "of": {"t": "struct", "fields": [
+                    ("sku", {"t": "scalar", "type": "VARCHAR"}),
+                    ("id", {"t": "scalar", "type": "BIGINT"}),
+                ]},
+            })]
+            eq(s._flatten_promote_col(one), "json",
+               "sole LIST(STRUCT) still promotes")
+            pcands = _shred.root_id_candidates(
+                one, promote_col=s._flatten_promote_col(one))
+            plabs = [c["label"] for c in pcands]
+            need("sku" in plabs and "id" in plabs,
+                 "promoted element fields: %r" % plabs)
+        finally:
+            s.shutdown()
+
     def t_field_explorer_toplevel_sel_ide_quote():
         # Multi-select splices access.sel as-is. Top-level scalars must use
         # IDE-style quoting (bare ``code`` / ``Code``), not always-quote
@@ -36784,6 +36972,12 @@ def backend_tests(datadir, csv_path, json_path):
          t_flatten_keep_source_counterparty_contacts),
         ("opaque JSON flatten scopes _embedded.items not sibling _links",
          t_flatten_opaque_json_embedded_not_links),
+        ("root_id options: HAL depth-capped lists id/code not only href/rel",
+         t_root_id_options_hal_not_only_links),
+        ("root_id options: opaque HAL includes id/code/sku not only links",
+         t_root_id_options_opaque_json_includes_business_keys),
+        ("root_id promote only for sole LIST(STRUCT) column",
+         t_root_id_promote_only_single_list_column),
         ("Field Explorer top-level access.sel uses IDE-style quoting",
          t_field_explorer_toplevel_sel_ide_quote),
         ("a flatten card's X cancels via the shared job cancel flag",

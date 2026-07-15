@@ -7312,18 +7312,26 @@ class Session:
         return None
 
     def _flatten_promote_col(self, columns):
-        """Single wrapping LIST(STRUCT) column to promote, else None."""
-        _list_specs = []
-        for name, node in columns:
-            if (node or {}).get("t") == "list":
-                _list_specs.append({"list_path": [name], "node": node})
-        promote = (len(_list_specs) == 1
-                   and ((_list_specs[0]["node"].get("of") or {}).get("t")
-                        == "struct"))
-        if not promote:
+        """Single wrapping LIST(STRUCT) column to promote, else None.
+
+        Matches ``sniff_root_candidates`` / load-time promote: only when the
+        table is *exactly one* LIST(STRUCT) column (array-of-records shape).
+
+        Do NOT promote merely because there is a single LIST among siblings.
+        Depth-capped HAL JSON often yields ``id``, ``code``, ``_links JSON[]``,
+        ``_embedded STRUCT(...)`` — promoting into ``_links`` collapses the
+        Field Explorer unique-id picker to ``href``/``rel`` and hides the
+        real record keys. Whole-table flatten already refuses that promote
+        when the hub has scalars; root_id options must use the same rule.
+        """
+        if len(columns) != 1:
             return None
-        lp = _list_specs[0]["list_path"]
-        return lp[0] if len(lp) == 1 else None
+        name, node = columns[0]
+        if (node or {}).get("t") != "list":
+            return None
+        if ((node.get("of") or {}).get("t") != "struct"):
+            return None
+        return name
 
     def table_root_id_options(self, engine, table):
         """Unique-identifier candidates for Field Explorer flatten picker.
