@@ -18,9 +18,12 @@ test("opens the App Dashboard view with board controls", async ({ page }) => {
   await expect(page.getByTestId("dashboard-root")).toBeVisible();
   await expect(page.getByTestId("dashboard-run")).toBeVisible();
   await expect(page.getByTestId("dashboard-select")).toBeVisible();
-  await expect(page.getByTestId("dashboard-add-widget")).toBeVisible();
-  await expect(page.getByRole("button", { name: /add widget/i })).toBeVisible();
+  await expect(page.getByTestId("dashboard-more")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^more$/i })).toBeVisible();
+  await page.getByTestId("dashboard-more").click();
+  await expect(page.getByTestId("dashboard-more-menu")).toBeVisible();
   await expect(page.getByTestId("dashboard-export-pdf")).toBeVisible();
+  await expect(page.getByTestId("dashboard-add-text")).toBeVisible();
   // Board background customization was removed.
   await expect(page.getByTestId("dashboard-bg-menu")).toHaveCount(0);
 });
@@ -37,7 +40,7 @@ test("configure opens only via chrome; float minimizes and closes", async ({
     "dashboard",
   );
 
-  await page.getByTestId("dashboard-add-widget").click();
+  await page.getByTestId("dashboard-more").click();
   await page.getByTestId("dashboard-add-text").click();
   await expect(page.locator(".dash-widget-text")).toBeVisible();
   // Adding / selecting a widget must not open configure.
@@ -86,7 +89,7 @@ test("widget expand opens a resizable window and closes", async ({ page }) => {
     "dashboard",
   );
 
-  await page.getByTestId("dashboard-add-widget").click();
+  await page.getByTestId("dashboard-more").click();
   await page.getByTestId("dashboard-add-text").click();
   const textWidget = page.locator(".dash-widget-text").first();
   await expect(textWidget).toBeVisible();

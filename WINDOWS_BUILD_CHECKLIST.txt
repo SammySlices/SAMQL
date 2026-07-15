@@ -130,6 +130,15 @@ EXPECT both commands to pass before any executable packaging begins.
 5b.4  Both EXEs themselves should carry the SQ icon in Explorer -- the
       spec writes backend\samql.ico from the embedded asset when the
       file is absent; the build log prints "wrote + embedding".
+5b.5  TASKBAR GROUPING (.550): SamQL-APP must NOT share a taskbar
+      button with Teams, Edge, Explorer, or any other app. Pin SamQL,
+      launch Teams (and Edge if you use the browser fallback) -- each
+      gets its own button. If they were previously lumped together:
+      unpin SamQL, rebuild/reinstall the new exe, launch once, re-pin
+      from the running window. Launcher log should show
+      "process AppUserModelID=SamQL.App.2" and must NOT show
+      "refusing AUMID stamp on foreign". A rebuild is required for
+      this fix to take effect.
 
 5c. CUSTOM BRANDING -- WHERE IMAGES GO (the .467 one-file flow)
 5c.1  ONE file is enough: frontend\public\app-icon.png. After

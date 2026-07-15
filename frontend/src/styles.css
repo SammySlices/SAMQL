@@ -589,12 +589,21 @@ textarea:focus {
   border-radius: 999px;
   padding: 0 6px;
 }
+/* Always reserve the action-button slot so hover does not grow the row.
+   Icons stay invisible until hover (opacity/visibility), but layout size
+   matches the hovered state. */
 .tree-row .row-actions {
-  display: none;
+  display: inline-flex;
+  flex: 0 0 auto;
   gap: 2px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 .tree-row:hover .row-actions {
-  display: inline-flex;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 .tree-cols {
   padding: 0 0 4px 0;
@@ -1227,17 +1236,25 @@ body.editor-ivory .code textarea.ta::placeholder {
   font-style: italic;
 }
 
-/* struct / JSON cells: a hover-revealed expander opens a formatted viewer */
+/* struct / JSON cells: a hover-revealed expander opens a formatted viewer.
+   Reserve right padding so cell text does not sit under the button and steal
+   center hits; z-index keeps the control above the ellipsized value. */
+.gc-cell.has-expand {
+  padding-right: 34px;
+}
 .gc-expand {
   position: absolute;
   right: 3px;
   top: 50%;
   transform: translateY(-50%);
+  z-index: 2;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   opacity: 0.68;
-  height: 18px;
-  padding: 0 5px;
+  height: 20px;
+  min-width: 28px;
+  padding: 0 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10.5px;
   line-height: 1;
@@ -1246,6 +1263,9 @@ body.editor-ivory .code textarea.ta::placeholder {
   border: 1px solid var(--border-strong);
   border-radius: 4px;
   cursor: pointer;
+  user-select: none;
+  pointer-events: auto;
+  -webkit-user-select: none;
 }
 .gc-cell:hover .gc-expand {
   opacity: 1;
@@ -1268,6 +1288,11 @@ body.editor-ivory .code textarea.ta::placeholder {
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   box-shadow: var(--shadow);
+}
+/* Value inspector: fixed geometry, no entrance animation (avoids open flicker). */
+.gc-json-pop.val-win {
+  animation: none;
+  max-width: 85vw;
 }
 .gc-json-head {
   display: flex;
@@ -7657,6 +7682,9 @@ label.chk input[type="checkbox"],
   cursor: move;
   user-select: none;
 }
+.val-win .gc-json-body.is-loading {
+  color: var(--text-faint);
+}
 
 /* .458: per-statement Run-all ledger strip above the grid */
 .stmt-strip {
@@ -8570,10 +8598,14 @@ button:hover .icon-trash svg {
   font-weight: 650;
   letter-spacing: -0.02em;
 }
+.dash-toolbar-left {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .dash-title-wrap {
   position: relative;
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   max-width: min(480px, 100%);
   width: 100%;
@@ -8592,6 +8624,12 @@ button:hover .icon-trash svg {
   letter-spacing: -0.02em;
   font-family: inherit;
   line-height: 1.15;
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  field-sizing: content;
 }
 .dash-title-input:focus {
   outline: none;
@@ -8600,6 +8638,7 @@ button:hover .icon-trash svg {
 .dash-title-config-btn {
   flex-shrink: 0;
   opacity: 0.55;
+  margin-top: 2px;
 }
 .dash-title-config-btn:hover,
 .dash-title-config-btn.active,
@@ -8636,6 +8675,25 @@ button:hover .icon-trash svg {
   flex-shrink: 0;
   align-items: center;
   flex-wrap: wrap;
+}
+.dash-toolbar-right .btn.active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--raised));
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--text);
+}
+.dash-board-locked .dash-widget,
+.dash-board-locked .dash-widget:active,
+.dash-widget-locked,
+.dash-widget-locked:active {
+  cursor: default;
+}
+.dash-board-locked .dash-text-grab {
+  cursor: default;
+  pointer-events: none;
+}
+.dash-board-locked .dash-resize,
+.dash-board-locked .dash-header-resize {
+  display: none;
 }
 .dash-run-wrap {
   position: relative;
@@ -8849,15 +8907,27 @@ button:hover .icon-trash svg {
 .dash-text-style-row .btn {
   min-width: 32px;
 }
-.dash-add-wrap {
+.dash-more-wrap {
   position: relative;
 }
-.dash-add-menu {
+.dash-more-wrap .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dash-more-lock-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 2px;
+  opacity: 0.9;
+}
+.dash-more-menu {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  z-index: 30;
-  min-width: 220px;
+  z-index: 70;
+  min-width: 240px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -8867,7 +8937,7 @@ button:hover .icon-trash svg {
   background: var(--panel);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
 }
-.dash-add-menu-item {
+.dash-more-menu-item {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -8882,13 +8952,37 @@ button:hover .icon-trash svg {
   font-size: 13px;
   font-weight: 600;
 }
-.dash-add-menu-item:hover {
+.dash-more-menu-item:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.dash-add-menu-note {
+.dash-more-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.dash-more-menu-item.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.dash-more-menu-item.danger {
+  color: var(--danger, #e25b5b);
+}
+.dash-more-menu-item.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger, #e25b5b) 12%, transparent);
+}
+.dash-more-menu-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.dash-more-menu-note {
   font-size: 11px;
   font-weight: 500;
   color: var(--muted);
+  padding-left: 22px;
+}
+.dash-more-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }
 .dash-chart,
 .dash-table-wrap {

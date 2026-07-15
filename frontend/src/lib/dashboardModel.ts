@@ -46,6 +46,8 @@ export interface DashboardDoc {
   id: string;
   name: string;
   widgets: DashboardWidget[];
+  /** When true, widgets cannot be moved or resized on the board. */
+  widgetsLocked?: boolean;
   /** Epoch ms when the board last finished a Run (success or cancel). */
   lastRunAt?: number;
   /** Wall time of that Run in milliseconds. */
@@ -101,17 +103,189 @@ export const DASH_H_MIN_TEXT = 0.35;
 export const DASH_TEXT_SIZE_DEFAULT = 22;
 export const DASH_TEXT_SIZE_MIN = 12;
 export const DASH_TEXT_SIZE_MAX = 72;
-export const DASH_TEXT_FONTS: { label: string; value: string }[] = [
-  { label: "Default", value: "inherit" },
-  { label: "Segoe UI", value: '"Segoe UI", system-ui, sans-serif' },
-  { label: "Arial", value: "Arial, Helvetica, sans-serif" },
-  { label: "Verdana", value: "Verdana, Geneva, sans-serif" },
-  { label: "Trebuchet", value: '"Trebuchet MS", sans-serif' },
-  { label: "Georgia", value: "Georgia, serif" },
-  { label: "Times", value: '"Times New Roman", Times, serif' },
-  { label: "Garamond", value: "Garamond, serif" },
-  { label: "Courier", value: '"Courier New", Courier, monospace' },
+
+/** Picker optgroup for dashboard text / heading fonts. */
+export type DashTextFontGroup =
+  | "Default"
+  | "Sans"
+  | "Serif"
+  | "Mono"
+  | "Display";
+
+export type DashTextFontOption = {
+  label: string;
+  /** CSS font-family stack (persisted on widgets / page title). */
+  value: string;
+  group: DashTextFontGroup;
+};
+
+/**
+ * System / generic stacks only — works offline in packaged App Window builds.
+ * Keep existing `value` strings stable so saved dashboards keep rendering.
+ */
+export const DASH_TEXT_FONTS: DashTextFontOption[] = [
+  { label: "Default", value: "inherit", group: "Default" },
+  {
+    label: "App UI",
+    value: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    group: "Sans",
+  },
+  { label: "Segoe UI", value: '"Segoe UI", system-ui, sans-serif', group: "Sans" },
+  { label: "Aptos", value: 'Aptos, "Segoe UI", system-ui, sans-serif', group: "Sans" },
+  { label: "Calibri", value: 'Calibri, "Segoe UI", sans-serif', group: "Sans" },
+  { label: "Candara", value: "Candara, Calibri, sans-serif", group: "Sans" },
+  { label: "Corbel", value: "Corbel, Calibri, sans-serif", group: "Sans" },
+  { label: "Bahnschrift", value: 'Bahnschrift, "Segoe UI", sans-serif', group: "Sans" },
+  { label: "Arial", value: "Arial, Helvetica, sans-serif", group: "Sans" },
+  { label: "Arial Narrow", value: '"Arial Narrow", Arial, sans-serif', group: "Sans" },
+  { label: "Verdana", value: "Verdana, Geneva, sans-serif", group: "Sans" },
+  { label: "Tahoma", value: "Tahoma, Geneva, sans-serif", group: "Sans" },
+  { label: "Trebuchet", value: '"Trebuchet MS", sans-serif', group: "Sans" },
+  {
+    label: "Century Gothic",
+    value: '"Century Gothic", CenturyGothic, AppleGothic, sans-serif',
+    group: "Sans",
+  },
+  {
+    label: "Franklin Gothic",
+    value: '"Franklin Gothic Medium", "Arial Narrow", Arial, sans-serif',
+    group: "Sans",
+  },
+  { label: "Gill Sans", value: '"Gill Sans MT", "Gill Sans", Calibri, sans-serif', group: "Sans" },
+  {
+    label: "Lucida Sans",
+    value: '"Lucida Sans Unicode", "Lucida Grande", sans-serif',
+    group: "Sans",
+  },
+  {
+    label: "Microsoft Sans Serif",
+    value: '"Microsoft Sans Serif", "Segoe UI", sans-serif',
+    group: "Sans",
+  },
+  { label: "Yu Gothic UI", value: '"Yu Gothic UI", "Segoe UI", sans-serif', group: "Sans" },
+  { label: "Georgia", value: "Georgia, serif", group: "Serif" },
+  { label: "Times", value: '"Times New Roman", Times, serif', group: "Serif" },
+  { label: "Garamond", value: "Garamond, serif", group: "Serif" },
+  { label: "Cambria", value: "Cambria, Georgia, serif", group: "Serif" },
+  { label: "Constantia", value: "Constantia, Georgia, serif", group: "Serif" },
+  {
+    label: "Palatino",
+    value: '"Palatino Linotype", "Book Antiqua", Palatino, serif',
+    group: "Serif",
+  },
+  { label: "Book Antiqua", value: '"Book Antiqua", Palatino, serif', group: "Serif" },
+  {
+    label: "Century Schoolbook",
+    value: '"Century Schoolbook", Century, Georgia, serif',
+    group: "Serif",
+  },
+  {
+    label: "Bookman Old Style",
+    value: '"Bookman Old Style", "Times New Roman", serif',
+    group: "Serif",
+  },
+  {
+    label: "Baskerville",
+    value: '"Baskerville Old Face", Baskerville, Georgia, serif',
+    group: "Serif",
+  },
+  { label: "Perpetua", value: "Perpetua, Georgia, serif", group: "Serif" },
+  { label: "Rockwell", value: 'Rockwell, "Courier New", serif', group: "Serif" },
+  { label: "Sylfaen", value: "Sylfaen, Georgia, serif", group: "Serif" },
+  {
+    label: "App Mono",
+    value:
+      '"JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code", ui-monospace, Menlo, Consolas, monospace',
+    group: "Mono",
+  },
+  { label: "Courier", value: '"Courier New", Courier, monospace', group: "Mono" },
+  { label: "Consolas", value: 'Consolas, "Courier New", monospace', group: "Mono" },
+  {
+    label: "Cascadia Mono",
+    value: '"Cascadia Mono", Consolas, "Courier New", monospace',
+    group: "Mono",
+  },
+  {
+    label: "Cascadia Code",
+    value: '"Cascadia Code", Consolas, "Courier New", monospace',
+    group: "Mono",
+  },
+  {
+    label: "Lucida Console",
+    value: '"Lucida Console", Monaco, monospace',
+    group: "Mono",
+  },
+  { label: "Impact", value: "Impact, Haettenschweiler, sans-serif", group: "Display" },
+  { label: "Arial Black", value: '"Arial Black", Gadget, sans-serif', group: "Display" },
+  { label: "Comic Sans", value: '"Comic Sans MS", "Segoe Print", cursive', group: "Display" },
+  { label: "Segoe Print", value: '"Segoe Print", "Comic Sans MS", cursive', group: "Display" },
+  { label: "Segoe Script", value: '"Segoe Script", "Segoe Print", cursive', group: "Display" },
+  { label: "Ink Free", value: '"Ink Free", "Segoe Print", cursive', group: "Display" },
+  {
+    label: "Brush Script",
+    value: '"Brush Script MT", "Segoe Script", cursive',
+    group: "Display",
+  },
+  {
+    label: "Lucida Handwriting",
+    value: '"Lucida Handwriting", "Segoe Script", cursive',
+    group: "Display",
+  },
+  { label: "Papyrus", value: "Papyrus, fantasy", group: "Display" },
+  {
+    label: "Copperplate",
+    value: '"Copperplate Gothic", Copperplate, fantasy',
+    group: "Display",
+  },
+  {
+    label: "Showcard Gothic",
+    value: '"Showcard Gothic", Impact, fantasy',
+    group: "Display",
+  },
+  { label: "Stencil", value: "Stencil, Impact, fantasy", group: "Display" },
+  { label: "Algerian", value: 'Algerian, "Times New Roman", serif', group: "Display" },
+  { label: "Castellar", value: 'Castellar, "Times New Roman", serif', group: "Display" },
+  {
+    label: "Old English",
+    value: '"Old English Text MT", "Times New Roman", serif',
+    group: "Display",
+  },
+  {
+    label: "Edwardian Script",
+    value: '"Edwardian Script ITC", "Segoe Script", cursive',
+    group: "Display",
+  },
+  {
+    label: "Freestyle Script",
+    value: '"Freestyle Script", "Segoe Script", cursive',
+    group: "Display",
+  },
 ];
+
+const DASH_TEXT_FONT_GROUP_ORDER: DashTextFontGroup[] = [
+  "Default",
+  "Sans",
+  "Serif",
+  "Mono",
+  "Display",
+];
+
+/** Grouped font list for `<select>` / `<optgroup>` pickers. */
+export function groupDashTextFonts(): {
+  group: DashTextFontGroup;
+  fonts: DashTextFontOption[];
+}[] {
+  const byGroup = new Map<DashTextFontGroup, DashTextFontOption[]>();
+  for (const font of DASH_TEXT_FONTS) {
+    const list = byGroup.get(font.group);
+    if (list) list.push(font);
+    else byGroup.set(font.group, [font]);
+  }
+  return DASH_TEXT_FONT_GROUP_ORDER.filter((g) => byGroup.has(g)).map((group) => ({
+    group,
+    fonts: byGroup.get(group)!,
+  }));
+}
 
 
 export function emptyWidgets(): DashboardWidget[] {
@@ -445,6 +619,7 @@ export function normalizeDashboardDoc(raw: any): DashboardDoc | null {
     id: String(raw.id),
     name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : "Dashboard",
     widgets: widgets.length ? widgets : emptyWidgets(),
+    ...(raw.widgetsLocked ? { widgetsLocked: true } : {}),
     ...(lastRunAt != null ? { lastRunAt } : {}),
     ...(lastRunMs != null ? { lastRunMs } : {}),
   };

@@ -438,24 +438,43 @@ def _json_path_seg(key):
     return '."%s"' % (key or "").replace('"', '""')
 
 
-def access_recipes(column, rows):
+def access_recipes(column, rows, access_style="struct", cast_to_json=False,
+                   root_is_list=False):
     """Attach an ``access`` recipe to every row of a flattened type tree: how to
     actually QUERY that field.
 
     For each node:
       first     -- the first-record expression, hopping arrays with [1]
-                   (e.g. json[1].strike.strikePrice.currency)
+                   (STRUCT/LIST) or [0] inside a JSON path (opaque JSON)
       sel       -- the select expression for an all-rows query
-      unnests   -- the FROM-clause UNNEST chain (one hop per enclosing array)
-                   that makes ``sel`` valid, e.g.
-                   UNNEST(json) AS x1(e1), UNNEST(e1.receivingLeg) AS x2(e2)
-      recursive -- for an array node, the one-shot
-                   UNNEST(<first>, recursive := true) expression
+      unnests   -- the FROM-clause UNNEST / json-array explode chain that
+                   makes ``sel`` valid
+      recursive -- for an array node, a one-shot explode expression
       note      -- map / opaque-JSON access hints
+
+    ``access_style``:
+      "struct" -- DuckDB STRUCT/LIST dotted paths (DESCRIBE schema). Default;
+                  preserves existing Field Explorer recipes for typed nests.
+      "json"   -- DuckDB JSON extract (``->>`` / ``->``) with 0-based JSONPath
+                  indexes. Use for opaque JSON / JSON[] / STRUCT+JSON samples
+                  where STRUCT-style UNNEST would fail.
+
+    ``cast_to_json``: prefix the column with ``::JSON`` (STRUCT shells that
+    still need JSONPath under opaque leaves). ``root_is_list``: column is a
+    DuckDB LIST/JSON[] so the first ``(element)`` hop is a native UNNEST.
 
     Pure and engine-free: works on the parsed type alone, so it is fully
     testable without DuckDB. Mutates ``rows`` in place and returns them.
     ``rows`` must INCLUDE the depth-0 root row for the column itself."""
+    if (access_style or "struct").lower() == "json":
+        return _access_recipes_json(
+            column, rows, cast_to_json=cast_to_json,
+            root_is_list=root_is_list)
+    return _access_recipes_struct(column, rows)
+
+
+def _access_recipes_struct(column, rows):
+    """STRUCT/LIST recipes: 1-based list indexes + native UNNEST."""
     def q(name):
         return '"%s"' % name.replace('"', '""') if _needs_quote(name) else name
 
@@ -498,7 +517,6 @@ def access_recipes(column, rows):
             h = hop(ent)
             acc["sel"] = h["all"]
             acc["unnests"] = h["unnests"]
-            counter[0] -= 0  # alias numbers stay unique across the walk
             if kind == "array":
                 acc["recursive"] = ("UNNEST(%s, recursive := true)"
                                     % ent["first"])
@@ -516,6 +534,174 @@ def access_recipes(column, rows):
         elif (r.get("type") or "").strip().upper() == "JSON":
             acc["note"] = ("opaque JSON: %s->>'$.field' extracts text"
                            % ent["first"])
+        r["access"] = acc
+        stack.append(ent)
+    return rows
+
+
+def _json_extract_expr(base, jptr, as_text=True):
+    """``base ->> '$.a[0].b'`` (text) or ``base -> '$.a'`` (JSON)."""
+    if not jptr or jptr == "$":
+        return base
+    return "%s %s '%s'" % (base, "->>" if as_text else "->", jptr)
+
+
+def _json_array_sql(base, jptr):
+    """SQL expression for a JSON array value at ``jptr`` under ``base``."""
+    if not jptr or jptr == "$":
+        return base
+    return "json_extract(%s, '%s')" % (base, jptr)
+
+
+def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
+    """Opaque JSON / JSON[] / STRUCT::JSON recipes (0-based JSONPath).
+
+    Nested JSON arrays are not DuckDB LIST values, so all-rows hops use
+    ``UNNEST(from_json(<array>, '["VARCHAR"]'))`` plus ``json(eN)`` so both
+    object elements and double-encoded string elements (``["{...}"]``) work.
+    A root JSON[] / LIST column still uses a native UNNEST for its first
+    ``(element)`` hop (1-based ``[1]`` on the list)."""
+    def q(name):
+        return '"%s"' % name.replace('"', '""') if _needs_quote(name) else name
+
+    base0 = q(column) + ("::JSON" if cast_to_json else "")
+    elem_cast = "::JSON" if cast_to_json else ""
+    stack = []
+    counter = [0]
+
+    def native_list_hop(parent):
+        counter[0] += 1
+        n = counter[0]
+        return {
+            "unnests": parent["unnests"]
+            + ["UNNEST(%s) AS x%d(e%d)" % (parent["all_base"], n, n)],
+            "all_base": ("e%d%s" % (n, elem_cast)),
+            "first_base": parent["first_base"] + "[1]" + elem_cast,
+        }
+
+    def json_array_hop(parent):
+        # Decode each element via text→json so double-encoded string
+        # elements and real JSON objects share one working recipe.
+        counter[0] += 1
+        n = counter[0]
+        arr = _json_array_sql(parent["all_base"], parent["all_jptr"])
+        elem0_text = _json_extract_expr(
+            parent["first_base"], parent["first_jptr"] + "[0]", as_text=True)
+        return {
+            "unnests": parent["unnests"]
+            + ["UNNEST(from_json(%s, '[\"VARCHAR\"]')) AS x%d(e%d)"
+               % (arr, n, n)],
+            "all_base": "json(e%d)" % n,
+            "first_base": "json(%s)" % elem0_text,
+            "first_jptr": "$",
+            "all_jptr": "$",
+        }
+
+    for r in rows:
+        while stack and stack[-1]["depth"] >= r["depth"]:
+            stack.pop()
+        parent = stack[-1] if stack else None
+        kind = r.get("kind")
+        name = r.get("name") or ""
+        if parent is None:
+            ent = {
+                "depth": r["depth"], "kind": kind,
+                "first_base": base0, "all_base": base0,
+                "first_jptr": "$", "all_jptr": "$",
+                "unnests": [], "native_list": bool(root_is_list),
+            }
+        elif name == "(element)":
+            # Root LIST/JSON[]: native UNNEST. Nested arrays: JSON explode.
+            use_native = (parent.get("native_list")
+                          and parent["all_jptr"] == "$"
+                          and not parent["unnests"])
+            if use_native or (
+                    parent.get("native_list") and parent["depth"] == 0):
+                h = native_list_hop(parent)
+                ent = {
+                    "depth": r["depth"], "kind": kind,
+                    "first_base": h["first_base"], "all_base": h["all_base"],
+                    "first_jptr": "$", "all_jptr": "$",
+                    "unnests": h["unnests"], "native_list": False,
+                }
+            else:
+                h = json_array_hop(parent)
+                ent = {
+                    "depth": r["depth"], "kind": kind,
+                    "first_base": h["first_base"],
+                    "all_base": h["all_base"],
+                    "first_jptr": h["first_jptr"],
+                    "all_jptr": h["all_jptr"],
+                    "unnests": h["unnests"], "native_list": False,
+                }
+        else:
+            seg = _json_path_seg(name)
+            ent = {
+                "depth": r["depth"], "kind": kind,
+                "first_base": parent["first_base"],
+                "all_base": parent["all_base"],
+                "first_jptr": parent["first_jptr"] + seg,
+                "all_jptr": parent["all_jptr"] + seg,
+                "unnests": list(parent["unnests"]),
+                "native_list": False,
+            }
+
+        as_text = kind == "scalar"
+        first_expr = _json_extract_expr(
+            ent["first_base"], ent["first_jptr"], as_text=as_text)
+        sel_expr = _json_extract_expr(
+            ent["all_base"], ent["all_jptr"], as_text=as_text)
+        acc = {"first": first_expr, "sel": sel_expr,
+               "unnests": list(ent["unnests"])}
+
+        if kind in ("array", "array-scalar"):
+            use_native = (ent.get("native_list") and ent["all_jptr"] == "$"
+                          and not ent["unnests"])
+            if use_native or (root_is_list and ent["depth"] == 0
+                              and ent["all_jptr"] == "$"):
+                h = native_list_hop(ent)
+                acc["sel"] = h["all_base"]
+                acc["unnests"] = h["unnests"]
+                if kind == "array":
+                    acc["recursive"] = ("UNNEST(%s, recursive := true)"
+                                        % ent["first_base"])
+                    acc["note"] = ("one row per element; explode nested JSON "
+                                   "arrays with from_json + UNNEST")
+                else:
+                    acc["note"] = "one row per element (JSON[] / list)"
+            else:
+                h = json_array_hop(ent)
+                acc["sel"] = h["all_base"]
+                acc["unnests"] = h["unnests"]
+                arr_first = _json_array_sql(
+                    ent["first_base"], ent["first_jptr"])
+                if kind == "array":
+                    acc["recursive"] = (
+                        "UNNEST(from_json(%s, '[\"VARCHAR\"]'))" % arr_first)
+                    acc["note"] = (
+                        "one row per JSON array element; %s is each "
+                        "element decoded as JSON" % h["all_base"])
+                else:
+                    acc["note"] = "one row per JSON array element (scalar)"
+            acc["first"] = _json_extract_expr(
+                ent["first_base"], ent["first_jptr"], as_text=False)
+        elif kind == "struct":
+            acc["first"] = _json_extract_expr(
+                ent["first_base"], ent["first_jptr"], as_text=False)
+            acc["sel"] = _json_extract_expr(
+                ent["all_base"], ent["all_jptr"], as_text=False)
+            acc["note"] = ("JSON object: %s ->> '$.field' extracts text"
+                           % (first_expr if ent["first_jptr"] != "$"
+                              else ent["first_base"]))
+        elif kind == "map":
+            acc["note"] = ("map/dictionary inside JSON: %s ->> '$.key'"
+                           % ent["first_base"])
+        else:
+            if ent["first_jptr"] == "$":
+                acc["note"] = "JSON value (whole cell / element)"
+            else:
+                acc["note"] = ("opaque JSON path (text): %s" % first_expr)
+
         r["access"] = acc
         stack.append(ent)
     return rows

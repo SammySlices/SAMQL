@@ -106,6 +106,25 @@ def _configured_registry(
     return None
 
 
+# Cursor / agent sandboxes inject npm_config_devdir (and sometimes a sandbox
+# npm cache). npm 11+ treats unknown ``devdir`` as a warning on stderr; under
+# PowerShell $ErrorActionPreference=Stop that can abort the build even when
+# ``npm ci`` succeeded. Strip those so SamQL installs use a clean npm env.
+_SANDBOX_NPM_ENV_KEYS = (
+    "npm_config_devdir",
+    "NPM_CONFIG_DEVDIR",
+    "npm_config_cache",
+    "NPM_CONFIG_CACHE",
+)
+
+
+def _scrub_sandbox_npm_env(env: Mapping[str, str]) -> dict[str, str]:
+    cleaned = dict(env)
+    for key in _SANDBOX_NPM_ENV_KEYS:
+        cleaned.pop(key, None)
+    return cleaned
+
+
 def _ci_command(npm: str, cache: Path, registry: str | None) -> list[str]:
     command = [
         npm,
@@ -140,7 +159,7 @@ def install_with_recovery(
     frontend = frontend.resolve()
     cache = cache.resolve()
     node_modules = frontend / "node_modules"
-    run_env = dict(os.environ if env is None else env)
+    run_env = _scrub_sandbox_npm_env(os.environ if env is None else env)
     cache.parent.mkdir(parents=True, exist_ok=True)
 
     configured = registry or _configured_registry(npm, frontend, run_env, runner)

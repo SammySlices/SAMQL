@@ -93,51 +93,24 @@ export function prettyStruct(text: string, indent = "  "): string {
 }
 
 /**
- * Run ``task`` only after the browser has had a chance to paint.
+ * Run ``task`` only after the browser has painted (double-rAF).
  *
- * ``setTimeout(0)`` alone can still run before the first paint, so a sync
- * pretty-print inside it freezes the UI and the formatted viewer appears to
- * ignore the first click. Double-rAF waits for paint; idle (with a short
- * timeout) yields to input before the heavy walk.
+ * ``setTimeout(0)`` / idle alone can still run before first paint, so a sync
+ * pretty-print would freeze the UI and the formatted viewer would appear to
+ * ignore the first click. Two animation frames let "Loading..." commit first;
+ * no idle delay — that made content feel stuck after the window was already open.
  */
 export function runAfterPaint(task: () => void): () => void {
   let cancelled = false;
   let raf2 = 0;
-  let idleId: number | undefined;
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const raf1 = requestAnimationFrame(() => {
     raf2 = requestAnimationFrame(() => {
-      if (cancelled) return;
-      const ric =
-        typeof window !== "undefined" &&
-        typeof window.requestIdleCallback === "function"
-          ? window.requestIdleCallback.bind(window)
-          : null;
-      if (ric) {
-        idleId = ric(
-          () => {
-            if (!cancelled) task();
-          },
-          { timeout: 80 },
-        );
-      } else {
-        timeoutId = setTimeout(() => {
-          if (!cancelled) task();
-        }, 0);
-      }
+      if (!cancelled) task();
     });
   });
   return () => {
     cancelled = true;
     cancelAnimationFrame(raf1);
     if (raf2) cancelAnimationFrame(raf2);
-    if (
-      idleId != null &&
-      typeof window !== "undefined" &&
-      typeof window.cancelIdleCallback === "function"
-    ) {
-      window.cancelIdleCallback(idleId);
-    }
-    if (timeoutId != null) clearTimeout(timeoutId);
   };
 }

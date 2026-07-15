@@ -104,11 +104,21 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 $npmCache = Join-Path $env:TEMP ("samql-npm-build-cache-" + $PID)
+# Cursor sandboxes set npm_config_devdir; npm warns on stderr and Stop can
+# treat that as failure even when install_frontend_deps exits 0.
+foreach ($k in @("npm_config_devdir", "NPM_CONFIG_DEVDIR",
+                 "npm_config_cache", "NPM_CONFIG_CACHE")) {
+  Remove-Item "Env:$k" -ErrorAction SilentlyContinue
+}
+$prevInstallEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $py (Join-Path $Root "tools\install_frontend_deps.py") `
   --frontend (Join-Path $Root "frontend") `
   --cache $npmCache
-if ($LASTEXITCODE -ne 0) {
-  Write-Error ("frontend npm install failed (exit $LASTEXITCODE). " +
+$installCode = $LASTEXITCODE
+$ErrorActionPreference = $prevInstallEap
+if ($installCode -ne 0) {
+  Write-Error ("frontend npm install failed (exit $installCode). " +
                "Fix frontend deps / registry, then re-run.")
   exit 1
 }
