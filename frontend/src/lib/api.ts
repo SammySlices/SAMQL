@@ -1353,6 +1353,54 @@ export const api = {
       },
     ),
 
+  /** Background relational flatten (Field Explorer). Optional root_id unique
+   * identifier is carried onto every family table as root_id. */
+  flattenTableStart: (
+    engine: string,
+    name: string,
+    rootId?: RootIdChoice | null,
+  ) =>
+    jsonFetch<{ job_id: string; name: string }>(
+      `/api/table/${encodeURIComponent(name)}/flatten-start`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          engine,
+          ...(rootId ? { root_id: rootId } : {}),
+        }),
+        timeoutMs: 25000,
+      },
+    ),
+
+  tableRootIdOptions: (engine: string, name: string) =>
+    jsonFetch<{
+      ok?: boolean;
+      error?: string;
+      candidates?: RootIdCand[];
+      promote?: boolean;
+      promote_col?: string | null;
+    }>(`/api/table/${encodeURIComponent(name)}/root-id-options`, {
+      method: "POST",
+      body: JSON.stringify({ engine }),
+    }),
+
+  tableRootIdStats: (engine: string, name: string, rootId: RootIdChoice) =>
+    jsonFetch<{
+      ok?: boolean;
+      error?: string;
+      label?: string;
+      records?: number;
+      nonnull?: number;
+      distinct?: number;
+      duplicated?: number;
+      nulls?: number;
+      unique?: boolean;
+      choice?: RootIdChoice;
+    }>(`/api/table/${encodeURIComponent(name)}/root-id-stats`, {
+      method: "POST",
+      body: JSON.stringify({ engine, root_id: rootId }),
+    }),
+
   // start an in-place JSON flatten in the background -> a cancellable card in
   // the activity tray + stat popover (with a live row count), instead of a
   // request that blocks until the (possibly long) flatten finishes

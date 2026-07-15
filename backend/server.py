@@ -3699,14 +3699,16 @@ class Api:
 
     @staticmethod
     def flatten_table_start(s, m, body, ctx):
-        """Flatten a JSON table into relational tables in the background, so the
-        UI shows a cancellable progress card in the activity tray + stat popover
-        instead of a request that blocks until the (potentially long) flatten
-        finishes. Mirrors load_start: the card's X (or Cancel all) sets the
-        cancel flag, which flatten_json's progress callback raises on. Returns
-        {job_id, name}."""
+        """Flatten a loaded nested table into relational tables in the
+        background (Field Explorer / activity tray). Accepts optional
+        ``root_id`` (unique identifier choice) so every family table carries
+        ``root_id`` and a Master_Keys table is built. Returns {job_id, name}."""
         name = unquote(m.group("name"))
-        engine = (body or {}).get("engine", "duckdb")
+        b = body or {}
+        engine = b.get("engine", "duckdb")
+        root_id = b.get("root_id")
+        if root_id is not None and not isinstance(root_id, dict):
+            raise ApiError(400, "root_id must be an object.")
         job_id = uuid.uuid4().hex[:12]
         job = {"id": job_id, "kind": "flatten", "state": "starting",
                "bytes_done": 0, "bytes_total": 0, "rows": 0,
@@ -3721,27 +3723,22 @@ class Api:
 
         def run():
             job["state"] = "running"
-
-            def on_prog(done, total):
-                # streaming JSON has no known record total, so this drives a
-                # live row count + spinner (not a determinate bar)
-                job["rows"] = done
-                if total:
-                    job["bytes_total"] = total
-                    job["bytes_done"] = min(done, total)
-
             try:
-                res = s.flatten_json(name, engine=engine, query_id=job_id,
-                                     on_progress=on_prog,
-                                     cancel=lambda: bool(job.get("cancel")))
+                # Relational flatten with optional unique identifier — the
+                # Field Explorer path. (CSV dump flatten uses /api/flatten/start.)
+                res = s.flatten_table(name, base=name, query_id=job_id,
+                                      root_id=root_id)
                 if res.get("cancelled"):
                     job["state"] = "cancelled"
                 elif res.get("error"):
                     _fail_job(job, res["error"])
                 else:
-                    job["loaded"] = res.get("tables")
-                    job["method"] = res.get("method")
-                    job["key"] = res.get("key")
+                    created = res.get("created") or []
+                    job["loaded"] = created
+                    job["rows"] = sum(int(c.get("rows") or 0) for c in created)
+                    job["method"] = "flatten_table"
+                    job["key"] = "root_id" if root_id else None
+                    job["root_id"] = res.get("root_id")
                     job["state"] = "done"
             except LoadCancelled:
                 job["state"] = "cancelled"
@@ -3755,6 +3752,21 @@ class Api:
 
         threading.Thread(target=run, daemon=True).start()
         return {"job_id": job_id, "name": name}
+
+    @staticmethod
+    def table_root_id_options(s, m, body, ctx):
+        b = body or {}
+        name = unquote(m.group("name"))
+        return s.table_root_id_options(b.get("engine", "duckdb"), name)
+
+    @staticmethod
+    def table_root_id_stats(s, m, body, ctx):
+        b = body or {}
+        name = unquote(m.group("name"))
+        rid = b.get("root_id")
+        if not isinstance(rid, dict):
+            raise ApiError(400, "root_id is required.")
+        return s.table_root_id_stats(b.get("engine", "duckdb"), name, rid)
 
     @staticmethod
     def nodeflow_run(s, m, body, ctx):
@@ -4116,6 +4128,10 @@ ROUTES = [
     ("POST", r"^/api/profile/field$", Api.profile_field),
     ("POST", r"^/api/table/(?P<name>[^/]+)/flatten$", Api.table_flatten),
     ("POST", r"^/api/table/(?P<name>[^/]+)/flatten-start$", Api.flatten_table_start),
+    ("POST", r"^/api/table/(?P<name>[^/]+)/root-id-options$",
+     Api.table_root_id_options),
+    ("POST", r"^/api/table/(?P<name>[^/]+)/root-id-stats$",
+     Api.table_root_id_stats),
     ("POST", r"^/api/table/rename$", Api.table_rename),
     ("POST", r"^/api/table/drop$", Api.table_drop),
     ("POST", r"^/api/table/optimize-start$", Api.table_optimize_start),

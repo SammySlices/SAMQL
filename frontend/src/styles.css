@@ -960,8 +960,12 @@ textarea:focus {
   line-height: 20px;
   letter-spacing: 0;
   tab-size: 2;
-  white-space: pre;
-  word-wrap: normal;
+  /* Soft-wrap long lines so mega-statements stay readable inside the
+     viewport. Hard one-line SQL can exceed millions of CSS pixels and
+     browsers clip it even when min-width / H-scroll is set. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   border: 0;
   min-width: 100%;
   box-sizing: border-box;
@@ -2938,6 +2942,9 @@ kbd {
   padding-bottom: 8px;
 }
 .fx-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 2px 8px;
   cursor: pointer;
   white-space: nowrap;
@@ -2946,6 +2953,22 @@ kbd {
 }
 .fx-row:hover { background: var(--panel-2); }
 .fx-row.sel { background: var(--panel-2); outline: 1px solid var(--border-strong); }
+.fx-check {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.fx-sel-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
 .fx-right {
   flex: 1;
   min-width: 0;

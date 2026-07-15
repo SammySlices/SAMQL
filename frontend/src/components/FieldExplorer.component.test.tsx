@@ -18,6 +18,8 @@ vi.mock("../lib/api", () => ({
     columnFields: vi.fn(),
     columnAccessPreview: vi.fn(),
     shredPlan: vi.fn(),
+    tableRootIdOptions: vi.fn(),
+    tableRootIdStats: vi.fn(),
   },
   copyText: vi.fn(() => Promise.resolve()),
 }));
@@ -103,6 +105,26 @@ describe("FieldExplorer shred steering", () => {
   it("offers 'Flatten to tables' for a deep-opaque column that can't shred in place", async () => {
     vi.mocked(api.shredPlan).mockResolvedValue({ tables: [] } as any);
     const onFlatten = vi.fn().mockResolvedValue({ ok: true, created: 3 });
+    const choice = {
+      steps: ["id"],
+      label: "id",
+      map: false,
+      in_list: null,
+    };
+    vi.mocked(api.tableRootIdOptions).mockResolvedValue({
+      ok: true,
+      candidates: [choice],
+    } as any);
+    vi.mocked(api.tableRootIdStats).mockResolvedValue({
+      ok: true,
+      unique: true,
+      records: 10,
+      distinct: 10,
+      nonnull: 10,
+      duplicated: 0,
+      nulls: 0,
+      label: "id",
+    } as any);
 
     render(
       <FieldExplorer
@@ -120,8 +142,22 @@ describe("FieldExplorer shred steering", () => {
 
     const btn = await screen.findByTestId("fx-flatten-run");
     fireEvent.click(btn);
+    expect(await screen.findByTestId("fx-flatten-uid-modal")).toBeTruthy();
+    expect(onFlatten).not.toHaveBeenCalled();
+
+    fireEvent.change(await screen.findByTestId("fx-uid-select"), {
+      target: { value: "0" },
+    });
     await waitFor(() =>
-      expect(onFlatten).toHaveBeenCalledWith("duckdb", "orders"),
+      expect(screen.getByTestId("fx-uid-confirm")).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByTestId("fx-uid-confirm"));
+    await waitFor(() =>
+      expect(onFlatten).toHaveBeenCalledWith(
+        "duckdb",
+        "orders",
+        expect.objectContaining({ steps: ["id"], label: "id" }),
+      ),
     );
     expect(screen.queryByTestId("fx-shred-run")).toBeNull();
   });
@@ -132,6 +168,19 @@ describe("FieldExplorer shred steering", () => {
       .fn()
       .mockResolvedValue({ error: "OutOfMemoryException: 3.4 of 3.4 GiB used" });
     const onTablesChanged = vi.fn();
+    vi.mocked(api.tableRootIdOptions).mockResolvedValue({
+      ok: true,
+      candidates: [{ steps: ["id"], label: "id", map: false }],
+    } as any);
+    vi.mocked(api.tableRootIdStats).mockResolvedValue({
+      ok: true,
+      unique: true,
+      records: 10,
+      distinct: 10,
+      nonnull: 10,
+      duplicated: 0,
+      nulls: 0,
+    } as any);
 
     render(
       <FieldExplorer
@@ -150,6 +199,13 @@ describe("FieldExplorer shred steering", () => {
     const fieldsCallsBefore = vi.mocked(api.columnFields).mock.calls.length;
 
     fireEvent.click(await screen.findByTestId("fx-flatten-run"));
+    fireEvent.change(await screen.findByTestId("fx-uid-select"), {
+      target: { value: "0" },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("fx-uid-confirm")).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByTestId("fx-uid-confirm"));
     await waitFor(() => expect(onFlatten).toHaveBeenCalled());
 
     // Failed flatten must not refresh tables or re-fetch fields — a post-OOM
@@ -197,6 +253,67 @@ describe("FieldExplorer shred steering", () => {
     );
     const sample = await screen.findByTestId("fx-preview-sample");
     expect(sample.textContent).toContain("preview-ok");
+  });
+
+  it("composes Id + nested field when Ctrl-selecting two fields", async () => {
+    vi.mocked(api.shredPlan).mockResolvedValue({ tables: [] } as any);
+    vi.mocked(api.columnFields).mockResolvedValue({
+      fields: [
+        {
+          depth: 1,
+          name: "Id",
+          type: "number",
+          kind: "scalar",
+          access: {
+            first: "json ->> '$.Id'",
+            sel: "json ->> '$.Id'",
+            unnests: [],
+          },
+        },
+        {
+          depth: 2,
+          name: "fixingdate",
+          type: "string",
+          kind: "scalar",
+          access: {
+            first: "json -> '$.legs[0]' ->> '$.fixingdate'",
+            sel: "e1 ->> '$.fixingdate'",
+            unnests: [
+              "UNNEST(from_json(json_extract(json, '$.legs'), '[\"JSON\"]')) AS x1(e1)",
+            ],
+          },
+        },
+      ],
+    } as any);
+
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+        onFlatten={vi.fn()}
+      />,
+    );
+
+    const idRow = await screen.findByTestId("fx-field-Id");
+    const nestCheck = await screen.findByTestId("fx-check-fixingdate");
+    fireEvent.click(idRow);
+    fireEvent.click(nestCheck);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("fx-multi-hint").textContent).toMatch(
+        /Combined query/i,
+      ),
+    );
+    expect(screen.getByTestId("fx-sel-bar").textContent).toMatch(/2 selected/);
+    expect(screen.getByText(/All rows \(combined fields\)/)).toBeTruthy();
+    const sqlText = Array.from(document.querySelectorAll(".fx-sql"))
+      .map((el) => el.textContent || "")
+      .join("\n");
+    expect(sqlText).toContain("AS Id");
+    expect(sqlText).toContain("AS fixingdate");
+    expect(sqlText).toContain("UNNEST(from_json");
   });
 });
 

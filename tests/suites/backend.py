@@ -34399,14 +34399,15 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_flatten_tray_cancel():
         # the activity tray's per-card X routes through load_cancel, which sets
-        # job["cancel"]=True for any job -- exactly the flag the flatten worker
-        # checks (cancel=lambda: bool(job.get("cancel"))), so a flatten card
-        # cancels the real work the same way a load card does.
+        # job["cancel"]=True and flags the flatten job's query_id so
+        # flatten_table unwinds via _run_is_cancelled. CSV dump flatten still
+        # uses cancel=lambda on its worker.
         import server as srv
         s = _fresh_session()
         jid = "flat_tray_job"
         srv.JOBS[jid] = {"id": jid, "kind": "flatten", "state": "running",
-                         "cancel": False, "name": "x.json"}
+                         "cancel": False, "name": "x.json",
+                         "query_id": jid}
 
         class _M:
             def group(self, k):
@@ -34415,12 +34416,20 @@ def backend_tests(datadir, csv_path, json_path):
             srv.Api.load_cancel(s, _M(), None, None)
             eq(srv.JOBS[jid]["cancel"], True,
                "a flatten card's X (load_cancel) must set the shared cancel flag")
+            need(s._run_is_cancelled(jid),
+                 "load_cancel must flag the flatten job's query_id")
             src = open(os.path.join(BACKEND, "server.py"),
                        encoding="utf-8").read()
             need('cancel=lambda: bool(job.get("cancel"))' in src,
-                 "the flatten worker must check that same job['cancel'] flag")
+                 "CSV/dump flatten workers still check job['cancel']")
+            need("s.flatten_table(" in src
+                 and "query_id=job_id" in src,
+                 "Field Explorer flatten_table_start passes query_id for cancel")
+            need("flag_run_cancelled" in src,
+                 "load_cancel flags the run so flatten_table can stop")
         finally:
             srv.JOBS.pop(jid, None)
+            s.shutdown()
 
     def t_cancellation_contract():
         # Stage 5 audit lock for the concurrent cancellation model: every
@@ -34503,9 +34512,10 @@ def backend_tests(datadir, csv_path, json_path):
              "optimize_to_parquet should document the materialized-table path")
 
     def t_flatten_table_start_job():
-        # The in-place flatten now runs as a background JOB so it surfaces as a
-        # cancellable card (with a live row count) in BOTH the activity modal
-        # and the stat popover -- the synchronous request gave neither.
+        # Field Explorer flatten runs as a background JOB (flatten_table +
+        # optional root_id) so it surfaces as a cancellable card in the
+        # activity tray. The old path mocked flatten_json; this path is
+        # relational flatten_table.
         import server as srv
         import time as _t
         s = _fresh_session()
@@ -34519,20 +34529,22 @@ def backend_tests(datadir, csv_path, json_path):
 
         try:
             calls = {}
+            rid = {"steps": ["id"], "label": "id", "map": False}
 
-            def fake_flatten(table, engine="duckdb", query_id=None,
-                             on_progress=None, cancel=None):
-                calls["engine"] = engine
-                for i in (10, 20, 30):
-                    if cancel and cancel():
-                        return {"cancelled": True}
-                    if on_progress:
-                        on_progress(i, 0)
-                return {"ok": True, "tables": [{"name": "t_flat"}]}
+            def fake_flatten(table, base=None, query_id=None, root_id=None):
+                calls["table"] = table
+                calls["base"] = base
+                calls["query_id"] = query_id
+                calls["root_id"] = root_id
+                return {"ok": True,
+                        "created": [{"name": "t_flat", "rows": 30}],
+                        "base": table,
+                        "root_id": {"column": "root_id", "unique": True}}
 
-            s.flatten_json = fake_flatten
-            out = srv.Api.flatten_table_start(s, _M("mytbl"),
-                                              {"engine": "duckdb"}, None)
+            s.flatten_table = fake_flatten
+            out = srv.Api.flatten_table_start(
+                s, _M("mytbl"),
+                {"engine": "duckdb", "root_id": rid}, None)
             jid = out["job_id"]
             need(jid in srv.JOBS, "flatten-start registers a background job")
             eq(srv.JOBS[jid]["kind"], "flatten", "job is tagged kind=flatten")
@@ -34541,23 +34553,25 @@ def backend_tests(datadir, csv_path, json_path):
                     break
                 _t.sleep(0.02)
             eq(srv.JOBS[jid]["state"], "done", "the flatten job completes")
-            eq(srv.JOBS[jid]["rows"], 30, "the job tracks a live row count")
-            eq(calls.get("engine"), "duckdb", "engine flows through to flatten_json")
+            eq(srv.JOBS[jid]["rows"], 30, "the job sums created table rows")
+            eq(srv.JOBS[jid]["method"], "flatten_table",
+               "job records the flatten_table method")
+            eq(calls.get("table"), "mytbl", "table flows through to flatten_table")
+            eq(calls.get("root_id"), rid, "root_id flows through to flatten_table")
+            eq(calls.get("query_id"), jid, "job id is the query_id for cancel")
             card = srv._task_card(srv.JOBS[jid])
             eq(card["kind"], "flatten", "the tray card is a flatten card")
 
             # cancellation via the generic per-card route (also covers Cancel all)
-            def fake_slow(table, engine="duckdb", query_id=None,
-                          on_progress=None, cancel=None):
+            def fake_slow(table, base=None, query_id=None, root_id=None):
                 for _ in range(2000):
-                    if cancel and cancel():
+                    j = srv.JOBS.get(query_id) or {}
+                    if j.get("cancel") or s._run_is_cancelled(query_id):
                         return {"cancelled": True}
-                    if on_progress:
-                        on_progress(1, 0)
                     _t.sleep(0.005)
-                return {"ok": True, "tables": []}
+                return {"ok": True, "created": []}
 
-            s.flatten_json = fake_slow
+            s.flatten_table = fake_slow
             out2 = srv.Api.flatten_table_start(s, _M("slowtbl"), None, None)
             jid2 = out2["job_id"]
             _t.sleep(0.05)
@@ -34568,15 +34582,6 @@ def backend_tests(datadir, csv_path, json_path):
                 _t.sleep(0.02)
             eq(srv.JOBS[jid2]["state"], "cancelled",
                "the per-card X cancels a running flatten job")
-
-            # the heartbeat fix: flatten_json stamps the progress registry so a
-            # long flatten is never mis-flagged as a stall + shows live rows
-            fsrc = open(os.path.join(BACKEND, "samql_core", "session.py"),
-                        encoding="utf-8").read()
-            i = fsrc.index("def flatten_json")
-            j = fsrc.index("def _duckdb_table_to_json", i)
-            need("opreg.beat" in fsrc[i:j],
-                 "flatten_json must heartbeat the progress registry (no false stall)")
         finally:
             for k in list(srv.JOBS):
                 srv.JOBS.pop(k, None)

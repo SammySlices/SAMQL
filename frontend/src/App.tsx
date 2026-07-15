@@ -2021,13 +2021,14 @@ export default function App() {
   };
 
   // Flatten a nested JSON table into its relational family from the Field
-  // Explorer. This is the correct, memory-safe path for deep OPAQUE JSON (the
-  // shred planner only sees the shallow declared type): flatten_json re-reads
-  // the source deeply (or dumps the table when there is no file) and builds the
-  // full family. Tracked as a cancellable background op; refreshes on success.
+  // Explorer. Runs as a background JOB (flatten-start) so the HTTP request
+  // returns immediately — the old synchronous /flatten held the connection
+  // for the whole CTAS and the UI looked stalled. Poll loadProgress; Stop
+  // cancels via loadCancel + query interrupt.
   const onFlattenColumn = async (
     engine: string,
     table: string,
+    rootId?: RootIdChoice | null,
   ): Promise<{
     ok?: boolean;
     error?: string;
@@ -2038,28 +2039,54 @@ export default function App() {
     toast(
       "ok",
       `Flattening ${table}`,
-      "Building relational tables — tracking in the activity panel.",
+      rootId?.label
+        ? `Building relational tables with unique id ${rootId.label} — tracking in the activity panel.`
+        : "Building relational tables — tracking in the activity panel.",
     );
+    let jobId: string | null = null;
     try {
-      const r = await api.flattenJson(engine, table, queryId, ctrl.signal);
-      if (r.cancelled) {
-        toast("warn", "Flatten cancelled", table);
-        return { cancelled: true };
+      const started = await api.flattenTableStart(engine, table, rootId);
+      jobId = started.job_id;
+      // Prefer cancelling the job when Stop is pressed (Abort alone only
+      // stops our poll loop; the engine work keeps going otherwise).
+      const onAbort = () => {
+        if (jobId) api.loadCancel(jobId).catch(() => {});
+      };
+      ctrl.signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        for (;;) {
+          if (ctrl.signal.aborted) {
+            toast("warn", "Flatten cancelled", table);
+            return { cancelled: true };
+          }
+          const p = await api.loadProgress(jobId);
+          if (p.state === "done") {
+            const n = (p.loaded || []).length;
+            toast(
+              "ok",
+              "Flattened to tables",
+              `${n} table${n === 1 ? "" : "s"} created from ${table}.`,
+            );
+            refreshTables();
+            return { ok: true, created: n };
+          }
+          if (p.state === "cancelled") {
+            toast("warn", "Flatten cancelled", table);
+            return { cancelled: true };
+          }
+          if (p.state === "error") {
+            const err = p.error || "Flatten failed";
+            toast("error", "Flatten failed", err);
+            return { error: err };
+          }
+          await new Promise((r) => setTimeout(r, 800));
+        }
+      } finally {
+        ctrl.signal.removeEventListener("abort", onAbort);
       }
-      if (r.error) {
-        toast("error", "Flatten failed", r.error);
-        return { error: r.error };
-      }
-      const n = (r.tables || []).length;
-      toast(
-        "ok",
-        "Flattened to tables",
-        `${n} table${n === 1 ? "" : "s"} created from ${table}.`,
-      );
-      refreshTables();
-      return { ok: true, created: n };
     } catch (e: any) {
-      if (isCancelledError(e)) {
+      if (isCancelledError(e) || ctrl.signal.aborted) {
+        if (jobId) api.loadCancel(jobId).catch(() => {});
         toast("warn", "Flatten cancelled", table);
         return { cancelled: true };
       }
