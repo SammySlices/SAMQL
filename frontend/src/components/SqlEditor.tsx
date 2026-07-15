@@ -94,7 +94,6 @@ export const SqlEditor: React.FC<Props> = ({
   const preRef = useRef<HTMLPreElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const blurTimer = useRef<number | null>(null);
 
   const [menu, setMenu] = useState<Menu | null>(null);
@@ -210,52 +209,75 @@ export const SqlEditor: React.FC<Props> = ({
     if (sc && fp) fp.style.transform = tf;
   }, []);
 
-  // measure monospace character width once (cached on the canvas ref)
-  const charWidth = (ta: HTMLTextAreaElement): number => {
-    if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
-    const ctx = canvasRef.current.getContext("2d");
-    if (!ctx) return 7.8;
+  /** Caret offset inside a soft-wrapped textarea (mirror technique). */
+  const caretOffsetInTa = (
+    ta: HTMLTextAreaElement,
+    pos: number,
+  ): { left: number; top: number } => {
     const cs = getComputedStyle(ta);
-    ctx.font = cs.font || `${cs.fontSize} ${cs.fontFamily}`;
-    const w = ctx.measureText("0").width;
-    return w > 0 ? w : 7.8;
-  };
-
-  /** Pixel width of the longest line (tabs expanded to tab-size 2). */
-  const maxLineWidthPx = (ta: HTMLTextAreaElement, text: string): number => {
-    if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
-    const ctx = canvasRef.current.getContext("2d");
-    const cs = getComputedStyle(ta);
-    if (ctx) ctx.font = cs.font || `${cs.fontSize} ${cs.fontFamily}`;
-    const cw = charWidth(ta);
-    let max = 0;
-    for (const line of text.split("\n")) {
-      const expanded = line.replace(/\t/g, "  ");
-      const w = ctx ? ctx.measureText(expanded).width : expanded.length * cw;
-      if (w > max) max = w;
+    const mirror = document.createElement("div");
+    const props = [
+      "boxSizing",
+      "width",
+      "paddingTop",
+      "paddingRight",
+      "paddingBottom",
+      "paddingLeft",
+      "borderTopWidth",
+      "borderRightWidth",
+      "borderBottomWidth",
+      "borderLeftWidth",
+      "fontFamily",
+      "fontSize",
+      "fontWeight",
+      "fontStyle",
+      "letterSpacing",
+      "textTransform",
+      "wordSpacing",
+      "textIndent",
+      "whiteSpace",
+      "wordBreak",
+      "overflowWrap",
+      "lineHeight",
+      "tabSize",
+    ] as const;
+    mirror.style.position = "absolute";
+    mirror.style.visibility = "hidden";
+    mirror.style.left = "-99999px";
+    mirror.style.top = "0";
+    mirror.style.overflow = "hidden";
+    for (const p of props) {
+      mirror.style[p] = cs[p] as string;
     }
-    const pad =
-      (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
-    return Math.ceil(max + pad + 2);
+    mirror.style.width = `${ta.clientWidth}px`;
+    const before = ta.value.slice(0, pos);
+    mirror.textContent = before;
+    const marker = document.createElement("span");
+    marker.textContent = "\u200b";
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    const left = marker.offsetLeft;
+    const top = marker.offsetTop;
+    mirror.remove();
+    return { left, top };
   };
 
   useLayoutEffect(() => {
-    // .424 / long-line fix: the textarea is the scroll extent of .scroll
-    // (the highlight <pre> is an absolute overlay and sizes nothing).
-    // Relying on pre.scrollWidth alone is unreliable for absolute+inset
-    // overlays — long single-line SQL then never widens the scroller and
-    // the highlight clips. Measure the real content width (and height)
-    // and size the textarea so .scroll can reach every character.
+    // Soft-wrap mode: fill the pane width and grow height to the wrapped
+    // content so .scroll can reach every visual line. Mega one-line SQL
+    // (100+ statements) used to need multi-million-px min-width and got
+    // clipped by the browser even with H-scroll.
     const ta = taRef.current;
-    const pre = preRef.current;
-    if (ta && pre) {
-      const cs = getComputedStyle(ta);
-      const lineH = parseFloat(cs.lineHeight) || 20;
-      const padY =
-        (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
-      const contentW = Math.max(maxLineWidthPx(ta, value), pre.scrollWidth);
-      ta.style.minWidth = contentW + "px";
-      ta.style.minHeight = Math.ceil(lineCount * lineH + padY) + "px";
+    const sc = scrollRef.current;
+    if (ta && sc) {
+      ta.style.minWidth = "";
+      ta.style.width = "100%";
+      ta.style.height = "auto";
+      ta.style.minHeight = "0";
+      const contentH = ta.scrollHeight;
+      const viewH = sc.clientHeight || 0;
+      ta.style.height = "";
+      ta.style.minHeight = Math.max(contentH, viewH) + "px";
     }
     syncScroll();
   }, [value, lineCount, syncScroll]);
@@ -331,29 +353,19 @@ export const SqlEditor: React.FC<Props> = ({
       }
       items = items.slice(0, 9);
 
-      // caret pixel position (monospace, white-space: pre -> no wrapping)
+      // caret pixel position (soft-wrap aware via mirror)
       const scroll = scrollRef.current;
       const code = scroll?.parentElement;
       if (!scroll || !code) {
         setMenu(null);
         return;
       }
-      const cs = getComputedStyle(ta);
-      const padL = parseFloat(cs.paddingLeft) || 0;
-      const padT = parseFloat(cs.paddingTop) || 0;
-      const lineH = parseFloat(cs.lineHeight) || 20;
-      const cw = charWidth(ta);
-      const lineStart = before.lastIndexOf("\n") + 1;
-      const caretCol = pos - lineStart;
-      const caretLine = before.split("\n").length - 1;
+      const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 20;
+      const caret = caretOffsetInTa(ta, pos);
 
-      let left =
-        scroll.offsetLeft + padL + caretCol * cw - scroll.scrollLeft;
+      let left = scroll.offsetLeft + caret.left - scroll.scrollLeft;
       let top =
-        scroll.offsetTop +
-        padT +
-        (caretLine + 1) * lineH -
-        scroll.scrollTop;
+        scroll.offsetTop + caret.top + lineH - scroll.scrollTop;
 
       const codeW = code.clientWidth;
       const codeH = code.clientHeight;
@@ -363,12 +375,7 @@ export const SqlEditor: React.FC<Props> = ({
       if (left < 0) left = 2;
       // flip above the caret line if it would overflow the bottom
       if (top + menuH > codeH) {
-        top =
-          scroll.offsetTop +
-          padT +
-          caretLine * lineH -
-          scroll.scrollTop -
-          menuH;
+        top = scroll.offsetTop + caret.top - scroll.scrollTop - menuH;
         if (top < 0) top = 2;
       }
 

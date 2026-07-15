@@ -1,8 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useWinDrag } from "./ActivityShared";
 import { api, copyText } from "../lib/api";
+import type { RootIdChoice } from "../lib/api";
 import type { TableInfo } from "../lib/types";
 import { Icon } from "./Icon";
+import {
+  composeMultiFieldSql,
+  formatFieldSql,
+} from "../lib/fieldExplorerSql";
+import { FlattenUidModal } from "./FlattenUidModal";
 
 // A floating, draggable field-access explorer. Stays open across the IDE,
 // Journal and Node views (it is rendered at the App root, outside the view
@@ -47,6 +53,7 @@ interface Props {
   onFlatten?: (
     engine: string,
     table: string,
+    rootId?: RootIdChoice | null,
   ) => Promise<{
     ok?: boolean;
     error?: string;
@@ -126,12 +133,16 @@ export const FieldExplorer: React.FC<Props> = ({
   const [fields, setFields] = useState<FieldRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [selIdx, setSelIdx] = useState<number | null>(null);
+  // Multi-select (Ctrl/Cmd+click). Order is click order; last is the
+  // "primary" field used for preview / shred CTAs.
+  const [selIdxs, setSelIdxs] = useState<number[]>([]);
   // Shred eligibility for the picked column: whether the relational-shred
   // planner can build tables from it (the memory-safe alternative to a
   // full-column UNNEST). null while unknown; an empty tables list = not
   // shreddable in place (e.g. deep opaque JSON with no relational backing).
   const [shredInfo, setShredInfo] = useState<ShredInfo | null>(null);
   const [shredBusy, setShredBusy] = useState(false);
+  const [flattenUidOpen, setFlattenUidOpen] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
   const [previewSample, setPreviewSample] = useState<string | null>(null);
@@ -145,6 +156,7 @@ export const FieldExplorer: React.FC<Props> = ({
   const reloadFields = (engine: string, table: string, column: string, key: string) => {
     setBusy(true);
     setSelIdx(null);
+    setSelIdxs([]);
     setValidatedAccess(null);
     setValidatedFirstSql(null);
     setValidatedAllSql(null);
@@ -330,22 +342,55 @@ export const FieldExplorer: React.FC<Props> = ({
   }
 
   const sel = selIdx != null && fields ? fields[selIdx] : null;
+  const selectedFields =
+    fields && selIdxs.length
+      ? selIdxs.map((i) => fields[i]).filter(Boolean)
+      : sel
+        ? [sel]
+        : [];
+  const multiCompose =
+    selectedFields.length > 1 && src
+      ? composeMultiFieldSql(
+          src.table,
+          selectedFields.map((f) => ({ name: f.name, access: f.access })),
+        )
+      : null;
   const acc = validatedAccess || sel?.access;
-  const tbl = src ? `"${src.table.replace(/"/g, '""')}"` : '"table"';
   // Prefer server-validated SQL (survives NULL / wrong from_json schema).
+  // Fall back to locally formatted multi-line recipes for readability.
   const firstSql =
+    multiCompose?.firstSql ||
     validatedFirstSql ||
-    (acc?.first ? `SELECT ${acc.first}\nFROM ${tbl}\nLIMIT 1;` : null);
+    (acc ? formatFieldSql(src?.table || "table", acc, "first") : null);
   const allSql =
+    multiCompose?.sql ||
     validatedAllSql ||
-    (acc?.sel
-      ? `SELECT ${acc.sel}\nFROM ${tbl}${(acc.unnests || [])
-          .map((u) => `,\n     ${u}`)
-          .join("")};`
-      : null);
-  const recSql = acc?.recursive
-    ? `SELECT ${acc.recursive}\nFROM ${tbl};`
-    : null;
+    (acc ? formatFieldSql(src?.table || "table", acc, "all") : null);
+  const recSql =
+    !multiCompose && acc
+      ? formatFieldSql(src?.table || "table", acc, "recursive")
+      : null;
+
+  const toggleField = (i: number, opts?: { exclusive?: boolean }) => {
+    if (opts?.exclusive) {
+      setSelIdx(i);
+      setSelIdxs([i]);
+      return;
+    }
+    // Default: toggle into the selection set so multiple fields compose
+    // into one query (no Ctrl required). Last toggled-on field is primary.
+    setSelIdxs((prev) => {
+      const has = prev.includes(i);
+      const next = has ? prev.filter((x) => x !== i) : [...prev, i];
+      setSelIdx(next.length ? next[next.length - 1] : null);
+      return next;
+    });
+  };
+
+  const clearSelection = () => {
+    setSelIdx(null);
+    setSelIdxs([]);
+  };
 
   const isArray = !!sel && (sel.kind === "array" || sel.kind === "array-scalar");
   const shredTables = shredInfo?.tables || [];
@@ -382,13 +427,16 @@ export const FieldExplorer: React.FC<Props> = ({
 
   const runFlatten = () => {
     if (!src || !onFlatten || shredBusy) return;
+    setFlattenUidOpen(true);
+  };
+
+  const confirmFlatten = (rootId: RootIdChoice) => {
+    if (!src || !onFlatten || shredBusy) return;
+    setFlattenUidOpen(false);
     setShredBusy(true);
     const key = src.key;
-    onFlatten(src.engine, src.table)
+    onFlatten(src.engine, src.table, rootId)
       .then((r) => {
-        // Same as shred: only refresh the tree after a successful flatten.
-        // A failed flatten left the explorer on top-level fields until the
-        // user re-picked the table (post-OOM sample fell back to DESCRIBE).
         if (!r?.ok) return;
         onTablesChanged?.();
         reloadFields(src.engine, src.table, src.column, key);
@@ -509,61 +557,122 @@ export const FieldExplorer: React.FC<Props> = ({
                 No nested fields.
               </div>
             ) : (
-              fields.map((f, i) => (
-                <div
-                  key={i}
-                  className={"fx-row" + (i === selIdx ? " sel" : "")}
-                  style={{ paddingLeft: 6 + (f.depth - 1) * 12 }}
-                  onClick={() => setSelIdx(i)}
-                  title={f.type}
-                >
-                  <span
-                    style={{
-                      color: KIND_COLOR[f.kind] || undefined,
-                      fontStyle: f.name === "(element)" ? "italic" : undefined,
-                      opacity: f.name === "(element)" ? 0.7 : 1,
-                    }}
-                  >
-                    {f.name}
+              <>
+                <div className="fx-sel-bar" data-testid="fx-sel-bar">
+                  <span className="faint">
+                    {selIdxs.length
+                      ? `${selIdxs.length} selected`
+                      : "Check fields to combine"}
                   </span>
-                  {(f.kind === "array" || f.kind === "array-scalar") && (
-                    <span style={{ color: "#c98a2b" }}> ⇗</span>
+                  {selIdxs.length > 0 && (
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      data-testid="fx-sel-clear"
+                      onClick={clearSelection}
+                    >
+                      Clear
+                    </button>
                   )}
                 </div>
-              ))
+                {fields.map((f, i) => {
+                  const checked = selIdxs.includes(i);
+                  return (
+                    <div
+                      key={i}
+                      className={"fx-row" + (checked ? " sel" : "")}
+                      style={{ paddingLeft: 6 + (f.depth - 1) * 12 }}
+                      onClick={() => toggleField(i, { exclusive: true })}
+                      title={
+                        f.type +
+                        " — click to view; use the checkbox to add more fields to one query"
+                      }
+                      data-testid={`fx-field-${f.name}`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="fx-check"
+                        checked={checked}
+                        tabIndex={0}
+                        aria-label={`Add ${f.name} to query`}
+                        data-testid={`fx-check-${f.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleField(i);
+                        }}
+                        onChange={() => {
+                          /* click handler owns the toggle */
+                        }}
+                      />
+                      <span
+                        style={{
+                          color: KIND_COLOR[f.kind] || undefined,
+                          fontStyle:
+                            f.name === "(element)" ? "italic" : undefined,
+                          opacity: f.name === "(element)" ? 0.7 : 1,
+                        }}
+                      >
+                        {f.name}
+                      </span>
+                      {(f.kind === "array" || f.kind === "array-scalar") && (
+                        <span style={{ color: "#c98a2b" }}> ⇗</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
             )}
           </div>
         </div>
         <div className="fx-right">
-          {!sel ? (
+          {!sel && selectedFields.length === 0 ? (
             <div className="faint" style={{ padding: 10 }}>
-              Click a field on the left to see how to query it.
+              Click a field to see how to query it. Check multiple fields to
+              build one combined query (e.g. top-level Id plus a nested array
+              field).
             </div>
           ) : (
             <>
               <div className="fx-field-name">
-                {sel.name}
-                <span className="ctype" style={{ marginLeft: 8 }}>
-                  {sel.kind}
-                </span>
+                {selectedFields.length > 1
+                  ? `${selectedFields.length} fields`
+                  : sel?.name}
+                {selectedFields.length <= 1 && sel && (
+                  <span className="ctype" style={{ marginLeft: 8 }}>
+                    {sel.kind}
+                  </span>
+                )}
               </div>
-              {previewBusy && (
+              {selectedFields.length > 1 && (
+                <div className="fx-note faint" data-testid="fx-multi-hint">
+                  Combined query: outer scalars repeat on each exploded nested
+                  row. {multiCompose?.error || ""}
+                </div>
+              )}
+              {previewBusy && selectedFields.length <= 1 && (
                 <div className="faint" style={{ padding: "4px 0" }}>
                   <span className="spin" /> validating SQL…
                 </div>
               )}
-              {!previewBusy && previewSample != null && (
+              {!previewBusy && previewSample != null && selectedFields.length <= 1 && (
                 <div className="fx-note faint" data-testid="fx-preview-sample">
                   Sample: <code>{previewSample}</code>
                 </div>
               )}
-              {!previewBusy && previewErr && (
+              {!previewBusy && previewErr && selectedFields.length <= 1 && (
                 <div className="fx-note" style={{ color: "#c44" }} data-testid="fx-preview-error">
                   Preview: {previewErr}
                 </div>
               )}
-              {firstSql && block("First record ([1] path)", firstSql)}
-              {isArray && (
+              {firstSql &&
+                !multiCompose?.error &&
+                block(
+                  selectedFields.length > 1
+                    ? "Peek one row (all selected fields)"
+                    : "Peek one value",
+                  firstSql,
+                )}
+              {isArray && selectedFields.length <= 1 && (
                 <div className="fx-shred" data-testid="fx-shred">
                   {shredEligible ? (
                     <>
@@ -630,16 +739,41 @@ export const FieldExplorer: React.FC<Props> = ({
                 </div>
               )}
               {allSql &&
+                !multiCompose?.error &&
                 block(
-                  isArray ? "All rows (UNNEST — small data)" : "All rows (UNNEST chain)",
+                  selectedFields.length > 1
+                    ? "All rows (combined fields)"
+                    : isArray
+                      ? "All rows (explode array — small data)"
+                      : "All rows",
                   allSql,
                 )}
-              {recSql && block("Explode everything under it (recursive)", recSql)}
-              {acc?.note && <div className="fx-note faint">{acc.note}</div>}
+              {multiCompose?.error && (
+                <div
+                  className="fx-note"
+                  style={{ color: "#c44" }}
+                  data-testid="fx-multi-error"
+                >
+                  {multiCompose.error}
+                </div>
+              )}
+              {recSql && block("Explode everything under it", recSql)}
+              {acc?.note && selectedFields.length <= 1 && (
+                <div className="fx-note faint">{acc.note}</div>
+              )}
             </>
           )}
         </div>
       </div>
+      {flattenUidOpen && src && (
+        <FlattenUidModal
+          open
+          engine={src.engine}
+          table={src.table}
+          onConfirm={confirmFlatten}
+          onCancel={() => setFlattenUidOpen(false)}
+        />
+      )}
     </div>
   );
 };

@@ -403,8 +403,8 @@ JOIN identifier AS i
               while they run (same cancel rail as the IDE).
             </li>
             <li>
-              Drag the corner grip to resize a cell; long lines scroll
-              horizontally inside the editor.
+              Drag the corner grip to resize a cell; long lines soft-wrap
+              inside the editor so the full statement stays visible.
             </li>
             <li>
               Cell results are session-scoped working sets — export

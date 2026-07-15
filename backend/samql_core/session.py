@@ -7056,41 +7056,17 @@ class Session:
         except Exception as e:
             return {"error": "sniff failed: %s" % str(e)[:300]}
 
-    def flatten_table(self, table, base=None, query_id=None, root_id=None):
-        """.474: the Load-modal "flatten" toggle, done at TABLE level.
-        Turns one nested table into the relational set the model wants:
-        a base table of every top-level scalar PLUS single-struct
-        columns flattened inline; a <base>_joinkeys table of _rid + one
-        ordinal per top-level list; and one <base>_<list> table per
-        top-level list, exploded with the element's fields inlined.
-
-        Reads through the loaded table's Parquet cache so file_row_number
-        gives a stable _rid (materializing a one-shot cache first if the
-        table isn't already parquet-backed -- e.g. a real CTAS table).
-        Returns {ok, created:[{name,rows}], base} or {error}/{cancelled}.
-        """
-        from . import shred as _shred
-        from .diagnostics import parse_duckdb_type as _P
-        from .engines import _is_interrupt as _is_intr
-        mgr = self.duckdb
-        if mgr is None:
-            return {"error": "Flatten runs on the DuckDB engine."}
-        # Nested flatten/shred CTAS needs a generous engine ceiling. Adaptive
-        # budget sync can otherwise leave a crushed limit after a large load.
-        try:
-            from .engines import ensure_heavy_op_engine_memory
-            ensure_heavy_op_engine_memory(mgr)
-        except Exception:
-            pass
-        base = base or table or "rec"
+    def _flatten_table_columns(self, mgr, table):
+        """Parse + sample-enrich columns for flatten / root_id (same as flatten_table)."""
+        from .diagnostics import (parse_duckdb_type as _P,
+                                  json_samples_to_type_node,
+                                  column_needs_json_shred)
+        from .sqlutil import quote_ident as _qid
         try:
             raw = mgr._column_types_raw(table)
         except Exception as e:
-            return {"error": "Couldn't read the table's columns: "
-                    + err_str(e)}
-        from .diagnostics import (json_samples_to_type_node,
-                                  column_needs_json_shred)
-        from .sqlutil import quote_ident as _qid
+            return None, None, {"error": "Couldn't read the table's columns: "
+                                + err_str(e)}
         columns = []
         json_access_cols = set()
         for name, typ in raw.items():
@@ -7114,6 +7090,162 @@ class Session:
                 except Exception:
                     pass
             columns.append((name, node))
+        return columns, json_access_cols, None
+
+    def _flatten_promote_col(self, columns):
+        """Single wrapping LIST(STRUCT) column to promote, else None."""
+        _list_specs = []
+        for name, node in columns:
+            if (node or {}).get("t") == "list":
+                _list_specs.append({"list_path": [name], "node": node})
+        promote = (len(_list_specs) == 1
+                   and ((_list_specs[0]["node"].get("of") or {}).get("t")
+                        == "struct"))
+        if not promote:
+            return None
+        lp = _list_specs[0]["list_path"]
+        return lp[0] if len(lp) == 1 else None
+
+    def table_root_id_options(self, engine, table):
+        """Unique-identifier candidates for Field Explorer flatten picker.
+
+        Same schema walk as load-time sniff, against the loaded table (with
+        opaque-JSON sample enrichment). Map candidates include live keys.
+        """
+        from . import shred as _shred
+        from .sqlutil import quote_ident as _qid
+        mgr = self.duckdb if engine == "duckdb" else self.db
+        if mgr is None:
+            return {"error": "Engine not available."}
+        columns, _ja, err = self._flatten_table_columns(mgr, table)
+        if err:
+            return err
+        promote_col = self._flatten_promote_col(columns)
+        cands = _shred.root_id_candidates(columns, promote_col=promote_col)
+        # Fill map keys from a small sample (same idea as sniff_root_candidates).
+        for c in cands:
+            if not c.get("map"):
+                continue
+            keys = []
+            try:
+                if promote_col is not None:
+                    frm = ("(SELECT unnest(%s) AS e0 FROM %s) AS s0"
+                           % (_qid(promote_col), _qid(table)))
+                    alias = "e0"
+                else:
+                    frm = "%s AS t0" % _qid(table)
+                    alias = "t0"
+                in_list = c.get("in_list")
+                if in_list:
+                    lp = ".".join(_qid(x) for x in in_list)
+                    frm = ("(SELECT unnest(%s.%s) AS eL FROM %s) AS s1"
+                           % (alias, lp, frm))
+                    alias = "eL"
+                mexpr = "%s.%s" % (alias,
+                                   ".".join(_qid(x) for x in c["steps"]))
+                q = ("SELECT DISTINCT k FROM (SELECT unnest(map_keys("
+                     "%s)) AS k FROM %s WHERE %s IS NOT NULL) LIMIT 40"
+                     % (mexpr, frm, mexpr))
+                _, krows = mgr.execute(q)
+                keys = sorted({str(r[0]) for r in krows
+                               if r and r[0] is not None})
+            except Exception:
+                keys = []
+            c["keys"] = keys
+        return {"ok": True, "candidates": cands,
+                "promote": promote_col is not None,
+                "promote_col": promote_col}
+
+    def table_root_id_stats(self, engine, table, root_id):
+        """Uniqueness probe for a chosen root_id on a loaded table.
+
+        Returns counts so the Field Explorer picker can warn on duplicates
+        before Confirm Flatten.
+        """
+        from . import shred as _shred
+        from .sqlutil import quote_ident as _qid
+        mgr = self.duckdb if engine == "duckdb" else self.db
+        if mgr is None:
+            return {"error": "Engine not available."}
+        columns, _ja, err = self._flatten_table_columns(mgr, table)
+        if err:
+            return err
+        promote_col = self._flatten_promote_col(columns)
+        cand = _shred.validate_root_choice(
+            columns, promote_col, root_id)
+        if cand is None:
+            return {"error": "That field was not found in this table's schema."}
+        mk = cand.get("map_key")
+        if promote_col is not None:
+            alias = "e0"
+            expr = _shred.render_root_expr(cand, alias, map_key=mk)
+            frm = ("(SELECT unnest(%s) AS e0 FROM %s) AS s0"
+                   % (_qid(promote_col), _qid(table)))
+        else:
+            alias = "t0"
+            expr = _shred.render_root_expr(cand, alias, map_key=mk)
+            frm = "%s AS t0" % _qid(table)
+        try:
+            _, rows = mgr.execute(
+                "SELECT COUNT(*), COUNT(%s), COUNT(DISTINCT %s) FROM %s"
+                % (expr, expr, frm))
+        except Exception as e:
+            return {"error": "Couldn't check uniqueness: " + err_str(e)}
+        if not rows:
+            return {"error": "Couldn't check uniqueness."}
+        records, nonnull, distinct = (int(rows[0][0]), int(rows[0][1]),
+                                      int(rows[0][2]))
+        duplicated = max(0, nonnull - distinct)
+        nulls = max(0, records - nonnull)
+        unique = (records > 0 and nulls == 0 and duplicated == 0
+                  and distinct == records)
+        return {
+            "ok": True,
+            "label": cand.get("label"),
+            "records": records,
+            "nonnull": nonnull,
+            "distinct": distinct,
+            "duplicated": duplicated,
+            "nulls": nulls,
+            "unique": unique,
+            "choice": {
+                "steps": cand.get("steps"),
+                "in_list": cand.get("in_list"),
+                "map": bool(cand.get("map")),
+                "map_key": cand.get("map_key"),
+                "label": cand.get("label"),
+            },
+        }
+
+    def flatten_table(self, table, base=None, query_id=None, root_id=None):
+        """.474: the Load-modal "flatten" toggle, done at TABLE level.
+        Turns one nested table into the relational set the model wants:
+        a base table of every top-level scalar PLUS single-struct
+        columns flattened inline; a <base>_joinkeys table of _rid + one
+        ordinal per top-level list; and one <base>_<list> table per
+        top-level list, exploded with the element's fields inlined.
+
+        Reads through the loaded table's Parquet cache so file_row_number
+        gives a stable _rid (materializing a one-shot cache first if the
+        table isn't already parquet-backed -- e.g. a real CTAS table).
+        Returns {ok, created:[{name,rows}], base} or {error}/{cancelled}.
+        """
+        from . import shred as _shred
+        from .engines import _is_interrupt as _is_intr
+        mgr = self.duckdb
+        if mgr is None:
+            return {"error": "Flatten runs on the DuckDB engine."}
+        # Nested flatten/shred CTAS needs a generous engine ceiling. Adaptive
+        # budget sync can otherwise leave a crushed limit after a large load.
+        try:
+            from .engines import ensure_heavy_op_engine_memory
+            ensure_heavy_op_engine_memory(mgr)
+        except Exception:
+            pass
+        base = base or table or "rec"
+        columns, json_access_cols, err = self._flatten_table_columns(mgr, table)
+        if err:
+            return err
         # .501: uniquify planned names against the live catalog (minus this
         # base, which re-flatten replaces) so path-only child names ("legs",
         # "json") from two different files can't clobber each other.
@@ -7467,6 +7599,12 @@ class Session:
                     sql, spec["name"], spec["kind"], parent=_par)
                 if early is not None:
                     return early
+                # Heartbeat between child tables so a long Field-Explorer
+                # flatten doesn't look stalled on the activity tray.
+                try:
+                    opreg.beat(rows=len(created), op_id=query_id)
+                except Exception:
+                    pass
 
             # 2) deep hierarchy for each nested-array-bearing top-level list.
             #    plan_shred names its ROOT after `base`, so pass the shallow

@@ -992,8 +992,10 @@ console.log("OK");
             ("field list fetches the column field tree",
              "api" in fx and "columnFields(" in fx),
             ("right pane assembles first / all-rows / recursive queries",
-             "First record" in fx and "UNNEST chain" in fx
-             and "recursive" in fx and "acc.unnests" in fx),
+             ("Peek one value" in fx or "First record" in fx)
+             and "All rows" in fx
+             and "recursive" in fx
+             and ("formatFieldSql" in fx or "acc.unnests" in fx)),
             ("copy buttons use the shared copyText helper",
              "copyText" in fx),
             ("App renders it OUTSIDE the view switch so it persists",
@@ -1008,6 +1010,14 @@ console.log("OK");
              os.path.isfile(os.path.join(
                  FRONTEND, "src", "components",
                  "FieldExplorer.component.test.tsx"))),
+            ("Flatten opens Unique Identifier picker before Confirm",
+             "FlattenUidModal" in fx
+             and os.path.isfile(os.path.join(
+                 FRONTEND, "src", "components", "FlattenUidModal.tsx"))
+             and "tableRootIdOptions" in api_src
+             and "tableRootIdStats" in api_src
+             and "flattenTableStart" in app
+             and "rootId" in app),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing, "field explorer broken: " + "; ".join(missing))

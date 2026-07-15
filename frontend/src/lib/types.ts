@@ -399,7 +399,14 @@ export interface FsListing {
 
 export interface LoadProgress {
   id: string;
-  state: "starting" | "reading" | "finalizing" | "done" | "error" | "cancelled";
+  state:
+    | "starting"
+    | "running"
+    | "reading"
+    | "finalizing"
+    | "done"
+    | "error"
+    | "cancelled";
   bytes_done: number;
   bytes_total: number;
   rows: number | null;

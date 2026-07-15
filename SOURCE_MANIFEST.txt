@@ -99,6 +99,8 @@ frontend/src/components/DocsModal.tsx
 frontend/src/components/ErrorLogModal.tsx
 frontend/src/components/FieldExplorer.component.test.tsx
 frontend/src/components/FieldExplorer.tsx
+frontend/src/components/FlattenUidModal.component.test.tsx
+frontend/src/components/FlattenUidModal.tsx
 frontend/src/components/FloatingPanel.tsx
 frontend/src/components/FlowCacheModal.tsx
 frontend/src/components/Icon.tsx
@@ -125,6 +127,7 @@ frontend/src/components/ReconcileModal.tsx
 frontend/src/components/ServerWatchdog.component.test.tsx
 frontend/src/components/ServerWatchdog.tsx
 frontend/src/components/Sidebar.tsx
+frontend/src/components/SqlEditor.longline.component.test.tsx
 frontend/src/components/SqlEditor.tsx
 frontend/src/components/StorageMemoryModal.tsx
 frontend/src/components/TablePropsModal.tsx
@@ -209,6 +212,8 @@ frontend/src/lib/dashboardPdf.ts
 frontend/src/lib/docking.ts
 frontend/src/lib/echart.ts
 frontend/src/lib/eyeCare.component.test.tsx
+frontend/src/lib/fieldExplorerSql.component.test.ts
+frontend/src/lib/fieldExplorerSql.ts
 frontend/src/lib/format.ts
 frontend/src/lib/ids.ts
 frontend/src/lib/loadForm.ts

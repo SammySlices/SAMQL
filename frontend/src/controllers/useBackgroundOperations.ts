@@ -161,7 +161,13 @@ export function useBackgroundOperations({
 
   const onTaskComplete = useCallback(
     async (task: TaskCard) => {
-      if (task.kind === "flatten") return;
+      if (task.kind === "flatten") {
+        // Table flatten-start (Field Explorer) and CSV flatten both land here.
+        // Field Explorer also polls loadProgress for its own toast; still
+        // refresh the catalog so the sidebar picks up new child tables.
+        if (task.state === "done") refreshTables();
+        return;
+      }
       refreshTables();
       if (task.state === "error") {
         toast(
