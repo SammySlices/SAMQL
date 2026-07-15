@@ -1684,6 +1684,13 @@ class Api:
                                    b.get("table", ""), b.get("column", ""))
 
     @staticmethod
+    def table_fields(s, m, body, ctx):
+        """Unified Field Explorer tree for one loaded table (all columns)."""
+        b = body or {}
+        name = unquote(m.group("name"))
+        return s.table_field_tree(b.get("engine", "duckdb"), name)
+
+    @staticmethod
     def column_access_preview(s, m, body, ctx):
         """Validate Field Explorer SQL by executing First (LIMIT 1) with fallbacks."""
         b = body or {}
@@ -4132,6 +4139,7 @@ ROUTES = [
      Api.table_root_id_options),
     ("POST", r"^/api/table/(?P<name>[^/]+)/root-id-stats$",
      Api.table_root_id_stats),
+    ("POST", r"^/api/table/(?P<name>[^/]+)/fields$", Api.table_fields),
     ("POST", r"^/api/table/rename$", Api.table_rename),
     ("POST", r"^/api/table/drop$", Api.table_drop),
     ("POST", r"^/api/table/optimize-start$", Api.table_optimize_start),

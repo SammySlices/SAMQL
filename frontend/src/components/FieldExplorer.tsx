@@ -12,10 +12,9 @@ import { FlattenUidModal } from "./FlattenUidModal";
 
 // A floating, draggable field-access explorer. Stays open across the IDE,
 // Journal and Node views (it is rendered at the App root, outside the view
-// switch). Pick a nested (JSON) source column, click any field in its tree,
-// and the right pane shows the queries to access it: the first-record [1]
-// path, the all-rows UNNEST chain, and (for arrays) the recursive one-shot.
-// Minimize collapses to a draggable icon that expands on click.
+// switch). Pick a loaded table (flatten-off = one table with nested fields),
+// multi-select fields for a combined query, and Flatten to tables prompts
+// for a Unique Identifier from any level of that table.
 
 export const FIELD_EXPLORER_STORE_KEY = "samql.fieldExplorer.v1";
 
@@ -24,6 +23,9 @@ type FieldRow = {
   name: string;
   type: string;
   kind: string;
+  path?: string | null;
+  /** Owning top-level column (table-rooted tree). */
+  column?: string;
   access?: {
     first?: string;
     sel?: string;
@@ -108,21 +110,22 @@ export const FieldExplorer: React.FC<Props> = ({
   onShred,
   onFlatten,
 }) => {
-  // nested columns across loaded tables = the selectable "JSON files"
+  // One source per loaded table that has nested content (not one per column).
+  // Flatten-off JSON is a single catalog table with several nested columns —
+  // listing each column as its own source looked like separate loaded tables.
   const sources = useMemo(() => {
-    const out: { key: string; label: string; engine: string; table: string; column: string }[] = [];
+    const out: { key: string; label: string; engine: string; table: string }[] =
+      [];
     for (const t of tables) {
       if (t.remote) continue;
-      for (const c of t.columns || []) {
-        if (!c.hint) continue; // nested columns only
-        out.push({
-          key: `${t.engine}\u0000${t.name}\u0000${c.name}`,
-          label: `${t.name} › ${c.name}`,
-          engine: t.engine,
-          table: t.name,
-          column: c.name,
-        });
-      }
+      const nested = (t.columns || []).some((c) => !!c.hint);
+      if (!nested) continue;
+      out.push({
+        key: `${t.engine}\u0000${t.name}`,
+        label: t.name,
+        engine: t.engine,
+        table: t.name,
+      });
     }
     return out;
   }, [tables]);
@@ -133,13 +136,10 @@ export const FieldExplorer: React.FC<Props> = ({
   const [fields, setFields] = useState<FieldRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [selIdx, setSelIdx] = useState<number | null>(null);
-  // Multi-select (Ctrl/Cmd+click). Order is click order; last is the
-  // "primary" field used for preview / shred CTAs.
+  // Multi-select via checkboxes. Order is check order; last checked / click
+  // is the "primary" field used for preview / shred CTAs.
   const [selIdxs, setSelIdxs] = useState<number[]>([]);
-  // Shred eligibility for the picked column: whether the relational-shred
-  // planner can build tables from it (the memory-safe alternative to a
-  // full-column UNNEST). null while unknown; an empty tables list = not
-  // shreddable in place (e.g. deep opaque JSON with no relational backing).
+  // Shred eligibility for the primary field's owning column.
   const [shredInfo, setShredInfo] = useState<ShredInfo | null>(null);
   const [shredBusy, setShredBusy] = useState(false);
   const [flattenUidOpen, setFlattenUidOpen] = useState(false);
@@ -153,7 +153,10 @@ export const FieldExplorer: React.FC<Props> = ({
   const [validatedAllSql, setValidatedAllSql] = useState<string | null>(null);
   const src = sources.find((s) => s.key === srcKey) || null;
 
-  const reloadFields = (engine: string, table: string, column: string, key: string) => {
+  const primaryColumn = (row: FieldRow | null | undefined) =>
+    row?.column || row?.name || "";
+
+  const reloadFields = (engine: string, table: string, key: string) => {
     setBusy(true);
     setSelIdx(null);
     setSelIdxs([]);
@@ -162,8 +165,9 @@ export const FieldExplorer: React.FC<Props> = ({
     setValidatedAllSql(null);
     setPreviewErr(null);
     setPreviewSample(null);
+    setShredInfo(null);
     api
-      .columnFields(engine, table, column)
+      .tableFields(engine, table)
       .then((r) => {
         if (key !== srcKey) return;
         setFields((r.fields || []) as FieldRow[]);
@@ -174,21 +178,6 @@ export const FieldExplorer: React.FC<Props> = ({
       .finally(() => {
         if (key === srcKey) setBusy(false);
       });
-    if (engine === "duckdb") {
-      api
-        .shredPlan(engine, table, column)
-        .then((r) => {
-          if (key !== srcKey) return;
-          setShredInfo({
-            tables: (r.tables || []).map((t) => ({ name: t.name })),
-            notes: r.notes,
-            error: r.error,
-          });
-        })
-        .catch(() => {
-          if (key === srcKey) setShredInfo(null);
-        });
-    }
   };
   const initPos = {
     x: typeof saved.x === "number" ? saved.x : 120,
@@ -207,7 +196,7 @@ export const FieldExplorer: React.FC<Props> = ({
       setShredInfo(null);
       return;
     }
-    reloadFields(src.engine, src.table, src.column, src.key);
+    reloadFields(src.engine, src.table, src.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey]);
 
@@ -223,12 +212,25 @@ export const FieldExplorer: React.FC<Props> = ({
     }
     const forKey = src.key;
     const idx = selIdx;
+    const row = fields[idx];
+    const col = primaryColumn(row);
+    // Scalars already have a simple quoted-ident recipe — skip the nested preview.
+    if (row.kind === "scalar" && (!row.access?.unnests || !row.access.unnests.length)) {
+      setValidatedAccess(row.access || null);
+      setValidatedFirstSql(null);
+      setValidatedAllSql(null);
+      setPreviewErr(null);
+      setPreviewSample(null);
+      setPreviewBusy(false);
+      return;
+    }
     setPreviewBusy(true);
     setPreviewErr(null);
     setPreviewSample(null);
+    // field_idx is within the *column* tree; use path so table-rooted indices work.
     api
-      .columnAccessPreview(src.engine, src.table, src.column, {
-        field_idx: idx,
+      .columnAccessPreview(src.engine, src.table, col, {
+        field_path: row.path || row.name,
       })
       .then((r) => {
         if (forKey !== srcKey || idx !== selIdx) return;
@@ -240,7 +242,6 @@ export const FieldExplorer: React.FC<Props> = ({
             r.sample == null ? null : String(r.sample).slice(0, 200),
           );
           setPreviewErr(null);
-          // Keep the tree's recipe in sync with the validated one.
           setFields((prev) => {
             if (!prev || !prev[idx]) return prev;
             const next = prev.slice();
@@ -264,6 +265,33 @@ export const FieldExplorer: React.FC<Props> = ({
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selIdx, srcKey]);
+
+  // Shred plan follows the primary field's owning column.
+  const shredCol =
+    selIdx != null && fields?.[selIdx]
+      ? primaryColumn(fields[selIdx])
+      : "";
+  useEffect(() => {
+    if (!src || src.engine !== "duckdb" || !shredCol) {
+      setShredInfo(null);
+      return;
+    }
+    const forKey = src.key;
+    const forCol = shredCol;
+    api
+      .shredPlan(src.engine, src.table, shredCol)
+      .then((r) => {
+        if (forKey !== srcKey || forCol !== shredCol) return;
+        setShredInfo({
+          tables: (r.tables || []).map((t) => ({ name: t.name })),
+          notes: r.notes,
+          error: r.error,
+        });
+      })
+      .catch(() => {
+        if (forKey === srcKey) setShredInfo(null);
+      });
+  }, [src, srcKey, shredCol]);
 
   // ---- close: X button, and Esc anywhere while the panel is open (not mini) ----
   useEffect(() => {
@@ -402,22 +430,21 @@ export const FieldExplorer: React.FC<Props> = ({
   const flattenEligible = !!src && src.engine === "duckdb" && !!onFlatten;
 
   const runShred = () => {
-    if (!src || !onShred || !shredEligible || shredBusy) return;
+    if (!src || !onShred || !shredEligible || shredBusy || !sel) return;
+    const col = primaryColumn(sel);
+    if (!col) return;
     setShredBusy(true);
     const key = src.key;
     onShred(
       src.engine,
       src.table,
-      src.column,
+      col,
       shredTables.map((t) => t.name),
     )
       .then((r) => {
-        // onShred resolves on failure too ({error}). Reloading after an OOM
-        // re-samples under a exhausted engine and replaces the rich tree
-        // with DESCRIBE-only top-level fields — keep the tree on failure.
         if (!r?.ok) return;
         onTablesChanged?.();
-        reloadFields(src.engine, src.table, src.column, key);
+        reloadFields(src.engine, src.table, key);
       })
       .catch(() => {
         /* onShred surfaces its own error toast */
@@ -439,7 +466,7 @@ export const FieldExplorer: React.FC<Props> = ({
       .then((r) => {
         if (!r?.ok) return;
         onTablesChanged?.();
-        reloadFields(src.engine, src.table, src.column, key);
+        reloadFields(src.engine, src.table, key);
       })
       .catch(() => {
         /* onFlatten surfaces its own error toast */
@@ -532,10 +559,10 @@ export const FieldExplorer: React.FC<Props> = ({
             className="fx-src"
             value={srcKey}
             onChange={(e) => setSrcKey(e.target.value)}
-            title="Pick a nested (JSON) column to explore"
+            title="Pick a loaded table to explore"
           >
             <option value="">
-              {sources.length ? "Pick a JSON source…" : "No nested columns loaded"}
+              {sources.length ? "Pick a table…" : "No nested tables loaded"}
             </option>
             {sources.map((s) => (
               <option key={s.key} value={s.key}>
@@ -550,11 +577,11 @@ export const FieldExplorer: React.FC<Props> = ({
               </div>
             ) : !fields ? (
               <div className="faint" style={{ padding: 8 }}>
-                Pick a source above.
+                Pick a table above.
               </div>
             ) : fields.length === 0 ? (
               <div className="faint" style={{ padding: 8 }}>
-                No nested fields.
+                No fields on this table.
               </div>
             ) : (
               <>
@@ -562,7 +589,7 @@ export const FieldExplorer: React.FC<Props> = ({
                   <span className="faint">
                     {selIdxs.length
                       ? `${selIdxs.length} selected`
-                      : "Check fields to combine"}
+                      : "Check fields to combine (e.g. id + nested array)"}
                   </span>
                   {selIdxs.length > 0 && (
                     <button

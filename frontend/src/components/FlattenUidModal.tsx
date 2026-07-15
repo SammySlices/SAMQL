@@ -133,8 +133,9 @@ export const FlattenUidModal: React.FC<{
       testId="fx-flatten-uid-modal"
     >
       <p className="hint" style={{ marginTop: 0 }}>
-        Pick a field that uniquely identifies each record. It is carried onto
-        every flattened table as <code>root_id</code>, and a{" "}
+        Pick a field that uniquely identifies each source record (any level of
+        this table). It is carried onto every flattened table as{" "}
+        <code>root_id</code>, aligned to each flattened row, and a{" "}
         <code>Master_Keys</code> table lists the distinct values.
       </p>
       {busy && (

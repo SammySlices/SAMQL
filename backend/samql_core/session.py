@@ -1321,6 +1321,70 @@ class Session:
                 return sampled
         return {"type": raw, "fields": rows}
 
+    def table_field_tree(self, engine, table):
+        """Unified Field Explorer tree for one loaded table.
+
+        Flatten-off JSON often expands to several top-level columns on a
+        *single* catalog table (``id``, ``legs``, ``nest``, …). Field Explorer
+        used to list each nested column as its own "source"; this returns one
+        tree so the UI can show the table once with every column + nested
+        field underneath. Each row carries ``column`` (owning top-level name)
+        so preview / shred stay column-scoped while multi-select spans the
+        whole table.
+        """
+        from .sqlutil import quote_ident as _qid
+        mgr = self.duckdb if engine == "duckdb" else self.db
+        if mgr is None or not hasattr(mgr, "_column_types_raw"):
+            return {"fields": [], "error": "Engine not available."}
+        try:
+            raw_cols = mgr._column_types_raw(table) or {}
+        except Exception as e:
+            return {"fields": [], "error": err_str(e)}
+        if not raw_cols:
+            return {"fields": [], "error": "No columns."}
+
+        out = []
+        for col, typ in raw_cols.items():
+            sub = self.column_field_tree(engine, table, col)
+            nested = list(sub.get("fields") or [])
+            q = _qid(col)
+            if nested:
+                root_kind = "struct"
+                tu = (typ or "").strip().upper()
+                if tu.endswith("[]") or tu in ("JSON", "JSON[]"):
+                    for n in nested:
+                        if int(n.get("depth") or 0) == 1 and n.get("kind") in (
+                                "array", "array-scalar"):
+                            root_kind = n.get("kind") or "array"
+                            break
+                out.append({
+                    "depth": 1,
+                    "name": col,
+                    "type": typ or sub.get("type") or "",
+                    "kind": root_kind,
+                    "path": col,
+                    "note": None,
+                    "column": col,
+                    "access": {"first": q, "sel": q, "unnests": []},
+                })
+                for n in nested:
+                    row = dict(n)
+                    row["depth"] = int(n.get("depth") or 0) + 1
+                    row["column"] = col
+                    out.append(row)
+            else:
+                out.append({
+                    "depth": 1,
+                    "name": col,
+                    "type": typ or "",
+                    "kind": "scalar",
+                    "path": col,
+                    "note": None,
+                    "column": col,
+                    "access": {"first": q, "sel": q, "unnests": []},
+                })
+        return {"ok": True, "fields": out, "table": table}
+
     # Live-cell field discovery: how many rows to pull when DESCRIBE stops at
     # opaque JSON (flatten-off maximum_depth). Kept modest — union of shapes,
     # not a full scan.

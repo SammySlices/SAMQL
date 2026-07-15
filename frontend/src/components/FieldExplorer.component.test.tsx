@@ -16,6 +16,7 @@ import type { TableInfo } from "../lib/types";
 vi.mock("../lib/api", () => ({
   api: {
     columnFields: vi.fn(),
+    tableFields: vi.fn(),
     columnAccessPreview: vi.fn(),
     shredPlan: vi.fn(),
     tableRootIdOptions: vi.fn(),
@@ -34,13 +35,38 @@ const nestedTable = (): TableInfo[] => [
   },
 ];
 
+const multiColTable = (): TableInfo[] => [
+  {
+    engine: "duckdb",
+    name: "orders",
+    source: "orders.json",
+    row_count: 10,
+    columns: [
+      { name: "id", type: "BIGINT" },
+      { name: "legs", type: "STRUCT(x INT)[]", hint: "list" },
+      { name: "nest", type: "JSON", hint: "json" },
+    ],
+  },
+];
+
 const arrayFieldTree = {
   fields: [
     {
       depth: 1,
+      name: "json",
+      type: "JSON",
+      kind: "struct",
+      column: "json",
+      path: "json",
+      access: { first: '"json"', sel: '"json"', unnests: [] },
+    },
+    {
+      depth: 2,
       name: "legs",
       type: "array of object",
       kind: "array",
+      column: "json",
+      path: "json.legs",
       access: {
         first: "json -> '$.legs[0]'",
         sel: "json(e1)",
@@ -54,14 +80,53 @@ const arrayFieldTree = {
 describe("FieldExplorer shred steering", () => {
   beforeEach(() => {
     localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
-    vi.mocked(api.columnFields).mockResolvedValue(arrayFieldTree as any);
+    vi.mocked(api.tableFields).mockResolvedValue(arrayFieldTree as any);
     vi.mocked(api.columnAccessPreview).mockResolvedValue({
       ok: true,
       sample: "preview-ok",
       sql: "SELECT json ->> '$.legs[0]' FROM \"orders\"",
       all_sql: "SELECT json(e1) FROM \"orders\", UNNEST(...)",
-      access: arrayFieldTree.fields[0].access,
+      access: arrayFieldTree.fields[1].access,
     } as any);
+  });
+
+  it("lists one source per loaded table (not per nested column)", async () => {
+    vi.mocked(api.tableFields).mockResolvedValue({
+      fields: [
+        {
+          depth: 1,
+          name: "id",
+          type: "BIGINT",
+          kind: "scalar",
+          column: "id",
+          access: { first: '"id"', sel: '"id"', unnests: [] },
+        },
+        {
+          depth: 1,
+          name: "legs",
+          type: "STRUCT(x INT)[]",
+          kind: "array",
+          column: "legs",
+          access: { first: '"legs"', sel: '"legs"', unnests: [] },
+        },
+      ],
+    } as any);
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={multiColTable()}
+        onToast={vi.fn()}
+      />,
+    );
+    const select = await screen.findByTitle("Pick a loaded table to explore");
+    const opts = Array.from(select.querySelectorAll("option")).map(
+      (o) => o.textContent,
+    );
+    expect(opts.filter((t) => t === "orders")).toHaveLength(1);
+    expect(opts.some((t) => t?.includes("›"))).toBe(false);
+    await screen.findByText("id");
+    await screen.findByText("legs");
   });
 
   it("offers 'Shred to tables' for an array node when the column is shreddable", async () => {
@@ -196,7 +261,7 @@ describe("FieldExplorer shred steering", () => {
 
     const legRow = await screen.findByText("legs");
     fireEvent.click(legRow);
-    const fieldsCallsBefore = vi.mocked(api.columnFields).mock.calls.length;
+    const fieldsCallsBefore = vi.mocked(api.tableFields).mock.calls.length;
 
     fireEvent.click(await screen.findByTestId("fx-flatten-run"));
     fireEvent.change(await screen.findByTestId("fx-uid-select"), {
@@ -211,7 +276,7 @@ describe("FieldExplorer shred steering", () => {
     // Failed flatten must not refresh tables or re-fetch fields — a post-OOM
     // sample falls back to DESCRIBE-only top-level fields.
     expect(onTablesChanged).not.toHaveBeenCalled();
-    expect(vi.mocked(api.columnFields).mock.calls.length).toBe(fieldsCallsBefore);
+    expect(vi.mocked(api.tableFields).mock.calls.length).toBe(fieldsCallsBefore);
     expect(screen.getAllByText("legs").length).toBeGreaterThan(0);
   });
 
@@ -257,13 +322,14 @@ describe("FieldExplorer shred steering", () => {
 
   it("composes Id + nested field when Ctrl-selecting two fields", async () => {
     vi.mocked(api.shredPlan).mockResolvedValue({ tables: [] } as any);
-    vi.mocked(api.columnFields).mockResolvedValue({
+    vi.mocked(api.tableFields).mockResolvedValue({
       fields: [
         {
           depth: 1,
           name: "Id",
           type: "number",
           kind: "scalar",
+          column: "json",
           access: {
             first: "json ->> '$.Id'",
             sel: "json ->> '$.Id'",
@@ -275,6 +341,7 @@ describe("FieldExplorer shred steering", () => {
           name: "fixingdate",
           type: "string",
           kind: "scalar",
+          column: "json",
           access: {
             first: "json -> '$.legs[0]' ->> '$.fixingdate'",
             sel: "e1 ->> '$.fixingdate'",
@@ -320,7 +387,7 @@ describe("FieldExplorer shred steering", () => {
 describe("FieldExplorer minimize", () => {
   beforeEach(() => {
     localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
-    vi.mocked(api.columnFields).mockResolvedValue({ fields: [] } as any);
+    vi.mocked(api.tableFields).mockResolvedValue({ fields: [] } as any);
     vi.mocked(api.columnAccessPreview).mockResolvedValue({ ok: false } as any);
   });
 

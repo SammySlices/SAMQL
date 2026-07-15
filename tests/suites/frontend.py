@@ -988,9 +988,10 @@ console.log("OK");
              and "SquareMinus" in fx
              and "FIELD_EXPLORER_STORE_KEY" in fx),
             ("source dropdown lists nested columns of loaded tables",
-             "c.hint" in fx and "Pick a JSON source" in fx),
+             "c.hint" in fx and ("Pick a table" in fx or "Pick a JSON source" in fx)),
             ("field list fetches the column field tree",
-             "api" in fx and "columnFields(" in fx),
+             "api" in fx
+             and ("tableFields(" in fx or "columnFields(" in fx)),
             ("right pane assembles first / all-rows / recursive queries",
              ("Peek one value" in fx or "First record" in fx)
              and "All rows" in fx
