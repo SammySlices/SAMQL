@@ -54,6 +54,38 @@ export interface Features {
   secrets: boolean;
 }
 
+/** Local SQL assistant (optional llama.cpp pack) status. */
+export interface AssistantStatus {
+  enabled?: boolean;
+  available?: boolean;
+  pack_ok?: boolean;
+  reason?: string | null;
+  hint?: string | null;
+  root?: string | null;
+  model?: string | null;
+  model_name?: string;
+  quant?: string;
+  duckdb_busy?: boolean;
+  generating?: boolean;
+  server_url?: string | null;
+  refuse_low_memory?: boolean;
+  memory?: {
+    memory_total_mb?: number;
+    memory_available_mb?: number;
+  };
+}
+
+export interface AssistantChatResult {
+  ok: boolean;
+  reply?: string;
+  sql?: string;
+  dialect?: string;
+  error?: string;
+  cancelled?: boolean;
+  queued_reason?: string;
+  status?: AssistantStatus;
+}
+
 export interface Health {
   ok: boolean;
   app: string;

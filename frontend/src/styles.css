@@ -9603,3 +9603,144 @@ button:hover .icon-trash svg {
   gap: 4px;
   flex-shrink: 0;
 }
+
+/* ---------- Local SQL assistant (beta) ---------- */
+.sql-asst-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 95;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--raised);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+}
+.sql-asst-fab:hover {
+  background: var(--raised-2);
+}
+.sql-asst-fab.open {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.sql-asst-win {
+  position: fixed;
+  z-index: 96;
+  width: 380px;
+  max-width: calc(100vw - 24px);
+  height: 460px;
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.sql-asst-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  user-select: none;
+  background: var(--raised);
+}
+.sql-asst-badge {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.sql-asst-status {
+  padding: 6px 12px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.sql-asst-msgs {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sql-asst-msg {
+  max-width: 100%;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.sql-asst-msg.user .sql-asst-msg-body {
+  margin-left: 24px;
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel-2));
+  border: 1px solid var(--border);
+  border-radius: 10px 10px 2px 10px;
+  padding: 8px 10px;
+}
+.sql-asst-msg.assistant .sql-asst-msg-body,
+.sql-asst-msg.system .sql-asst-msg-body {
+  margin-right: 16px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px 10px 10px 2px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+.sql-asst-msg.error .sql-asst-msg-body {
+  border-color: color-mix(in srgb, var(--error) 50%, var(--border));
+  color: var(--error);
+}
+.sql-asst-sql {
+  margin: 6px 16px 0 0;
+}
+.sql-asst-sql pre {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 140px;
+  overflow: auto;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+}
+.sql-asst-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.sql-asst-foot {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--raised);
+}
+.sql-asst-input {
+  flex: 1 1 auto;
+  resize: none;
+  min-height: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+.sql-asst-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}

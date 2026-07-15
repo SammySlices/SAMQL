@@ -5,6 +5,7 @@ import type {
   LoadedTable, FsListing, LoadProgress, JobSummary, ColumnFilter,
   ReconcileDrill, ActivityStatus, EngineResetResult,
   TaskCard, DiagnosticsList, DiagnosticRun,
+  AssistantStatus, AssistantChatResult,
 } from "./types";
 import { buildLoadForm } from "./loadForm";
 import type { ReconcileDetailRequest } from "./reconcileRequest";
@@ -123,6 +124,7 @@ const UNBOUNDED_ENDPOINTS = new Set<string>([
   "/api/load/sniff",
   "/api/directory/read",
   "/api/folder/read",
+  "/api/assistant/chat",
 ]);
 function isUnboundedPath(path: string): boolean {
   const p = path.split("?")[0];
@@ -342,6 +344,20 @@ export const api = {
   // "Resetting…" forever when the engine is bottlenecked. (abortInflight is a
   // standalone export, since it makes no /api call of its own.)
   status: () => jsonFetch<ActivityStatus>("/api/status", { timeoutMs: 8000 }),
+  // Optional offline SQL assistant (llama.cpp pack; DuckDB-idle gated).
+  assistantStatus: () =>
+    jsonFetch<AssistantStatus>("/api/assistant/status", { timeoutMs: 8000 }),
+  assistantChat: (question: string, dialect: string = "native") =>
+    jsonFetch<AssistantChatResult>("/api/assistant/chat", {
+      method: "POST",
+      body: JSON.stringify({ question, dialect }),
+    }),
+  assistantCancel: () =>
+    jsonFetch<{ ok: boolean }>("/api/assistant/cancel", {
+      method: "POST",
+      body: "{}",
+      timeoutMs: 8000,
+    }),
   // The unified activity feed: every background task normalized into a card.
   // The tray polls this in place of the per-task progress modals.
   tasks: () => jsonFetch<{ tasks: TaskCard[] }>("/api/tasks", { timeoutMs: 8000 }),

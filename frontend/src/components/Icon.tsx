@@ -670,4 +670,10 @@ export const Icon = {
       <rect width="7" height="5" x="3" y="16" rx="1" />
     </S>
   ),
+  // Lucide message-circle — local SQL assistant FAB
+  MessageCircle: (p: P) => (
+    <S {...p}>
+      <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+    </S>
+  ),
 };

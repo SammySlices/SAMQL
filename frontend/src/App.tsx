@@ -47,6 +47,7 @@ const Dashboard = lazy(() =>
 import { Modal } from "./components/Modal";
 import { ErrorLogModal } from "./components/ErrorLogModal";
 import { DiagnosticsModal } from "./components/DiagnosticsModal";
+import { SqlAssistant } from "./components/SqlAssistant";
 import {
   StorageMemoryModal,
   type StorageMemoryTab,
@@ -4431,6 +4432,16 @@ export default function App() {
           </FloatingPanel>
         );
       })}
+
+      <SqlAssistant
+        dialect={dialect}
+        onInsertSql={insertText}
+        onLoadSql={(sql) => {
+          loadSqlIntoEditor(sql);
+          switchView("ide");
+        }}
+        onSwitchIde={() => switchView("ide")}
+      />
 
       {/* ---------- toasts ---------- */}
       {dropChip && (

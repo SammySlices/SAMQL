@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-15.616
+Current build:   2026-07-15.617
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-15.617  (v2.16.4)
+
+LOCAL SQL ASSISTANT BETA (1.5B). Optional offline llama.cpp pack
+(Qwen2.5-Coder-1.5B-Instruct Q4) with bottom-right chat UI. Generates
+only while DuckDB is idle; schema-only prompts; Insert/Open into IDE.
+No Ollama; no cloud APIs. Pack is copied beside SamQL (work PCs need
+no download). Additive — load/join/flatten paths unchanged. Refreshed
+samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-15.616  (v2.16.4)

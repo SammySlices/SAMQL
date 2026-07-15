@@ -3201,6 +3201,31 @@ class Api:
             raise ApiError(400, "pos must be an integer.")
         return s.statement_at_cursor(_sql, _pos)
 
+    # ---- Local SQL assistant (optional llama.cpp pack) -------------
+    @staticmethod
+    def assistant_status(s, m, body, ctx):
+        from samql_core import assistant as _asst
+        return _asst.status(s)
+
+    @staticmethod
+    def assistant_chat(s, m, body, ctx):
+        # English → DuckDB/SparkSQL via offline llama-server. Refuses while
+        # DuckDB is busy; never mutates load/join/flatten state.
+        from samql_core import assistant as _asst
+        b = body or {}
+        question = b.get("question", "")
+        if not isinstance(question, str):
+            raise ApiError(400, "question must be a string.")
+        dialect = b.get("dialect", "native")
+        if not isinstance(dialect, str):
+            dialect = "native"
+        return _asst.chat(s, question, dialect=dialect)
+
+    @staticmethod
+    def assistant_cancel(s, m, body, ctx):
+        from samql_core import assistant as _asst
+        return _asst.cancel()
+
     # ---- history / saved -------------------------------------------
     @staticmethod
     def history_get(s, m, body, ctx):
@@ -4176,6 +4201,9 @@ ROUTES = [
     ("POST", r"^/api/run-tests$", Api.run_tests),
     ("POST", r"^/api/sql/format$", Api.sql_format),
     ("POST", r"^/api/sql/statement-at$", Api.sql_statement_at),
+    ("GET", r"^/api/assistant/status$", Api.assistant_status),
+    ("POST", r"^/api/assistant/chat$", Api.assistant_chat),
+    ("POST", r"^/api/assistant/cancel$", Api.assistant_cancel),
     ("GET", r"^/api/history$", Api.history_get),
     ("DELETE", r"^/api/history$", Api.history_clear),
     ("GET", r"^/api/errors$", Api.errors_get),

@@ -17,6 +17,7 @@ Start-SamQL-AppWindow.ps1
 Test-SamQL-All.ps1
 VERSION
 WINDOWS_BUILD_CHECKLIST.txt
+assistant/README.txt
 backend/launcher_app.py
 backend/requirements.txt
 backend/samql.spec
@@ -24,6 +25,7 @@ backend/samql_core/__init__.py
 backend/samql_core/_brand.py
 backend/samql_core/apiload.py
 backend/samql_core/applyvars.py
+backend/samql_core/assistant.py
 backend/samql_core/connection_profiles.py
 backend/samql_core/diagnostics.py
 backend/samql_core/engines.py
@@ -130,6 +132,8 @@ frontend/src/components/ServerWatchdog.component.test.tsx
 frontend/src/components/ServerWatchdog.tsx
 frontend/src/components/Sidebar.tablesReorder.component.test.tsx
 frontend/src/components/Sidebar.tsx
+frontend/src/components/SqlAssistant.component.test.tsx
+frontend/src/components/SqlAssistant.tsx
 frontend/src/components/SqlEditor.longline.component.test.tsx
 frontend/src/components/SqlEditor.tsx
 frontend/src/components/StorageMemoryModal.tsx
@@ -282,6 +286,7 @@ tests/suites/__init__.py
 tests/suites/backend.py
 tests/suites/frontend.py
 tests/suites/http_api.py
+tests/test_assistant.py
 tests/test_nodeflow_resources.py
 tests/test_optimizations_dual_engine.py
 tests/test_refactor_phase2.py
