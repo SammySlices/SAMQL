@@ -395,6 +395,7 @@ export const api = {
         kind: string;
         path?: string | null;
         note?: string | null;
+        column?: string;
         access?: {
           first?: string;
           sel?: string;
@@ -413,6 +414,40 @@ export const api = {
     }>("/api/column/fields", {
       method: "POST",
       body: JSON.stringify({ engine, table, column }),
+    }),
+
+  /** Unified Field Explorer tree: one loaded table → all columns + nests. */
+  tableFields: (engine: string, table: string) =>
+    jsonFetch<{
+      ok?: boolean;
+      error?: string;
+      table?: string;
+      fields: {
+        depth: number;
+        name: string;
+        type: string;
+        kind: string;
+        path?: string | null;
+        note?: string | null;
+        column?: string;
+        access?: {
+          first?: string;
+          sel?: string;
+          unnests?: string[];
+          recursive?: string;
+          note?: string;
+          alt?: {
+            first?: string;
+            sel?: string;
+            unnests?: string[];
+            recursive?: string;
+            note?: string;
+          };
+        };
+      }[];
+    }>(`/api/table/${encodeURIComponent(table)}/fields`, {
+      method: "POST",
+      body: JSON.stringify({ engine }),
     }),
 
   columnAccessPreview: (
