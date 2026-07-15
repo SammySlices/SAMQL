@@ -4,6 +4,7 @@ import {
   DASH_HEADER_DEFAULT,
   DASH_HEADER_MAX,
   DASH_HEADER_MIN,
+  DASH_TEXT_FONTS,
   DASHBOARD_WORKSPACE_KEY,
   collectWorkflowNames,
   deleteDashboardInWorkspace,
@@ -13,6 +14,7 @@ import {
   formatDashboardLastRun,
   formatDashboardRuntime,
   graphHasSamqlDashboard,
+  groupDashTextFonts,
   kindFromUpstream,
   loadDashboardWorkspace,
   moveDashboardInWorkspace,
@@ -46,6 +48,24 @@ describe("dashboardModel", () => {
     expect(ws.dashboards[0].widgets.every((w) => w.showHeader !== false)).toBe(
       true,
     );
+  });
+
+  it("preserves widgetsLocked on normalize / round-trip", () => {
+    const ws = normalizeWorkspace({
+      version: 2,
+      activeId: "d1",
+      dashboards: [
+        {
+          id: "d1",
+          name: "Main",
+          widgetsLocked: true,
+          widgets: [{ id: "w1", x: 0, y: 0, w: 6, h: 3 }],
+        },
+      ],
+    });
+    expect(ws.dashboards[0].widgetsLocked).toBe(true);
+    saveDashboardWorkspace(ws);
+    expect(loadDashboardWorkspace().dashboards[0].widgetsLocked).toBe(true);
   });
 
   it("migrates legacy cell layouts into a workspace", () => {
@@ -474,5 +494,37 @@ describe("dashboardModel", () => {
       b.id,
     );
     expect(only.ok).toBe(false);
+  });
+
+  it("exposes a large grouped system-font catalog with stable legacy values", () => {
+    expect(DASH_TEXT_FONTS.length).toBeGreaterThanOrEqual(40);
+    const values = DASH_TEXT_FONTS.map((f) => f.value);
+    expect(new Set(values).size).toBe(values.length);
+    // Backward-compatible stacks for existing saved dashboards.
+    for (const legacy of [
+      "inherit",
+      '"Segoe UI", system-ui, sans-serif',
+      "Arial, Helvetica, sans-serif",
+      "Verdana, Geneva, sans-serif",
+      '"Trebuchet MS", sans-serif',
+      "Georgia, serif",
+      '"Times New Roman", Times, serif',
+      "Garamond, serif",
+      '"Courier New", Courier, monospace',
+    ]) {
+      expect(values).toContain(legacy);
+    }
+    const groups = groupDashTextFonts();
+    expect(groups.map((g) => g.group)).toEqual([
+      "Default",
+      "Sans",
+      "Serif",
+      "Mono",
+      "Display",
+    ]);
+    expect(groups.reduce((n, g) => n + g.fonts.length, 0)).toBe(
+      DASH_TEXT_FONTS.length,
+    );
+    expect(values.some((v) => /Calibri|Consolas|Impact/.test(v))).toBe(true);
   });
 });

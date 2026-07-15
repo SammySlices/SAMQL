@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -36,7 +37,7 @@ import {
   DASH_PAGE_TITLE_SIZE_DEFAULT,
   DASH_PAGE_TITLE_SIZE_MAX,
   DASH_PAGE_TITLE_SIZE_MIN,
-  DASH_TEXT_FONTS,
+  groupDashTextFonts,
   DASH_TEXT_SIZE_DEFAULT,
   DASH_TEXT_SIZE_MAX,
   DASH_TEXT_SIZE_MIN,
@@ -88,6 +89,33 @@ function saveDashConfigChrome(patch: DashConfigChrome) {
   } catch {
     /* ignore quota / private mode */
   }
+}
+
+/** Grouped `<option>`s for page-title and text-widget font pickers. */
+function DashTextFontSelectOptions() {
+  return (
+    <>
+      {groupDashTextFonts().map(({ group, fonts }) =>
+        group === "Default" ? (
+          <React.Fragment key={group}>
+            {fonts.map((f) => (
+              <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
+                {f.label}
+              </option>
+            ))}
+          </React.Fragment>
+        ) : (
+          <optgroup key={group} label={group}>
+            {fonts.map((f) => (
+              <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
+                {f.label}
+              </option>
+            ))}
+          </optgroup>
+        ),
+      )}
+    </>
+  );
 }
 
 export type DashboardCommand = {
@@ -416,7 +444,7 @@ export const Dashboard: React.FC<{
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [eligible, setEligible] = useState<{ name: string }[]>([]);
   const [loadingEligible, setLoadingEligible] = useState(false);
-  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [configKind, setConfigKind] = useState<
     null | "title" | { widgetId: string }
@@ -448,14 +476,55 @@ export const Dashboard: React.FC<{
     orig: DashboardWidget;
   } | null>(null);
   const boardRef = useRef<HTMLDivElement>(null);
+  const pageTitleRef = useRef<HTMLTextAreaElement>(null);
   const handledCmd = useRef(0);
   const handledLoad = useRef(0);
+  // Layout undo/redo — widget snapshots only (not lock, not lastRun*).
+  // Coalesce rapid edits (drag/resize/typing) like Journal; reset on board switch.
+  const dashHist = useRef<{
+    past: DashboardWidget[][];
+    future: DashboardWidget[][];
+    at: number;
+  }>({ past: [], future: [], at: 0 });
+  const dashHistPrev = useRef<DashboardWidget[]>([]);
+  const dashHistApplying = useRef(false);
+  const dashHistBoardId = useRef("");
+  const [, bumpDashHist] = useState(0);
 
   const doc = activeDashboard(workspace);
+  const widgetsLocked = !!doc.widgetsLocked;
+  const widgetsSig = useMemo(() => JSON.stringify(doc.widgets), [doc.widgets]);
 
   useEffect(() => {
     saveDashboardWorkspace(workspace);
   }, [workspace]);
+
+  useEffect(() => {
+    if (dashHistBoardId.current !== doc.id) {
+      dashHistBoardId.current = doc.id;
+      dashHist.current = { past: [], future: [], at: 0 };
+      dashHistPrev.current = doc.widgets;
+      dashHistApplying.current = false;
+      bumpDashHist((n) => n + 1);
+      return;
+    }
+    if (dashHistApplying.current) {
+      dashHistApplying.current = false;
+      dashHistPrev.current = doc.widgets;
+      return;
+    }
+    // No layout change (e.g. Strict Mode effect re-run) — don't seed a fake undo step.
+    if (JSON.stringify(dashHistPrev.current) === widgetsSig) return;
+    const now = Date.now();
+    if (now - dashHist.current.at > 600 || dashHist.current.past.length === 0) {
+      dashHist.current.past.push(dashHistPrev.current);
+      if (dashHist.current.past.length > 50) dashHist.current.past.shift();
+    }
+    dashHist.current.future = [];
+    dashHist.current.at = now;
+    dashHistPrev.current = doc.widgets;
+    bumpDashHist((n) => n + 1);
+  }, [widgetsSig, doc.id, doc.widgets]);
 
   useEffect(() => {
     // Config is a Field Explore–style float; do not steal the tables panel slot.
@@ -549,6 +618,69 @@ export const Dashboard: React.FC<{
     });
   }, []);
 
+  const undoDash = useCallback(() => {
+    const h = dashHist.current;
+    if (h.past.length === 0) return;
+    h.future.push(dashHistPrev.current);
+    const prev = h.past.pop() as DashboardWidget[];
+    dashHistApplying.current = true;
+    dashHistPrev.current = prev;
+    setActiveDoc((d) => ({
+      ...d,
+      widgets: packWidgetsNoOverlap(prev),
+    }));
+    bumpDashHist((n) => n + 1);
+  }, [setActiveDoc]);
+
+  const redoDash = useCallback(() => {
+    const h = dashHist.current;
+    if (h.future.length === 0) return;
+    h.past.push(dashHistPrev.current);
+    const next = h.future.pop() as DashboardWidget[];
+    dashHistApplying.current = true;
+    dashHistPrev.current = next;
+    setActiveDoc((d) => ({
+      ...d,
+      widgets: packWidgetsNoOverlap(next),
+    }));
+    bumpDashHist((n) => n + 1);
+  }, [setActiveDoc]);
+
+  const canUndoDash = dashHist.current.past.length > 0;
+  const canRedoDash = dashHist.current.future.length > 0;
+
+  const toggleWidgetsLock = useCallback(() => {
+    setActiveDoc((d) => ({ ...d, widgetsLocked: !d.widgetsLocked }));
+  }, [setActiveDoc]);
+
+  // Scoped to Dashboard mount (view is exclusive); skip editable fields so
+  // native text undo and SQL editor (other views) are unaffected.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        el?.isContentEditable
+      ) {
+        return;
+      }
+      const k = e.key.toLowerCase();
+      if (k === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undoDash();
+      } else if ((k === "z" && e.shiftKey) || k === "y") {
+        e.preventDefault();
+        redoDash();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undoDash, redoDash]);
+
   const updateWidget = useCallback(
     (id: string, patch: Partial<DashboardWidget>) => {
       setActiveDoc((d) => {
@@ -599,7 +731,7 @@ export const Dashboard: React.FC<{
     });
     pulse(id, "dash-anim-add", 520);
     setSelectedId(id);
-    setAddMenuOpen(false);
+    setMoreMenuOpen(false);
   }, [pulse, setActiveDoc]);
 
   const addTextWidget = useCallback(() => {
@@ -630,7 +762,7 @@ export const Dashboard: React.FC<{
     });
     pulse(id, "dash-anim-add", 520);
     setSelectedId(id);
-    setAddMenuOpen(false);
+    setMoreMenuOpen(false);
   }, [pulse, setActiveDoc]);
 
   const removeWidget = useCallback(
@@ -957,6 +1089,7 @@ export const Dashboard: React.FC<{
   }, [loadRequest, onLoadConsumed, onToast, onWorkflowsChanged]);
 
   const onPointerDownMove = (e: React.PointerEvent, widget: DashboardWidget) => {
+    if (widgetsLocked) return;
     if (
       (e.target as HTMLElement).closest(
         [
@@ -995,6 +1128,7 @@ export const Dashboard: React.FC<{
   };
 
   const onPointerDownResize = (e: React.PointerEvent, widget: DashboardWidget) => {
+    if (widgetsLocked) return;
     e.preventDefault();
     e.stopPropagation();
     setSelectedId(widget.id);
@@ -1012,6 +1146,7 @@ export const Dashboard: React.FC<{
     e: React.PointerEvent,
     widget: DashboardWidget,
   ) => {
+    if (widgetsLocked) return;
     e.preventDefault();
     e.stopPropagation();
     dragRef.current = {
@@ -1088,6 +1223,7 @@ export const Dashboard: React.FC<{
 
   const fitWidgetToMetrics = useCallback(
     (widgetId: string, widthPx: number, heightPx: number) => {
+      if (widgetsLocked) return;
       const board = boardRef.current;
       if (!board) return;
       setActiveDoc((d) => {
@@ -1116,7 +1252,7 @@ export const Dashboard: React.FC<{
         };
       });
     },
-    [setActiveDoc],
+    [setActiveDoc, widgetsLocked],
   );
 
   const boardHeight = useMemo(() => {
@@ -1135,6 +1271,36 @@ export const Dashboard: React.FC<{
     },
     [],
   );
+
+  /** Grow page-title height with wrapped lines so the board below shifts down. */
+  const syncPageTitleHeight = useCallback(() => {
+    const el = pageTitleRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.max(el.scrollHeight, 1)}px`;
+  }, []);
+
+  useLayoutEffect(() => {
+    syncPageTitleHeight();
+  }, [
+    syncPageTitleHeight,
+    workspace.pageTitle,
+    workspace.pageTitleSize,
+    workspace.pageTitleFontFamily,
+    workspace.pageTitleBold,
+    workspace.pageTitleItalic,
+    workspace.pageTitleUnderline,
+  ]);
+
+  useEffect(() => {
+    const el = pageTitleRef.current;
+    const wrap = el?.parentElement;
+    if (!wrap || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => syncPageTitleHeight());
+    // Observe the wrap width (not the textarea height) so grow sync cannot loop.
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [syncPageTitleHeight]);
 
   const titleConfigPanel = (
     <div className="dash-config" data-testid="dashboard-title-config">
@@ -1167,11 +1333,7 @@ export const Dashboard: React.FC<{
           patchPageTitle({ pageTitleFontFamily: e.target.value })
         }
       >
-        {DASH_TEXT_FONTS.map((f) => (
-          <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
-            {f.label}
-          </option>
-        ))}
+        {DashTextFontSelectOptions()}
       </select>
       <label className="nb2-lbl">Style</label>
       <div className="dash-text-style-row">
@@ -1380,16 +1542,13 @@ export const Dashboard: React.FC<{
           <label className="nb2-lbl">Font</label>
           <select
             className="nb2-in"
+            data-testid="dashboard-widget-font"
             value={selected.fontFamily || "inherit"}
             onChange={(e) =>
               updateWidget(selected.id, { fontFamily: e.target.value })
             }
           >
-            {DASH_TEXT_FONTS.map((f) => (
-              <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
-                {f.label}
-              </option>
-            ))}
+            {DashTextFontSelectOptions()}
           </select>
           <label className="nb2-lbl">Style</label>
           <div className="dash-text-style-row">
@@ -1581,16 +1740,25 @@ export const Dashboard: React.FC<{
       <div className="dash-toolbar">
         <div className="dash-toolbar-left">
           <div className="dash-title-wrap">
-            <input
+            <textarea
+              ref={pageTitleRef}
               className="dash-title-input"
               data-testid="dashboard-page-title"
+              rows={1}
+              wrap="soft"
+              spellCheck={false}
+              aria-label="Dashboard heading"
               value={workspace.pageTitle ?? DASH_PAGE_TITLE_DEFAULT}
-              onChange={(e) =>
+              onChange={(e) => {
                 setWorkspace((prev) => ({
                   ...prev,
                   pageTitle: e.target.value,
-                }))
-              }
+                }));
+                // Sync before paint when possible; layout effect covers style changes.
+                const el = e.currentTarget;
+                el.style.height = "0px";
+                el.style.height = `${Math.max(el.scrollHeight, 1)}px`;
+              }}
               style={{
                 fontSize:
                   workspace.pageTitleSize ?? DASH_PAGE_TITLE_SIZE_DEFAULT,
@@ -1642,66 +1810,185 @@ export const Dashboard: React.FC<{
             ))}
             <option value="__new__">+ Add dashboard…</option>
           </select>
-          <button
-            type="button"
-            className="btn ghost"
-            data-testid="dashboard-delete"
-            disabled={workspace.dashboards.length <= 1}
-            title={
-              workspace.dashboards.length <= 1
-                ? "Keep at least one dashboard"
-                : "Delete current dashboard"
-            }
-            onClick={(e) => deleteDashboardBoard(e.currentTarget)}
-          >
-            <Icon.Trash size={14} />
-          </button>
-          <div className="dash-add-wrap">
+          <div className="dash-more-wrap">
             <button
               type="button"
-              className="btn ghost"
-              data-testid="dashboard-add-widget"
-              onClick={() => setAddMenuOpen((v) => !v)}
-              title="Add widget"
+              className={
+                "btn sm ghost" +
+                (moreMenuOpen || widgetsLocked ? " active" : "")
+              }
+              data-testid="dashboard-more"
+              aria-expanded={moreMenuOpen}
+              aria-haspopup="menu"
+              title={
+                widgetsLocked
+                  ? "More actions (widgets locked)"
+                  : "More actions"
+              }
+              onClick={() => setMoreMenuOpen((v) => !v)}
             >
-              <Icon.Plus size={14} /> Add Widget
+              <Icon.MoreHorizontal size={14} />
+              More
+              {widgetsLocked ? (
+                <span className="dash-more-lock-badge" aria-hidden="true">
+                  <Icon.Lock size={11} />
+                </span>
+              ) : null}
             </button>
-            {addMenuOpen ? (
-              <div className="dash-add-menu" data-testid="dashboard-add-menu">
-                <button
-                  type="button"
-                  className="dash-add-menu-item"
-                  data-testid="dashboard-add-text"
-                  onClick={addTextWidget}
+            {moreMenuOpen ? (
+              <>
+                <div
+                  className="rc-backdrop"
+                  data-testid="dashboard-more-backdrop"
+                  onMouseDown={() => setMoreMenuOpen(false)}
+                />
+                <div
+                  className="dash-more-menu"
+                  data-testid="dashboard-more-menu"
+                  role="menu"
+                  onMouseDown={(e) => e.stopPropagation()}
                 >
-                  Add Text
-                  <span className="dash-add-menu-note">Section header</span>
-                </button>
-                <button
-                  type="button"
-                  className="dash-add-menu-item"
-                  data-testid="dashboard-add-empty"
-                  onClick={addDataWidget}
-                >
-                  Empty Widget
-                  <span className="dash-add-menu-note">Bind a NodeFlow workflow</span>
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    className="dash-more-menu-item"
+                    role="menuitem"
+                    data-testid="dashboard-undo"
+                    disabled={!canUndoDash}
+                    onClick={() => {
+                      undoDash();
+                      setMoreMenuOpen(false);
+                    }}
+                    title="Undo layout edit (Ctrl+Z)"
+                  >
+                    <span className="dash-more-menu-label">
+                      <Icon.Undo size={14} />
+                      Undo
+                    </span>
+                    <span className="dash-more-menu-note">Ctrl+Z</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="dash-more-menu-item"
+                    role="menuitem"
+                    data-testid="dashboard-redo"
+                    disabled={!canRedoDash}
+                    onClick={() => {
+                      redoDash();
+                      setMoreMenuOpen(false);
+                    }}
+                    title="Redo layout edit (Ctrl+Shift+Z)"
+                  >
+                    <span className="dash-more-menu-label">
+                      <Icon.Redo size={14} />
+                      Redo
+                    </span>
+                    <span className="dash-more-menu-note">Ctrl+Shift+Z</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      "dash-more-menu-item" +
+                      (widgetsLocked ? " active" : "")
+                    }
+                    role="menuitem"
+                    data-testid="dashboard-lock"
+                    aria-pressed={widgetsLocked}
+                    onClick={() => {
+                      toggleWidgetsLock();
+                      setMoreMenuOpen(false);
+                    }}
+                    title={
+                      widgetsLocked
+                        ? "Unlock widgets (allow move & resize)"
+                        : "Lock widgets (prevent move & resize)"
+                    }
+                  >
+                    <span className="dash-more-menu-label">
+                      {widgetsLocked ? (
+                        <Icon.Lock size={14} />
+                      ) : (
+                        <Icon.Unlock size={14} />
+                      )}
+                      {widgetsLocked ? "Unlock widgets" : "Lock widgets"}
+                    </span>
+                    <span className="dash-more-menu-note">
+                      {widgetsLocked ? "Locked" : "Unlocked"}
+                    </span>
+                  </button>
+                  <div className="dash-more-menu-sep" role="separator" />
+                  <button
+                    type="button"
+                    className="dash-more-menu-item"
+                    role="menuitem"
+                    data-testid="dashboard-add-text"
+                    onClick={addTextWidget}
+                  >
+                    <span className="dash-more-menu-label">
+                      <Icon.StickyNote size={14} />
+                      Add Text
+                    </span>
+                    <span className="dash-more-menu-note">Section header</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="dash-more-menu-item"
+                    role="menuitem"
+                    data-testid="dashboard-add-empty"
+                    onClick={addDataWidget}
+                  >
+                    <span className="dash-more-menu-label">
+                      <Icon.Plus size={14} />
+                      Empty Widget
+                    </span>
+                    <span className="dash-more-menu-note">
+                      Bind a NodeFlow workflow
+                    </span>
+                  </button>
+                  <div className="dash-more-menu-sep" role="separator" />
+                  <button
+                    type="button"
+                    className="dash-more-menu-item"
+                    role="menuitem"
+                    data-testid="dashboard-export-pdf"
+                    disabled={exportingPdf}
+                    title="Export dashboard as PDF to Downloads"
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      void exportPdf();
+                    }}
+                  >
+                    <span className="dash-more-menu-label">
+                      <Icon.FileDown size={14} />
+                      {exportingPdf ? "Exporting…" : "Export PDF"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="dash-more-menu-item danger"
+                    role="menuitem"
+                    data-testid="dashboard-delete"
+                    disabled={workspace.dashboards.length <= 1}
+                    title={
+                      workspace.dashboards.length <= 1
+                        ? "Keep at least one dashboard"
+                        : "Delete current dashboard"
+                    }
+                    onClick={(e) => {
+                      setMoreMenuOpen(false);
+                      deleteDashboardBoard(e.currentTarget);
+                    }}
+                  >
+                    <span className="dash-more-menu-label">
+                      <Icon.Trash size={14} />
+                      Delete board
+                    </span>
+                  </button>
+                </div>
+              </>
             ) : null}
           </div>
           <div className="dash-run-wrap">
             <div className="dash-run-actions">
-              <button
-                type="button"
-                className="btn ghost"
-                data-testid="dashboard-export-pdf"
-                disabled={exportingPdf}
-                title="Export dashboard as PDF to Downloads"
-                onClick={() => void exportPdf()}
-              >
-                <Icon.FileDown size={14} />
-                {exportingPdf ? "Exporting…" : "Export PDF"}
-              </button>
               <button
                 type="button"
                 className={running ? "btn danger" : "btn primary"}
@@ -1743,9 +2030,10 @@ export const Dashboard: React.FC<{
 
       <div className="dash-board-fill">
       <div
-        className="dash-board"
+        className={"dash-board" + (widgetsLocked ? " dash-board-locked" : "")}
         ref={boardRef}
         data-testid="dashboard-board"
+        data-locked={widgetsLocked ? "true" : "false"}
         style={{
           minHeight: Math.max(boardHeight, 480),
         }}
@@ -1787,6 +2075,7 @@ export const Dashboard: React.FC<{
                 (isText ? " dash-widget-text" : "") +
                 (widget.liquidGlass ? " dash-widget-glass" : "") +
                 (selectedId === widget.id ? " selected" : "") +
+                (widgetsLocked ? " dash-widget-locked" : "") +
                 (anim ? " " + anim : "")
               }
               data-testid={`dashboard-widget-${widget.id}`}
@@ -1802,8 +2091,9 @@ export const Dashboard: React.FC<{
                   <div
                     className="dash-text-grab dash-text-grab-edge"
                     data-testid={`dashboard-text-grab-${widget.id}`}
-                    title="Drag to move"
+                    title={widgetsLocked ? "Widgets locked" : "Drag to move"}
                     onPointerDown={(e) => {
+                      if (widgetsLocked) return;
                       e.preventDefault();
                       e.stopPropagation();
                       setSelectedId(widget.id);
@@ -1822,8 +2112,9 @@ export const Dashboard: React.FC<{
                   />
                   <div
                     className="dash-text-grab dash-text-grab-top"
-                    title="Drag to move"
+                    title={widgetsLocked ? "Widgets locked" : "Drag to move"}
                     onPointerDown={(e) => {
+                      if (widgetsLocked) return;
                       e.preventDefault();
                       e.stopPropagation();
                       setSelectedId(widget.id);

@@ -5218,14 +5218,20 @@ def main(argv=None):
                 if os.name == "nt":
                     try:
                         import ctypes as _ct
-                        _ct.windll.shell32.\
-                            SetCurrentProcessExplicitAppUserModelID(
-                                "SamQL.App.2")  # .532: keep in lockstep
-                            # with launcher_app.APP_AUMID -- the old
-                            # identities carry an Edge-poisoned icon
-                            # cache
-                    except Exception:
-                        pass
+                        _fn = _ct.windll.shell32.\
+                            SetCurrentProcessExplicitAppUserModelID
+                        _fn.argtypes = [_ct.c_wchar_p]
+                        _fn.restype = _ct.HRESULT
+                        _hr = int(_fn("SamQL.App.2"))  # .532: lockstep
+                        # with launcher_app.APP_AUMID -- the old
+                        # identities carry an Edge-poisoned icon cache
+                        if _hr != 0:
+                            print("  WARN process AppUserModelID hr="
+                                  "0x%08X" % (_hr & 0xFFFFFFFF,),
+                                  flush=True)
+                    except Exception as _ae:
+                        print("  WARN process AppUserModelID not set "
+                              "(%r)" % (_ae,), flush=True)
 
                 def _srv_ico():
                     base = getattr(sys, "_MEIPASS", None)
@@ -5238,6 +5244,71 @@ def main(argv=None):
                         if os.path.isfile(c):
                             return c
                     return None
+
+                def _srv_set_window_aumid(hwnd, aumid="SamQL.App.2"):
+                    """.550: window-level AUMID on the Form HWND so the
+                    taskbar identity cannot drift to a foreign window."""
+                    if os.name != "nt" or not hwnd:
+                        return False
+                    try:
+                        import ctypes
+                        from ctypes import wintypes
+
+                        class GUID(ctypes.Structure):
+                            _fields_ = [("d1", ctypes.c_ulong),
+                                        ("d2", ctypes.c_ushort),
+                                        ("d3", ctypes.c_ushort),
+                                        ("d4", ctypes.c_ubyte * 8)]
+
+                        class PROPERTYKEY(ctypes.Structure):
+                            _fields_ = [("fmtid", GUID),
+                                        ("pid", ctypes.c_ulong)]
+
+                        class PROPVARIANT(ctypes.Structure):
+                            _fields_ = [("vt", ctypes.c_ushort),
+                                        ("r1", ctypes.c_ushort),
+                                        ("r2", ctypes.c_ushort),
+                                        ("r3", ctypes.c_ushort),
+                                        ("pwszVal", ctypes.c_wchar_p),
+                                        ("pad", ctypes.c_byte * 8)]
+
+                        iid = GUID(0x886D8EEB, 0x8CF2, 0x4446,
+                                   (ctypes.c_ubyte * 8)(
+                                       0x8D, 0x02, 0xCD, 0xBA,
+                                       0x1D, 0xBD, 0xCF, 0x99))
+                        pkey = PROPERTYKEY(
+                            GUID(0x9F4C2855, 0x9F79, 0x4B39,
+                                 (ctypes.c_ubyte * 8)(
+                                     0xA8, 0xD0, 0xE1, 0xD4,
+                                     0x2D, 0xE1, 0xD5, 0xF3)), 5)
+                        store = ctypes.c_void_p()
+                        hr = ctypes.windll.shell32.\
+                            SHGetPropertyStoreForWindow(
+                                wintypes.HWND(hwnd), ctypes.byref(iid),
+                                ctypes.byref(store))
+                        if hr != 0 or not store:
+                            return False
+                        vtbl = ctypes.cast(
+                            store, ctypes.POINTER(ctypes.POINTER(
+                                ctypes.c_void_p))).contents
+                        SetValue = ctypes.CFUNCTYPE(
+                            ctypes.c_long, ctypes.c_void_p,
+                            ctypes.POINTER(PROPERTYKEY),
+                            ctypes.POINTER(PROPVARIANT))(vtbl[6])
+                        Commit = ctypes.CFUNCTYPE(
+                            ctypes.c_long, ctypes.c_void_p)(vtbl[7])
+                        Release = ctypes.CFUNCTYPE(
+                            ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+                        pv = PROPVARIANT()
+                        pv.vt = 31  # VT_LPWSTR
+                        pv.pwszVal = aumid
+                        ok = (SetValue(store, ctypes.byref(pkey),
+                                       ctypes.byref(pv)) == 0
+                              and Commit(store) == 0)
+                        Release(store)
+                        return ok
+                    except Exception:
+                        return False
 
                 # Match launcher / _brand.CHROME_BG: WebView2 defaults to
                 # white until content paints.
@@ -5272,6 +5343,13 @@ def main(argv=None):
                         native.Icon = _I(ip)
                         try:
                             native.ShowIcon = True
+                        except Exception:
+                            pass
+                        try:
+                            _hwnd = int(str(native.Handle))
+                            if _srv_set_window_aumid(_hwnd):
+                                print("  native window AppUserModelID set.",
+                                      flush=True)
                         except Exception:
                             pass
                         print("  native window icon set.", flush=True)

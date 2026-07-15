@@ -46,6 +46,18 @@ const OVERSCAN = 12;
 const DEFAULT_W = 150;
 const ROWNUM_W = 56;
 const EMPTY_ROWS: Cell[][] = [];
+/** Fixed value-inspector size — reserved so Loading… → pretty does not resize/flicker. */
+const VIEWER_W = 520;
+const VIEWER_H = 380;
+
+function centerViewerPos(): { x: number; y: number } {
+  const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+  return {
+    x: Math.max(16, Math.round((vw - VIEWER_W) / 2)),
+    y: Math.max(16, Math.round((vh - VIEWER_H) / 2)),
+  };
+}
 
 function isNumeric(v: Cell): boolean {
   return typeof v === "number";
@@ -200,18 +212,16 @@ const DataGridImpl: React.FC<Props> = ({
   const [cellMenu, setCellMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
-  // expandable viewer for a struct / JSON cell, anchored at the click
+  // Expandable viewer for a struct / JSON cell. Position lives in useWinDrag
+  // (viewport-centered on open); never paint raw text before pretty-print.
   const [viewer, setViewer] = useState<{
     loading?: boolean;
     note?: string;
-    x: number;
-    y: number;
     text: string;
+    cellKey: string;
   } | null>(null);
-  // Pretty text is computed AFTER the window opens so the first click isn't
-  // blocked on a sync walk of a large JSON/struct string.
-  const [viewerPretty, setViewerPretty] = useState<string>("");
-  const [viewerFormatting, setViewerFormatting] = useState(false);
+  // null = still preparing (show "Loading..."); string = ready body text.
+  const [viewerPretty, setViewerPretty] = useState<string | null>(null);
   // Latest-wins guard for full-cell fetches. A slow response from a prior
   // cell must never replace the viewer after the user opens another cell,
   // closes the viewer, or switches to a different result page.
@@ -219,6 +229,9 @@ const DataGridImpl: React.FC<Props> = ({
   // Separate from fetch seq: pretty-print generations must not cancel an
   // in-flight resultCell request (and vice versa).
   const viewerFormatSeq = useRef(0);
+  // Sync guard so pointerdown+click (or rapid repeats) cannot reopen the
+  // same cell and restart formatting mid-flight.
+  const viewerOpenKeyRef = useRef<string | null>(null);
 
   const claimCopyOwner = () => {
     copyOwnerRef.current = nextCopyOwnerToken++;
@@ -235,34 +248,27 @@ const DataGridImpl: React.FC<Props> = ({
 
   useEffect(() => {
     if (!viewer) {
-      setViewerPretty("");
-      setViewerFormatting(false);
+      setViewerPretty(null);
       return;
     }
-    // Full-value fetch in flight: keep the window open with loading..., do
-    // not pretty-print the truncated preview (it would be thrown away).
+    // Full-value fetch in flight: keep Loading...; do not pretty-print the
+    // truncated preview (it would be thrown away when the full value arrives).
     if (viewer.loading) {
-      setViewerPretty("");
-      setViewerFormatting(false);
       return;
     }
     const raw = viewer.text || "";
     if (!looksStructy(raw)) {
       setViewerPretty(raw);
-      setViewerFormatting(false);
       return;
     }
-    // Open with loading... first; pretty-print only after paint so the first
-    // click always shows the window (setTimeout(0) alone can still block paint).
-    setViewerPretty("");
-    setViewerFormatting(true);
+    // viewerPretty is already null from the open handler — do not clear again
+    // (that caused an extra render / flicker). Format only after paint.
     const formatGen = ++viewerFormatSeq.current;
     const cancel = runAfterPaint(() => {
       if (formatGen !== viewerFormatSeq.current) return;
       const pretty = prettyStruct(raw);
       if (formatGen !== viewerFormatSeq.current) return;
       setViewerPretty(pretty);
-      setViewerFormatting(false);
     });
     return () => {
       cancel();
@@ -275,22 +281,94 @@ const DataGridImpl: React.FC<Props> = ({
     setPos: setVposRaw,
     startDrag: startVDrag,
     dragging: vDragging,
-    settled: vSettled,
     winRef: vWinRef,
   } = useWinDrag({ x: -1, y: -1 });
   const vpos = vposRaw.x < 0 ? null : vposRaw;
   const setVpos = (p: { x: number; y: number } | null) =>
     setVposRaw(p ?? { x: -1, y: -1 });
 
+  const closeViewer = () => {
+    viewerRequestSeq.current += 1;
+    viewerFormatSeq.current += 1;
+    viewerOpenKeyRef.current = null;
+    setViewer(null);
+    setViewerPretty(null);
+    setVpos(null);
+  };
+
+  /** Open synchronously with Loading...; pretty-print runs after paint. */
+  const openStructuredViewer = (opts: {
+    text: string;
+    truncated: boolean;
+    column: string;
+    absRow: number;
+  }) => {
+    const cellKey = `${opts.absRow}:${opts.column}`;
+    // Single instance: ignore duplicate opens of the same cell while open.
+    if (viewerOpenKeyRef.current === cellKey) return;
+    viewerOpenKeyRef.current = cellKey;
+    const request = ++viewerRequestSeq.current;
+    viewerFormatSeq.current += 1;
+    // Same-event batch: open + Loading... + center before any raw text paints.
+    setViewerPretty(null);
+    setVposRaw(centerViewerPos());
+    if (opts.truncated && cellFetch?.resultId) {
+      setViewer({ cellKey, text: opts.text, loading: true });
+      api
+        .resultCell({
+          result_id: cellFetch.resultId,
+          row: opts.absRow,
+          column: opts.column,
+          sort_col: sortCol,
+          descending,
+          filters: cellFetch.filters || undefined,
+        })
+        .then((r) => {
+          if (request !== viewerRequestSeq.current) return;
+          setViewer(
+            (v) =>
+              v && {
+                ...v,
+                loading: false,
+                text:
+                  r.error != null ? opts.text : String(r.value ?? ""),
+                note: r.error
+                  ? `couldn't fetch full value: ${r.error}`
+                  : r.clipped
+                    ? "fetch clipped at the server limit (SAMQL_CELL_FETCH_MAX)"
+                    : undefined,
+              },
+          );
+        })
+        .catch((err: any) => {
+          if (request !== viewerRequestSeq.current) return;
+          setViewer(
+            (v) =>
+              v && {
+                ...v,
+                loading: false,
+                note: `couldn't fetch full value: ${err?.message || err}`,
+              },
+          );
+        });
+    } else {
+      setViewer({ cellKey, text: opts.text, loading: false });
+    }
+  };
+
   // a fresh result clears any prior selection
   useEffect(() => {
     viewerRequestSeq.current += 1;
     viewerFormatSeq.current += 1;
+    viewerOpenKeyRef.current = null;
     setSel(null);
     setCellMenu(null);
     setViewer(null);
-     
-  }, [page]);
+    setViewerPretty(null);
+    // setVposRaw is stable (useWinDrag); avoid the setVpos wrapper so the
+    // effect does not depend on a per-render arrow and re-fire every paint.
+    setVposRaw({ x: -1, y: -1 });
+  }, [page, setVposRaw]);
 
   const bounds = sel
     ? {
@@ -545,7 +623,12 @@ const DataGridImpl: React.FC<Props> = ({
                 return (
                   <div
                     key={c}
-                    className={"gc-cell " + f.cls + (inSel(idx, ci) ? " sel" : "")}
+                    className={
+                      "gc-cell " +
+                      f.cls +
+                      (inSel(idx, ci) ? " sel" : "") +
+                      (nested ? " has-expand" : "")
+                    }
                     data-column={c}
                     data-row-index={rowBase + idx}
                     style={{ width: colWidth(c) }}
@@ -564,61 +647,34 @@ const DataGridImpl: React.FC<Props> = ({
                         data-row-index={rowBase + idx}
                         aria-label={`View formatted value for ${c}, row ${rowBase + idx + 1}`}
                         title="View formatted"
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => {
+                        onPointerDown={(e) => {
+                          // Open on pointerdown so the full hit box works (center
+                          // included) and cell drag-select never steals the gesture.
+                          if (e.button !== 0) return;
+                          e.preventDefault();
                           e.stopPropagation();
-                          const x = e.clientX;
-                          const y = e.clientY;
-                          // One viewer at a time; bump both guards so a prior
-                          // fetch/format cannot clobber this open.
-                          const request = ++viewerRequestSeq.current;
-                          viewerFormatSeq.current += 1;
-                          if (truncated && cellFetch?.resultId) {
-                            // Fetch the COMPLETE value under this grid's view.
-                            // Absolute row = window offset + local index.
-                            // The sequence guard prevents an older request from
-                            // overwriting a newer viewer selection.
-                            setViewer({ x, y, text: f.text, loading: true });
-                            api
-                              .resultCell({
-                                result_id: cellFetch.resultId,
-                                row: rowBase + idx,
-                                column: c,
-                                sort_col: sortCol,
-                                descending,
-                                filters: cellFetch.filters || undefined,
-                              })
-                              .then((r) => {
-                                if (request !== viewerRequestSeq.current) return;
-                                setViewer((v) =>
-                                  v && {
-                                    ...v,
-                                    loading: false,
-                                    text:
-                                      r.error != null
-                                        ? f.text
-                                        : String(r.value ?? ""),
-                                    note: r.error
-                                      ? `couldn't fetch full value: ${r.error}`
-                                      : r.clipped
-                                        ? "fetch clipped at the server limit (SAMQL_CELL_FETCH_MAX)"
-                                        : undefined,
-                                  },
-                                );
-                              })
-                              .catch((err: any) => {
-                                if (request !== viewerRequestSeq.current) return;
-                                setViewer((v) =>
-                                  v && {
-                                    ...v,
-                                    loading: false,
-                                    note: `couldn't fetch full value: ${err?.message || err}`,
-                                  },
-                                );
-                              });
-                          } else {
-                            setViewer({ x, y, text: f.text });
-                          }
+                          openStructuredViewer({
+                            text: f.text,
+                            truncated,
+                            column: c,
+                            absRow: rowBase + idx,
+                          });
+                        }}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                        }}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          // Fallback for environments that only synthesize click
+                          // (tests); ref guard skips if pointerdown already opened.
+                          openStructuredViewer({
+                            text: f.text,
+                            truncated,
+                            column: c,
+                            absRow: rowBase + idx,
+                          });
                         }}
                       >
                         {"{ }"}
@@ -749,19 +805,17 @@ const DataGridImpl: React.FC<Props> = ({
           ref={vWinRef as React.RefObject<HTMLDivElement>}
           data-testid="structured-value-viewer"
           className={
-            "gc-json-pop val-win win-float" +
-            (vDragging ? " dragging" : "") +
-            (vSettled ? " settle" : "")
+            "gc-json-pop val-win win-float" + (vDragging ? " dragging" : "")
           }
           style={{
             position: "fixed",
-            left: (vpos ?? viewer).x,
-            top: (vpos ?? viewer).y,
+            left: (vpos ?? centerViewerPos()).x,
+            top: (vpos ?? centerViewerPos()).y,
             zIndex: 220,
             resize: "both",
             overflow: "auto",
-            width: 520,
-            height: 380,
+            width: VIEWER_W,
+            height: VIEWER_H,
           }}
           onMouseDown={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
@@ -770,18 +824,18 @@ const DataGridImpl: React.FC<Props> = ({
             className="gc-json-head"
             onMouseDown={(e) => {
               e.stopPropagation();
-              if (!vpos) setVposRaw({ x: viewer.x, y: viewer.y });
+              if (!vpos) setVposRaw(centerViewerPos());
               startVDrag(e);
             }}
             title="Drag to move; resize from the corner"
           >
             <span className="label">
               Value
-              {viewer.loading || viewerFormatting ? " · loading…" : ""}
+              {viewer.loading || viewerPretty === null ? " · Loading..." : ""}
             </span>
             <button
               type="button"
-              onClick={() => copyText(viewerPretty || viewer.text)}
+              onClick={() => copyText(viewerPretty ?? viewer.text)}
             >
               Copy
             </button>
@@ -789,20 +843,20 @@ const DataGridImpl: React.FC<Props> = ({
               type="button"
               className="gc-json-x"
               aria-label="Close"
-              onClick={() => {
-                viewerRequestSeq.current += 1;
-                viewerFormatSeq.current += 1;
-                setViewer(null);
-                setVpos(null);
-              }}
+              onClick={closeViewer}
             >
               ✕
             </button>
           </div>
-          <pre className="gc-json-body">
-            {viewer.loading || viewerFormatting
-              ? "loading..."
-              : viewerPretty || viewer.text}
+          <pre
+            className={
+              "gc-json-body" +
+              (viewer.loading || viewerPretty === null ? " is-loading" : "")
+            }
+          >
+            {viewer.loading || viewerPretty === null
+              ? "Loading..."
+              : viewerPretty}
           </pre>
           {viewer.note && <div className="gc-json-note">{viewer.note}</div>}
         </div>,

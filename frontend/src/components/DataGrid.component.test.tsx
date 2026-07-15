@@ -99,20 +99,43 @@ describe("DataGrid DOM behavior", () => {
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 
-  it("opens View Formatted immediately with loading... then pretty text", async () => {
+  it("opens View Formatted immediately with Loading... then pretty text", async () => {
     mount(page([[1, '{"region":"east","priority":2}']]));
 
     fireEvent.click(screen.getByTitle("View formatted"));
     const viewer = screen.getByTestId("structured-value-viewer");
     expect(viewer).toBeInTheDocument();
-    expect(viewer.querySelector(".gc-json-body")?.textContent).toBe("loading...");
-    expect(viewer.querySelector(".label")?.textContent).toMatch(/loading/i);
+    expect(viewer.querySelector(".gc-json-body")?.textContent).toBe("Loading...");
+    expect(viewer.querySelector(".label")?.textContent).toMatch(/Loading/i);
+
+    // Fixed geometry + viewport center; body node must not remount when content arrives.
+    const body = viewer.querySelector(".gc-json-body") as HTMLElement;
+    expect(viewer.style.width).toBe("520px");
+    expect(viewer.style.height).toBe("380px");
+    const left = parseFloat(viewer.style.left);
+    const top = parseFloat(viewer.style.top);
+    expect(left).toBeGreaterThan(0);
+    expect(top).toBeGreaterThan(0);
+    expect(Math.abs(left - (window.innerWidth - 520) / 2)).toBeLessThan(2);
+    expect(Math.abs(top - (window.innerHeight - 380) / 2)).toBeLessThan(2);
 
     await waitFor(() =>
-      expect(viewer.querySelector(".gc-json-body")?.textContent).toContain("region"),
+      expect(body.textContent).toContain("region"),
     );
-    expect(viewer.querySelector(".gc-json-body")?.textContent).toContain("priority");
-    expect(viewer.querySelector(".label")?.textContent).not.toMatch(/loading/i);
+    expect(body.textContent).toContain("priority");
+    expect(viewer.querySelector(".gc-json-body")).toBe(body);
+    expect(viewer.querySelector(".label")?.textContent).not.toMatch(/Loading/i);
+  });
+
+  it("opens from pointerdown on the expander center (not only edges)", () => {
+    mount(page([[1, '{"ok":true}']]));
+    const btn = screen.getByTitle("View formatted");
+    fireEvent.pointerDown(btn, { button: 0, clientX: 10, clientY: 10 });
+    expect(screen.getByTestId("structured-value-viewer")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("structured-value-viewer").querySelector(".gc-json-body")
+        ?.textContent,
+    ).toBe("Loading...");
   });
 
   it("keeps a single viewer across rapid View Formatted clicks", async () => {

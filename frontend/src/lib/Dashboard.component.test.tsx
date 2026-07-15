@@ -17,6 +17,7 @@ import {
 import {
   DASHBOARD_WORKSPACE_KEY,
   emptyDashboardWorkspace,
+  loadDashboardWorkspace,
   saveDashboardWorkspace,
   type DashboardWorkspace,
 } from "./dashboardModel";
@@ -89,6 +90,19 @@ function samqlGraph(upstreamType = "browse") {
 
 function openWidgetConfig(id: string) {
   fireEvent.click(screen.getByTestId(`dashboard-widget-configure-${id}`));
+}
+
+/** Open the consolidated toolbar More menu (no-op if already open). */
+function openDashboardMore() {
+  if (!screen.queryByTestId("dashboard-more-menu")) {
+    fireEvent.click(screen.getByTestId("dashboard-more"));
+  }
+  expect(screen.getByTestId("dashboard-more-menu")).toBeTruthy();
+}
+
+function clickDashboardMoreItem(testId: string) {
+  openDashboardMore();
+  fireEvent.click(screen.getByTestId(testId));
 }
 
 function seedWorkspace(patch?: (ws: DashboardWorkspace) => void) {
@@ -222,24 +236,108 @@ describe("buildDashboardExportBundle / importDashboardBundle", () => {
 });
 
 describe("Dashboard", () => {
-  it("renders the board with Run, Export PDF, select, and Add Widget controls", () => {
+  it("renders the board with Run, board select, More menu, and page title", () => {
     render(<Dashboard onToast={() => undefined} />);
     expect(screen.getByTestId("dashboard-root")).toBeTruthy();
     expect(screen.getByTestId("dashboard-run")).toBeTruthy();
-    expect(screen.getByTestId("dashboard-export-pdf")).toBeTruthy();
+    expect(screen.queryByTestId("dashboard-export-pdf")).toBeNull();
     expect(screen.getByTestId("dashboard-select")).toBeTruthy();
     expect(screen.getByTestId("dashboard-page-title")).toBeTruthy();
-    expect((screen.getByTestId("dashboard-page-title") as HTMLInputElement).value).toBe(
-      "Dashboard",
+    const pageTitle = screen.getByTestId(
+      "dashboard-page-title",
+    ) as HTMLTextAreaElement;
+    expect(pageTitle.tagName).toBe("TEXTAREA");
+    expect(pageTitle.value).toBe("Dashboard");
+    expect(screen.getByTestId("dashboard-more")).toBeTruthy();
+    expect(screen.getByText("More")).toBeTruthy();
+    expect(screen.queryByTestId("dashboard-add-widget")).toBeNull();
+    openDashboardMore();
+    expect(screen.getByTestId("dashboard-export-pdf")).toBeTruthy();
+    expect(screen.getByTestId("dashboard-add-empty")).toBeTruthy();
+    expect(screen.getByTestId("dashboard-add-text")).toBeTruthy();
+    expect(screen.getByTestId("dashboard-undo")).toBeTruthy();
+    expect(screen.getByTestId("dashboard-redo")).toBeTruthy();
+    expect(screen.getByTestId("dashboard-lock")).toBeTruthy();
+    expect(
+      (screen.getByTestId("dashboard-undo") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("dashboard-redo") as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("undoes and redoes widget layout edits", async () => {
+    seedWorkspace();
+    render(<Dashboard onToast={() => undefined} />);
+    openDashboardMore();
+    const undo = screen.getByTestId("dashboard-undo") as HTMLButtonElement;
+    const redo = screen.getByTestId("dashboard-redo") as HTMLButtonElement;
+    expect(undo.disabled).toBe(true);
+    expect(redo.disabled).toBe(true);
+
+    clickDashboardMoreItem("dashboard-add-empty");
+    openDashboardMore();
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("dashboard-undo") as HTMLButtonElement).disabled,
+      ).toBe(false),
     );
-    expect(screen.getByTestId("dashboard-add-widget")).toBeTruthy();
-    expect(screen.getByText("Add Widget")).toBeTruthy();
+
+    const beforeUndo = loadDashboardWorkspace().dashboards[0].widgets.length;
+    expect(beforeUndo).toBe(3);
+    fireEvent.click(screen.getByTestId("dashboard-undo"));
+    await waitFor(() =>
+      expect(loadDashboardWorkspace().dashboards[0].widgets.length).toBe(2),
+    );
+    openDashboardMore();
+    expect(
+      (screen.getByTestId("dashboard-redo") as HTMLButtonElement).disabled,
+    ).toBe(false);
+
+    fireEvent.click(screen.getByTestId("dashboard-redo"));
+    await waitFor(() =>
+      expect(loadDashboardWorkspace().dashboards[0].widgets.length).toBe(3),
+    );
+  });
+
+  it("locks widgets from move/resize and persists lock state", async () => {
+    seedWorkspace();
+    render(<Dashboard onToast={() => undefined} />);
+    openDashboardMore();
+    const lockBtn = screen.getByTestId("dashboard-lock");
+    const board = screen.getByTestId("dashboard-board");
+    expect(board.getAttribute("data-locked")).toBe("false");
+    expect(lockBtn.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(lockBtn);
+    await waitFor(() => {
+      expect(board.getAttribute("data-locked")).toBe("true");
+      expect(board.className).toMatch(/dash-board-locked/);
+    });
+    expect(loadDashboardWorkspace().dashboards[0].widgetsLocked).toBe(true);
+    expect(screen.getByTestId("dashboard-more").className).toMatch(/active/);
+
+    const widget = screen.getByTestId("dashboard-widget-w1");
+    fireEvent.pointerDown(widget, { clientX: 40, clientY: 40, pointerId: 1 });
+    fireEvent.pointerMove(board, { clientX: 200, clientY: 200, pointerId: 1 });
+    fireEvent.pointerUp(board, { pointerId: 1 });
+    const after = loadDashboardWorkspace().dashboards[0].widgets.find(
+      (w) => w.id === "w1",
+    );
+    expect(after?.x).toBe(0);
+    expect(after?.y).toBe(0);
+
+    clickDashboardMoreItem("dashboard-lock");
+    await waitFor(() => {
+      expect(board.getAttribute("data-locked")).toBe("false");
+      expect(loadDashboardWorkspace().dashboards[0].widgetsLocked).toBeFalsy();
+    });
   });
 
   it("exports the board as a PDF into Downloads", async () => {
     const toast = vi.fn();
     render(<Dashboard onToast={toast} />);
-    fireEvent.click(screen.getByTestId("dashboard-export-pdf"));
+    clickDashboardMoreItem("dashboard-export-pdf");
     await waitFor(() => expect(exportPdfMock).toHaveBeenCalled());
     expect(exportPdfMock.mock.calls[0]?.[1]).toBe("Dashboard");
     expect(toast).toHaveBeenCalledWith(
@@ -279,13 +377,28 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByTestId("dashboard-title-font"), {
       target: { value: "Georgia, serif" },
     });
+    const titleFont = screen.getByTestId(
+      "dashboard-title-font",
+    ) as HTMLSelectElement;
+    expect(titleFont.querySelectorAll("optgroup").length).toBeGreaterThanOrEqual(4);
+    expect(
+      within(titleFont).getByRole("option", { name: "Calibri" }),
+    ).toBeTruthy();
+    expect(
+      within(titleFont).getByRole("option", { name: "Consolas" }),
+    ).toBeTruthy();
+    expect(
+      within(titleFont).getByRole("option", { name: "Impact" }),
+    ).toBeTruthy();
     fireEvent.click(screen.getByTestId("dashboard-title-bold"));
     fireEvent.click(screen.getByTestId("dashboard-title-italic"));
     fireEvent.change(screen.getByTestId("dashboard-title-color"), {
       target: { value: "#ff6600" },
     });
 
-    const title = screen.getByTestId("dashboard-page-title") as HTMLInputElement;
+    const title = screen.getByTestId(
+      "dashboard-page-title",
+    ) as HTMLTextAreaElement;
     expect(title.style.fontSize).toBe("32px");
     expect(title.style.fontFamily).toMatch(/Georgia/);
     expect(title.style.fontWeight).toBe("700");
@@ -306,10 +419,49 @@ describe("Dashboard", () => {
     });
   });
 
+  it("wraps the page title and grows height so the board shifts down", async () => {
+    render(<Dashboard onToast={() => undefined} />);
+    const title = screen.getByTestId(
+      "dashboard-page-title",
+    ) as HTMLTextAreaElement;
+    const board = screen.getByTestId("dashboard-board");
+    const toolbar = board.parentElement?.previousElementSibling as HTMLElement;
+    expect(title.tagName).toBe("TEXTAREA");
+    expect(title.getAttribute("wrap")).toBe("soft");
+    expect(toolbar?.className).toMatch(/dash-toolbar/);
+
+    const boardTopBefore = board.offsetTop;
+    Object.defineProperty(title, "scrollHeight", {
+      configurable: true,
+      get() {
+        // Match the auto-grow pattern: measure at height 0, then expand.
+        return title.style.height === "0px" ? 72 : 24;
+      },
+    });
+
+    fireEvent.change(title, {
+      target: {
+        value:
+          "A very long dashboard heading that should wrap within the title window instead of running off screen",
+      },
+    });
+
+    expect(title.style.height).toBe("72px");
+    expect(Number.parseFloat(title.style.height)).toBeGreaterThan(24);
+    // Title stays in normal toolbar flow above the board (no absolute overlay).
+    expect(toolbar.contains(title)).toBe(true);
+    expect(board.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    // Growing the title height must not place the board above the toolbar.
+    expect(board.offsetTop).toBeGreaterThanOrEqual(boardTopBefore);
+    expect(screen.getByTestId("dashboard-more")).toBeTruthy();
+    openDashboardMore();
+    expect(screen.getByTestId("dashboard-undo")).toBeTruthy();
+    expect(screen.getByTestId("dashboard-lock")).toBeTruthy();
+  });
+
   it("autosaves workspace edits to localStorage", async () => {
     render(<Dashboard onToast={() => undefined} />);
-    fireEvent.click(screen.getByTestId("dashboard-add-widget"));
-    fireEvent.click(screen.getByTestId("dashboard-add-empty"));
+    clickDashboardMoreItem("dashboard-add-empty");
     await waitFor(() => {
       const raw = window.localStorage.getItem(DASHBOARD_WORKSPACE_KEY);
       expect(raw).toBeTruthy();
@@ -321,8 +473,7 @@ describe("Dashboard", () => {
   it("adds a widget with anim class without opening config on select", async () => {
     const onSel = vi.fn();
     render(<Dashboard onToast={() => undefined} onSelectionChange={onSel} />);
-    fireEvent.click(screen.getByTestId("dashboard-add-widget"));
-    fireEvent.click(screen.getByTestId("dashboard-add-empty"));
+    clickDashboardMoreItem("dashboard-add-empty");
     await waitFor(() => expect(onSel).toHaveBeenCalledWith(false));
     const widgets = screen.getAllByTestId(/dashboard-widget-/);
     expect(widgets.some((el) => el.className.includes("dash-anim-add"))).toBe(
@@ -336,10 +487,10 @@ describe("Dashboard", () => {
     expect(screen.getByTestId("dashboard-config-panel")).toBeTruthy();
   });
 
-  it("adds an Add Text widget from the add menu", async () => {
+  it("adds an Add Text widget from the More menu", async () => {
     render(<Dashboard onToast={() => undefined} />);
-    fireEvent.click(screen.getByTestId("dashboard-add-widget"));
-    expect(screen.getByTestId("dashboard-add-menu")).toBeTruthy();
+    openDashboardMore();
+    expect(screen.getByTestId("dashboard-more-menu")).toBeTruthy();
     expect(screen.getByTestId("dashboard-add-empty")).toBeTruthy();
     fireEvent.click(screen.getByTestId("dashboard-add-text"));
     await waitFor(() =>
@@ -402,13 +553,17 @@ describe("Dashboard", () => {
     const toast = vi.fn();
     const prompt = vi.spyOn(window, "prompt").mockReturnValue("Ops");
     render(<Dashboard onToast={toast} />);
-    const del = screen.getByTestId("dashboard-delete") as HTMLButtonElement;
-    expect(del.disabled).toBe(true);
+    openDashboardMore();
+    expect(
+      (screen.getByTestId("dashboard-delete") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.mouseDown(screen.getByTestId("dashboard-more-backdrop"));
 
     fireEvent.change(screen.getByTestId("dashboard-select"), {
       target: { value: "__new__" },
     });
     await waitFor(() => {
+      openDashboardMore();
       expect(
         (screen.getByTestId("dashboard-delete") as HTMLButtonElement).disabled,
       ).toBe(false);
@@ -430,6 +585,7 @@ describe("Dashboard", () => {
       "Dashboard deleted",
       expect.stringContaining("Ops"),
     );
+    openDashboardMore();
     expect(
       (screen.getByTestId("dashboard-delete") as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -571,8 +727,7 @@ describe("Dashboard", () => {
 
   it("places text grab + resize below the header area", async () => {
     render(<Dashboard onToast={() => undefined} />);
-    fireEvent.click(screen.getByTestId("dashboard-add-widget"));
-    fireEvent.click(screen.getByTestId("dashboard-add-text"));
+    clickDashboardMoreItem("dashboard-add-text");
     await waitFor(() =>
       expect(document.querySelector(".dash-widget-text")).toBeTruthy(),
     );
@@ -596,8 +751,7 @@ describe("Dashboard", () => {
 
   it("persists text widget style options through localStorage", async () => {
     render(<Dashboard onToast={() => undefined} />);
-    fireEvent.click(screen.getByTestId("dashboard-add-widget"));
-    fireEvent.click(screen.getByTestId("dashboard-add-text"));
+    clickDashboardMoreItem("dashboard-add-text");
     await waitFor(() =>
       expect(document.querySelector(".dash-widget-text")).toBeTruthy(),
     );
@@ -614,6 +768,9 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByTestId("dashboard-header-color"), {
       target: { value: "#abcdef" },
     });
+    fireEvent.change(screen.getByTestId("dashboard-widget-font"), {
+      target: { value: 'Calibri, "Segoe UI", sans-serif' },
+    });
     fireEvent.change(screen.getByTestId("dashboard-widget-bg"), {
       target: { value: "#123456" },
     });
@@ -626,6 +783,7 @@ describe("Dashboard", () => {
         (w: { kind?: string }) => w.kind === "text",
       );
       expect(text.headerColor).toBe("#abcdef");
+      expect(text.fontFamily).toMatch(/Calibri/);
       expect(text.backgroundColor).toBe("#123456");
       expect(text.liquidGlass).toBe(true);
     });
@@ -818,8 +976,7 @@ describe("Dashboard", () => {
   it("expands a text widget", async () => {
     seedWorkspace();
     render(<Dashboard onToast={() => undefined} />);
-    fireEvent.click(screen.getByTestId("dashboard-add-widget"));
-    fireEvent.click(screen.getByTestId("dashboard-add-text"));
+    clickDashboardMoreItem("dashboard-add-text");
     const textWidget = document.querySelector(
       ".dash-widget-text",
     ) as HTMLElement | null;

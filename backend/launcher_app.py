@@ -56,6 +56,7 @@ CHROME_BG = "#16181d"
 # again.
 APP_AUMID = "SamQL.App.2"
 _LEGACY_AUMIDS = ("SamQL.SamQL", "SamQL.App")
+_AUMID_SET = []   # filled when SetCurrentProcessExplicitAppUserModelID succeeds
 # .534: one SamQL at a time -- a named mutex closes the double-click
 # race, and a window scan surfaces an already-open SamQL instead of
 # opening a second one.
@@ -881,11 +882,19 @@ def find_browser(prefer="auto", env=None):
 
 
 def wait_for_app_window(title_contains="SamQL", timeout_s=12.0,
-                        splash=None):
+                        splash=None, owned_by_pid=None,
+                        exe_basenames=None):
     """Poll top-level VISIBLE windows for a title containing "SamQL"
     via EnumWindows -- the moment the app window exists, not a blind
     sleep. Non-Windows (and any ctypes surprise) falls back to a short
-    pump so the flow still completes."""
+    pump so the flow still completes.
+
+    Ownership filters (.550): branding used to stamp AppUserModelID on
+    ANY title match -- a Teams/Explorer window whose title happened to
+    contain "SamQL" then joined the SamQL-APP taskbar group. Pass
+    ``owned_by_pid`` (native pywebview host) and/or ``exe_basenames``
+    (browser --app fallback, e.g. msedge.exe) so foreign HWNDs are
+    never returned for AUMID / icon stamping."""
     if os.name != "nt":
         (splash.pump(1.0) if splash else time.sleep(1.0))
         return False
@@ -896,6 +905,18 @@ def wait_for_app_window(title_contains="SamQL", timeout_s=12.0,
         proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
                                    wintypes.LPARAM)
         found = {"hit": False}
+        exe_want = None
+        if exe_basenames:
+            exe_want = {str(x).lower() for x in exe_basenames if x}
+
+        def _owner_ok(pid):
+            if owned_by_pid is not None and int(pid) != int(owned_by_pid):
+                return False
+            if exe_want is not None:
+                base = os.path.basename(_proc_image(pid) or "").lower()
+                if base not in exe_want:
+                    return False
+            return True
 
         def _cb(hwnd, _l):
             if not user32.IsWindowVisible(hwnd):
@@ -905,11 +926,15 @@ def wait_for_app_window(title_contains="SamQL", timeout_s=12.0,
                 return True
             buf = ctypes.create_unicode_buffer(n + 1)
             user32.GetWindowTextW(hwnd, buf, n + 1)
-            if title_contains in buf.value:
-                found["hit"] = True
-                found["hwnd"] = hwnd  # .461: hand the window back
-                return False
-            return True
+            if title_contains not in buf.value:
+                return True
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if not _owner_ok(pid.value):
+                return True  # keep looking -- never brand a foreign HWND
+            found["hit"] = True
+            found["hwnd"] = hwnd  # .461: hand the window back
+            return False
 
         deadline = time.time() + timeout_s
         while time.time() < deadline:
@@ -923,6 +948,29 @@ def wait_for_app_window(title_contains="SamQL", timeout_s=12.0,
         write_log("WARN window wait unavailable (%s)"
                   % e.__class__.__name__)
         (splash.pump(1.5) if splash else time.sleep(1.5))
+        return False
+
+
+def _set_process_aumid(aumid=APP_AUMID):
+    """Set the process-wide AppUserModelID as early as possible.
+    Returns True on success. Failures are logged (never silent) -- a
+    missed process AUMID is exactly how the taskbar can regroup us."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        fn = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        fn.argtypes = [ctypes.c_wchar_p]
+        fn.restype = ctypes.HRESULT
+        hr = int(fn(str(aumid)))
+        if hr == 0:
+            _AUMID_SET.append(True)
+            return True
+        write_log("WARN SetCurrentProcessExplicitAppUserModelID "
+                  "hr=0x%08X (aumid=%s)" % (hr & 0xFFFFFFFF, aumid))
+        return False
+    except Exception as e:
+        write_log("WARN process AppUserModelID not set (%r)" % (e,))
         return False
 
 
@@ -1847,7 +1895,10 @@ def open_native_window(url, args, splash):
             try:
                 import time as _t
                 _t.sleep(0.4)  # let the splash finish tearing down first
-                hwnd = wait_for_app_window("SamQL", 15.0, None)
+                # .550: only our process -- never stamp Teams/Explorer/Edge
+                # just because the title contains "SamQL".
+                hwnd = wait_for_app_window(
+                    "SamQL", 15.0, None, owned_by_pid=os.getpid())
                 if not hwnd or hwnd is True:
                     write_log("INFO native window not found to stamp its icon")
                     return
@@ -1862,9 +1913,15 @@ def open_native_window(url, args, splash):
                     pid = ctypes.c_ulong(0)
                     ctypes.windll.user32.GetWindowThreadProcessId(
                         hwnd, ctypes.byref(pid))
+                    ours = pid.value == os.getpid()
                     write_log("INFO stamp target hwnd=%s class=%s ours=%s"
-                              % (hwnd, buf.value,
-                                 pid.value == os.getpid()))
+                              % (hwnd, buf.value, ours))
+                    if not ours:
+                        write_log("WARN refusing AUMID stamp on foreign "
+                                  "hwnd (pid=%s exe=%r) -- would pull that "
+                                  "app into the SamQL taskbar group"
+                                  % (pid.value, _proc_image(pid.value)))
+                        return
                 except Exception:
                     pass
                 set_app_user_model_id(hwnd)
@@ -1955,9 +2012,6 @@ def open_native_window(url, args, splash):
 
 # --------------------------------------------------------------- main
 
-_AUMID_SET = []   # .517: filled when the process-level AUMID call succeeds
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Open SamQL in a "
                                  "chromeless app window.")
@@ -1989,15 +2043,10 @@ def main(argv=None):
     # Per-hwnd property-store stamping (below) races WebView2 repaints; the
     # process-level ID is what Win11 actually groups taskbar buttons by, so
     # the SamQL window gets its OWN button with its OWN icon instead of
-    # sheltering under Edge's.
-    if os.name == "nt":
-        try:
-            import ctypes
-            ctypes.windll.shell32.\
-                SetCurrentProcessExplicitAppUserModelID(APP_AUMID)
-            _AUMID_SET.append(True)
-        except Exception:
-            pass
+    # sheltering under Edge's. .550: never swallow failures silently --
+    # a missed process AUMID is how foreign apps can share our taskbar
+    # group after a bad window stamp.
+    _set_process_aumid(APP_AUMID)
     splash = make_splash()
     write_log("INFO launcher start (port %d)%s"
               % (args.port,
@@ -2187,7 +2236,12 @@ def main(argv=None):
     except Exception as e:
         fail_visibly(splash, "Could not start the browser: %s" % e)
 
-    hwnd = wait_for_app_window("SamQL", 12.0, splash)
+    # .550: Edge single-instance may attach the --app window to an
+    # already-running msedge/chrome process -- filter by browser image
+    # name (same as the PS1 flow), never by "any SamQL title" (Teams).
+    _bx_base = os.path.basename(bx).lower()
+    hwnd = wait_for_app_window("SamQL", 12.0, splash,
+                               exe_basenames=(_bx_base,))
     if not hwnd:
         write_log("WARN app window title not seen within 12s "
                   "(opened anyway)")

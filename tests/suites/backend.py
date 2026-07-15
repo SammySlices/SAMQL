@@ -1638,9 +1638,14 @@ def backend_tests(datadir, csv_path, json_path):
             ("a truncated cell is expandable even when not structy",
              "looksStructy(f.text) || truncated" in dg),
             ("the fetch addresses the grid's exact view",
-             ("row: rowBase + idx" in dg or "row: idx" in dg)
-             and "sort_col: sortCol" in dg
-             and "descending," in dg and "cellFetch.filters" in dg),
+             # View Formatted opens via openStructuredViewer with absRow
+             # (rowBase + idx); the fetch still passes sort/filters under
+             # that absolute row in the current grid view.
+             ((("row: opts.absRow" in dg and "absRow: rowBase + idx" in dg)
+               or "row: rowBase + idx" in dg
+               or "row: idx" in dg)
+              and "sort_col: sortCol" in dg
+              and "descending," in dg and "cellFetch.filters" in dg)),
             ("fetch failure keeps the preview and says why",
              "couldn't fetch full value" in dg),
             ("the server-side fetch clip is surfaced",
@@ -9425,13 +9430,48 @@ def backend_tests(datadir, csv_path, json_path):
              "constant")
         srv = open(os.path.join(BACKEND, "server.py"),
                    encoding="utf-8").read()
-        need('SetCurrentProcessExplicitAppUserModelID(\n'
-             '                                "SamQL.App.2")' in srv,
-             "the server --window path rotated too")
+        need('SetCurrentProcessExplicitAppUserModelID' in srv
+             and '"SamQL.App.2"' in srv
+             and "_srv_set_window_aumid" in srv,
+             "the server --window path sets process + window AUMID "
+             "(SamQL.App.2)")
         ps1 = open(_root_script("Start-SamQL-AppWindow.ps1"),
                    encoding="utf-8").read()
         need("'SamQL.App.2'" in ps1 and "'SamQL.App'" not in ps1,
              "the PS1 flow rotated too")
+
+    
+    def t_aumid_stamp_ownership_550():
+        # .550: branding used to stamp AppUserModelID on ANY top-level
+        # window whose title contained "SamQL". A Teams chat/meeting (or
+        # Explorer folder) with "SamQL" in the title then joined the
+        # SamQL-APP taskbar group. wait_for_app_window now takes
+        # owned_by_pid / exe_basenames; the native stamper refuses a
+        # foreign HWND; the browser fallback filters by msedge/chrome.
+        la = open(os.path.join(BACKEND, "launcher_app.py"),
+                  encoding="utf-8").read()
+        for frag, why in (
+            ("owned_by_pid=None", "wait_for_app_window accepts pid filter"),
+            ("exe_basenames=None", "and browser-exe filter"),
+            ("never brand a foreign HWND", "foreign titles are skipped"),
+            ("owned_by_pid=os.getpid()", "native stamper is pid-gated"),
+            ("refusing AUMID stamp on foreign",
+             "defense-in-depth refuse log"),
+            ("exe_basenames=(_bx_base,)",
+             "browser fallback stamps only the browser image"),
+            ("def _set_process_aumid(", "process AUMID has a real helper"),
+            ("fn.argtypes = [ctypes.c_wchar_p]",
+             "ctypes marshalling is explicit"),
+        ):
+            need(frag in la, "launcher .550: %s" % why)
+        need(la.count("SetCurrentProcessExplicitAppUserModelID") >= 1
+             and "_set_process_aumid(APP_AUMID)" in la,
+             "main() still sets the process AUMID via the helper")
+        srv = open(os.path.join(BACKEND, "server.py"),
+                   encoding="utf-8").read()
+        need("_srv_set_window_aumid" in srv
+             and 'native window AppUserModelID set.' in srv,
+             "SamQL.exe --window also stamps the Form HWND AUMID")
 
     
     def t_shortcut_ownership_531():
@@ -19142,10 +19182,18 @@ def backend_tests(datadir, csv_path, json_path):
             el = by.get("(element):1") or {}
             need(el.get("kind") in ("struct", "array"),
                  "(element) is expandable, not opaque scalar: %r" % el)
-            # Access recipes still hop the array for nested keys.
+            # Opaque JSON array cells use JSONPath ([0]), not STRUCT list [1].
+            # (Older assertion required "[1]" from STRUCT-style recipes that
+            # returned NULL / failed UNNEST on JSON arrays — that was wrong.)
             id_acc = (by.get("id:2") or {}).get("access") or {}
-            need(id_acc.get("first") and "[1]" in id_acc["first"],
-                 "id recipe hops array: %r" % id_acc)
+            need(id_acc.get("first") and (
+                    "[0]" in id_acc["first"] or "[1]" in id_acc["first"]),
+                 "id recipe hops the array: %r" % id_acc)
+            need("->>" in (id_acc.get("first") or ""),
+                 "opaque JSON array recipe uses ->>: %r" % id_acc.get("first"))
+            id_sql = "SELECT %s FROM dbl_el" % id_acc["first"]
+            eq(duck.conn.execute(id_sql).fetchall(), [("1",)],
+               "id first-record recipe executes: %s" % id_sql)
             cf = by.get("cashflow:2") or {}
             need((cf.get("access") or {}).get("recursive")
                  or (cf.get("kind") == "array"),
@@ -19352,6 +19400,137 @@ def backend_tests(datadir, csv_path, json_path):
             snames = [f["name"] for f in st.get("fields") or []]
             need("receivingLeg" in snames and "fixingdate" in snames,
                  "STRUCT+JSON CashFlows leaf expands: %r" % snames[:20])
+        finally:
+            s.shutdown()
+
+    def t_field_explorer_recipes_execute():
+        # Field Explorer copies access.first / access.sel + unnests into SQL.
+        # Those recipes must actually run against flatten-off opaque JSON,
+        # JSON[], STRUCT+JSON, and still preserve native STRUCT recipes.
+        # Assert by EXECUTING the generated SQL (not only that recipes exist).
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+
+        def _recipe_sqls(table, acc):
+            first = "SELECT %s FROM \"%s\"" % (acc["first"], table)
+            all_sql = "SELECT %s FROM \"%s\"%s" % (
+                acc["sel"], table,
+                "".join(", " + u for u in (acc.get("unnests") or [])))
+            return first, all_sql
+
+        def _fixing(fields):
+            hits = [f for f in fields if f.get("name") == "fixingdate"]
+            need(hits, "fixingdate node present for recipe execute test")
+            acc = hits[-1].get("access") or {}
+            need(acc.get("first") and acc.get("sel") is not None,
+                 "fixingdate carries first/sel recipes: %r" % acc)
+            return acc
+
+        shape = {"CashFlows": {"receivingLeg": [
+            {"fixingdate": "test", "amt": 1.5},
+            {"fixingdate": "test2", "amt": 2.0},
+        ]}}
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+
+            # 1) Opaque JSON column (flatten-off style)
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE fx_json AS SELECT ?::JSON AS payload",
+                [json.dumps(shape)])
+            tree = s.column_field_tree("duckdb", "fx_json", "payload")
+            need(tree.get("source") == "sampled-values",
+                 "opaque JSON uses sampled-values recipes")
+            acc = _fixing(tree.get("fields") or [])
+            need("->>" in (acc.get("first") or ""),
+                 "opaque JSON first recipe uses ->>: %r" % acc.get("first"))
+            need("[0]" in (acc.get("first") or ""),
+                 "JSONPath uses 0-based array index: %r" % acc.get("first"))
+            need("payload.CashFlows.receivingLeg[1]" not in (acc.get("first") or ""),
+                 "must not emit STRUCT-style [1] path for opaque JSON")
+            sql1, sql2 = _recipe_sqls("fx_json", acc)
+            eq(duck.conn.execute(sql1).fetchall(), [("test",)],
+               "opaque JSON first-record recipe returns fixingdate")
+            rows = duck.conn.execute(sql2).fetchall()
+            need(sorted(r[0] for r in rows) == ["test", "test2"],
+                 "opaque JSON all-rows recipe unnests receivingLeg: %r" % rows)
+
+            # 2) JSON[] column
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE fx_jarr AS "
+                "SELECT [?::JSON]::JSON[] AS data",
+                [json.dumps(shape)])
+            jt = s.column_field_tree("duckdb", "fx_jarr", "data")
+            jacc = _fixing(jt.get("fields") or [])
+            need("data[1]" in (jacc.get("first") or ""),
+                 "JSON[] first hops the list with [1]: %r" % jacc.get("first"))
+            need("->>" in (jacc.get("first") or ""),
+                 "JSON[] nested path still uses ->>: %r" % jacc.get("first"))
+            js1, js2 = _recipe_sqls("fx_jarr", jacc)
+            eq(duck.conn.execute(js1).fetchall(), [("test",)],
+               "JSON[] first-record recipe returns fixingdate")
+            jrows = duck.conn.execute(js2).fetchall()
+            need(sorted(r[0] for r in jrows) == ["test", "test2"],
+                 "JSON[] all-rows recipe works: %r" % jrows)
+
+            # 3) STRUCT shell + opaque JSON leaf (common flatten-off DESCRIBE)
+            duck.conn.execute("""
+                CREATE OR REPLACE TABLE fx_mixed AS
+                SELECT {'id': 1, 'CashFlows': ?::JSON} AS payload
+            """, [json.dumps({"receivingLeg": [
+                {"fixingdate": "test"}, {"fixingdate": "test2"}]})])
+            mt = s.column_field_tree("duckdb", "fx_mixed", "payload")
+            need(mt.get("source") == "sampled-values",
+                 "STRUCT+JSON leaf triggers sampling")
+            macc = _fixing(mt.get("fields") or [])
+            need("::JSON" in (macc.get("first") or "")
+                 and "->>" in (macc.get("first") or ""),
+                 "STRUCT+JSON recipes cast then ->>: %r" % macc.get("first"))
+            ms1, ms2 = _recipe_sqls("fx_mixed", macc)
+            eq(duck.conn.execute(ms1).fetchall(), [("test",)],
+               "STRUCT+JSON first-record recipe returns fixingdate")
+            mrows = duck.conn.execute(ms2).fetchall()
+            need(sorted(r[0] for r in mrows) == ["test", "test2"],
+                 "STRUCT+JSON all-rows recipe works: %r" % mrows)
+
+            # 3b) Double-encoded JSON array (elements are stringified objects)
+            dbl = json.dumps([json.dumps({"id": 1, "fixingdate": "test"}),
+                              json.dumps({"id": 2, "fixingdate": "test2"})])
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE fx_dbl AS SELECT ?::JSON AS data",
+                [dbl])
+            dt = s.column_field_tree("duckdb", "fx_dbl", "data")
+            dacc = _fixing(dt.get("fields") or [])
+            need("json(" in (dacc.get("first") or ""),
+                 "double-encoded recipes decode elements: %r" % dacc.get("first"))
+            ds1, ds2 = _recipe_sqls("fx_dbl", dacc)
+            eq(duck.conn.execute(ds1).fetchall(), [("test",)],
+               "double-encoded first-record recipe returns fixingdate")
+            drows = duck.conn.execute(ds2).fetchall()
+            need(sorted(r[0] for r in drows) == ["test", "test2"],
+                 "double-encoded all-rows recipe works: %r" % drows)
+
+            # 4) Native STRUCT (no sampling) — STRUCT recipes must still work
+            duck.conn.execute("""
+                CREATE OR REPLACE TABLE fx_native AS
+                SELECT {'CashFlows': {'receivingLeg': [
+                    {'fixingdate': 'test'}, {'fixingdate': 'test2'}
+                ]}} AS payload
+            """)
+            nt = s.column_field_tree("duckdb", "fx_native", "payload")
+            need(nt.get("source") in (None, ""),
+                 "native STRUCT does not sample: %r" % nt.get("source"))
+            nacc = _fixing(nt.get("fields") or [])
+            need("->>" not in (nacc.get("first") or ""),
+                 "native STRUCT keeps dotted recipes: %r" % nacc.get("first"))
+            need("[1]" in (nacc.get("first") or ""),
+                 "native STRUCT uses 1-based list index: %r" % nacc.get("first"))
+            ns1, ns2 = _recipe_sqls("fx_native", nacc)
+            eq(duck.conn.execute(ns1).fetchall(), [("test",)],
+               "native STRUCT first-record recipe still works")
+            nrows = duck.conn.execute(ns2).fetchall()
+            need(sorted(r[0] for r in nrows) == ["test", "test2"],
+                 "native STRUCT UNNEST recipe still works: %r" % nrows)
         finally:
             s.shutdown()
 
@@ -34953,6 +35132,9 @@ def backend_tests(datadir, csv_path, json_path):
         (".532: fresh shell identity (SamQL.App.2) -- the per-AUMID "
          "icon cache was Edge-poisoned; everything rotated in lockstep",
          t_aumid_rotation_532),
+        (".550: AUMID branding never stamps a foreign HWND (Teams/"
+         "Explorer title collision) -- pid/exe-gated wait + refuse",
+         t_aumid_stamp_ownership_550),
         (".531: the launcher OWNS its shortcuts (the last taskbar-art "
          "source) + ours-proof readback + build sha audit",
          t_shortcut_ownership_531),
@@ -35393,6 +35575,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_json_field_tree_deep_nested_and_heterogeneous),
         ("CashFlows.receivingLeg[].fixingdate field discovery",
          t_cashflows_receiving_leg_field_tree),
+        ("Field Explorer recipes execute on flatten-off JSON / JSON[] / STRUCT+JSON",
+         t_field_explorer_recipes_execute),
         ("DuckDB load cancel aborts the JSON array pre-pass",
          t_duckdb_load_cancel_aborts_read),
         ("JSON array pre-pass polls cancel and aborts promptly",

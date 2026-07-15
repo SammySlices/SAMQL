@@ -1311,13 +1311,16 @@ class Session:
         values = [r[0] for r in (rows or []) if r]
         if not values:
             return None
-        # STRUCT columns with JSON leaves use dotted access for the typed
-        # shell; pure JSON / JSON[] use ->> recipes.
-        tu = (raw_type or "").upper()
-        access = ("struct" if tu.startswith("STRUCT") else "json")
+        # Sidebar `path` tooltips: STRUCT shells keep dotted labels; pure
+        # JSON / JSON[] use ->>. Field Explorer *queries* always need JSON
+        # recipes here — STRUCT-style UNNEST fails on opaque JSON arrays.
+        tu = (raw_type or "").upper().strip()
+        path_style = ("struct" if tu.startswith("STRUCT") else "json")
+        cast_to_json = "STRUCT" in tu
+        root_is_list = tu.endswith("[]")
         try:
             ft = json_values_to_field_tree(values, colname=column,
-                                          access_style=access)
+                                          access_style=path_style)
         except Exception:
             return None
         nodes = list(ft.get("nodes") or [])
@@ -1327,13 +1330,17 @@ class Session:
             return None
         try:
             # Rebuild a root row so access_recipes has column context, then
-            # drop it again for the sidebar.
+            # drop it again for the sidebar / Field Explorer.
+            root_kind = ("array" if root_is_list
+                         else "struct" if path_style == "struct"
+                         else "scalar")
             root = {"depth": 0, "name": column, "type": raw_type,
-                    "kind": "struct" if access == "struct" else "scalar",
-                    "path": column, "note": None}
+                    "kind": root_kind, "path": column, "note": None}
             full = [root] + [
                 dict(n, depth=int(n.get("depth") or 0)) for n in nodes]
-            access_recipes(column, full)
+            access_recipes(column, full, access_style="json",
+                           cast_to_json=cast_to_json,
+                           root_is_list=root_is_list)
             nodes = full[1:]
         except Exception:
             pass
