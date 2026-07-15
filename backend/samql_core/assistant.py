@@ -101,10 +101,17 @@ def find_pack(root=None):
                 continue
         except Exception:
             continue
-        binary = base / bin_name
-        # Also accept llama-server without extension on Windows if present.
-        if not binary.is_file():
-            alt = base / "llama-server"
+        # Prefer assistant/runtime/ (full llama.cpp release payload with libs).
+        # Fall back to a flat assistant/llama-server for older manual packs.
+        binary = None
+        for candidate in (base / "runtime" / bin_name, base / bin_name):
+            if candidate.is_file():
+                binary = candidate
+                break
+        if binary is None and not _is_windows():
+            alt = base / "runtime" / "llama-server"
+            if not alt.is_file():
+                alt = base / "llama-server"
             if alt.is_file():
                 binary = alt
         models_dir = base / "models"
@@ -127,7 +134,7 @@ def find_pack(root=None):
                     break
             if model is not None:
                 break
-        if binary.is_file() and model is not None:
+        if binary is not None and binary.is_file() and model is not None:
             return {
                 "ok": True,
                 "root": str(base),
@@ -136,7 +143,7 @@ def find_pack(root=None):
                 "model_name": DEFAULT_MODEL_NAME,
                 "quant": DEFAULT_QUANT,
             }
-        if binary.is_file() and model is None:
+        if binary is not None and binary.is_file() and model is None:
             return {
                 "ok": False,
                 "root": str(base),
@@ -145,10 +152,10 @@ def find_pack(root=None):
                 "reason": "model_missing",
                 "hint": (
                     "Place a Qwen2.5-Coder-1.5B-Instruct Q4_K_M .gguf under "
-                    "assistant/models/ (copied from a machine that can download)."
+                    "assistant/models/ (or run tools/fetch_assistant_pack.py)."
                 ),
             }
-        if model is not None and not binary.is_file():
+        if model is not None and (binary is None or not binary.is_file()):
             return {
                 "ok": False,
                 "root": str(base),
@@ -156,8 +163,10 @@ def find_pack(root=None):
                 "model": str(model),
                 "reason": "binary_missing",
                 "hint": (
-                    "Place llama-server%s next to the model pack under "
-                    "assistant/." % (".exe" if _is_windows() else "")
+                    "Place llama-server%s under assistant/runtime/ "
+                    "(or run tools/fetch_assistant_pack.py / "
+                    "Fetch-SamQL-Assistant.ps1)."
+                    % (".exe" if _is_windows() else "")
                 ),
             }
     return {
@@ -167,10 +176,9 @@ def find_pack(root=None):
         "model": None,
         "reason": "pack_missing",
         "hint": (
-            "Copy an offline assistant pack to ./assistant/ "
-            "(llama-server + Qwen2.5-Coder-1.5B Q4 GGUF). "
-            "No download is required on locked-down machines if the pack "
-            "was prepared elsewhere. See assistant/README.txt."
+            "Run tools/fetch_assistant_pack.py (or Fetch-SamQL-Assistant.ps1) "
+            "on a machine that can download, then copy ./assistant/ next to "
+            "SamQL. See assistant/README.txt."
         ),
     }
 
@@ -397,8 +405,11 @@ def ensure_server(pack=None):
         creationflags = 0
         if _is_windows():
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # Run with cwd = binary dir so companion DLLs/.so resolve.
+        bin_dir = str(Path(pack["binary"]).resolve().parent)
         _proc = subprocess.Popen(
             cmd,
+            cwd=bin_dir,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,

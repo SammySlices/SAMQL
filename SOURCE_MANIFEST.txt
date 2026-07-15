@@ -7,6 +7,7 @@ DESIGN_iterator_dynamic_nodes.md
 DISTRIBUTION.md
 Decode-SamQL-APHEX.ps1
 Expand-SamQL.ps1
+Fetch-SamQL-Assistant.ps1
 Pack-SamQL.ps1
 README.md
 RELEASE_CHECKLIST.md
@@ -295,6 +296,7 @@ tests/test_wave3_stabilization.py
 tools/aphex_transport.py
 tools/bench_large_load.py
 tools/diag_load.py
+tools/fetch_assistant_pack.py
 tools/gen_nested_json_stall_sample.py
 tools/install_frontend_deps.py
 tools/normalize_npm_lock.py

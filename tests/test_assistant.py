@@ -64,13 +64,16 @@ class PackAndGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             bin_name = "llama-server.exe" if asst._is_windows() else "llama-server"
-            (root / bin_name).write_bytes(b"x")
+            runtime = root / "runtime"
+            runtime.mkdir()
+            (runtime / bin_name).write_bytes(b"x")
             models = root / "models"
             models.mkdir()
             (models / "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf").write_bytes(b"gguf")
             got = asst.find_pack(root)
         self.assertTrue(got["ok"])
         self.assertTrue(got["model"].endswith(".gguf"))
+        self.assertIn("runtime", got["binary"].replace("\\", "/"))
 
     def test_chat_refuses_when_duckdb_busy(self):
         class Sess:

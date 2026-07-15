@@ -7,6 +7,14 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/playwright/.cache/
 
+# Optional offline SQL assistant binaries / weights (download via
+# tools/fetch_assistant_pack.py or Fetch-SamQL-Assistant.ps1). Keep README.
+assistant/llama-server
+assistant/llama-server.exe
+assistant/runtime/
+assistant/models/*.gguf
+assistant/**/*.partial
+
 # Python / build
 **/__pycache__/
 *.py[cod]

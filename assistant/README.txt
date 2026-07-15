@@ -6,18 +6,35 @@ chat icon can turn English into DuckDB SQL or SparkSQL using a local model.
 
 No internet and no registration are required at runtime.
 
-Contents (prepare on a machine that CAN download, then copy here):
-  llama-server.exe          (Windows)  OR  llama-server  (Linux/macOS)
+Contents (after running the fetch script):
+  runtime/
+    llama-server.exe   (Windows)  OR  llama-server  (Linux/macOS)
+    … companion DLLs / .so libraries from the llama.cpp CPU release …
   models/
     qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
 
 Model: Qwen2.5-Coder-1.5B-Instruct (Apache 2.0), Q4_K_M GGUF (~1 GB).
-Runtime: llama.cpp llama-server (native binary, not Python, not Ollama).
+Runtime: llama.cpp llama-server (native binary + libs, not Python, not Ollama).
+
+Download (on a machine that CAN reach GitHub + Hugging Face):
+
+  Windows:
+    .\Fetch-SamQL-Assistant.ps1
+
+  Any OS with Python 3.10+:
+    python tools/fetch_assistant_pack.py
+
+  Re-download:
+    python tools/fetch_assistant_pack.py --force
 
 Locked-down work PC workflow:
-  1. On a home/build PC, download llama-server and the GGUF.
-  2. Place them in this assistant/ layout.
-  3. Copy the whole assistant/ folder next to SamQL (or set SAMQL_ASSISTANT_DIR).
+  1. Run the fetch script on a home/build PC.
+  2. Copy the whole assistant/ folder next to SamQL (or set SAMQL_ASSISTANT_DIR).
+
+Sources used by the fetch script:
+  * llama-server: https://github.com/ggml-org/llama.cpp/releases (CPU build)
+  * model: https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF
+    file qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
 
 Optional env:
   SAMQL_ASSISTANT_DIR   absolute path to this pack
