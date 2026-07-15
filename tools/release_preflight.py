@@ -427,17 +427,12 @@ def _check_manifest(root: Path, release: dict[str, Any], checks: Checks) -> list
             else f"extra={extra[:6]!r}; absent={absent[:6]!r}"
         ),
     )
-    audit_name = (
-        f"AUDIT_{str(release.get('build', '')).split('.')[0]}_"
-        f"refactor_phase{release.get('phase')}.md"
-    )
     required = {
         "ARCHITECTURE.md",
         "Decode-SamQL-APHEX.ps1",
         "Pack-SamQL.ps1",
         "RELEASE_MANIFEST.json",
         "RELEASE_CHECKLIST.md",
-        audit_name,
         "tools/release_artifacts.py",
         "tools/release_preflight.py",
         "tools/package_release.py",

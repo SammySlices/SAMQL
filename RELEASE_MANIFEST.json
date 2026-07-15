@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "product": "SamQL",
   "version": "2.16.4",
-  "build": "2026-07-14.603",
+  "build": "2026-07-14.604",
   "phase": 10,
   "generatedAt": "2026-07-14T20:04:24Z",
   "sourceManifest": "SOURCE_MANIFEST.txt",
-  "sourceFileCount": 313,
+  "sourceFileCount": 290,
   "runtime": {
     "pythonMinimum": "3.10",
     "nodeMinimum": "20.19",

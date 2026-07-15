@@ -29,9 +29,13 @@ Thumbs.db
 # Release / local outputs
 release/
 samql_txt/
+samql_full_source_all_tests_ui_*.txt
 *.aphex.txt
 *_EMAIL_SAFE_APHEX.txt
 *_RELEASE_RECEIPT.json
 
 # Local suite / agent logs (never ship)
 .samql-*.log
+_full_test_out.txt
+_npm_ci_out.txt
+_build_*.txt
