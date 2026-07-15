@@ -2029,6 +2029,8 @@ export default function App() {
     engine: string,
     table: string,
     rootId?: RootIdChoice | null,
+    column?: string | null,
+    path?: string | null,
   ): Promise<{
     ok?: boolean;
     error?: string;
@@ -2036,16 +2038,23 @@ export default function App() {
     cancelled?: boolean;
   }> => {
     const { queryId, ctrl } = startBgOp();
+    const nestLabel = path || column || table;
     toast(
       "ok",
-      `Flattening ${table}`,
+      `Flattening ${nestLabel}`,
       rootId?.label
-        ? `Building relational tables with unique id ${rootId.label} — tracking in the activity panel.`
-        : "Building relational tables — tracking in the activity panel.",
+        ? `Building relational tables with unique id ${rootId.label} — source table kept.`
+        : "Building relational tables for this nest — source table kept.",
     );
     let jobId: string | null = null;
     try {
-      const started = await api.flattenTableStart(engine, table, rootId);
+      const started = await api.flattenTableStart(
+        engine,
+        table,
+        rootId,
+        column,
+        path,
+      );
       jobId = started.job_id;
       // Prefer cancelling the job when Stop is pressed (Abort alone only
       // stops our poll loop; the engine work keeps going otherwise).
@@ -2065,13 +2074,13 @@ export default function App() {
             toast(
               "ok",
               "Flattened to tables",
-              `${n} table${n === 1 ? "" : "s"} created from ${table}.`,
+              `${n} table${n === 1 ? "" : "s"} created from ${nestLabel}; ${table} kept.`,
             );
             refreshTables();
             return { ok: true, created: n };
           }
           if (p.state === "cancelled") {
-            toast("warn", "Flatten cancelled", table);
+            toast("warn", "Flatten cancelled", nestLabel);
             return { cancelled: true };
           }
           if (p.state === "error") {

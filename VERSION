@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-15.612
+Current build:   2026-07-15.613
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-15.613  (v2.16.4)
+
+JOIN_KEYS, *_FLATTENED NAMING, PATH FLATTEN, SIDEBAR REORDER, LAUNCHER.
+Flatten/shred families use <stem>_flattened hubs/children plus Join_Keys
+alongside Master_Keys; Field Explorer can flatten a nest path (not only
+top-level columns). Loaded-table drag reorder, ConfirmPop/modal polish,
+Field Explorer layout, and AppWindow HTTP-health / source-first launch
+fixes. Refreshed samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-15.612  (v2.16.4)

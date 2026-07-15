@@ -53,7 +53,7 @@ describe("Modal accessibility and lifecycle", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     fireEvent.keyDown(window, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(140);
+    vi.advanceTimersByTime(160);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

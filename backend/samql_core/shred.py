@@ -98,6 +98,19 @@ def _sanitize(part):
     return _sanitize_cached(str(part))
 
 
+_FLATTENED_SUFFIX = "_flattened"
+
+
+def _with_flattened(stem):
+    """Table-name stem for flatten/shred hubs and children (not Master/Join_Keys)."""
+    s = _sanitize(stem)
+    if not s:
+        s = "tbl"
+    if s.lower().endswith(_FLATTENED_SUFFIX):
+        return s
+    return s + _FLATTENED_SUFFIX
+
+
 def _uniq_alias(base, seen, counter):
     """.481 audit: O(1) unique-alias allocation. The old form probed
     `while a in seen: a = base_i; i += 1` from scratch each call -- when
@@ -248,8 +261,8 @@ def plan_shred(column, node, base="rec", max_tables=40, root_ord=None,
     .507: ``children_use_base=False`` names children by their ELEMENT PATH
     alone ("legs", "legs_cashflows") -- used when the ROOT itself takes the
     file's name (single-list promotion), so the file name doesn't repeat on
-    every child. The joinkeys hub stays root-prefixed either way (it belongs
-    to the root).
+    every child. The records hub stays root-prefixed either way (it belongs
+    to the root) and is named <base>_flattened.
 
     .507: for a struct-element ROOT, each depth-1 WRAPPER OBJECT with scalar
     leaves becomes its OWN 1:1 table (kind "wrapper": the wrapper's leaves,
@@ -331,10 +344,10 @@ def plan_shred(column, node, base="rec", max_tables=40, root_ord=None,
             ord_col = root_ord or (base + "_ord")
         my_keys = keys + [ord_col]
         if path_parts and not children_use_base:
-            name = uniq(_sanitize("_".join(
+            name = uniq(_with_flattened("_".join(
                 _sanitize(p) for p in path_parts)))
         else:
-            name = uniq(_sanitize("_".join([base] + [
+            name = uniq(_with_flattened("_".join([base] + [
                 _sanitize(p) for p in path_parts])))
         if elem.get("t") == "struct":
             fields, kids, leaves = fields_of(elem)
@@ -375,8 +388,9 @@ def plan_shred(column, node, base="rec", max_tables=40, root_ord=None,
                         _al = _uniq_alias(_sanitize(_vf), _vseen, _vctr)
                         _vleaves.append((_al, _vf))
                 wrap_specs.append({
-                    "name": uniq(_sanitize(_mf) if not children_use_base
-                                 else _sanitize(base + "_" + _sanitize(_mf))),
+                    "name": uniq(_with_flattened(
+                        _mf if not children_use_base
+                        else base + "_" + _sanitize(_mf))),
                     "path": (column + ("." + ".".join(path_parts)
                                        if path_parts else "")
                              + "." + _mf + " (map)"),
@@ -411,8 +425,9 @@ def plan_shred(column, node, base="rec", max_tables=40, root_ord=None,
                                     _seen, _six))
                        for parts in plist]
                 wrap_specs.append({
-                    "name": uniq(_sanitize(wf) if not children_use_base
-                                 else _sanitize(base + "_" + _sanitize(wf))),
+                    "name": uniq(_with_flattened(
+                        wf if not children_use_base
+                        else base + "_" + _sanitize(wf))),
                     "path": (column + ("." + ".".join(path_parts)
                                        if path_parts else "")
                              + "." + wf + " (object)"),
@@ -451,9 +466,8 @@ def plan_shred(column, node, base="rec", max_tables=40, root_ord=None,
         # JOIN-HELPER (on-box ask 2026-07-02): deep-shred child tables are
         # slim, but the ROOT keeps every wrapper struct and is enormous per
         # row. This slim hub carries _rid + a few scalar identifiers, so
-        # children join to IT (child._rid = <base>_joinkeys._rid) without
-        # dragging the fat root through every join. The name says what it
-        # is; the path says what it keys.
+        # children join to IT (child._rid = <base>_flattened._rid) without
+        # dragging the fat root through every join. Named <base>_flattened.
         if tables and len(tables) < max_tables:
             root = tables[0]
             # .520 audit: under .518 the hub IS the records table (no base
@@ -464,8 +478,21 @@ def plan_shred(column, node, base="rec", max_tables=40, root_ord=None,
             # existing. Fields literally named like the key/surrogate
             # columns are renamed at SQL build time now, not dropped.
             idents = [fn for fn in root["fields"]]
+            # Hub claims <base>_flattened. If the shred root already used
+            # that stem, give the root a distinct plan-only name and mark
+            # skip_materialize so session keeps a single records hub.
+            hub_stem = _with_flattened(base)
+            if root["name"].lower() == hub_stem.lower():
+                old = root["name"]
+                taken_low.discard(old.lower())
+                taken.discard(old)
+                root["name"] = uniq(_sanitize(base) + "__root")
+                root["skip_materialize"] = True
+                for t in tables:
+                    if t.get("parent") == old:
+                        t["parent"] = root["name"]
             tables.append({
-                "name": uniq(_sanitize(base + "_joinkeys")),
+                "name": uniq(hub_stem),
                 "path": column + " (join keys: every shred table joins "
                         "here on _rid)",
                 "keys": list(root["keys"]),
@@ -777,23 +804,35 @@ def _build_table_sql_json(spec, column, fwd, hops, keys, _root,
         e0_expr = _json_elem_wrap(e0_raw, arr_schema)
     where = (" WHERE t0.file_row_number + 1 BETWEEN %d AND %d"
              % (int(row_range[0]), int(row_range[1]))) if row_range else ""
+    # .521: compute root_id once in u0 (same contract as the STRUCT path).
+    # e0-flavoured ids substitute the unnest expression (zip-safe); t0
+    # flavours reference the source row directly.
+    if _root and "e0." in _root:
+        if root_is_json_list:
+            _root_u0 = _root.replace("e0.", "unnest(%s)." % root_arr)
+        else:
+            _root_u0 = _root.replace(
+                "e0.", "%s." % _json_elem_wrap("unnest(_a0)", arr_schema))
+    else:
+        _root_u0 = _root
+    _rid_frag = ((', %s AS "root_id"' % _root_u0) if _root else "")
     ctes = []
     if root_is_json_list:
         ctes.append(
             'u0 AS (SELECT t0.file_row_number + 1 AS "_rid", '
             "generate_subscripts(%s, 1) AS %s, "
-            "%s AS e0 "
+            "%s AS e0%s "
             "FROM read_parquet('%s', file_row_number = true) AS t0%s)"
-            % (root_arr, _q(keys[1]), e0_expr, fwd, where))
+            % (root_arr, _q(keys[1]), e0_expr, _rid_frag, fwd, where))
     else:
         arr = _json_arr_expr("t0.%s" % col0, arr_schema)
         ctes.append(
             'u0 AS (SELECT t0.file_row_number + 1 AS "_rid", '
             "generate_subscripts(_a0, 1) AS %s, "
-            "%s AS e0 "
+            "%s AS e0%s "
             "FROM read_parquet('%s', file_row_number = true) AS t0, "
             "LATERAL (SELECT %s AS _a0) AS _j0%s)"
-            % (_q(keys[1]), e0_expr, fwd, arr, where))
+            % (_q(keys[1]), e0_expr, _rid_frag, fwd, arr, where))
     prev_keys = ['"_rid"', _q(keys[1])]
     carry = list(prev_keys) + (['"root_id"'] if _root else [])
     for i2, part in enumerate(hops[1:], start=1):
@@ -866,14 +905,11 @@ def _build_table_sql_json(spec, column, fwd, hops, keys, _root,
 # WHOLE TABLE's column set as the root record and produces exactly the shape
 # the relational model wants:
 #
-#   <base>            one row per source record: all top-level scalars, PLUS
-#                     every single-struct column flattened INLINE
-#                     (product -> product_x, product_y, ...). List columns are
-#                     dropped from here (each becomes its own table).
-#   <base>_joinkeys   _rid + one ordinal per top-level list (fees_ord, ...),
-#                     so a child row maps to its exact position; the base
-#                     joins on _rid alone.
-#   <base>_<list>     one row per element of a top-level list: _rid + <list>_ord
+#   <base>            (not materialized under .518) planned payload only.
+#   <base>_flattened  records hub: top-level scalars + inlined struct leaves
+#                     + _rid/_sk (one row per source record). Children join
+#                     here on _parent_sk = hub._sk.
+#   <list>_flattened  one row per element of a top-level list: _rid + <list>_ord
 #                     + the element's fields flattened INLINE (a struct element
 #                     spreads its subfields; a scalar element becomes "value").
 #
@@ -1025,7 +1061,7 @@ def plan_flatten_table(columns, base="rec", reserved=None):
         # (a completely FLAT table has nothing to anchor -- no hub)
         tables.append({
             "kind": "joinkeys",
-            "name": uniq(_sanitize(base + "_joinkeys")),
+            "name": uniq(_with_flattened(base)),
             "scalars": scalars,
             "inline_structs": inline_structs,
         })
@@ -1034,7 +1070,7 @@ def plan_flatten_table(columns, base="rec", reserved=None):
     for colname, _mnode in maps:
         tables.append({
             "kind": "map",
-            "name": uniq(_sanitize(colname)),
+            "name": uniq(_with_flattened(colname)),
             "col": colname,
             "ord_col": _sanitize(colname) + "_ord",
         })
@@ -1042,7 +1078,7 @@ def plan_flatten_table(columns, base="rec", reserved=None):
     for colname in json_cols:
         tables.append({
             "kind": "jsonside",
-            "name": uniq(_sanitize(colname)),
+            "name": uniq(_with_flattened(colname)),
             "col": colname,
         })
 
@@ -1061,7 +1097,7 @@ def plan_flatten_table(columns, base="rec", reserved=None):
                 nested_child_specs.append((list(p) + list(np), nnode, p, ordc))
         tables.append({
             "kind": "list",
-            "name": uniq(_pathkey(p)),
+            "name": uniq(_with_flattened(_pathkey(p))),
             "list_path": p,
             "ord_col": ordc,
             "elem_scalar": elem_scalar,
@@ -1091,7 +1127,7 @@ def plan_flatten_table(columns, base="rec", reserved=None):
             n_ord = _pathkey(full_path) + "_ord"
             tables.append({
                 "kind": "list",
-                "name": uniq(_pathkey(full_path)),
+                "name": uniq(_with_flattened(_pathkey(full_path))),
                 "list_path": full_path,
                 "ord_col": n_ord,
                 "elem_scalar": n_scalar,
@@ -1269,14 +1305,8 @@ def build_flatten_sql(spec, src_expr, row_expr, json_access=False,
     if parent_ords and parent_list_path:
         # Compound-key child: unnest the parent list, then this list at
         # the relative path under each parent element.
-        parent_acc = _inline_path(parent_list_path[0], parent_list_path[1:])
         parent_ord = parent_ords[0]
         rel = path[len(parent_list_path):]
-        parent_elem = "t0.%s[g0.%s]" % (parent_acc, Q(parent_ord))
-        child_list = parent_elem
-        for part in rel:
-            child_list = "%s.%s" % (child_list, Q(part))
-        elem = "%s[g.%s]" % (child_list, Q(ordc))
         key_exprs = [row_expr, "g0.%s" % Q(parent_ord), "g.%s" % Q(ordc)]
         sk, psk = _surrogate_frags(key_exprs)
         sel = [sk, psk, '%s AS "_rid"' % row_expr]
@@ -1284,6 +1314,45 @@ def build_flatten_sql(spec, src_expr, row_expr, json_access=False,
             sel.append('%s AS "root_id"' % _root)
         sel += ["g0.%s AS %s" % (Q(parent_ord), Q(parent_ord)),
                 "g.%s AS %s" % (Q(ordc), Q(ordc))]
+        if json_access:
+            # Opaque JSON parent list: from_json + json_extract (native
+            # STRUCT subscripts fail when the nest is still JSON-typed).
+            pcol = parent_list_path[0]
+            prest = parent_list_path[1:]
+            if prest:
+                parr = _json_arr_expr(
+                    _json_field_expr("t0.%s" % Q(pcol), prest,
+                                     as_text=False),
+                    json_arr_schema)
+            else:
+                parr = _json_arr_expr("t0.%s" % Q(pcol), json_arr_schema)
+            pelem = _json_elem_wrap(
+                "_parr[g0.%s]" % Q(parent_ord), json_arr_schema)
+            carr = _json_arr_expr(
+                _json_field_expr(pelem, rel, as_text=False),
+                json_arr_schema)
+            elem = _json_elem_wrap("_carr[g.%s]" % Q(ordc), json_arr_schema)
+            if spec["elem_scalar"]:
+                sel.append('CAST(%s AS VARCHAR) AS "value"' % elem)
+            else:
+                for parts, alias in spec["leaves"]:
+                    sel.append("%s AS %s" % (
+                        _json_field_expr(elem, parts, as_text=True),
+                        Q(alias)))
+            return ('CREATE OR REPLACE TABLE %s AS SELECT %s '
+                    "FROM %s AS t0, LATERAL (SELECT %s AS _parr) AS _jp, "
+                    "LATERAL (SELECT generate_subscripts(_parr, 1) AS %s) "
+                    "AS g0, LATERAL (SELECT %s AS _carr) AS _jc, "
+                    "LATERAL (SELECT generate_subscripts(_carr, 1) AS %s) "
+                    "AS g"
+                    % (Q(spec["name"]), ", ".join(sel), qsrc, parr,
+                       Q(parent_ord), carr, Q(ordc)))
+        parent_acc = _inline_path(parent_list_path[0], parent_list_path[1:])
+        parent_elem = "t0.%s[g0.%s]" % (parent_acc, Q(parent_ord))
+        child_list = parent_elem
+        for part in rel:
+            child_list = "%s.%s" % (child_list, Q(part))
+        elem = "%s[g.%s]" % (child_list, Q(ordc))
         if spec["elem_scalar"]:
             sel.append('%s AS "value"' % elem)
         else:

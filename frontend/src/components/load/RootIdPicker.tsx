@@ -84,7 +84,7 @@ export const RootIdPicker: React.FC<{
   };
   return (
     <div className="form-row">
-      <label title="Optional: a field that identifies each RECORD. It is carried onto every table in the family as root_id, and a Master_Keys table (the distinct, non-null identifier list) is created alongside. The load card reports whether the field was actually unique.">
+      <label title="Optional: a field that identifies each RECORD. It is carried onto every table in the family as root_id. A Master_Keys table (distinct, non-null identifier list) and a Join_Keys table (_sk, _rid, root_id per record) are created alongside. The load card reports whether the field was actually unique.">
         Unique identifier (optional)
         {busy && (
           <span

@@ -132,9 +132,25 @@ const DocsModalInner: React.FC<{
   const [tab, setTab] = useState<Tab>("joins");
   const live = useMemo(() => {
     const duck = tables.filter((t) => t.engine === "duckdb");
-    const hub = duck.find((t) => t.name.endsWith("_joinkeys"));
+    // Records hub: a root (*_flattened with children) — Master_Keys /
+    // Join_Keys / nest children all carry parent metadata.
+    const hub =
+      duck.find(
+        (t) =>
+          !t.parent &&
+          /_flattened$/i.test(t.name) &&
+          duck.some((x) => x.parent === t.name),
+      ) ||
+      duck.find(
+        (t) =>
+          !t.parent &&
+          /_joinkeys$/i.test(t.name) &&
+          duck.some((x) => x.parent === t.name),
+      );
     if (!hub) return null;
-    const base = hub.name.slice(0, -"_joinkeys".length);
+    const base = /_flattened$/i.test(hub.name)
+      ? hub.name.slice(0, -"_flattened".length)
+      : hub.name.slice(0, -"_joinkeys".length);
     // .515: children carry ELEMENT-PATH names (cashflows_payingleg) since
     // .504 -- find them by the explicit parent metadata (.501 family tree),
     // falling back to the legacy base_* prefix for families made by older
@@ -164,7 +180,7 @@ const DocsModalInner: React.FC<{
   const child = live?.child?.name || "cashflows";
   const childOrd = ord(child, t);
   const grand = live?.grand?.name || `${child}_legs`;
-  const hub = live?.hub || `${t}_joinkeys`;
+  const hub = live?.hub || `${t}_flattened`;
 
   // SQL functions: fetched once, filterable
   const [fns, setFns] = useState<Awaited<
@@ -303,13 +319,17 @@ const DocsModalInner: React.FC<{
             nested json. When the file is only a wrapper around a single
             list, the wrapper vanishes and each record is one hub row
             (925 wrapper rows in, 22,704 records out). Children are named
-            by their <b>element path</b> (<code>{child}</code>, then{" "}
-            <code>{grand}</code> a level deeper); single nested{" "}
+            by their <b>element path</b> with a <code>_flattened</code>{" "}
+            suffix (<code>{child}</code>, then <code>{grand}</code> a level
+            deeper); single nested{" "}
             <i>objects</i> get their own one-row-per-record table; a
             heterogeneous object column (a DuckDB <code>MAP</code>, like
             an <code>identifier</code> block) becomes a{" "}
-            <code>(key, value)</code> table — one row per entry. All of
-            them join with the same rule.
+            <code>(key, value)</code> table — one row per entry. When a
+            unique identifier is chosen, <code>Master_Keys</code> and{" "}
+            <code>Join_Keys</code> list first under the family, then the
+            <code>_flattened</code> data tables. All of them join with the
+            same rule.
           </p>
           <h4>Unique identifier (root_id) and Master_Keys</h4>
           <p>
@@ -321,7 +341,10 @@ const DocsModalInner: React.FC<{
             alternative to <code>"_sk"</code> for joining any two family
             tables directly. A <code>Master_Keys</code> table is created
             alongside: the <b>distinct, non-null</b> identifier list, one
-            row each. Duplicates are removed there but never silently —
+            row each. A sibling <code>Join_Keys</code> table maps each
+            record's <code>_sk</code>, <code>_rid</code>, and{" "}
+            <code>root_id</code> (one row per hub record). Duplicates are
+            removed from <code>Master_Keys</code> but never silently —
             the load card reports whether the field was actually unique
             (records vs distinct, with the duplicated and null counts).
             The picker appears wherever a JSON load offers the flatten
@@ -332,7 +355,8 @@ const DocsModalInner: React.FC<{
             notes whether it looked unique <i>in the sample</i>, and the
             load card's verdict over the full data is the authoritative
             one. Re-flattening the same file replaces its{" "}
-            <code>Master_Keys</code> alongside the family.
+            <code>Master_Keys</code> and <code>Join_Keys</code> alongside
+            the family.
           </p>
           <h4>Hub → child (one column)</h4>
           <pre className="code">{`SELECT r.*, c.*

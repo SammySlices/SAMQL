@@ -674,6 +674,11 @@ class Session:
         # names instead of suffixing new copies. Session-lifetime, like the
         # DuckDB catalog it describes.
         self._table_family = {}
+        # User-driven Loaded-tables sidebar order (session-scoped). List of
+        # "engine:name" keys. Empty means catalog default (alphabetical).
+        # Flatten/load may still append new tables; unknown keys sort after
+        # ranked ones so a drag reorder never fights registration order.
+        self._table_ui_order = []
         self.config = ConfigStore()
         self.history = QueryHistoryStore()
         self.saved = SavedQueryStore()
@@ -1146,6 +1151,10 @@ class Session:
         except Exception:
             pass
         try:
+            self._table_ui_order.clear()
+        except Exception:
+            pass
+        try:
             with self._running_lock:
                 self._running.clear()
         except Exception:
@@ -1278,7 +1287,68 @@ class Session:
                 "col_count": len(info.get("columns", [])),
                 "columns": [],
             })
-        return out
+        return self._apply_table_ui_order(out)
+
+    def set_table_ui_order(self, items):
+        """Persist Loaded-tables drag order for this session.
+
+        ``items`` is a list of ``{engine, name}`` (local tables only). Remote
+        catalog entries are ignored. Tables not listed keep appearing after
+        the ranked set (stable relative order from the catalog walk).
+        """
+        order = []
+        seen = set()
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            eng = str(it.get("engine") or "").strip()
+            name = str(it.get("name") or "").strip()
+            if not eng or not name or eng == "remote":
+                continue
+            key = "%s:%s" % (eng, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            order.append(key)
+        self._table_ui_order = order
+        return {"ok": True, "order": list(order)}
+
+    def _apply_table_ui_order(self, out):
+        """Reorder ``tables_tree`` rows by ``_table_ui_order`` when set."""
+        rank = getattr(self, "_table_ui_order", None) or []
+        if not rank:
+            return out
+        idx = {k: i for i, k in enumerate(rank)}
+        ranked, unranked, remotes = [], [], []
+        for t in out:
+            if t.get("remote"):
+                remotes.append(t)
+                continue
+            key = "%s:%s" % (t.get("engine", ""), t.get("name", ""))
+            if key in idx:
+                ranked.append(t)
+            else:
+                unranked.append(t)
+        ranked.sort(key=lambda t: idx["%s:%s" % (t.get("engine", ""),
+                                                 t.get("name", ""))])
+        return ranked + unranked + remotes
+
+    def _rename_table_ui_order(self, engine, old, new):
+        order = getattr(self, "_table_ui_order", None) or []
+        if not order:
+            return
+        old_k = "%s:%s" % (engine, old)
+        new_k = "%s:%s" % (engine, new)
+        self._table_ui_order = [
+            (new_k if k == old_k else k) for k in order if k != new_k
+        ]
+
+    def _drop_table_ui_order(self, engine, name):
+        order = getattr(self, "_table_ui_order", None) or []
+        if not order:
+            return
+        key = "%s:%s" % (engine, name)
+        self._table_ui_order = [k for k in order if k != key]
 
     def column_field_tree(self, engine, table, column):
         """The nested field tree for one column, parsed from its raw-case
@@ -7156,6 +7226,52 @@ class Session:
             columns.append((name, node))
         return columns, json_access_cols, None
 
+    def _sample_enrich_flatten_path(self, mgr, table, path_parts):
+        """Sample a Field Explorer nest path (often opaque JSON under a
+        depth-capped STRUCT) into a real list/struct type node.
+
+        Returns (synth_name, node, json_access) or None when the path cannot
+        be enriched into a flattenable nest.
+        """
+        from .diagnostics import json_samples_to_type_node
+        from .sqlutil import quote_ident as _qid
+        if not path_parts:
+            return None
+        try:
+            acc = ".".join(_qid(p) for p in path_parts)
+            sql = ('SELECT %s FROM %s LIMIT %d'
+                   % (acc, _qid(table),
+                      int(Session._FIELD_TREE_SAMPLE_ROWS)))
+            reader = getattr(mgr, "read", None) or getattr(
+                mgr, "execute_read", None)
+            if reader is not None:
+                _c, rows = reader(sql)
+            else:
+                _c, rows = mgr.execute(sql)
+            values = [r[0] for r in (rows or []) if r and r[0] is not None]
+            if not values:
+                return None
+            syn = json_samples_to_type_node(values)
+            if not syn or syn.get("t") not in ("list", "struct"):
+                return None
+            stem = "_".join(
+                re.sub(r"[^A-Za-z0-9_]+", "_", p).strip("_") or "x"
+                for p in path_parts)
+            synth = (stem + "_nest") if stem else "fx_nest"
+            # Depth-capped loads store nested arrays as JSON text/cells.
+            use_json = True
+            try:
+                _, tr = mgr.execute(
+                    "SELECT typeof(%s) FROM %s LIMIT 1"
+                    % (acc, _qid(table)))
+                tu = (str(tr[0][0]) if tr and tr[0] else "").upper()
+                use_json = ("JSON" in tu) or tu in ("VARCHAR", "CHAR")
+            except Exception:
+                use_json = True
+            return synth, syn, use_json
+        except Exception:
+            return None
+
     def _flatten_promote_col(self, columns):
         """Single wrapping LIST(STRUCT) column to promote, else None."""
         _list_specs = []
@@ -7281,18 +7397,85 @@ class Session:
             },
         }
 
-    def flatten_table(self, table, base=None, query_id=None, root_id=None):
+    @staticmethod
+    def _flatten_path_parts(path, column=None):
+        """Normalize a Field Explorer field path into column-rooted parts."""
+        if path is None or path is False:
+            return None
+        if isinstance(path, (list, tuple)):
+            parts = [str(p) for p in path if p not in (None, "")]
+        else:
+            parts = [p for p in str(path).replace("/", ".").split(".")
+                     if p]
+        # Field-tree (element) wrappers are display-only; never STRUCT keys.
+        parts = [p for p in parts if p and p != "(element)"]
+        if not parts:
+            return None
+        if column and parts[0] != column:
+            parts = [column] + parts
+        return parts
+
+    @staticmethod
+    def _flatten_keep_source_base(path_parts, column, table):
+        """Family base name for Field Explorer keep_source flatten.
+
+        The hub is named ``<stem>_flattened`` by the planner; this returns
+        the stem only (no ``_flat`` / ``_joinkeys`` suffix).
+        """
+        if path_parts:
+            stem = "_".join(
+                re.sub(r"[^A-Za-z0-9_]+", "_", p).strip("_") or "x"
+                for p in path_parts)
+        elif column:
+            stem = (re.sub(r"[^A-Za-z0-9_]+", "_", column).strip("_")
+                    or "col")
+        else:
+            stem = (re.sub(r"[^A-Za-z0-9_]+", "_", table or "tbl").strip("_")
+                    or "tbl")
+        return stem
+
+    @staticmethod
+    def _filter_flatten_plan_for_path(plan, path_parts):
+        """Keep hub + only list/map/jsonside tables for ``path_parts``."""
+        if not path_parts:
+            return plan
+        kept = []
+        for t in plan.get("tables") or []:
+            kind = t.get("kind")
+            if kind in ("base", "joinkeys"):
+                kept.append(t)
+                continue
+            if kind == "list":
+                lp = list(t.get("list_path") or [])
+                if (len(lp) >= len(path_parts)
+                        and lp[:len(path_parts)] == path_parts):
+                    kept.append(t)
+                continue
+            if kind in ("map", "jsonside"):
+                col = t.get("col") or t.get("column")
+                if col and path_parts == [col]:
+                    kept.append(t)
+        return dict(plan, tables=kept)
+
+    def flatten_table(self, table, base=None, query_id=None, root_id=None,
+                      keep_source=False, column=None, path=None):
         """.474: the Load-modal "flatten" toggle, done at TABLE level.
         Turns one nested table into the relational set the model wants:
         a base table of every top-level scalar PLUS single-struct
-        columns flattened inline; a <base>_joinkeys table of _rid + one
-        ordinal per top-level list; and one <base>_<list> table per
-        top-level list, exploded with the element's fields inlined.
+        columns flattened inline; a <base>_flattened records hub of _rid
+        + inlined scalars; and one <list>_flattened table per top-level
+        list, exploded with the element's fields inlined.
 
         Reads through the loaded table's Parquet cache so file_row_number
         gives a stable _rid (materializing a one-shot cache first if the
         table isn't already parquet-backed -- e.g. a real CTAS table).
         Returns {ok, created:[{name,rows}], base} or {error}/{cancelled}.
+
+        Field Explorer passes ``keep_source=True`` plus optional ``column`` /
+        ``path`` so the original nested table stays loaded and only the
+        selected nest produces a relational family (+ Master_Keys and
+        Join_Keys when a unique identifier is chosen). Load-time flatten
+        keeps the default (replace source under the file name).
         """
         from . import shred as _shred
         from .engines import _is_interrupt as _is_intr
@@ -7306,10 +7489,116 @@ class Session:
             ensure_heavy_op_engine_memory(mgr)
         except Exception:
             pass
+        path_parts = self._flatten_path_parts(path, column)
+        if column is not None:
+            column = str(column)
+            if not column:
+                column = None
+        # Field Explorer: family base is path/column-derived so it never
+        # steals the source table name; load-time still uses base=table.
+        # May be recomputed after path walk-up finds a shorter enrichable nest.
+        if keep_source and (base is None or base == table):
+            base = self._flatten_keep_source_base(path_parts, column, table)
         base = base or table or "rec"
         columns, json_access_cols, err = self._flatten_table_columns(mgr, table)
         if err:
             return err
+        # root_id is validated against the FULL table schema (any level);
+        # planning may be narrowed to the selected column/path.
+        full_columns = columns
+        # True when a list element's type contains an array at any struct
+        # depth (needs compound-key deep shred, not one-level shallow).
+        def _elem_has_nested_array(list_node):
+            stack = [(list_node or {}).get("of") or {}]
+            while stack:
+                n = stack.pop()
+                t = (n or {}).get("t")
+                if t == "list":
+                    return True
+                if t == "struct":
+                    for _fn, _fnode in (n.get("fields") or []):
+                        stack.append(_fnode)
+            return False
+
+        # Field Explorer path scope: depth-capped flatten-off JSON often
+        # stores the nest as opaque JSON under a STRUCT. Project that nest
+        # into the flatten cache as a synthetic top-level column and plan
+        # only that nest — source table untouched.
+        _path_proj = None  # (sql_path, synth_name)
+        # Extra cache projections: deep list fields peeled out of a
+        # path-projected STRUCT so plan_shred owns their full subtree
+        # (e.g. terms.legs → cashflows / adjustments / history).
+        _path_peels = []  # [(sql_expr, peel_name), ...]
+        if path_parts:
+            # Walk up prefixes when a leaf path is not STRUCT-addressable
+            # (FE (element) children often have path=null → "phones" becomes
+            # counterparty.phones). Prefer the longest enrichable nest so
+            # contacts stays a child table, not residual JSON on joinkeys.
+            _enriched = None
+            _enrich_parts = None
+            for _end in range(len(path_parts), 0, -1):
+                _try = path_parts[:_end]
+                _got = self._sample_enrich_flatten_path(mgr, table, _try)
+                if _got is not None:
+                    _enriched = _got
+                    _enrich_parts = _try
+                    break
+            if _enriched is not None and _enrich_parts is not None:
+                if (keep_source and _enrich_parts != path_parts):
+                    base = self._flatten_keep_source_base(
+                        _enrich_parts, column, table)
+                path_parts = _enrich_parts
+                _synth, _snode, _sjson = _enriched
+                from .sqlutil import quote_ident as _qid_path
+                _path_sql = ".".join(_qid_path(p) for p in path_parts)
+                _path_proj = (_path_sql, _synth)
+                columns = [(_synth, _snode)]
+                json_access_cols = {_synth} if _sjson else set()
+                # Struct nests: shallow plan_flatten only emits ONE
+                # compound-key child level under a list-in-struct, so
+                # deeper arrays-of-objects are dropped (notes only). Peel
+                # each nested-array-bearing list field into a top-level
+                # cache column and route it through deep shred — same
+                # posture as flattening that list path directly.
+                if (_snode or {}).get("t") == "struct":
+                    _kept_fields = []
+                    _peeled_cols = []
+                    for _fname, _fnode in (_snode.get("fields") or []):
+                        if ((_fnode or {}).get("t") == "list"
+                                and _elem_has_nested_array(_fnode)):
+                            _peel = (
+                                _synth + "_"
+                                + (re.sub(r"[^A-Za-z0-9_]+", "_",
+                                          str(_fname)).strip("_")
+                                   or "list"))
+                            _path_peels.append((
+                                "%s.%s" % (_path_sql, _qid_path(_fname)),
+                                _peel))
+                            _peeled_cols.append((_peel, _fnode))
+                            if _sjson:
+                                json_access_cols.add(_peel)
+                        else:
+                            _kept_fields.append((_fname, _fnode))
+                    if _peeled_cols:
+                        _snode = dict(_snode, fields=_kept_fields)
+                        columns = [(_synth, _snode)] + _peeled_cols
+                # Already scoped via projection; do not path-filter the plan.
+                path_parts = None
+            elif column is not None:
+                plan_columns = [(n, nd) for n, nd in columns if n == column]
+                if not plan_columns:
+                    return {"error": "column %r was not found on table %r"
+                                     % (column, table)}
+                columns = plan_columns
+                json_access_cols = {c for c in json_access_cols
+                                    if c == column}
+        elif column is not None:
+            plan_columns = [(n, nd) for n, nd in columns if n == column]
+            if not plan_columns:
+                return {"error": "column %r was not found on table %r"
+                                 % (column, table)}
+            columns = plan_columns
+            json_access_cols = {c for c in json_access_cols if c == column}
         # .501: uniquify planned names against the live catalog (minus this
         # base, which re-flatten replaces) so path-only child names ("legs",
         # "json") from two different files can't clobber each other.
@@ -7320,15 +7609,18 @@ class Session:
         # .518: the family anchors at the HUB now -- a re-flatten must free
         # the hub-rooted members (and the hub name itself) so a reload lands
         # on the SAME names instead of suffixing "_2" copies.
+        _reserved -= self._family_members(base + "_flattened")
+        _reserved.discard(base + "_flattened")
+        # Also free a legacy *_joinkeys family from older builds so a
+        # re-flatten replaces instead of suffixing _2 copies.
         _reserved -= self._family_members(base + "_joinkeys")
         _reserved.discard(base + "_joinkeys")
-        plan = _shred.plan_flatten_table(columns, base=base,
-                                         reserved=_reserved)
-        if not any(t["kind"] in ("list", "map", "jsonside") or
-                   (t["kind"] == "base" and t["inline_structs"])
-                   for t in plan["tables"]):
-            return {"ok": True, "created": [], "base": None,
-                    "note": "no nested columns to flatten"}
+        # Keep-source: the original nested table must remain reserved so the
+        # family never lands on that catalog name.
+        if keep_source and table:
+            _reserved.add(table)
+        plan_full = _shred.plan_flatten_table(columns, base=base,
+                                              reserved=_reserved)
 
         # .494 (on-box "18 tables planned but only 2 came out"): a top-level
         # LIST whose ELEMENTS carry further nested arrays -- an array of
@@ -7341,38 +7633,28 @@ class Session:
         # the SAME planner the preflight counts, over the memory-lean .429
         # unnest pipeline, so the full hierarchy actually gets built. Simple
         # top-level lists and the base table keep the light shallow flatten.
-        def _elem_has_nested_array(list_node):
-            """True when the list's element type contains an array at any
-            struct depth (so it needs the compound-key deep breakout)."""
-            stack = [(list_node or {}).get("of") or {}]
-            while stack:
-                n = stack.pop()
-                t = (n or {}).get("t")
-                if t == "list":
-                    return True
-                if t == "struct":
-                    for _fn, _fnode in (n.get("fields") or []):
-                        stack.append(_fnode)
-            return False
-
         col_nodes = dict(columns)
         deep_cols = [name for name, node in columns
                      if (node or {}).get("t") == "list"
                      and _elem_has_nested_array(node)]
-        deep_set = set(deep_cols)
-        # the shallow list child's name ("<base>_json") is the prefix the deep
-        # hierarchy nests under, so its root/children/joinkeys line up with the
-        # rest of the flatten; its ord_col ("json_ord") is the SHORT ordinal
-        # name we hand the deep shred as root_ord, so the deep root ordinal
-        # reads the same as a one-level flatten instead of "<base>_json_ord".
+        # Path scope may drop the top-level shallow list from the plan; keep
+        # deep naming / eligibility from the unfiltered plan.
         shallow_list_name = {}
         shallow_list_ord = {}
-        for _s in plan["tables"]:
+        for _s in plan_full["tables"]:
             if _s.get("kind") == "list":
                 _p = _s.get("list_path") or []
                 if len(_p) == 1:
                     shallow_list_name[_p[0]] = _s["name"]
                     shallow_list_ord[_p[0]] = _s.get("ord_col")
+        plan = (self._filter_flatten_plan_for_path(plan_full, path_parts)
+                if path_parts else plan_full)
+        if not any(t["kind"] in ("list", "map", "jsonside") or
+                   (t["kind"] == "base" and t["inline_structs"])
+                   for t in plan["tables"]) and not deep_cols:
+            return {"ok": True, "created": [], "base": None,
+                    "note": "no nested columns to flatten"}
+        deep_set = set(deep_cols)
 
         # .507 PROMOTION: when the base table would carry NOTHING but keys
         # (no top-level scalars, no inline struct leaves, no map/json side
@@ -7416,11 +7698,34 @@ class Session:
         # steps/in_list/map match against our derived candidates -- no
         # client SQL), then rendered once per flavor: e0 = the promoted
         # record element, t0 = the source row.
+        # Field Explorer may scope planning to one nest, but the UID picker
+        # still offers any level of the SOURCE table -- validate against
+        # full_columns with the same promote gate a whole-table flatten uses.
         _rid_cand = None
         _rex_e0 = _rex_t0 = None
         if root_id is not None:
+            if column is None:
+                _rid_cols = columns
+                _rid_promo = _promo_col if promote else None
+            else:
+                _rid_cols = full_columns
+                _fplan = _shred.plan_flatten_table(
+                    full_columns, base="__uid__", reserved=set())
+                _fb0 = _fplan["tables"][0]
+                _flists = [t for t in _fplan["tables"]
+                           if t.get("kind") == "list"
+                           and len(t.get("list_path") or []) == 1
+                           and not t.get("parent_ords")]
+                _fother = [t for t in _fplan["tables"]
+                           if t.get("kind") in ("map", "jsonside")]
+                _fok = (not _fb0.get("scalars")
+                        and not _fb0.get("inline_structs")
+                        and not _fother and len(_flists) == 1)
+                _rid_promo = (_flists[0]["list_path"][0]
+                              if _fok and len(_flists[0]["list_path"]) == 1
+                              else None)
             _rid_cand = _shred.validate_root_choice(
-                columns, _promo_col if promote else None, root_id)
+                _rid_cols, _rid_promo, root_id)
             if _rid_cand is None:
                 return {"error": "root_id: that field was not found in "
                                  "this file's schema"}
@@ -7446,9 +7751,12 @@ class Session:
 
         # a stable _rid needs file_row_number, which only read_parquet
         # provides -- materialize a one-shot cache unless the table is
-        # already backed by parquet.
+        # already backed by parquet. Path-scoped Field Explorer flatten
+        # always projects the selected nest into a synthetic column, so it
+        # needs its own cache even when the source is already parquet.
         src = (getattr(mgr, "table_sources", {}) or {}).get(table)
-        parquet = src if (src and str(src).lower().endswith(".parquet"))             else None
+        parquet = src if (src and str(src).lower().endswith(".parquet")
+                          and _path_proj is None) else None
         cache_made = None
         if parquet is None:
             try:
@@ -7462,8 +7770,21 @@ class Session:
                 # keepalive-guarded: this streams the whole table to
                 # disk, so it must heartbeat (no false stall) and be
                 # cancellable mid-write.
-                _copy = ("COPY (SELECT * FROM %s) TO '%s' (FORMAT PARQUET)"
-                         % (self._rq(table), sqlutil.sql_path(parquet)))
+                if _path_proj is not None:
+                    _psql, _synth = _path_proj
+                    _peel_sel = "".join(
+                        ", t.%s AS %s" % (psql, self._rq(pname))
+                        for psql, pname in _path_peels)
+                    _copy = (
+                        "COPY (SELECT t.*, t.%s AS %s%s FROM %s AS t) "
+                        "TO '%s' (FORMAT PARQUET)"
+                        % (_psql, self._rq(_synth), _peel_sel,
+                           self._rq(table),
+                           sqlutil.sql_path(parquet)))
+                else:
+                    _copy = (
+                        "COPY (SELECT * FROM %s) TO '%s' (FORMAT PARQUET)"
+                        % (self._rq(table), sqlutil.sql_path(parquet)))
                 with mgr.native_op_cursor() as (xc, lk):
                     with lk:
                         with _ExecKeepalive(xc, mgr._cancel,
@@ -7622,9 +7943,9 @@ class Session:
             _hub_name = next(
                 (t["name"] for t in plan["tables"]
                  if t.get("kind") == "joinkeys"),
-                base + "_joinkeys")
-            # 1) shallow flatten: base + SIMPLE top-level lists (+ joinkeys).
-            #    The list child / joinkeys of any DEEP column is skipped here --
+                base + "_flattened")
+            # 1) shallow flatten: base + SIMPLE top-level lists (+ hub).
+            #    The list child / hub of any DEEP column is skipped here --
             #    replaced by that column's shred hierarchy in step 2.
             for spec in plan["tables"]:
                 if self._run_is_cancelled(query_id):
@@ -7646,6 +7967,8 @@ class Session:
                     # the file name stays UNBOUND (nothing answers to it)
                     pass
                 if _rex_t0:
+                    # Path-projected nests promote the nest element, but the
+                    # unique id still lives on the source row (t0).
                     spec = dict(spec, root_expr=_rex_t0)
                 _ja = False
                 if spec.get("kind") == "list":
@@ -7672,13 +7995,13 @@ class Session:
 
             # 2) deep hierarchy for each nested-array-bearing top-level list.
             #    plan_shred names its ROOT after `base`, so pass the shallow
-            #    child name ("<base>_json") -> root "<base>_json", children
-            #    "<base>_json_<path>", hub "<base>_json_joinkeys". Its root
-            #    ORDINAL would otherwise be "<base>_json_ord"; hand it the
-            #    shallow list's ord ("json_ord") as root_ord so it matches a
-            #    one-level flatten. Each CTAS reads the parquet directly;
-            #    build_table_sql escapes the path itself, so hand it the RAW
-            #    cache path, exactly like shred_run.
+            #    child name ("<list>_flattened") -> root/hub "<…>_flattened",
+            #    children "<path>_flattened". Its root ORDINAL would otherwise
+            #    be "<base>_json_ord"; hand it the shallow list's ord
+            #    ("json_ord") as root_ord so it matches a one-level flatten.
+            #    Each CTAS reads the parquet directly; build_table_sql escapes
+            #    the path itself, so hand it the RAW cache path, exactly like
+            #    shred_run.
             for name in deep_cols:
                 if promote and name == _promo_col:
                     # .507: the deep root IS the file-named records table
@@ -7687,6 +8010,10 @@ class Session:
                 else:
                     deep_base = (shallow_list_name.get(name)
                                  or (base + "_" + name))
+                    # Shallow list tables are already *_flattened; plan_shred
+                    # would otherwise emit <that>_flattened again as hub.
+                    if deep_base.lower().endswith("_flattened"):
+                        deep_base = deep_base[: -len("_flattened")]
                     _kw = {}
                 sub = _shred.plan_shred(
                     name, col_nodes[name], base=deep_base,
@@ -7695,37 +8022,71 @@ class Session:
                 _promoted_here = bool(promote and name == _promo_col)
                 _sub_hub = next(
                     (t["name"] for t in sub["tables"]
-                     if t["name"].endswith("_joinkeys")
-                     and t.get("parent") == deep_base),
-                    deep_base + "_joinkeys")
+                     if t.get("join_helper")),
+                    _shred._with_flattened(deep_base))
+                _root_name = next(
+                    (t["name"] for t in sub["tables"]
+                     if not t.get("join_helper")),
+                    deep_base)
                 _specs = sub["tables"]
-                if _promoted_here:
-                    # .518: no base data table -- the hub (same keys, same
-                    # record scalars, same "_sk") is the family anchor.
-                    # Materialize it FIRST so it is the family's base entry.
-                    _specs = ([t for t in _specs if t["name"] == _sub_hub]
-                              + [t for t in _specs
-                                 if t["name"] not in (deep_base, _sub_hub)])
+                # .518 / naming: join_helper hub anchors the family. Skip the
+                # redundant shred root (and any skip_materialize marks). When
+                # root and hub share a name after claiming <base>_flattened,
+                # select by join_helper — not by name equality.
+                if any(t.get("join_helper") for t in _specs):
+                    _specs = (
+                        [t for t in _specs if t.get("join_helper")]
+                        + [t for t in _specs
+                           if not t.get("join_helper")
+                           and not t.get("skip_materialize")
+                           and t["name"] != _root_name]
+                    )
+                # Field Explorer path scope: keep hub + ancestors + the
+                # selected nest and its descendants (not sibling arrays).
+                if path_parts and len(path_parts) > 1:
+                    _want = ".".join(path_parts)
+                    _kept_deep = []
+                    for _t in _specs:
+                        if (_t["name"] == _sub_hub
+                                or _t.get("join_helper")):
+                            _kept_deep.append(_t)
+                            continue
+                        _p = (str(_t.get("path") or "").split(" (", 1)[0])
+                        if (_p == _want or _p.startswith(_want + ".")
+                                or _want.startswith(_p + ".")
+                                or _p == name):
+                            _kept_deep.append(_t)
+                    _specs = _kept_deep
                 _use_json = name in json_access_cols
                 for spec in _specs:
                     if self._run_is_cancelled(query_id):
                         return {"cancelled": True, "created": created}
                     if _rex_e0 or _rex_t0:
+                        # Whole-table promote: id is on the record element
+                        # (e0). Field Explorer path projection promotes the
+                        # selected nest only — id stays on the source row.
+                        _use_e0 = (_promoted_here and _path_proj is None
+                                   and _rex_e0)
                         spec = dict(spec, root_expr=(
-                            _rex_e0 if _promoted_here else _rex_t0))
+                            _rex_e0 if _use_e0 else _rex_t0))
                     sql = _shred.build_table_sql(
                         spec, name, parquet,
                         json_access=_use_json,
                         json_arr_schema='"JSON"',
                         root_is_json_list=False)
                     _par = spec.get("parent")
-                    if _promoted_here:
-                        if spec["name"] == _sub_hub:
-                            _par = None
-                        elif _par == deep_base or _par is None:
-                            _par = _sub_hub
+                    if spec.get("join_helper") or spec["name"] == _sub_hub:
+                        # Promote: hub anchors the family. Else: nest under
+                        # the shallow records hub when one was created.
+                        _par = None if _promoted_here else _hub_name
+                    elif (_par == _root_name
+                          or (isinstance(_par, str)
+                              and any(t.get("skip_materialize")
+                                      and t["name"] == _par
+                                      for t in sub["tables"]))):
+                        _par = _sub_hub
                     elif _par is None:
-                        _par = _hub_name
+                        _par = _hub_name if not _promoted_here else _sub_hub
                     early = _materialize(
                         sql, spec["name"], "shred", parent=_par,
                         shred_spec=spec, shred_col=name,
@@ -7749,13 +8110,26 @@ class Session:
         # replaces it like any other member). If the chosen field is not
         # actually unique per record, the stats say so out loud instead of
         # the dedupe hiding a data problem.
+        #
+        # Join_Keys is the sibling per-record map: one row per hub record
+        # with _sk + _rid + root_id (the chosen unique identifier, stamped
+        # as root_id on every family table). Same naming / family parenting
+        # as Master_Keys; not a rename of Master_Keys.
         _rid_stats = None
         if _rid_cand is not None and created:
             _hub_tbl = created[0]["name"]
             _taken = {n.lower() for n in
                       (getattr(mgr, "table_columns", {}) or {})}
             _taken -= {c["name"].lower() for c in created}
-            _taken.discard(table.lower())
+            # Re-flatten: prior Master_Keys / Join_Keys sit under the hub in
+            # _table_family — free those names so CREATE OR REPLACE lands on
+            # the same titles instead of suffixing _2 copies.
+            _taken -= {n.lower() for n in self._family_members(_hub_tbl)}
+            # Load-time replace frees the source name; Field Explorer keep
+            # must not let Master_Keys / Join_Keys steal the still-loaded
+            # source table.
+            if not keep_source:
+                _taken.discard(table.lower())
             _mk_name = "Master_Keys"
             _n = 2
             while _mk_name.lower() in _taken:
@@ -7766,6 +8140,19 @@ class Session:
                        'WHERE "root_id" IS NOT NULL'
                        % (self._rq(_mk_name), self._rq(_hub_tbl)))
             early = _materialize(_mk_sql, _mk_name, "masterkeys",
+                                 parent=_hub_tbl)
+            if early is not None:
+                return early
+            _taken.add(_mk_name.lower())
+            _jk_name = "Join_Keys"
+            _n = 2
+            while _jk_name.lower() in _taken:
+                _jk_name = "Join_Keys_%d" % _n
+                _n += 1
+            _jk_sql = ('CREATE OR REPLACE TABLE %s AS '
+                       'SELECT "_sk", "_rid", "root_id" FROM %s'
+                       % (self._rq(_jk_name), self._rq(_hub_tbl)))
+            early = _materialize(_jk_sql, _jk_name, "joinkeys_uid",
                                  parent=_hub_tbl)
             if early is not None:
                 return early
@@ -7780,6 +8167,7 @@ class Session:
                     _rid_stats = {"column": "root_id",
                                   "label": _rid_cand.get("label"),
                                   "master_table": _mk_name,
+                                  "join_table": _jk_name,
                                   "records": _a, "nonnull": _b,
                                   "distinct": _c,
                                   "duplicated": _b - _c,
@@ -7787,21 +8175,22 @@ class Session:
             except Exception:
                 pass
 
-        # .518: NOTHING answers to the bare file name anymore -- the base
-        # data table is never created, and the nested SOURCE (view or table)
-        # under that name is dropped outright. Every on-box "the file name
-        # still answers with nested json" ghost traced to SOME relation
-        # living under the base name; now none does, and a stale query
-        # fails loudly (catalog error) instead of silently serving old rows.
+        # .518: load-time flatten drops the nested SOURCE so nothing answers
+        # to the bare file name (hub anchors the family). Field Explorer
+        # flatten keeps the source table and only adds the nest family.
         if created:
-            try:
-                self._drop_named(mgr, [table])
-            except Exception:
-                pass
+            if not keep_source:
+                try:
+                    self._drop_named(mgr, [table])
+                except Exception:
+                    pass
             _purge = getattr(mgr, "purge_shadow_temp_views", None)
             if _purge is not None:
                 try:
-                    _purge([c["name"] for c in created] + [table])
+                    _purge_names = [c["name"] for c in created]
+                    if not keep_source:
+                        _purge_names.append(table)
+                    _purge(_purge_names)
                 except Exception:
                     pass
         try:
@@ -7812,8 +8201,26 @@ class Session:
         self._invalidate_profiles()
         for c in created:
             self._prime_count("duckdb", c["name"], c["rows"])
-        base_tbl = next((c["name"] for c in created), None)
-        out = {"ok": True, "created": created, "base": base_tbl}
+        # Listing order: Master_Keys, Join_Keys, then flattened data tables.
+        # SQL still builds the hub first (keys SELECT FROM hub); only the
+        # returned / catalog-facing order is rearranged.
+        def _flatten_list_rank(c):
+            k = c.get("kind")
+            n = c.get("name") or ""
+            if k == "masterkeys" or n == "Master_Keys" \
+                    or n.startswith("Master_Keys_"):
+                return 0
+            if k == "joinkeys_uid" or n == "Join_Keys" \
+                    or n.startswith("Join_Keys_"):
+                return 1
+            return 2
+        _data = [c for c in created if _flatten_list_rank(c) == 2]
+        _keys = [c for c in created if _flatten_list_rank(c) < 2]
+        _keys.sort(key=_flatten_list_rank)
+        created = _keys + _data
+        base_tbl = next((c["name"] for c in _data), None)
+        out = {"ok": True, "created": created, "base": base_tbl,
+               "source": table, "kept_source": bool(keep_source)}
         if _rid_stats is not None:
             out["root_id"] = _rid_stats
         return out
@@ -8278,6 +8685,7 @@ class Session:
         origins = getattr(eng, "table_origins", None)
         if isinstance(origins, dict) and old in origins:
             origins[new] = origins.pop(old)
+        self._rename_table_ui_order(engine, old, new)
         self._invalidate_profiles()
         self._invalidate_counts()
         return {"ok": True, "name": new}
@@ -8292,6 +8700,7 @@ class Session:
             self.manifest.remove_for_table(name)  # so a drop survives restart
         except Exception:
             pass
+        self._drop_table_ui_order(engine, name)
         self._invalidate_profiles()
         self._invalidate_counts()
         self._schedule_cleanup(full=True)
@@ -8538,6 +8947,14 @@ class Session:
                 cr.close()
             self._results.clear()
             self._results_order.clear()
+        try:
+            self._table_family.clear()
+        except Exception:
+            pass
+        try:
+            self._table_ui_order.clear()
+        except Exception:
+            pass
         if clear_manifest:
             # only when the user explicitly clears everything -- NOT on the
             # internal clear during shutdown, or restore would have nothing

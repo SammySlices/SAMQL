@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   FIELD_EXPLORER_STORE_KEY,
   FieldExplorer,
+  flattenNestPath,
 } from "./FieldExplorer";
 import { api } from "../lib/api";
 import type { TableInfo } from "../lib/types";
@@ -32,20 +33,6 @@ const nestedTable = (): TableInfo[] => [
     source: "orders.json",
     row_count: 10,
     columns: [{ name: "json", type: "JSON", hint: "json" }],
-  },
-];
-
-const multiColTable = (): TableInfo[] => [
-  {
-    engine: "duckdb",
-    name: "orders",
-    source: "orders.json",
-    row_count: 10,
-    columns: [
-      { name: "id", type: "BIGINT" },
-      { name: "legs", type: "STRUCT(x INT)[]", hint: "list" },
-      { name: "nest", type: "JSON", hint: "json" },
-    ],
   },
 ];
 
@@ -77,6 +64,12 @@ const arrayFieldTree = {
   ],
 };
 
+/** Expand a collapsed Field Explorer node so nested children become visible. */
+async function expandField(name: string) {
+  const caret = await screen.findByTestId(`fx-caret-${name}`);
+  fireEvent.click(caret);
+}
+
 describe("FieldExplorer shred steering", () => {
   beforeEach(() => {
     localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
@@ -95,27 +88,65 @@ describe("FieldExplorer shred steering", () => {
       fields: [
         {
           depth: 1,
-          name: "id",
-          type: "BIGINT",
+          name: "tradeId",
+          type: "VARCHAR",
           kind: "scalar",
-          column: "id",
-          access: { first: '"id"', sel: '"id"', unnests: [] },
+          column: "tradeId",
+          access: { first: '"tradeId"', sel: '"tradeId"', unnests: [] },
         },
         {
           depth: 1,
+          name: "terms",
+          type: "STRUCT(...)",
+          kind: "struct",
+          column: "terms",
+          access: { first: '"terms"', sel: '"terms"', unnests: [] },
+        },
+        {
+          depth: 2,
           name: "legs",
-          type: "STRUCT(x INT)[]",
+          type: "array of object",
           kind: "array",
-          column: "legs",
-          access: { first: '"legs"', sel: '"legs"', unnests: [] },
+          column: "terms",
+          path: "terms.legs",
+          access: {
+            first: "terms.legs[1]",
+            sel: "e0",
+            unnests: ['UNNEST("terms"."legs") AS _(e0)'],
+          },
+        },
+        {
+          depth: 1,
+          name: "counterparty",
+          type: "STRUCT(...)",
+          kind: "struct",
+          column: "counterparty",
+          access: { first: '"counterparty"', sel: '"counterparty"', unnests: [] },
         },
       ],
     } as any);
+    const highlyNestedTable = (): TableInfo[] => [
+      {
+        engine: "duckdb",
+        name: "highly_nested_trades",
+        source: "highly_nested_trades.json",
+        row_count: 2,
+        columns: [
+          { name: "tradeId", type: "VARCHAR" },
+          { name: "product", type: "VARCHAR" },
+          { name: "book", type: "VARCHAR" },
+          { name: "counterparty", type: "STRUCT(...)", hint: "struct" },
+          { name: "terms", type: "STRUCT(...)", hint: "struct" },
+          { name: "collateral", type: "STRUCT(...)", hint: "struct" },
+          { name: "audit", type: "STRUCT(...)", hint: "struct" },
+        ],
+      },
+    ];
     render(
       <FieldExplorer
         open
         onClose={vi.fn()}
-        tables={multiColTable()}
+        tables={highlyNestedTable()}
         onToast={vi.fn()}
       />,
     );
@@ -123,10 +154,62 @@ describe("FieldExplorer shred steering", () => {
     const opts = Array.from(select.querySelectorAll("option")).map(
       (o) => o.textContent,
     );
-    expect(opts.filter((t) => t === "orders")).toHaveLength(1);
-    expect(opts.some((t) => t?.includes("›"))).toBe(false);
-    await screen.findByText("id");
+    // One table source — never table › column per nested STRUCT.
+    expect(opts.filter((t) => t && t !== "Pick a table…")).toEqual([
+      "highly_nested_trades",
+    ]);
+    expect(opts.some((t) => t?.includes("›") || t?.includes(" > "))).toBe(
+      false,
+    );
+    expect(
+      opts.some(
+        (t) =>
+          !!t &&
+          /counterparty|terms|collateral|audit/i.test(t) &&
+          t !== "highly_nested_trades",
+      ),
+    ).toBe(false);
+    await screen.findByText("tradeId");
+    await screen.findByText("terms");
+    await screen.findByText("counterparty");
+    // Nested children stay hidden until the parent caret is expanded.
+    expect(screen.queryByText("legs")).toBeNull();
+    await expandField("terms");
     await screen.findByText("legs");
+    await waitFor(() =>
+      expect(api.tableFields).toHaveBeenCalledWith(
+        "duckdb",
+        "highly_nested_trades",
+      ),
+    );
+  });
+
+  it("expands and collapses nested fields via the caret without selecting the row", async () => {
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+      />,
+    );
+    await screen.findByText("json");
+    expect(screen.queryByText("legs")).toBeNull();
+    const caret = await screen.findByTestId("fx-caret-json");
+    expect(caret.textContent).toBe("▸");
+
+    fireEvent.click(caret);
+    expect(caret.textContent).toBe("▾");
+    await screen.findByText("legs");
+    // Caret click must not select the parent row (selection stays empty).
+    expect(screen.getByTestId("fx-sel-bar").textContent).toMatch(
+      /Check fields to combine/i,
+    );
+    expect(screen.queryByTestId("fx-preview-sample")).toBeNull();
+
+    fireEvent.click(caret);
+    expect(caret.textContent).toBe("▸");
+    expect(screen.queryByText("legs")).toBeNull();
   });
 
   it("offers 'Shred to tables' for an array node when the column is shreddable", async () => {
@@ -150,7 +233,8 @@ describe("FieldExplorer shred steering", () => {
       />,
     );
 
-    // the single nested column auto-selects; click the array field
+    // Structs start collapsed — expand the parent before selecting the array.
+    await expandField("json");
     const legRow = await screen.findByText("legs");
     fireEvent.click(legRow);
 
@@ -163,6 +247,156 @@ describe("FieldExplorer shred steering", () => {
         "orders",
         "json",
         ["orders", "orders_legs"],
+      ),
+    );
+  });
+
+  it("flattenNestPath walks up from null-path (element) leaves to contacts", () => {
+    const fields = [
+      {
+        depth: 1,
+        name: "counterparty",
+        type: "object",
+        kind: "struct",
+        column: "counterparty",
+        path: "counterparty",
+      },
+      {
+        depth: 2,
+        name: "contacts",
+        type: "array of object",
+        kind: "array",
+        column: "counterparty",
+        path: "counterparty.contacts",
+      },
+      {
+        depth: 3,
+        name: "(element)",
+        type: "object",
+        kind: "struct",
+        column: "counterparty",
+        path: null,
+      },
+      {
+        depth: 4,
+        name: "phones",
+        type: "array of text",
+        kind: "array-scalar",
+        column: "counterparty",
+        path: null,
+      },
+    ];
+    expect(flattenNestPath(fields, 3, "counterparty")).toBe(
+      "counterparty.contacts",
+    );
+    expect(flattenNestPath(fields, 1, "counterparty")).toBe(
+      "counterparty.contacts",
+    );
+    expect(flattenNestPath(fields, 0, "counterparty")).toBe("counterparty");
+  });
+
+  it("Flatten on a null-path leaf sends the ancestor nest path, not the leaf name", async () => {
+    vi.mocked(api.shredPlan).mockResolvedValue({ tables: [] } as any);
+    vi.mocked(api.tableFields).mockResolvedValue({
+      fields: [
+        {
+          depth: 1,
+          name: "counterparty",
+          type: "object",
+          kind: "struct",
+          column: "counterparty",
+          path: "counterparty",
+          access: { first: "counterparty", sel: "counterparty", unnests: [] },
+        },
+        {
+          depth: 2,
+          name: "contacts",
+          type: "array of object",
+          kind: "array",
+          column: "counterparty",
+          path: "counterparty.contacts",
+          access: {
+            first: "counterparty.contacts",
+            sel: "e1",
+            unnests: ["UNNEST(...)"],
+          },
+        },
+        {
+          depth: 3,
+          name: "(element)",
+          type: "object",
+          kind: "struct",
+          column: "counterparty",
+          path: null,
+          access: { first: "e1", sel: "e1", unnests: [] },
+        },
+        {
+          depth: 4,
+          name: "phones",
+          type: "array of text",
+          kind: "array-scalar",
+          column: "counterparty",
+          path: null,
+          access: { first: "e1.phones", sel: "e2", unnests: [] },
+        },
+      ],
+    } as any);
+    const onFlatten = vi.fn().mockResolvedValue({ ok: true, created: 3 });
+    vi.mocked(api.tableRootIdOptions).mockResolvedValue({
+      ok: true,
+      candidates: [{ steps: ["tradeId"], label: "tradeId", map: false }],
+    } as any);
+    vi.mocked(api.tableRootIdStats).mockResolvedValue({
+      ok: true,
+      unique: true,
+      records: 2,
+      distinct: 2,
+      nonnull: 2,
+      duplicated: 0,
+      nulls: 0,
+      label: "tradeId",
+    } as any);
+
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={[
+          {
+            engine: "duckdb",
+            name: "trades",
+            source: "trades.json",
+            row_count: 2,
+            columns: [
+              { name: "counterparty", type: "STRUCT(...)", hint: "json" },
+            ],
+          },
+        ]}
+        onToast={vi.fn()}
+        onShred={vi.fn()}
+        onFlatten={onFlatten}
+      />,
+    );
+
+    await expandField("counterparty");
+    await expandField("contacts");
+    // (element) defaults open — select phones
+    fireEvent.click(await screen.findByText("phones"));
+    fireEvent.click(await screen.findByTestId("fx-flatten-run"));
+    fireEvent.change(await screen.findByTestId("fx-uid-select"), {
+      target: { value: "0" },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("fx-uid-confirm")).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByTestId("fx-uid-confirm"));
+    await waitFor(() =>
+      expect(onFlatten).toHaveBeenCalledWith(
+        "duckdb",
+        "trades",
+        expect.objectContaining({ steps: ["tradeId"] }),
+        "counterparty",
+        "counterparty.contacts",
       ),
     );
   });
@@ -202,6 +436,7 @@ describe("FieldExplorer shred steering", () => {
       />,
     );
 
+    await expandField("json");
     const legRow = await screen.findByText("legs");
     fireEvent.click(legRow);
 
@@ -222,9 +457,39 @@ describe("FieldExplorer shred steering", () => {
         "duckdb",
         "orders",
         expect.objectContaining({ steps: ["id"], label: "id" }),
+        "json",
+        "json.legs",
       ),
     );
     expect(screen.queryByTestId("fx-shred-run")).toBeNull();
+  });
+
+  it("places Flatten to tables above Sample and Peek SQL in the detail panel", async () => {
+    vi.mocked(api.shredPlan).mockResolvedValue({ tables: [] } as any);
+
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+        onShred={vi.fn()}
+        onFlatten={vi.fn()}
+      />,
+    );
+
+    await expandField("json");
+    fireEvent.click(await screen.findByText("legs"));
+
+    const shred = await screen.findByTestId("fx-shred");
+    const sample = await screen.findByTestId("fx-preview-sample");
+    const peek = await screen.findByText("Peek one value");
+    expect(shred.compareDocumentPosition(sample)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(shred.compareDocumentPosition(peek)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
   });
 
   it("keeps the nested field tree when Flatten fails (does not re-sample)", async () => {
@@ -259,6 +524,7 @@ describe("FieldExplorer shred steering", () => {
       />,
     );
 
+    await expandField("json");
     const legRow = await screen.findByText("legs");
     fireEvent.click(legRow);
     const fieldsCallsBefore = vi.mocked(api.tableFields).mock.calls.length;
@@ -293,6 +559,7 @@ describe("FieldExplorer shred steering", () => {
       />,
     );
 
+    await expandField("json");
     const legRow = await screen.findByText("legs");
     fireEvent.click(legRow);
 
@@ -311,6 +578,7 @@ describe("FieldExplorer shred steering", () => {
         onShred={vi.fn()}
       />,
     );
+    await expandField("json");
     const legRow = await screen.findByText("legs");
     fireEvent.click(legRow);
     await waitFor(() =>
@@ -364,6 +632,7 @@ describe("FieldExplorer shred steering", () => {
     );
 
     const idRow = await screen.findByTestId("fx-field-Id");
+    await expandField("Id");
     const nestCheck = await screen.findByTestId("fx-check-fixingdate");
     fireEvent.click(idRow);
     fireEvent.click(nestCheck);

@@ -61,6 +61,7 @@ frontend/e2e/cancellation-recovery.spec.ts
 frontend/e2e/dashboard-smoke.spec.ts
 frontend/e2e/eye-care.spec.ts
 frontend/e2e/fixtures.ts
+frontend/e2e/fixtures/highly_nested_trades.json
 frontend/e2e/fixtures/wave1-load.csv
 frontend/e2e/fixtures/wave1-nested.json
 frontend/e2e/journal-stability.spec.ts
@@ -87,6 +88,7 @@ frontend/src/components/ChartPanel.abort.component.test.tsx
 frontend/src/components/ChartPanel.tsx
 frontend/src/components/ChartView.tsx
 frontend/src/components/CommandPalette.tsx
+frontend/src/components/ConfirmPop.component.test.tsx
 frontend/src/components/ConfirmPop.tsx
 frontend/src/components/CreatedNodeModals.tsx
 frontend/src/components/CreatedNodesSettings.tsx
@@ -126,6 +128,7 @@ frontend/src/components/ReconReport.tsx
 frontend/src/components/ReconcileModal.tsx
 frontend/src/components/ServerWatchdog.component.test.tsx
 frontend/src/components/ServerWatchdog.tsx
+frontend/src/components/Sidebar.tablesReorder.component.test.tsx
 frontend/src/components/Sidebar.tsx
 frontend/src/components/SqlEditor.longline.component.test.tsx
 frontend/src/components/SqlEditor.tsx
@@ -267,6 +270,7 @@ requirements-optional.txt
 requirements-test.txt
 tests/benchmark_workloads.py
 tests/fixtures.py
+tests/fixtures/highly_nested_trades.json
 tests/harness.py
 tests/node_harnesses.py
 tests/paths.py

@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
+import { POP_EXIT_MS } from "../ConfirmPop";
 import { getNodeHelp } from "../../lib/nodeHelp";
 import type { NodeType } from "../../lib/nodeFlowModel";
 import { NODE_BY_TYPE, NODE_GROUPS } from "./nodeDefinitions";
@@ -78,11 +79,48 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
 }: NodeFlowMenusProps) {
   const [nodesOpen, setNodesOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState<string | null>(null);
+  const [delClosing, setDelClosing] = useState(false);
+  const delTimer = useRef<number | null>(null);
 
   useEffect(() => {
     setNodesOpen(false);
     setCategoryOpen(null);
   }, [canvasMenu]);
+
+  useEffect(() => {
+    // New confirm (or clear) resets any in-flight exit pop.
+    setDelClosing(false);
+    if (delTimer.current != null) {
+      window.clearTimeout(delTimer.current);
+      delTimer.current = null;
+    }
+  }, [deleteConfirm]);
+
+  useEffect(
+    () => () => {
+      if (delTimer.current != null) window.clearTimeout(delTimer.current);
+    },
+    [],
+  );
+
+  const dismissDelete = useCallback(
+    (after?: () => void) => {
+      if (delClosing || delTimer.current != null) return;
+      if (document.body.classList.contains("motion-reduced")) {
+        setDeleteConfirm(null);
+        after?.();
+        return;
+      }
+      setDelClosing(true);
+      delTimer.current = window.setTimeout(() => {
+        delTimer.current = null;
+        setDelClosing(false);
+        setDeleteConfirm(null);
+        after?.();
+      }, POP_EXIT_MS);
+    },
+    [delClosing, setDeleteConfirm],
+  );
 
   return (
     <>
@@ -165,15 +203,21 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
       {deleteConfirm && (
         <>
           <div
-            className="nb2-delconfirm-backdrop"
-            onClick={() => setDeleteConfirm(null)}
+            className={
+              "nb2-delconfirm-backdrop" + (delClosing ? " closing" : "")
+            }
+            onClick={() => dismissDelete()}
             onContextMenu={(event) => {
               event.preventDefault();
-              setDeleteConfirm(null);
+              dismissDelete();
             }}
           />
           <div
-            className={"nb2-delconfirm side-" + deleteConfirm.side}
+            className={
+              "nb2-delconfirm side-" +
+              deleteConfirm.side +
+              (delClosing ? " closing" : "")
+            }
             style={{ left: deleteConfirm.left, top: deleteConfirm.top }}
             role="dialog"
           >
@@ -184,7 +228,7 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
             <div className="nb2-delconfirm-row">
               <button
                 className="btn sm ghost"
-                onClick={() => setDeleteConfirm(null)}
+                onClick={() => dismissDelete()}
               >
                 Cancel
               </button>
@@ -193,9 +237,10 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
                 autoFocus
                 onClick={() => {
                   const { id, onOk } = deleteConfirm;
-                  setDeleteConfirm(null);
-                  if (onOk) onOk();
-                  else if (id) doRemoveNode(id);
+                  dismissDelete(() => {
+                    if (onOk) onOk();
+                    else if (id) doRemoveNode(id);
+                  });
                 }}
               >
                 {deleteConfirm.label || "Delete"}

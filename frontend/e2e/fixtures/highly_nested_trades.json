@@ -1,0 +1,165 @@
+[
+  {
+    "tradeId": "TRD-1001",
+    "product": "InterestRateSwap",
+    "book": "Rates-US",
+    "counterparty": {
+      "lei": "5493001KJTIIGC8Y1R12",
+      "name": "Acme Capital LLC",
+      "contacts": [
+        { "role": "trader", "email": "trader@acme.example", "phones": ["+1-212-555-0101"] },
+        { "role": "ops", "email": "ops@acme.example", "phones": ["+1-212-555-0199", "+1-212-555-0188"] }
+      ]
+    },
+    "terms": {
+      "effectiveDate": "2024-01-15",
+      "maturityDate": "2034-01-15",
+      "notional": { "amount": 100000000, "ccy": "USD" },
+      "legs": [
+        {
+          "legId": "PAY",
+          "payReceive": "Pay",
+          "index": "USD-SOFR",
+          "spreadBps": 0,
+          "schedules": {
+            "payment": { "freq": "3M", "bizDay": "ModifiedFollowing", "calendar": ["NYC", "LON"] },
+            "reset": { "freq": "1D", "lag": 2 }
+          },
+          "cashflows": [
+            {
+              "fixingDate": "2024-04-11",
+              "paymentDate": "2024-04-15",
+              "amount": { "value": -125000.55, "ccy": "USD" },
+              "adjustments": [
+                { "type": "rate", "from": 0.0531, "to": 0.0534, "reason": "fixing" },
+                { "type": "dayCount", "fraction": 0.25 }
+              ],
+              "history": [
+                { "ts": "2024-04-11T10:00:00Z", "event": "projected" },
+                { "ts": "2024-04-11T16:30:00Z", "event": "fixed", "by": "system" }
+              ]
+            },
+            {
+              "fixingDate": "2024-07-11",
+              "paymentDate": "2024-07-15",
+              "amount": { "value": -128400.10, "ccy": "USD" },
+              "adjustments": [{ "type": "rate", "from": 0.0540, "to": 0.0542, "reason": "fixing" }],
+              "history": [{ "ts": "2024-07-11T16:30:00Z", "event": "fixed", "by": "system" }]
+            }
+          ]
+        },
+        {
+          "legId": "RCV",
+          "payReceive": "Receive",
+          "fixedRate": 0.0425,
+          "schedules": {
+            "payment": { "freq": "6M", "bizDay": "ModifiedFollowing", "calendar": ["NYC"] }
+          },
+          "cashflows": [
+            {
+              "fixingDate": null,
+              "paymentDate": "2024-07-15",
+              "amount": { "value": 2125000.0, "ccy": "USD" },
+              "adjustments": [],
+              "history": [{ "ts": "2024-01-15T09:00:00Z", "event": "projected" }]
+            }
+          ]
+        }
+      ]
+    },
+    "collateral": {
+      "csa": "ISDA-2016",
+      "thresholds": [
+        { "party": "us", "amount": 0, "ccy": "USD", "ratings": { "moodys": "A2", "sp": "A" } },
+        { "party": "them", "amount": 5000000, "ccy": "USD", "ratings": { "moodys": "Baa1", "sp": "BBB+" } }
+      ],
+      "eligible": {
+        "cash": ["USD", "EUR"],
+        "bonds": [
+          { "isin": "US912828XYZ1", "haircut": 0.02, "buckets": ["gov", "usd"] },
+          { "isin": "US912810ABC9", "haircut": 0.05, "buckets": ["gov", "long"] }
+        ]
+      }
+    },
+    "audit": {
+      "createdBy": "jsmith",
+      "versions": [
+        {
+          "v": 1,
+          "at": "2024-01-14T15:22:01Z",
+          "diff": {
+            "changed": ["terms.legs[0].spreadBps"],
+            "meta": { "ticket": "CHG-88", "approvers": ["risk", "desk"] }
+          }
+        },
+        {
+          "v": 2,
+          "at": "2024-01-15T08:01:44Z",
+          "diff": {
+            "changed": ["collateral.thresholds"],
+            "meta": { "ticket": "CHG-91", "approvers": ["legal"] }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "tradeId": "TRD-1002",
+    "product": "InterestRateSwap",
+    "book": "Rates-EU",
+    "counterparty": {
+      "lei": "213800ABCDEFGHIJKL12",
+      "name": "Euro Desk AG",
+      "contacts": [{ "role": "trader", "email": "fx@euro.example", "phones": ["+49-69-555-0202"] }]
+    },
+    "terms": {
+      "effectiveDate": "2024-03-01",
+      "maturityDate": "2029-03-01",
+      "notional": { "amount": 50000000, "ccy": "EUR" },
+      "legs": [
+        {
+          "legId": "PAY",
+          "payReceive": "Pay",
+          "fixedRate": 0.031,
+          "schedules": { "payment": { "freq": "1Y", "calendar": ["TAR"] } },
+          "cashflows": [
+            {
+              "paymentDate": "2025-03-01",
+              "amount": { "value": -1550000.0, "ccy": "EUR" },
+              "adjustments": [],
+              "history": [{ "ts": "2024-03-01T12:00:00Z", "event": "projected" }]
+            }
+          ]
+        },
+        {
+          "legId": "RCV",
+          "payReceive": "Receive",
+          "index": "EUR-ESTR",
+          "spreadBps": 12.5,
+          "schedules": { "payment": { "freq": "3M", "calendar": ["TAR", "LON"] }, "reset": { "freq": "1D", "lag": 1 } },
+          "cashflows": [
+            {
+              "fixingDate": "2024-06-01",
+              "paymentDate": "2024-06-03",
+              "amount": { "value": 98000.25, "ccy": "EUR" },
+              "adjustments": [{ "type": "rate", "from": 0.0371, "to": 0.0375, "reason": "fixing" }],
+              "history": [
+                { "ts": "2024-06-01T10:00:00Z", "event": "projected" },
+                { "ts": "2024-06-01T17:00:00Z", "event": "fixed", "by": "system" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "collateral": {
+      "csa": "ISDA-2016",
+      "thresholds": [{ "party": "us", "amount": 1000000, "ccy": "EUR", "ratings": { "moodys": "A3", "sp": "A-" } }],
+      "eligible": { "cash": ["EUR"], "bonds": [] }
+    },
+    "audit": {
+      "createdBy": "mlange",
+      "versions": [{ "v": 1, "at": "2024-02-28T11:00:00Z", "diff": { "changed": ["new"], "meta": { "ticket": "NEW-12", "approvers": ["desk"] } } }]
+    }
+  }
+]

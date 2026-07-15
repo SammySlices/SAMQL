@@ -402,7 +402,7 @@ def duckdb_unnest_plan(table, coltypes, root_name, sep="_", fk_suffix="_id",
                 idents.append(parts)
             if len(idents) >= 5:
                 break
-        base = "%s%sjoinkeys" % (root_name, sep)
+        base = "%s%sflattened" % (root_name, sep)
         hub = base
         i = 0
         while hub in used:

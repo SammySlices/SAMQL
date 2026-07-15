@@ -13,6 +13,7 @@ import { Icon } from "./Icon";
 import {
   familyJoinKeys,
   familyJoinSql,
+  flattenFamilyOrderAfterReorder,
   groupRelationalFamilies,
 } from "../lib/notebook";
 import { useRenderCount } from "../lib/renderDebug";
@@ -396,6 +397,40 @@ const TablesTree: React.FC<
       for (const c of f.children) m.set(c.engine + ":" + c.name, f.table);
     return m;
   }, [families]);
+  // Loaded-tables drag reorder (family roots only; children stay nested).
+  // Disabled while filtering so drop indexes match the unfiltered list.
+  const [dragFam, setDragFam] = useState<number | null>(null);
+  const [overFam, setOverFam] = useState<number | null>(null);
+  const [popKey, setPopKey] = useState<string | null>(null);
+  const [reorderBusy, setReorderBusy] = useState(false);
+  const popTimer = React.useRef<number | null>(null);
+  const canReorder = !filtering && !reorderBusy && families.length >= 2;
+  const fireDropPop = (key: string) => {
+    if (popTimer.current != null) window.clearTimeout(popTimer.current);
+    setPopKey(key);
+    popTimer.current = window.setTimeout(() => {
+      setPopKey(null);
+      popTimer.current = null;
+    }, 320);
+  };
+  React.useEffect(
+    () => () => {
+      if (popTimer.current != null) window.clearTimeout(popTimer.current);
+    },
+    [],
+  );
+  const commitFamilyReorder = (from: number, to: number) => {
+    if (!canReorder || from === to) return;
+    const moved = families[from]?.table;
+    const order = flattenFamilyOrderAfterReorder(families, from, to);
+    if (moved) fireDropPop(moved.engine + ":" + moved.name);
+    setReorderBusy(true);
+    api
+      .reorderTables(order)
+      .then(() => onRefresh())
+      .catch(() => {})
+      .finally(() => setReorderBusy(false));
+  };
 
   // .460: the refresh icon spins exactly once per click.
   const [refreshSpin, setRefreshSpin] = React.useState(false);
@@ -448,8 +483,15 @@ const TablesTree: React.FC<
     [],
   );
 
-  const renderRow = (t: TableInfo, famParent?: TableInfo) => {
+  const renderRow = (
+    t: TableInfo,
+    famParent?: TableInfo,
+    opts?: { rootIdx?: number },
+  ) => {
     const isOpen = open[t.engine + ":" + t.name];
+    const rootIdx = opts?.rootIdx;
+    const showGrip =
+      rootIdx != null && canReorder && !t.remote && !famParent;
     return (
       <div key={t.engine + ":" + t.name}>
         <div
@@ -462,6 +504,35 @@ const TablesTree: React.FC<
             setMenu({ x: e.clientX, y: e.clientY, t });
           }}
         >
+          {showGrip && (
+            <span
+              className="tbl-grip"
+              title="Drag to reorder tables"
+              aria-label="Drag to reorder tables"
+              draggable
+              onDragStart={(e) => {
+                e.stopPropagation();
+                setDragFam(rootIdx);
+                e.dataTransfer.effectAllowed = "move";
+                try {
+                  e.dataTransfer.setData(
+                    "application/x-samql-table-order",
+                    String(rootIdx),
+                  );
+                  e.dataTransfer.setData("text/plain", t.name);
+                } catch {
+                  /* some browsers require setData */
+                }
+              }}
+              onDragEnd={() => {
+                setDragFam(null);
+                setOverFam(null);
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              ⠿
+            </span>
+          )}
           {!t.remote && (
             <input
               type="checkbox"
@@ -875,11 +946,51 @@ const TablesTree: React.FC<
           </div>
         )}
         <div className="tree-table">
-          {families.map(({ table, children }) => {
+          {families.map(({ table, children }, famIdx) => {
             const fk = table.engine + ":" + table.name;
             const expanded = famOpen[fk] ?? true;
+            const isDrag = dragFam === famIdx;
+            const isOver =
+              overFam === famIdx && dragFam != null && dragFam !== famIdx;
+            const isPop = popKey === fk;
             return (
-              <div key={"fam:" + fk}>
+              <div
+                key={"fam:" + fk}
+                className={
+                  "fam-block" +
+                  (isDrag ? " dragging" : "") +
+                  (isOver ? " drag-over" : "") +
+                  (isPop && !isDrag ? " drop-pop" : "")
+                }
+                onDragOver={(e) => {
+                  if (!canReorder) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  if (overFam !== famIdx) setOverFam(famIdx);
+                }}
+                onDragLeave={() =>
+                  setOverFam((cur) => (cur === famIdx ? null : cur))
+                }
+                onDrop={(e) => {
+                  e.preventDefault();
+                  let from = dragFam;
+                  if (from == null) {
+                    try {
+                      const raw = e.dataTransfer.getData(
+                        "application/x-samql-table-order",
+                      );
+                      if (raw !== "") from = Number(raw);
+                    } catch {
+                      from = null;
+                    }
+                  }
+                  setDragFam(null);
+                  setOverFam(null);
+                  if (from == null || Number.isNaN(from) || from === famIdx)
+                    return;
+                  commitFamilyReorder(from, famIdx);
+                }}
+              >
                 <div className="fam-head">
                   {children.length > 0 && (
                     <span
@@ -895,7 +1006,9 @@ const TablesTree: React.FC<
                       <Icon.Chevron size={12} />
                     </span>
                   )}
-                  <div style={{ flex: 1, minWidth: 0 }}>{renderRow(table)}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {renderRow(table, undefined, { rootIdx: famIdx })}
+                  </div>
                 </div>
                 {children.length > 0 && expanded && (
                   <div className="fam-kids">

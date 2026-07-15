@@ -6136,29 +6136,41 @@ kbd {
   position: fixed;
   inset: 0;
   z-index: 210;
+  transition: opacity 0.16s ease;
 }
 .nb2-delconfirm {
   position: fixed;
   z-index: 211;
   width: 188px;
+  max-width: min(188px, calc(100vw - 16px));
+  box-sizing: border-box;
+  overflow-x: hidden;
   background: var(--bg, #fff);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
   padding: 10px 12px;
+  /* Same enter/exit language as .modal (modal-in / modal-out). */
+  animation: modal-in 0.17s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .nb2-delconfirm-msg {
-  display: flex;
-  align-items: center;
-  gap: 7px;
+  /* block (not flex) so long table names / multi-delete lists wrap inside
+     the fixed-width popup instead of spilling horizontally */
+  display: block;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text, inherit);
   margin-bottom: 9px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 .nb2-delconfirm-msg svg {
   color: #c64a4a;
-  flex: 0 0 auto;
+  vertical-align: -2px;
+  margin-right: 7px;
 }
 .nb2-delconfirm-row {
   display: flex;
@@ -7138,12 +7150,18 @@ body.canvas-ivory .nb2-empty {
    buttons press. All under the motion-reduced kill. */
 @keyframes cell-in { from { opacity: 0; transform: translateY(6px); } }
 .nb-cell { animation: cell-in 0.18s ease-out; }
+/* Soft pop-out: slight lift + shrink + fade (not a hard cut or bounce). */
 @keyframes modal-out {
-  to { opacity: 0; transform: translateY(6px) scale(0.985); }
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(-3px) scale(0.96); }
 }
-.modal.closing { animation: modal-out 0.14s ease-in forwards; }
-.modal-backdrop { transition: opacity 0.14s ease; }
-.modal-backdrop.closing { opacity: 0; }
+.modal.closing,
+.nb2-delconfirm.closing {
+  animation: modal-out 0.16s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+.modal-backdrop { transition: opacity 0.16s ease; }
+.modal-backdrop.closing,
+.nb2-delconfirm-backdrop.closing { opacity: 0; }
 .tree-row .twist { transition: transform 0.15s ease; }
 button:not(:disabled) { transition: transform 0.08s ease; }
 button:not(:disabled):active { transform: scale(0.97); }
@@ -7559,6 +7577,52 @@ body.motion-reduced *, body.motion-reduced *::before, body.motion-reduced *::aft
   padding-left: 4px;
   border-left: 1px solid var(--border, #2a2f3a);
 }
+/* Loaded-tables drag: lift on pickup, settle-pop on drop (sidebar-scale). */
+.fam-block {
+  position: relative;
+  border-radius: 4px;
+  transition:
+    transform 0.14s ease,
+    box-shadow 0.14s ease,
+    background 0.14s ease,
+    opacity 0.12s ease;
+}
+.fam-block.dragging {
+  z-index: 3;
+  opacity: 1;
+  transform: translateY(-2px) scale(1.02);
+  background: var(--raised);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28), 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.fam-block.drag-over {
+  outline: 1px dashed var(--accent, #5b8def);
+  outline-offset: -1px;
+  background: var(--raised);
+}
+@keyframes fam-drop-pop {
+  0% { transform: translateY(-2px) scale(1.02); }
+  55% { transform: translateY(0) scale(1.015); }
+  100% { transform: translateY(0) scale(1); }
+}
+.fam-block.drop-pop {
+  z-index: 2;
+  animation: fam-drop-pop 0.3s cubic-bezier(0.34, 1.45, 0.64, 1);
+}
+.tree-row .tbl-grip {
+  flex: 0 0 auto;
+  width: 12px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-faint);
+  cursor: grab;
+  opacity: 0.35;
+  user-select: none;
+}
+.tree-row:hover .tbl-grip,
+.tree-row:focus-within .tbl-grip {
+  opacity: 0.85;
+}
+.tree-row .tbl-grip:active { cursor: grabbing; }
 .join-btn {
   flex: 0 0 auto;
   cursor: pointer;
