@@ -27,6 +27,14 @@ Download (on a machine that CAN reach GitHub + Hugging Face):
   Re-download:
     python tools/fetch_assistant_pack.py --force
 
+Or choose packaging during the SamQL build (build.ps1 / build.sh prompts):
+  1) lean  — SamQL only; copy this folder beside the exe later
+  2) post  — after PyInstaller, stage this folder next to dist/ (~+1 GB)
+  3) embed — bake this folder into the PyInstaller payload (~+1 GB)
+
+  .\build.ps1 -AssistantPack lean|post|embed
+  ./build.sh --assistant-pack lean|post|embed
+
 Locked-down work PC workflow:
   1. Run the fetch script on a home/build PC.
   2. Copy the whole assistant/ folder next to SamQL (or set SAMQL_ASSISTANT_DIR).

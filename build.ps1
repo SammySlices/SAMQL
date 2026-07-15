@@ -17,15 +17,23 @@
 # The signature is SHA-256 and RFC-3161 timestamped (so it stays valid after
 # the certificate expires). With no certificate the build still completes and
 # leaves the .exe unsigned.
+#
+# SQL assistant packaging (prompted interactively if omitted):
+#   .\build.ps1 -AssistantPack lean    # 1: SamQL only (default)
+#   .\build.ps1 -AssistantPack post    # 2: copy assistant/ next to dist (~+1GB)
+#   .\build.ps1 -AssistantPack embed   # 3: bake assistant into PyInstaller (~+1GB)
+# Or set $env:SAMQL_ASSISTANT_PACK = lean|post|embed
 param(
   [string]$CertThumbprint,
   [string]$CertPath,
   [string]$CertPassword,
   [string]$TimestampUrl = "http://timestamp.digicert.com",
   [switch]$NoSign,
-  [switch]$OneDir  # .549: build SamQL-AppWindow as a FOLDER (dist\\SamQL-AppWindow\\)
+  [switch]$OneDir,  # .549: build SamQL-AppWindow as a FOLDER (dist\\SamQL-AppWindow\\)
                    # + zip it for distribution -- no per-launch _MEI unpack,
                    # no "failed to remove temp dir" dialog, faster start.
+  [ValidateSet("", "1", "2", "3", "lean", "post", "embed", "sidecar")]
+  [string]$AssistantPack = ""
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -40,6 +48,45 @@ try {
 } catch {
   Write-Error "Python not found. Install Python 3.10+ or set `$env:PYTHON."
   exit 1
+}
+
+# ---- SQL assistant packaging mode (1 lean / 2 post / 3 embed) ------------
+$asstTool = Join-Path $Root "tools\assistant_build_pack.py"
+if (-not (Test-Path -LiteralPath $asstTool)) {
+  Write-Error "Missing $asstTool"
+  exit 1
+}
+$resolveArgs = @($asstTool, "resolve")
+if ($AssistantPack) {
+  $resolveArgs += @("--mode", $AssistantPack, "--no-prompt")
+} elseif ($env:SAMQL_ASSISTANT_PACK) {
+  $resolveArgs += @("--mode", $env:SAMQL_ASSISTANT_PACK, "--no-prompt")
+}
+# When neither flag nor env is set, resolve prompts on a TTY (default lean).
+$AssistantMode = (& $py @resolveArgs).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $AssistantMode) {
+  Write-Error "Failed to resolve SQL assistant packaging mode."
+  exit 1
+}
+$env:SAMQL_ASSISTANT_PACK = $AssistantMode
+if ($AssistantMode -eq "embed") {
+  $env:SAMQL_ASSISTANT_EMBED = "1"
+} else {
+  Remove-Item Env:\SAMQL_ASSISTANT_EMBED -ErrorAction SilentlyContinue
+}
+Write-Host "==> assistant pack mode: $AssistantMode"
+switch ($AssistantMode) {
+  "lean"  { Write-Host "    lean: SamQL only (copy assistant/ beside the exe later if needed)" }
+  "post"  { Write-Host "    post: will stage assistant/ next to dist/ after PyInstaller (~+1 GB)" }
+  "embed" { Write-Host "    embed: will bake assistant/ into the PyInstaller payload (~+1 GB)" }
+}
+if ($AssistantMode -eq "embed" -or $AssistantMode -eq "post") {
+  Write-Host "==> ensuring assistant pack (runtime + GGUF)…"
+  & $py $asstTool ensure --root $Root --fetch --platform win-cpu
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error "Assistant pack is required for mode '$AssistantMode' but could not be prepared."
+    exit 1
+  }
 }
 
 # .506 / splash: brand PNGs are binary drop-ins (not in SOURCE_MANIFEST).
@@ -354,6 +401,22 @@ if ($OneDir) {
   Write-Host "    OK: staged dist\SamQL-AppWindow\frontend_dist"
 }
 
+# Mode 2: place assistant/ next to dist outputs (and inside onedir folder).
+if ($AssistantMode -eq "post") {
+  Write-Host "==> staging assistant pack beside dist outputs (mode 2)…"
+  & $py $asstTool stage-post --root $Root
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to stage assistant/ into dist/."
+    exit 1
+  }
+} elseif ($AssistantMode -eq "lean") {
+  Write-Host "==> assistant pack: lean mode (not staged). To add later:"
+  Write-Host "    .\\Fetch-SamQL-Assistant.ps1"
+  Write-Host "    then copy .\\assistant next to dist\\SamQL.exe"
+} else {
+  Write-Host "==> assistant pack: embedded in PyInstaller payload (mode 3)"
+}
+
 function Find-SignTool {
   $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
@@ -431,6 +494,7 @@ if ($OneDir) {
 }
 Write-Host ""
 Write-Host "Done. Your build is in:  $Root\dist\"
+Write-Host "  Assistant packaging mode: $AssistantMode"
 Write-Host "  SamQL.exe            -- console server (+ --window native UI)"
 if ($OneDir) {
   Write-Host "  SamQL-AppWindow\     -- windowed launcher folder (same payload)"
@@ -438,5 +502,8 @@ if ($OneDir) {
 } else {
   Write-Host "  SamQL-AppWindow.exe  -- windowed launcher (same payload as SamQL.exe)"
   Write-Host "Run either exe to launch; both ship the same frontend + load stack."
+}
+if ($AssistantMode -eq "post") {
+  Write-Host "  assistant\           -- offline SQL assistant pack (llama-server + GGUF)"
 }
 Get-ChildItem dist -ErrorAction SilentlyContinue

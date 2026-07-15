@@ -55,7 +55,15 @@ def _candidate_roots():
     env = (os.environ.get("SAMQL_ASSISTANT_DIR") or "").strip()
     if env:
         roots.append(Path(env))
-    # Next to the running process (PyInstaller / source checkout).
+    # PyInstaller embed (mode 3): pack lives under sys._MEIPASS/assistant.
+    try:
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            roots.append(Path(meipass) / "assistant")
+    except Exception:
+        pass
+    # Next to the running process (PyInstaller onedir / post-build mode 2 /
+    # source checkout).
     try:
         me = Path(sys.executable).resolve().parent
         roots.append(me / "assistant")

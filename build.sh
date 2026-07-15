@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Build SamQL into a single distributable executable.
 # Requires: node + npm (to build the frontend) and python3 + pip.
+#
+# SQL assistant packaging (prompted interactively if omitted):
+#   ./build.sh --assistant-pack lean|post|embed
+#   SAMQL_ASSISTANT_PACK=lean|post|embed ./build.sh
+#   1 lean  = SamQL only (default)
+#   2 post  = copy assistant/ next to dist/ after build (~+1GB)
+#   3 embed = bake assistant/ into PyInstaller payload (~+1GB)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,6 +15,57 @@ cd "$ROOT"
 
 PY="${PYTHON:-python3}"
 echo "    build Python: $($PY -c 'import sys; print(sys.executable)')"
+
+ASSISTANT_PACK_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --assistant-pack)
+      ASSISTANT_PACK_ARG="${2:-}"
+      shift 2
+      ;;
+    --assistant-pack=*)
+      ASSISTANT_PACK_ARG="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+ASST_TOOL="$ROOT/tools/assistant_build_pack.py"
+if [ ! -f "$ASST_TOOL" ]; then
+  echo "ERROR: missing $ASST_TOOL" >&2
+  exit 1
+fi
+RESOLVE_ARGS=("$ASST_TOOL" resolve)
+if [ -n "$ASSISTANT_PACK_ARG" ]; then
+  RESOLVE_ARGS+=(--mode "$ASSISTANT_PACK_ARG" --no-prompt)
+elif [ -n "${SAMQL_ASSISTANT_PACK:-}" ]; then
+  RESOLVE_ARGS+=(--mode "$SAMQL_ASSISTANT_PACK" --no-prompt)
+fi
+ASSISTANT_MODE="$("$PY" "${RESOLVE_ARGS[@]}")"
+ASSISTANT_MODE="$(echo "$ASSISTANT_MODE" | tr -d '\r' | tail -n 1)"
+export SAMQL_ASSISTANT_PACK="$ASSISTANT_MODE"
+if [ "$ASSISTANT_MODE" = "embed" ]; then
+  export SAMQL_ASSISTANT_EMBED=1
+else
+  unset SAMQL_ASSISTANT_EMBED || true
+fi
+echo "==> assistant pack mode: $ASSISTANT_MODE"
+case "$ASSISTANT_MODE" in
+  lean)  echo "    lean: SamQL only (copy assistant/ beside the binary later if needed)" ;;
+  post)  echo "    post: will stage assistant/ next to dist/ after PyInstaller (~+1 GB)" ;;
+  embed) echo "    embed: will bake assistant/ into the PyInstaller payload (~+1 GB)" ;;
+esac
+if [ "$ASSISTANT_MODE" = "embed" ] || [ "$ASSISTANT_MODE" = "post" ]; then
+  echo "==> ensuring assistant pack (runtime + GGUF)…"
+  "$PY" "$ASST_TOOL" ensure --root "$ROOT" --fetch || {
+    echo "ERROR: assistant pack required for mode '$ASSISTANT_MODE'" >&2
+    exit 1
+  }
+fi
 
 # Brand PNGs are binary drop-ins (not in SOURCE_MANIFEST). Seed the embedded
 # SQ mark when absent so splash + Vite always have logo.png; never overwrite
@@ -157,6 +215,17 @@ if [ -d dist/SamQL-AppWindow ]; then
   echo "    OK: staged dist/SamQL-AppWindow/frontend_dist"
 fi
 
+if [ "$ASSISTANT_MODE" = "post" ]; then
+  echo "==> staging assistant pack beside dist outputs (mode 2)…"
+  "$PY" "$ASST_TOOL" stage-post --root "$ROOT"
+elif [ "$ASSISTANT_MODE" = "lean" ]; then
+  echo "==> assistant pack: lean mode (not staged). To add later:"
+  echo "    python tools/fetch_assistant_pack.py"
+  echo "    then copy ./assistant next to dist/SamQL"
+else
+  echo "==> assistant pack: embedded in PyInstaller payload (mode 3)"
+fi
+
 # .500: the app icon SOURCE is the user's own file in the repo ROOT (samql.ico),
 # which the spec reads and embeds. The build must NOT write over it -- that
 # clobbered the user's icon and shipped the default. Only refresh the shortcut
@@ -172,6 +241,7 @@ fi
 
 echo
 echo "Done. Your build is in:  $ROOT/dist/"
+echo "Assistant packaging mode: $ASSISTANT_MODE"
 ls -la dist/ 2>/dev/null || true
 echo "SamQL and SamQL-AppWindow both ship the same frontend + load stack."
 echo "Run either to launch SamQL."

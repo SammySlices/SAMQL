@@ -34,6 +34,11 @@ from PyInstaller.utils.hooks import collect_all
 SAMQL_ONEDIR = os.environ.get("SAMQL_ONEDIR", "").strip() in (
     "1", "true", "yes", "on")
 
+# Optional SQL assistant pack (llama-server + GGUF). Set by build.ps1/build.sh
+# when the user chooses packaging mode 3 (embed). Modes 1/2 leave this off.
+SAMQL_ASSISTANT_EMBED = os.environ.get("SAMQL_ASSISTANT_EMBED", "").strip() in (
+    "1", "true", "yes", "on")
+
 # ``__file__`` is not defined inside a spec; SPECPATH is provided by
 # PyInstaller and points at the directory containing this file (backend/).
 HERE = os.path.abspath(SPECPATH)            # noqa: F821  (injected)
@@ -61,6 +66,33 @@ if not (os.path.isdir(FRONTEND_DIST)
     )
 datas.append((FRONTEND_DIST, "frontend_dist"))
 print("[samql.spec] bundling frontend_dist from %s" % FRONTEND_DIST)
+
+# ---- optional offline SQL assistant pack (mode 3 / embed) ----------------
+# Ships llama-server + companion libs + the ~1 GiB GGUF inside the frozen
+# payload (sys._MEIPASS/assistant). Modes 1 (lean) and 2 (post-build folder)
+# leave this off so the core exe stays small.
+if SAMQL_ASSISTANT_EMBED:
+    _asst = os.path.join(REPO, "assistant")
+    _bin_win = os.path.join(_asst, "runtime", "llama-server.exe")
+    _bin_nix = os.path.join(_asst, "runtime", "llama-server")
+    _models = os.path.join(_asst, "models")
+    _has_bin = os.path.isfile(_bin_win) or os.path.isfile(_bin_nix)
+    _has_model = False
+    if os.path.isdir(_models):
+        _has_model = any(
+            name.lower().endswith(".gguf") for name in os.listdir(_models)
+        )
+    if not (_has_bin and _has_model):
+        raise SystemExit(
+            "\n[samql.spec] SAMQL_ASSISTANT_EMBED=1 but assistant/ is incomplete.\n"
+            "             Need assistant/runtime/llama-server[.exe] and a .gguf under\n"
+            "             assistant/models/. Run tools/fetch_assistant_pack.py first,\n"
+            "             or choose build packaging mode 1/2 instead.\n"
+        )
+    datas.append((_asst, "assistant"))
+    print("[samql.spec] EMBEDDING assistant pack from %s (~+1 GiB)" % _asst)
+else:
+    print("[samql.spec] assistant pack not embedded (lean / post-build mode)")
 
 # .519: the SERVER exe bundles samql.ico too -- SamQL.exe --window now sets
 # the Form icon exactly like the AppWindow launcher, so it needs the art.

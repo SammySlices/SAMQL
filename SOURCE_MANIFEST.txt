@@ -288,12 +288,14 @@ tests/suites/backend.py
 tests/suites/frontend.py
 tests/suites/http_api.py
 tests/test_assistant.py
+tests/test_assistant_build_pack.py
 tests/test_nodeflow_resources.py
 tests/test_optimizations_dual_engine.py
 tests/test_refactor_phase2.py
 tests/test_release_hardening.py
 tests/test_wave3_stabilization.py
 tools/aphex_transport.py
+tools/assistant_build_pack.py
 tools/bench_large_load.py
 tools/diag_load.py
 tools/fetch_assistant_pack.py
