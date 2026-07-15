@@ -276,7 +276,20 @@ print("[samql.spec] AppWindow payload = SamQL payload "
 _la_ico = ICON if (ICON and os.path.isfile(ICON)) else None
 if _la_ico:
     la_datas.append((_la_ico, "."))
+# Splash mark: prefer a user drop-in; otherwise write the embedded SQ PNG so
+# text-only trees still ship a logo on the launcher splash (mirrors ico).
 _la_logo = os.path.join(REPO, "frontend", "public", "logo.png")
+if not os.path.isfile(_la_logo):
+    try:
+        from samql_core import _brand as _b_logo
+        _pub = os.path.join(REPO, "frontend", "public")
+        os.makedirs(_pub, exist_ok=True)
+        with open(_la_logo, "wb") as _lf:
+            _lf.write(_b_logo.app_icon_png())
+        print(f"[samql.spec] wrote embedded splash logo {_la_logo} "
+              f"({os.path.getsize(_la_logo)} bytes)")
+    except Exception as _logo_exc:
+        print(f"[samql.spec] WARN could not seed splash logo: {_logo_exc!r}")
 if os.path.isfile(_la_logo):
     la_datas.append((_la_logo, "."))
 

@@ -46,10 +46,31 @@ describe("fieldExplorerSql", () => {
       },
     ]);
     expect(out.error).toBeUndefined();
-    expect(out.sql).toContain("payload ->> '$.Id' AS Id");
-    expect(out.sql).toContain("e1 ->> '$.fixingdate' AS fixingdate");
+    expect(out.sql).toContain('payload ->> \'$.Id\' AS "Id"');
+    expect(out.sql).toContain('e1 ->> \'$.fixingdate\' AS "fixingdate"');
     expect(out.sql).toContain("UNNEST(from_json");
     expect(out.firstSql).toContain("LIMIT 1");
+  });
+
+  it("composes a top-level unique id with IDE-style bare select + quoted alias", () => {
+    const out = composeMultiFieldSql("trades", [
+      {
+        name: "Code",
+        access: { first: "Code", sel: "Code", unnests: [] },
+      },
+      {
+        name: "sku",
+        access: {
+          first: "payload ->> '$.sku'",
+          sel: "payload ->> '$.sku'",
+          unnests: [],
+        },
+      },
+    ]);
+    expect(out.error).toBeUndefined();
+    expect(out.sql).toContain('Code AS "Code"');
+    expect(out.sql).not.toContain('"Code" AS');
+    expect(out.sql).toContain('payload ->> \'$.sku\' AS "sku"');
   });
 
   it("rejects fields under sibling arrays", () => {

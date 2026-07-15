@@ -10,6 +10,7 @@ import {
   FIELD_EXPLORER_STORE_KEY,
   FieldExplorer,
   flattenNestPath,
+  normalizeFlattenNestPath,
 } from "./FieldExplorer";
 import { api } from "../lib/api";
 import type { TableInfo } from "../lib/types";
@@ -293,6 +294,42 @@ describe("FieldExplorer shred steering", () => {
       "counterparty.contacts",
     );
     expect(flattenNestPath(fields, 0, "counterparty")).toBe("counterparty");
+  });
+
+  it("normalizeFlattenNestPath converts opaque JSON extract paths to dotted form", () => {
+    expect(
+      normalizeFlattenNestPath("json ->> '$._embedded.items'", "json"),
+    ).toBe("json._embedded.items");
+    expect(normalizeFlattenNestPath("_embedded -> '$.items'", "_embedded")).toBe(
+      "_embedded.items",
+    );
+    expect(normalizeFlattenNestPath("counterparty.contacts", "counterparty")).toBe(
+      "counterparty.contacts",
+    );
+    expect(
+      flattenNestPath(
+        [
+          {
+            depth: 1,
+            name: "json",
+            type: "JSON",
+            kind: "array",
+            column: "json",
+            path: "json",
+          },
+          {
+            depth: 2,
+            name: "items",
+            type: "array of object",
+            kind: "array",
+            column: "json",
+            path: "json ->> '$._embedded.items'",
+          },
+        ],
+        1,
+        "json",
+      ),
+    ).toBe("json._embedded.items");
   });
 
   it("Flatten on a null-path leaf sends the ancestor nest path, not the leaf name", async () => {
@@ -647,8 +684,8 @@ describe("FieldExplorer shred steering", () => {
     const sqlText = Array.from(document.querySelectorAll(".fx-sql"))
       .map((el) => el.textContent || "")
       .join("\n");
-    expect(sqlText).toContain("AS Id");
-    expect(sqlText).toContain("AS fixingdate");
+    expect(sqlText).toContain('AS "Id"');
+    expect(sqlText).toContain('AS "fixingdate"');
     expect(sqlText).toContain("UNNEST(from_json");
   });
 });

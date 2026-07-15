@@ -103,6 +103,25 @@ const KIND_COLOR: Record<string, string> = {
   map: "#8a6ad6",
 };
 
+/** Normalize opaque JSON extract paths to dotted nest paths for flatten.
+ *  ``json ->> '$._embedded.items'`` → ``json._embedded.items`` so the
+ *  backend does not mangle ``->>`` / ``$.`` on ``.`` splits. */
+export function normalizeFlattenNestPath(path: string, col: string): string {
+  const s = String(path || "").trim();
+  if (!s) return col;
+  const m = s.match(
+    /^((?:"[^"]+")|(?:[A-Za-z_][A-Za-z0-9_]*))(?:\s*::\s*JSON)?\s*(?:->>|->)\s*'\$\.?([^']*)'\s*$/i,
+  );
+  if (!m) return s;
+  let base = m[1];
+  if (base.startsWith('"') && base.endsWith('"')) {
+    base = base.slice(1, -1).replace(/""/g, '"');
+  }
+  const rest = (m[2] || "").replace(/\[["']?\d+["']?\]/g, "");
+  if (!rest) return base || col;
+  return `${base}.${rest}`;
+}
+
 /** Nest path for Flatten: prefer the row's path; inside ``(element)`` leaves
  *  often have ``path: null``, so walk up to the nearest ancestor with a path
  *  (e.g. phones → counterparty.contacts). Never send a bare leaf name that
@@ -113,13 +132,18 @@ export function flattenNestPath(
   col: string,
 ): string {
   const sel = fields[selIdx];
-  if (sel?.path) return sel.path;
-  const depth = sel?.depth ?? 0;
-  for (let i = selIdx - 1; i >= 0; i--) {
-    const row = fields[i];
-    if (row.depth < depth && row.path) return row.path;
+  let path: string | null | undefined = sel?.path;
+  if (!path) {
+    const depth = sel?.depth ?? 0;
+    for (let i = selIdx - 1; i >= 0; i--) {
+      const row = fields[i];
+      if (row.depth < depth && row.path) {
+        path = row.path;
+        break;
+      }
+    }
   }
-  return col;
+  return normalizeFlattenNestPath(path || col, col);
 }
 
 export const FieldExplorer: React.FC<Props> = ({

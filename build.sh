@@ -9,10 +9,21 @@ cd "$ROOT"
 PY="${PYTHON:-python3}"
 echo "    build Python: $($PY -c 'import sys; print(sys.executable)')"
 
-# Strip baked-in backgrounds from public brand PNGs before vite packages
-# them (splash + tab icons). Missing files are skipped.
-echo "==> brand: making public logos transparent"
+# Brand PNGs are binary drop-ins (not in SOURCE_MANIFEST). Seed the embedded
+# SQ mark when absent so splash + Vite always have logo.png; never overwrite
+# a user drop-in. Then strip baked-in backgrounds before vite packages them.
+echo "==> brand: ensuring public logos (embedded SQ mark if missing)"
 export PYTHONPATH="$ROOT/backend"
+if ! "$PY" -c "
+from samql_core import _brand
+for r in _brand.ensure_public_brand_pngs('frontend/public'):
+    path = r.get('path') or ''
+    print(('    wrote (embedded):' if r.get('written') else '    keep (present):'), path)
+"; then
+  echo "    WARN: brand PNG ensure pass failed; continuing" >&2
+fi
+
+echo "==> brand: making public logos transparent"
 if ! "$PY" -c "
 from samql_core import _brand
 for r in _brand.logo_fix_public_dir('frontend/public'):
