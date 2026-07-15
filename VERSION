@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-14.603
+Current build:   2026-07-14.604
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-14.604  (v2.16.4)
+
+AUDIT DOCS REMOVED + PRODUCTION-READY RULES.
+Dropped all root AUDIT_*.md / AUDIT_PLAN.txt from the managed source set
+(290 files); release preflight no longer requires a Phase 10 audit markdown.
+Project rules require enhance-only changes, cross-cutting checks, and no
+silent tradeoffs. Local test/build Tee logs cleaned from the tree.
 
 ----------------------------------------------------------------------
 build 2026-07-14.603  (v2.16.4)

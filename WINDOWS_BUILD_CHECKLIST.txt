@@ -1,13 +1,13 @@
 ======================================================================
 SamQL - WINDOWS BUILD + LAUNCHER CHECKLIST        (added in .456)
 ======================================================================
-The sandbox half of AUDIT_PLAN PASS 13 (port probe, log rotation,
-child-env scrubbing, candidate order, drift pins, defang round-trip)
-runs inside tests/run_tests.py on every build. THIS file is the other
-half: the parts that only exist on the Windows box -- PowerShell 5.1,
-PyInstaller, Edge/Chrome app windows, Citrix. Run it top to bottom
-after any packaging-adjacent change; each step names the EXPECTED
-observation so a failure is unambiguous.
+The packaging + launcher checks that run in the sandbox (port probe,
+log rotation, child-env scrubbing, candidate order, drift pins, defang
+round-trip) live inside tests/run_tests.py on every build. THIS file is
+the other half: the parts that only exist on the Windows box --
+PowerShell 5.1, PyInstaller, Edge/Chrome app windows, Citrix. Run it
+top to bottom after any packaging-adjacent change; each step names the
+EXPECTED observation so a failure is unambiguous.
 
 Conventions: PS> is PowerShell 5.1 from the repo root. "the log"
 means %TEMP%\samql\launcher.log. Before step 1 run:

@@ -1,41 +1,46 @@
 ---
-description: Do not break or degrade existing features; call out cross-cutting impacts
+description: SamQL is production-ready — enhance only; no silent regressions or tradeoffs
 alwaysApply: true
 ---
 
+# Production-ready: enhance, do not degrade
+
+SamQL is **production ready**. Further work must **only enhance**, never degrade.
+
+1. **Judge every change against prior code** for a real improvement in **correctness and/or performance**. If it is not clearly better on those axes (or a user-requested fix/feature that preserves them), do not ship it.
+2. **No silent tradeoffs.** Any downside (slower path, narrower behavior, weaker UX, higher memory, risk to another area) must be **explained before applying** the change.
+3. **Cross-cutting impact must be checked.** Before editing, identify other SamQL areas that could be affected. If another area would regress: **rethink the approach**, or **enhance both** — do not accept a local win that quietly hurts joins, load, Field Explorer, Profile, View Formatted, NodeFlow, diagnostics, Parquet cache/`table_origins`, sticky cancel, or paging.
+4. Prefer **additive** fixes on shared paths over rewriting or narrowing the happy path.
+
 # Preserve existing functionality and performance
 
-When implementing any change:
-
-1. **Do not regress working features.** New work must leave existing behavior and performance intact unless the user explicitly asks to change that feature.
+1. **Do not regress working features** unless the user explicitly asks to change that feature.
 2. **Especially never degrade or remove** (unless explicitly requested):
    - **JSON joins** performance and correctness
-   - **Nested fields** shown on loaded JSON tables / Field Explorer (discovery under opaque JSON, `(element)`, deep nests, arrays)
+   - **Nested fields** on loaded JSON tables / Field Explorer (opaque JSON, `(element)`, deep nests, arrays)
    - Large-file load posture (Parquet thresholds, flatten/shred opt-in, no silent stream-flatten)
-3. **Before changing shared load / query / field-tree / join paths**, identify what already works and keep those code paths stable. Prefer additive fixes (sampling when opaque, higher caps, UI loading states) over rewriting or narrowing the happy path.
-4. **Verify non-regression** with focused tests that cover the existing capability (joins, nested field tree, flatten-off load), not only the new bug. If a change touches those areas, say what was preserved and how it was checked.
-5. If a fix appears to require slowing or narrowing an existing feature, **stop and explain the tradeoff** before applying it — do not silently accept the degradation.
+3. **Verify non-regression** with focused tests for adjacent capabilities (joins, nested field tree, flatten-off load, paging), not only the new bug. Say what was preserved and how it was checked.
 
 # Call out cross-cutting impacts
 
-Before or when implementing a change, **explicitly call out** any other SamQL areas that could be affected (not only the feature under edit). Examples: load vs join vs Field Explorer vs Profile vs View Formatted vs NodeFlow vs diagnostics/profiler vs Parquet cache/`table_origins` vs sticky cancel vs UI paging.
+Before or when implementing a change, **explicitly call out** other SamQL areas that could be affected.
 
-- Name the shared modules/paths involved and the risk (behavior, performance, or UX).
+- Name shared modules/paths and the risk (behavior, performance, or UX).
 - If impact is possible but mitigated, say how.
 - Do not treat a “local” fix as isolated when it touches shared JSON/load/query/session code.
 
 # Baseline adjacent features first
 
-Before editing shared load / query / JSON / join / field-tree paths, **run or name** the focused checks for adjacent capabilities (at least: JSON joins, nested field tree / Field Explorer, flatten-off load, paging of nested/Parquet-backed tables) — not only the bug under fix. Report that baseline when starting the change.
+Before editing shared load / query / JSON / join / field-tree paths, **run or name** focused checks for adjacent capabilities. Report that baseline when starting the change.
 
 # Discovery is not load mutation
 
-Field Explorer sampling, nested key discovery, and “semi-shred” for display must stay **discovery-only** unless the user explicitly asks to shred/flatten data. Never change what is written to Parquet or table contents as a side effect of showing nested keys.
+Field Explorer sampling, nested key discovery, and “semi-shred” for display must stay **discovery-only** unless the user explicitly asks to shred/flatten. Never change what is written to Parquet or table contents as a side effect of showing nested keys.
 
 # Do not silently change defaults or thresholds
 
-Call out (and get clear intent) before moving: flatten/shred defaults, concurrent-reads default, Parquet size cutovers, field-tree sample/depth/array caps, pretty-print / cell-fetch limits, or similar knobs. Prefer leaving defaults alone when fixing a bug.
+Call out (and get clear intent) before moving: flatten/shred defaults, concurrent-reads default, Parquet size cutovers, field-tree sample/depth/array caps, pretty-print / cell-fetch limits, or similar knobs.
 
 # Hot-path and UI responsiveness
 
-Do not run heavy sync work before first paint on user actions (clicks, opens). Prefer **open UI → `loading...` → work after paint** (or idle). Discovery sampling and pretty-print must not block joins, loads, or make the UI look dead on first click.
+Do not run heavy sync work before first paint on user actions. Prefer **open UI → `loading...` → work after paint** (or idle). Discovery sampling and pretty-print must not block joins, loads, or make the UI look dead on first click.

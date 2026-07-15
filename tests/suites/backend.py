@@ -15244,9 +15244,6 @@ def backend_tests(datadir, csv_path, json_path):
              and "except (TypeError, ValueError):"
              in src.split("def page(")[1][:900],
              "page() coerces instead of raising")
-        need(os.path.exists(os.path.join(ROOT, "AUDIT_PLAN.txt")),
-             "the master plan ships in the repo")
-
     def t_route_fuzz():
         # .442: audit pass five, the HTTP boundary -- executed against
         # a LIVE server. FOUR 500-classes unearthed and fixed, all
