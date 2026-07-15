@@ -52,7 +52,7 @@ def test_adaptive_budget():
     need(r["recommended_flow_cache_mb"] >= 128, "flow-cache recommendation")
     need(1 <= r["recommended_parallel_workers"] <= 4, "worker recommendation")
     eff = resourcebudget.effective_limits(8192, 65536, 16, adaptive=True)
-    need(512 <= eff["engine_memory_mb"] <= r["recommended_engine_mb"],
+    need(1024 <= eff["engine_memory_mb"] <= r["recommended_engine_mb"],
          "adaptive engine memory is bounded")
     need(eff["flow_cache_mb"] <= 8192, "adaptive flow limit is a ceiling")
     need(eff["persistent_cache_mb"] <= 65536, "adaptive disk limit is a ceiling")
@@ -89,9 +89,11 @@ def test_duckdb_adaptive_memory():
     try:
         budget = s._effective_resource_budget()
         d = s.get_duckdb()
-        need(512 <= int(d._applied_resource_memory_mb or 0)
+        need(1024 <= int(d._applied_resource_memory_mb or 0)
              <= int(budget["recommended_engine_mb"]),
              "DuckDB did not start with a bounded adaptive memory ceiling")
+        # Adaptive sync must NOT crush a live engine ceiling downward —
+        # that aborted flatten/shred after large loads reduced "available" RAM.
         original = resourcebudget.effective_limits
         def pressured(*args, **kwargs):
             out = original(*args, **kwargs)
@@ -99,11 +101,42 @@ def test_duckdb_adaptive_memory():
             return out
         resourcebudget.effective_limits = pressured
         try:
+            before = int(d._applied_resource_memory_mb or 0)
             s._sync_flow_cache_limits()
-            need(d._applied_resource_memory_mb == 768,
-                 "live adaptive memory shrink was not applied")
+            need(int(d._applied_resource_memory_mb or 0) >= before,
+                 "adaptive sync must not shrink the live engine memory ceiling")
         finally:
             resourcebudget.effective_limits = original
+        # Explicit decrease still works (UI / low-memory).
+        need(d.apply_resource_memory_mb(1024, allow_decrease=True),
+             "explicit allow_decrease can lower the ceiling")
+        need(int(d._applied_resource_memory_mb) == 1024,
+             "explicit decrease applied")
+        # Heavy-op raise must follow TOTAL RAM, not depressed OS available
+        # (the "3.4 of 3.4 GiB used" flatten failure mode).
+        from samql_core.engines import ensure_heavy_op_engine_memory
+        original_rec = resourcebudget.recommend
+        resourcebudget.recommend = lambda _temp=None: {
+            "memory_total": 16 * 1024**3,
+            "memory_available": 3 * 1024**3,
+            "memory_total_mb": 16384.0,
+            "memory_available_mb": 3072.0,
+            "disk_total": 100 * 1024**3,
+            "disk_free": 50 * 1024**3,
+            "disk_free_gb": 50.0,
+            "cpus": 8,
+            "recommended_engine_mb": 12288,
+            "recommended_flow_cache_mb": 512,
+            "recommended_persistent_cache_mb": 4096,
+            "recommended_parallel_workers": 2,
+        }
+        try:
+            need(ensure_heavy_op_engine_memory(d),
+                 "heavy-op raise should apply when available is depressed")
+            need(int(d._applied_resource_memory_mb) >= 12000,
+                 "heavy-op raise targets ~75% of total, not available*0.7")
+        finally:
+            resourcebudget.recommend = original_rec
     finally:
         s.shutdown()
 

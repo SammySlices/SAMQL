@@ -7075,6 +7075,13 @@ class Session:
         mgr = self.duckdb
         if mgr is None:
             return {"error": "Flatten runs on the DuckDB engine."}
+        # Nested flatten/shred CTAS needs a generous engine ceiling. Adaptive
+        # budget sync can otherwise leave a crushed limit after a large load.
+        try:
+            from .engines import ensure_heavy_op_engine_memory
+            ensure_heavy_op_engine_memory(mgr)
+        except Exception:
+            pass
         base = base or table or "rec"
         try:
             raw = mgr._column_types_raw(table)
@@ -7294,10 +7301,17 @@ class Session:
                 getattr(mgr, "_conn", None),
                 getattr(mgr, "write_lock", None))
         try:
-            def _materialize(sql, tname, kind, parent=None):
+            def _materialize(sql, tname, kind, parent=None,
+                             shred_spec=None, shred_col=None,
+                             shred_parquet=None, json_access=False):
                 """Drop any squatting view, run the CTAS, count rows, record the
                 table. Returns None on success, or an early-return dict (cancel
-                / error) the caller must propagate."""
+                / error) the caller must propagate.
+
+                For deep shred CTAS, OutOfMemory falls back to row-range
+                batches (same .430 path as shred_run) after raising the engine
+                memory ceiling once more.
+                """
                 # pre-drop any view squatting on the target name (a flatten-off
                 # load leaves a VIEW; CREATE OR REPLACE TABLE can't replace it).
                 try:
@@ -7309,17 +7323,93 @@ class Session:
                 except Exception as e:
                     if _is_intr(e) or self._run_is_cancelled(query_id):
                         return {"cancelled": True, "created": created}
-                    # .485: surface the exact failing statement. A flatten
-                    # parser error is otherwise undiagnosable from a photo of
-                    # the Error Log -- with the SQL, any construct the quoting
-                    # fix misses is pinned in one round.
-                    _sql1 = " ".join(sql.split())
-                    if len(_sql1) > 4000:
-                        _sql1 = _sql1[:4000] + " ...[+%d chars]" % (
-                            len(_sql1) - 4000)
-                    return {"error": "Flatten failed on %s: %s -- SQL: %s"
-                            % (tname, err_str(e), _sql1),
-                            "created": created}
+                    is_oom = ("OutOfMemory" in err_str(e)
+                              or "Out of Memory" in err_str(e))
+                    if is_oom:
+                        # Raise toward total-RAM budget (not OS available) and
+                        # checkpoint so a stuck ~3–4 GiB pool can grow before
+                        # the row-range / single retry below.
+                        try:
+                            from .engines import ensure_heavy_op_engine_memory
+                            ensure_heavy_op_engine_memory(mgr)
+                        except Exception:
+                            pass
+                        try:
+                            mgr.execute("CHECKPOINT")
+                        except Exception:
+                            pass
+                    recovered = False
+                    if (is_oom and shred_spec is not None
+                            and shred_col and shred_parquet):
+                        # .430-style row-range CTAS for deep flatten children.
+                        total = self._parquet_rowcount(mgr, shred_parquet)
+                        if total:
+                            size = max(1, (total + 7) // 8)
+                            lo, first = 1, True
+                            schemas = (['"JSON"', '"VARCHAR"']
+                                       if json_access else ['"JSON"'])
+                            batch_failed = False
+                            while lo <= total:
+                                if self._run_is_cancelled(query_id):
+                                    return {"cancelled": True,
+                                            "created": created}
+                                hi = min(total, lo + size - 1)
+                                ok_batch = False
+                                last_err = None
+                                for sch in schemas:
+                                    bsql = _shred.build_table_sql(
+                                        shred_spec, shred_col, shred_parquet,
+                                        row_range=(lo, hi),
+                                        insert=not first,
+                                        json_access=json_access,
+                                        json_arr_schema=sch)
+                                    try:
+                                        mgr.execute(bsql)
+                                        ok_batch = True
+                                        break
+                                    except Exception as e2:
+                                        if _is_intr(e2) or self._run_is_cancelled(
+                                                query_id):
+                                            return {"cancelled": True,
+                                                    "created": created}
+                                        last_err = e2
+                                        if ("OutOfMemory" in err_str(e2)
+                                                or "Out of Memory" in err_str(e2)):
+                                            break
+                                if not ok_batch:
+                                    if last_err is not None and (
+                                            "OutOfMemory" in err_str(last_err)
+                                            or "Out of Memory" in err_str(
+                                                last_err)):
+                                        if size <= 50:
+                                            e = last_err
+                                            batch_failed = True
+                                            break
+                                        size = max(50, size // 2)
+                                        continue
+                                    e = last_err or e
+                                    batch_failed = True
+                                    break
+                                first = False
+                                lo = hi + 1
+                            recovered = not batch_failed and lo > total
+                    if not recovered:
+                        if is_oom and not shred_spec:
+                            # Shallow flatten SQL has no row-range builder —
+                            # retry once after the memory raise above.
+                            try:
+                                mgr.execute(sql)
+                                recovered = True
+                            except Exception as e3:
+                                e = e3
+                        if not recovered:
+                            _sql1 = " ".join(sql.split())
+                            if len(_sql1) > 4000:
+                                _sql1 = _sql1[:4000] + " ...[+%d chars]" % (
+                                    len(_sql1) - 4000)
+                            return {"error": "Flatten failed on %s: %s -- SQL: %s"
+                                    % (tname, err_str(e), _sql1),
+                                    "created": created}
                 try:
                     _c, _r = mgr.execute('SELECT COUNT(*) FROM %s'
                                          % self._rq(tname))
@@ -7435,7 +7525,9 @@ class Session:
                     elif _par is None:
                         _par = _hub_name
                     early = _materialize(
-                        sql, spec["name"], "shred", parent=_par)
+                        sql, spec["name"], "shred", parent=_par,
+                        shred_spec=spec, shred_col=name,
+                        shred_parquet=parquet, json_access=_use_json)
                     if early is not None:
                         return early
         finally:
@@ -7541,6 +7633,11 @@ class Session:
         plan = self.shred_plan(engine, table, column, base=base)
         if plan.get("error"):
             return plan
+        try:
+            from .engines import ensure_heavy_op_engine_memory
+            ensure_heavy_op_engine_memory(self.duckdb)
+        except Exception:
+            pass
         if plan.get("needs_cache"):
             # .471: materialize the parquet cache from the loaded
             # object (view or table) so every downstream statement --

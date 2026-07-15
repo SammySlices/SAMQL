@@ -366,7 +366,11 @@ export const FieldExplorer: React.FC<Props> = ({
       src.column,
       shredTables.map((t) => t.name),
     )
-      .then(() => {
+      .then((r) => {
+        // onShred resolves on failure too ({error}). Reloading after an OOM
+        // re-samples under a exhausted engine and replaces the rich tree
+        // with DESCRIBE-only top-level fields — keep the tree on failure.
+        if (!r?.ok) return;
         onTablesChanged?.();
         reloadFields(src.engine, src.table, src.column, key);
       })
@@ -381,7 +385,11 @@ export const FieldExplorer: React.FC<Props> = ({
     setShredBusy(true);
     const key = src.key;
     onFlatten(src.engine, src.table)
-      .then(() => {
+      .then((r) => {
+        // Same as shred: only refresh the tree after a successful flatten.
+        // A failed flatten left the explorer on top-level fields until the
+        // user re-picked the table (post-OOM sample fell back to DESCRIBE).
+        if (!r?.ok) return;
         onTablesChanged?.();
         reloadFields(src.engine, src.table, src.column, key);
       })
