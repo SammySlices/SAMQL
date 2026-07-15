@@ -7571,7 +7571,6 @@ body.motion-reduced *, body.motion-reduced *::before, body.motion-reduced *::aft
 
 /* relational families (shred output) in the sidebar */
 .fam-head { display: flex; align-items: center; min-width: 0; }
-.fam-caret { flex: 0 0 auto; opacity: 0.75; }
 .fam-kids {
   margin-left: 14px;
   padding-left: 4px;

@@ -95,6 +95,19 @@ describe("Sidebar loaded-tables drag reorder", () => {
     expect(screen.queryByLabelText("Drag to reorder tables")).toBeNull();
   });
 
+  it("does not show a far-left family expand caret on relational roots", () => {
+    renderSidebar([
+      tbl("hub"),
+      tbl("legs", { parent: "hub", columns: [{ name: "_rid", type: "BIGINT" }] }),
+      tbl("other"),
+    ]);
+    expect(document.querySelector(".fam-caret")).toBeNull();
+    // Child tables still render nested under the root.
+    expect(document.querySelector(".fam-kids")?.textContent).toContain("legs");
+    // Per-table column expand twists remain (not the removed family caret).
+    expect(document.querySelectorAll(".tree-row .twist").length).toBeGreaterThan(0);
+  });
+
   it("posts the flattened family order and refreshes on drop", async () => {
     const onRefresh = vi.fn();
     const tables = [

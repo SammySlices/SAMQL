@@ -383,7 +383,7 @@ const TablesTree: React.FC<
   }, [q, filtered]);
 
   // relational families (shred output): children grouped under their root
-  const [famOpen, setFamOpen] = useState<Record<string, boolean>>({});
+  // (always shown; no far-left family expand caret)
   const families = useMemo(
     () => groupRelationalFamilies(locals as any) as unknown as {
       table: TableInfo;
@@ -948,7 +948,6 @@ const TablesTree: React.FC<
         <div className="tree-table">
           {families.map(({ table, children }, famIdx) => {
             const fk = table.engine + ":" + table.name;
-            const expanded = famOpen[fk] ?? true;
             const isDrag = dragFam === famIdx;
             const isOver =
               overFam === famIdx && dragFam != null && dragFam !== famIdx;
@@ -992,25 +991,11 @@ const TablesTree: React.FC<
                 }}
               >
                 <div className="fam-head">
-                  {children.length > 0 && (
-                    <span
-                      className={"twist fam-caret" + (expanded ? " open" : "")}
-                      title={
-                        (expanded ? "Collapse" : "Expand") +
-                        " this table's relational tables"
-                      }
-                      onClick={() =>
-                        setFamOpen((p) => ({ ...p, [fk]: !expanded }))
-                      }
-                    >
-                      <Icon.Chevron size={12} />
-                    </span>
-                  )}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {renderRow(table, undefined, { rootIdx: famIdx })}
                   </div>
                 </div>
-                {children.length > 0 && expanded && (
+                {children.length > 0 && (
                   <div className="fam-kids">
                     {children.map((c) => renderRow(c, table))}
                   </div>
