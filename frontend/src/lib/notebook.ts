@@ -1017,14 +1017,56 @@ export function groupRelationalFamilies<T extends FamilyTable>(
     if (!kids.has(root)) kids.set(root, []);
     kids.get(root)!.push(byName.get(name)!);
   }
+  const familyChildRank = (n: string) => {
+    if (n === "Master_Keys" || /^Master_Keys_\d+$/i.test(n)) return 0;
+    if (n === "Join_Keys" || /^Join_Keys_\d+$/i.test(n)) return 1;
+    return 2;
+  };
   const out: { table: T; children: T[] }[] = [];
   for (const t of tables) {
     if (childOf.has(t.name)) continue; // rendered under its root
-    const ch = (kids.get(t.name) || []).slice()
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const ch = (kids.get(t.name) || []).slice().sort(
+      (a, b) =>
+        familyChildRank(a.name) - familyChildRank(b.name) ||
+        a.name.localeCompare(b.name),
+    );
     out.push({ table: t, children: ch });
   }
   return out;
+}
+
+/** Flat catalog order after dragging a family root from ``from`` to ``to``.
+ * Children stay immediately under their root so family grouping is preserved. */
+export function flattenFamilyOrderAfterReorder<T extends FamilyTable>(
+  families: { table: T; children: T[] }[],
+  from: number,
+  to: number,
+): { engine: string; name: string }[] {
+  if (
+    from === to ||
+    from < 0 ||
+    to < 0 ||
+    from >= families.length ||
+    to >= families.length
+  ) {
+    return families.flatMap((f) => [
+      { engine: String((f.table as any).engine || "duckdb"), name: f.table.name },
+      ...f.children.map((c) => ({
+        engine: String((c as any).engine || "duckdb"),
+        name: c.name,
+      })),
+    ]);
+  }
+  const next = families.slice();
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next.flatMap((f) => [
+    { engine: String((f.table as any).engine || "duckdb"), name: f.table.name },
+    ...f.children.map((c) => ({
+      engine: String((c as any).engine || "duckdb"),
+      name: c.name,
+    })),
+  ]);
 }
 
 export function familyJoinKeys(

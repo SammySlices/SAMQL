@@ -385,6 +385,12 @@ export const api = {
 
   tables: () =>
     jsonFetch<{ tables: TableInfo[] }>("/api/tables").then((d) => d.tables),
+  /** Persist Loaded-tables drag order for the current session. */
+  reorderTables: (order: { engine: string; name: string }[]) =>
+    jsonFetch<{ ok: boolean; order?: string[] }>("/api/tables/reorder", {
+      method: "POST",
+      body: JSON.stringify({ order }),
+    }),
   columnFields: (engine: string, table: string, column: string) =>
     jsonFetch<{
       type?: string;
@@ -1388,12 +1394,15 @@ export const api = {
       },
     ),
 
-  /** Background relational flatten (Field Explorer). Optional root_id unique
-   * identifier is carried onto every family table as root_id. */
+  /** Background relational flatten (Field Explorer). Keeps the source table;
+   * scopes to column/path when provided. Optional root_id is carried onto
+   * every family table as root_id (+ Master_Keys). */
   flattenTableStart: (
     engine: string,
     name: string,
     rootId?: RootIdChoice | null,
+    column?: string | null,
+    path?: string | null,
   ) =>
     jsonFetch<{ job_id: string; name: string }>(
       `/api/table/${encodeURIComponent(name)}/flatten-start`,
@@ -1402,6 +1411,8 @@ export const api = {
         body: JSON.stringify({
           engine,
           ...(rootId ? { root_id: rootId } : {}),
+          ...(column ? { column } : {}),
+          ...(path ? { path } : {}),
         }),
         timeoutMs: 25000,
       },

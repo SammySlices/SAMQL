@@ -1676,6 +1676,11 @@ class Api:
         return {"tables": s.tables_tree()}
 
     @staticmethod
+    def tables_reorder(s, m, body, ctx):
+        """Persist Loaded-tables drag order for the session."""
+        return s.set_table_ui_order((body or {}).get("order") or [])
+
+    @staticmethod
     def column_fields(s, m, body, ctx):
         # The nested field tree for one column, fetched lazily when the user
         # expands a nested column in the tables tree.
@@ -3706,22 +3711,29 @@ class Api:
 
     @staticmethod
     def flatten_table_start(s, m, body, ctx):
-        """Flatten a loaded nested table into relational tables in the
-        background (Field Explorer / activity tray). Accepts optional
-        ``root_id`` (unique identifier choice) so every family table carries
-        ``root_id`` and a Master_Keys table is built. Returns {job_id, name}."""
+        """Flatten a selected nest into relational tables in the background
+        (Field Explorer / activity tray). Keeps the source table; scopes to
+        optional ``column`` / ``path``. Accepts ``root_id`` so every family
+        table carries ``root_id`` and Master_Keys + Join_Keys tables are built.
+        Returns {job_id, name}."""
         name = unquote(m.group("name"))
         b = body or {}
         engine = b.get("engine", "duckdb")
         root_id = b.get("root_id")
         if root_id is not None and not isinstance(root_id, dict):
             raise ApiError(400, "root_id must be an object.")
+        column = b.get("column")
+        if column is not None and not isinstance(column, str):
+            raise ApiError(400, "column must be a string.")
+        path = b.get("path")
+        if path is not None and not isinstance(path, (str, list)):
+            raise ApiError(400, "path must be a string or list.")
         job_id = uuid.uuid4().hex[:12]
         job = {"id": job_id, "kind": "flatten", "state": "starting",
                "bytes_done": 0, "bytes_total": 0, "rows": 0,
                "name": name, "engine": engine, "started": time.time(),
                "query_id": job_id, "loaded": None, "error": None,
-               "cancel": False}
+               "cancel": False, "column": column, "path": path}
         with JOBS_LOCK:
             for k, v in list(JOBS.items()):
                 if v.get("done_at") and time.time() - v["done_at"] > 300:
@@ -3731,10 +3743,13 @@ class Api:
         def run():
             job["state"] = "running"
             try:
-                # Relational flatten with optional unique identifier — the
-                # Field Explorer path. (CSV dump flatten uses /api/flatten/start.)
-                res = s.flatten_table(name, base=name, query_id=job_id,
-                                      root_id=root_id)
+                # Field Explorer: keep the nested source table; only the
+                # selected nest becomes a family (+ Master_Keys). Load-time
+                # flatten still uses session.flatten_table without
+                # keep_source (replaces by design).
+                res = s.flatten_table(
+                    name, query_id=job_id, root_id=root_id,
+                    keep_source=True, column=column, path=path)
                 if res.get("cancelled"):
                     job["state"] = "cancelled"
                 elif res.get("error"):
@@ -3746,6 +3761,7 @@ class Api:
                     job["method"] = "flatten_table"
                     job["key"] = "root_id" if root_id else None
                     job["root_id"] = res.get("root_id")
+                    job["kept_source"] = True
                     job["state"] = "done"
             except LoadCancelled:
                 job["state"] = "cancelled"
@@ -4098,6 +4114,7 @@ ROUTES = [
     ("GET", r"^/api/settings/load-thresholds$", Api.load_thresholds_settings),
     ("POST", r"^/api/settings/load-thresholds$", Api.load_thresholds_settings),
     ("GET", r"^/api/tables$", Api.tables),
+    ("POST", r"^/api/tables/reorder$", Api.tables_reorder),
     ("POST", r"^/api/column/fields$", Api.column_fields),
     ("POST", r"^/api/column/access-preview$", Api.column_access_preview),
     ("POST", r"^/api/load/files$", Api.load_files),
@@ -4506,9 +4523,15 @@ class Handler(BaseHTTPRequestHandler):
     def _api_token_required(self, method, path):
         # Health is used by launch/reuse probes before any HTML exists.
         # Focus stays token-free only for loopback peers (second-launch attach).
+        # Shutdown is token-free on loopback so the app-window launcher (and
+        # Exit → Stop server from a fresh curl) can stop the backend without
+        # first scraping the HTML-injected cookie -- remote clients still need
+        # the token.
         if path == "/api/health" and method in ("GET", "HEAD"):
             return False
         if path == "/api/focus" and method == "POST":
+            return not self._client_is_loopback()
+        if path == "/api/shutdown" and method == "POST":
             return not self._client_is_loopback()
         return True
 

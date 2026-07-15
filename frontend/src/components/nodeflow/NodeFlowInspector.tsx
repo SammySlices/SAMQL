@@ -569,14 +569,16 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                               t.name.toLowerCase().startsWith(fam + "_")),
                         )
                         .map((t) => t.name);
-                      // base first, then joinkeys, then the list tables
+                      // base first, then records hub (*_flattened), then lists
                       opts.sort((a, b) => {
                         const rank = (n: string) =>
                           n.toLowerCase() === fam
                             ? 0
-                            : /_joinkeys$/i.test(n)
+                            : /_flattened$/i.test(n)
                               ? 1
-                              : 2;
+                              : /_joinkeys$/i.test(n)
+                                ? 1
+                                : 2;
                         return rank(a) - rank(b) || a.localeCompare(b);
                       });
                       return (
@@ -605,9 +607,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   </label>
                   <div className="hint">
                     Flattens the table into a base (top-level fields, with
-                    single structs inlined), a <code>_joinkeys</code> table,
-                    and one table per nested list. Join a list table to{" "}
-                    <code>_joinkeys</code> on <code>_rid</code> +{" "}
+                    single structs inlined), a <code>_flattened</code> records
+                    hub, and one <code>_flattened</code> table per nested list.
+                    Join a list table to the hub on <code>_rid</code> +{" "}
                     the list ordinal, then to the base on <code>_rid</code>.
                     The OUT port emits the table picked above.
                   </div>

@@ -176,6 +176,23 @@ function Test-SamQLPort {
     }
 }
 
+# HTTP readiness (not TCP alone). Opening WebView2 on a listening-but-not-
+# yet-accepting socket hangs the first navigation in the listen backlog and
+# shows a white / "Not Responding" window. Proxy-free: managed boxes can
+# hijack even localhost through a system proxy (.509).
+function Test-SamQLHealth {
+    param([int]$P)
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $wc.Headers.Add("Cache-Control", "no-cache")
+        $body = $wc.DownloadString("http://127.0.0.1:$P/api/health")
+        return ($body -match '"app"\s*:\s*"SamQL"')
+    } catch {
+        return $false
+    }
+}
+
 function Find-BrowserExe {
     param([string]$Which)
     $pf = $env:ProgramFiles
@@ -207,35 +224,53 @@ if (-not (Test-SamQLPort -P $Port)) {
         Fail-Visibly "Port $Port is closed (and -NoServer was given)."
     }
     Set-SplashText "No server on port $Port -- starting one..."
+    # Source checkout: prefer backend\server.py so a rebuilt frontend/dist
+    # and current APIs (e.g. tableFields) win over a stale dist\samql.exe
+    # that still embeds an older UI/API. Packaged installs have no
+    # backend\server.py beside the launcher, so they keep using the exe.
+    # Declaration order matches start preference (contract-tested).
+    $serverPy = Join-Path $here "backend\server.py"
     $exe = Join-Path $here "samql.exe"
     $distExe = Join-Path $here "dist\samql.exe"
-    $serverPy = Join-Path $here "backend\server.py"
-    if (Test-Path $exe) {
-        Start-Process -FilePath $exe -ArgumentList "--no-browser" -WorkingDirectory $here | Out-Null
-    } elseif (Test-Path $distExe) {
-        Start-Process -FilePath $distExe -ArgumentList "--no-browser" -WorkingDirectory $here | Out-Null
-    } elseif (Test-Path $serverPy) {
+    if (Test-Path $serverPy) {
         $py = Get-Command python -ErrorAction SilentlyContinue
         if ($null -eq $py) {
-            Fail-Visibly "python is not on PATH and no samql exe found."
+            Fail-Visibly "python is not on PATH (needed for backend\server.py)."
         }
+        # Pass --port so -Port N matches the health wait below (default 8765).
         Start-Process -FilePath $py.Source `
-            -ArgumentList @("`"$serverPy`"", "--no-browser") `
+            -ArgumentList @("`"$serverPy`"", "--no-browser", "--port", "$Port") `
             -WorkingDirectory $here -WindowStyle Minimized | Out-Null
+    } elseif (Test-Path $exe) {
+        Start-Process -FilePath $exe `
+            -ArgumentList @("--no-browser", "--port", "$Port") `
+            -WorkingDirectory $here | Out-Null
+    } elseif (Test-Path $distExe) {
+        Start-Process -FilePath $distExe `
+            -ArgumentList @("--no-browser", "--port", "$Port") `
+            -WorkingDirectory $here | Out-Null
     } else {
         Fail-Visibly "Nothing to start: no samql exe, no backend server."
     }
+} elseif (-not (Test-SamQLHealth -P $Port)) {
+    Fail-Visibly "Port $Port is in use by something that is not SamQL."
+} else {
+    Set-SplashText "Reusing the server on port $Port."
+}
+
+# Wait for /api/health (accepting HTTP), not merely TCP bind -- matches
+# launcher_app cold-start posture and avoids the listen-backlog hang.
+if (-not (Test-SamQLHealth -P $Port)) {
+    Set-SplashText "Waiting for SamQL to be ready..."
     $deadline = (Get-Date).AddSeconds(120)
-    while (-not (Test-SamQLPort -P $Port)) {
+    while (-not (Test-SamQLHealth -P $Port)) {
         if ((Get-Date) -gt $deadline) {
-            Fail-Visibly "Server did not answer on port $Port within 120s."
+            Fail-Visibly "SamQL did not answer /api/health on port $Port within 120s."
         }
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 300
     }
     Set-SplashText "Server is up."
-} else {
-    Set-SplashText "Reusing the server on port $Port."
 }
 
 # ---- 2) the app window ----

@@ -56,6 +56,8 @@ interface Props {
     engine: string,
     table: string,
     rootId?: RootIdChoice | null,
+    column?: string | null,
+    path?: string | null,
   ) => Promise<{
     ok?: boolean;
     error?: string;
@@ -101,6 +103,25 @@ const KIND_COLOR: Record<string, string> = {
   map: "#8a6ad6",
 };
 
+/** Nest path for Flatten: prefer the row's path; inside ``(element)`` leaves
+ *  often have ``path: null``, so walk up to the nearest ancestor with a path
+ *  (e.g. phones → counterparty.contacts). Never send a bare leaf name that
+ *  invents a wrong STRUCT path (phones → counterparty.phones). */
+export function flattenNestPath(
+  fields: FieldRow[],
+  selIdx: number,
+  col: string,
+): string {
+  const sel = fields[selIdx];
+  if (sel?.path) return sel.path;
+  const depth = sel?.depth ?? 0;
+  for (let i = selIdx - 1; i >= 0; i--) {
+    const row = fields[i];
+    if (row.depth < depth && row.path) return row.path;
+  }
+  return col;
+}
+
 export const FieldExplorer: React.FC<Props> = ({
   open,
   onClose,
@@ -139,6 +160,10 @@ export const FieldExplorer: React.FC<Props> = ({
   // Multi-select via checkboxes. Order is check order; last checked / click
   // is the "primary" field used for preview / shred CTAs.
   const [selIdxs, setSelIdxs] = useState<number[]>([]);
+  // Nested field-tree collapse (match Sidebar): structs/arrays default
+  // COLLAPSED for a compact top level; "(element)" wrappers default OPEN.
+  const [openFields, setOpenFields] = useState<Set<string>>(new Set());
+  const [closedEls, setClosedEls] = useState<Set<string>>(new Set());
   // Shred eligibility for the primary field's owning column.
   const [shredInfo, setShredInfo] = useState<ShredInfo | null>(null);
   const [shredBusy, setShredBusy] = useState(false);
@@ -156,10 +181,23 @@ export const FieldExplorer: React.FC<Props> = ({
   const primaryColumn = (row: FieldRow | null | undefined) =>
     row?.column || row?.name || "";
 
+  const toggleFieldNode = (nodeId: string, isEl: boolean) => {
+    const flip = (s: Set<string>) => {
+      const n = new Set(s);
+      if (n.has(nodeId)) n.delete(nodeId);
+      else n.add(nodeId);
+      return n;
+    };
+    if (isEl) setClosedEls(flip);
+    else setOpenFields(flip);
+  };
+
   const reloadFields = (engine: string, table: string, key: string) => {
     setBusy(true);
     setSelIdx(null);
     setSelIdxs([]);
+    setOpenFields(new Set());
+    setClosedEls(new Set());
     setValidatedAccess(null);
     setValidatedFirstSql(null);
     setValidatedAllSql(null);
@@ -458,11 +496,15 @@ export const FieldExplorer: React.FC<Props> = ({
   };
 
   const confirmFlatten = (rootId: RootIdChoice) => {
-    if (!src || !onFlatten || shredBusy) return;
+    if (!src || !onFlatten || shredBusy || !sel || selIdx == null || !fields)
+      return;
+    const col = primaryColumn(sel);
+    if (!col) return;
     setFlattenUidOpen(false);
     setShredBusy(true);
     const key = src.key;
-    onFlatten(src.engine, src.table, rootId)
+    const fieldPath = flattenNestPath(fields, selIdx, col);
+    onFlatten(src.engine, src.table, rootId, col, fieldPath)
       .then((r) => {
         if (!r?.ok) return;
         onTablesChanged?.();
@@ -602,51 +644,100 @@ export const FieldExplorer: React.FC<Props> = ({
                     </button>
                   )}
                 </div>
-                {fields.map((f, i) => {
-                  const checked = selIdxs.includes(i);
-                  return (
-                    <div
-                      key={i}
-                      className={"fx-row" + (checked ? " sel" : "")}
-                      style={{ paddingLeft: 6 + (f.depth - 1) * 12 }}
-                      onClick={() => toggleField(i, { exclusive: true })}
-                      title={
-                        f.type +
-                        " — click to view; use the checkbox to add more fields to one query"
-                      }
-                      data-testid={`fx-field-${f.name}`}
-                    >
-                      <input
-                        type="checkbox"
-                        className="fx-check"
-                        checked={checked}
-                        tabIndex={0}
-                        aria-label={`Add ${f.name} to query`}
-                        data-testid={`fx-check-${f.name}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleField(i);
-                        }}
-                        onChange={() => {
-                          /* click handler owns the toggle */
-                        }}
-                      />
-                      <span
-                        style={{
-                          color: KIND_COLOR[f.kind] || undefined,
-                          fontStyle:
-                            f.name === "(element)" ? "italic" : undefined,
-                          opacity: f.name === "(element)" ? 0.7 : 1,
-                        }}
+                {(() => {
+                  const nodes: React.ReactNode[] = [];
+                  let skipDeeper: number | null = null;
+                  for (let i = 0; i < fields.length; i++) {
+                    const f = fields[i];
+                    if (skipDeeper !== null) {
+                      if (f.depth > skipDeeper) continue;
+                      skipDeeper = null;
+                    }
+                    const hasKids =
+                      i + 1 < fields.length && fields[i + 1].depth > f.depth;
+                    const nid = `${srcKey}\u0000${i}`;
+                    const isEl = f.name === "(element)";
+                    // Structs/arrays load COLLAPSED; "(element)" loads open.
+                    const collapsed =
+                      hasKids &&
+                      (isEl ? closedEls.has(nid) : !openFields.has(nid));
+                    const checked = selIdxs.includes(i);
+                    nodes.push(
+                      <div
+                        key={i}
+                        className={"fx-row" + (checked ? " sel" : "")}
+                        style={{ paddingLeft: 6 + (f.depth - 1) * 12 }}
+                        onClick={() => toggleField(i, { exclusive: true })}
+                        title={
+                          f.type +
+                          " — click to view; use the checkbox to add more fields to one query" +
+                          (hasKids ? "; ▸ to expand nested fields" : "")
+                        }
+                        data-testid={`fx-field-${f.name}`}
                       >
-                        {f.name}
-                      </span>
-                      {(f.kind === "array" || f.kind === "array-scalar") && (
-                        <span style={{ color: "#c98a2b" }}> ⇗</span>
-                      )}
-                    </div>
-                  );
-                })}
+                        {hasKids ? (
+                          <span
+                            className="fx-caret"
+                            data-testid={`fx-caret-${f.name}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleFieldNode(nid, isEl);
+                            }}
+                            title={collapsed ? "Expand" : "Collapse"}
+                            style={{
+                              cursor: "pointer",
+                              width: 12,
+                              flex: "0 0 auto",
+                              display: "inline-block",
+                              textAlign: "center",
+                              opacity: 0.7,
+                            }}
+                          >
+                            {collapsed ? "▸" : "▾"}
+                          </span>
+                        ) : (
+                          <span
+                            className="fx-caret-spacer"
+                            style={{
+                              width: 12,
+                              flex: "0 0 auto",
+                              display: "inline-block",
+                            }}
+                          />
+                        )}
+                        <input
+                          type="checkbox"
+                          className="fx-check"
+                          checked={checked}
+                          tabIndex={0}
+                          aria-label={`Add ${f.name} to query`}
+                          data-testid={`fx-check-${f.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleField(i);
+                          }}
+                          onChange={() => {
+                            /* click handler owns the toggle */
+                          }}
+                        />
+                        <span
+                          style={{
+                            color: KIND_COLOR[f.kind] || undefined,
+                            fontStyle: isEl ? "italic" : undefined,
+                            opacity: isEl ? 0.7 : 1,
+                          }}
+                        >
+                          {f.name}
+                        </span>
+                        {(f.kind === "array" || f.kind === "array-scalar") && (
+                          <span style={{ color: "#c98a2b" }}> ⇗</span>
+                        )}
+                      </div>,
+                    );
+                    if (hasKids && collapsed) skipDeeper = f.depth;
+                  }
+                  return nodes;
+                })()}
               </>
             )}
           </div>
@@ -670,35 +761,6 @@ export const FieldExplorer: React.FC<Props> = ({
                   </span>
                 )}
               </div>
-              {selectedFields.length > 1 && (
-                <div className="fx-note faint" data-testid="fx-multi-hint">
-                  Combined query: outer scalars repeat on each exploded nested
-                  row. {multiCompose?.error || ""}
-                </div>
-              )}
-              {previewBusy && selectedFields.length <= 1 && (
-                <div className="faint" style={{ padding: "4px 0" }}>
-                  <span className="spin" /> validating SQL…
-                </div>
-              )}
-              {!previewBusy && previewSample != null && selectedFields.length <= 1 && (
-                <div className="fx-note faint" data-testid="fx-preview-sample">
-                  Sample: <code>{previewSample}</code>
-                </div>
-              )}
-              {!previewBusy && previewErr && selectedFields.length <= 1 && (
-                <div className="fx-note" style={{ color: "#c44" }} data-testid="fx-preview-error">
-                  Preview: {previewErr}
-                </div>
-              )}
-              {firstSql &&
-                !multiCompose?.error &&
-                block(
-                  selectedFields.length > 1
-                    ? "Peek one row (all selected fields)"
-                    : "Peek one value",
-                  firstSql,
-                )}
               {isArray && selectedFields.length <= 1 && (
                 <div className="fx-shred" data-testid="fx-shred">
                   {shredEligible ? (
@@ -732,7 +794,7 @@ export const FieldExplorer: React.FC<Props> = ({
                         className="btn sm"
                         disabled={shredBusy}
                         data-testid="fx-flatten-run"
-                        title="Re-read the source deeply and build the relational family"
+                        title="Build a relational family for this nest; keep the source table"
                         onClick={runFlatten}
                       >
                         {shredBusy ? (
@@ -743,9 +805,10 @@ export const FieldExplorer: React.FC<Props> = ({
                         <span style={{ marginLeft: 6 }}>Flatten to tables</span>
                       </button>
                       <div className="fx-note faint">
-                        This column is deep/opaque JSON, so it builds via
-                        Flatten: the source is re-read deeply into the full
-                        relational family (memory-safe). Preferred over a full
+                        Builds a relational family for this nest only (plus{" "}
+                        <code>Master_Keys</code> / <code>Join_Keys</code> when
+                        you pick a unique id). The source table stays loaded
+                        with its original nested columns. Preferred over a full
                         UNNEST, which loads the whole column into memory and can
                         exhaust it on big files.
                       </div>
@@ -765,6 +828,35 @@ export const FieldExplorer: React.FC<Props> = ({
                   )}
                 </div>
               )}
+              {selectedFields.length > 1 && (
+                <div className="fx-note faint" data-testid="fx-multi-hint">
+                  Combined query: outer scalars repeat on each exploded nested
+                  row. {multiCompose?.error || ""}
+                </div>
+              )}
+              {previewBusy && selectedFields.length <= 1 && (
+                <div className="faint" style={{ padding: "4px 0" }}>
+                  <span className="spin" /> validating SQL…
+                </div>
+              )}
+              {!previewBusy && previewSample != null && selectedFields.length <= 1 && (
+                <div className="fx-note faint" data-testid="fx-preview-sample">
+                  Sample: <code>{previewSample}</code>
+                </div>
+              )}
+              {!previewBusy && previewErr && selectedFields.length <= 1 && (
+                <div className="fx-note" style={{ color: "#c44" }} data-testid="fx-preview-error">
+                  Preview: {previewErr}
+                </div>
+              )}
+              {firstSql &&
+                !multiCompose?.error &&
+                block(
+                  selectedFields.length > 1
+                    ? "Peek one row (all selected fields)"
+                    : "Peek one value",
+                  firstSql,
+                )}
               {allSql &&
                 !multiCompose?.error &&
                 block(

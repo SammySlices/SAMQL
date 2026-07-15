@@ -34,7 +34,7 @@ export const Modal: React.FC<Props> = ({
   testId,
 }) => {
   // .435: every modal EXITS as smoothly as it enters -- a short
-  // closing phase plays the reverse pop, then the real onClose fires.
+  // closing phase plays the soft pop-out (modal-out), then onClose fires.
   // Reduce motion closes immediately.
   const [closing, setClosing] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -52,7 +52,7 @@ export const Modal: React.FC<Props> = ({
     closeTimer.current = window.setTimeout(() => {
       closeTimer.current = null;
       onClose();
-    }, 140);
+    }, 160);
   }, [closing, onClose]);
 
   useEffect(() => {

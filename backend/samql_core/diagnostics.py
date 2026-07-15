@@ -316,9 +316,11 @@ def flatten_type_tree(column, node, max_nodes=4000):
                 "note": ("UNNEST(%s) to get one row per element"
                          % path) if (path and not in_array) else
                         "nested array — UNNEST after expanding the parent"})
-            # descend into the element type so the shape is visible; paths
-            # inside an array are only valid after an UNNEST, so drop them
-            walk("(element)", of, depth + 1, None, True)
+            # Scalar lists (VARCHAR[], phones: ["…"]) already say "array of
+            # text" on this row — a lone "(element)" child is a dead-end that
+            # looks like missing fields. Only descend for object/array elems.
+            if not scalar_elem:
+                walk("(element)", of, depth + 1, None, True)
         elif t == "map":
             rows.append({"depth": depth, "name": name, "type": "MAP",
                          "kind": "map", "path": None if in_array else path,
@@ -986,15 +988,16 @@ def _field_tree_from_root(root, colname="json", access_style="json",
                 walk(key, nd["children"][key], depth + 1,
                      None if in_array else jptr + _json_path_seg(key), in_array)
         elif k == "array":
+            scalar_elem = bool(nd["elem"] and nd["elem"]["kind"] == "scalar")
             rows.append({"depth": depth, "name": name, "type": label(nd),
-                         "kind": ("array-scalar"
-                                  if (nd["elem"] and nd["elem"]["kind"] == "scalar")
-                                  else "array"),
+                         "kind": ("array-scalar" if scalar_elem else "array"),
                          "path": None if in_array else expr(jptr),
                          "note": ("array — expand with UNNEST" if not in_array
                                   else "nested array — UNNEST after the parent"),
                          "double_encoded": bool(nd.get("double_encoded"))})
-            if nd["elem"]:
+            # Same as flatten_type_tree: scalar-array phones/tags don't get a
+            # dead-end "(element)" leaf — the parent type already names it.
+            if nd["elem"] and not scalar_elem:
                 walk("(element)", nd["elem"], depth + 1, None, True)
         else:
             rows.append({"depth": depth, "name": name,

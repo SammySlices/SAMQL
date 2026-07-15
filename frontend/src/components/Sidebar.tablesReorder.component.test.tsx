@@ -1,0 +1,193 @@
+import React from "react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Sidebar } from "./Sidebar";
+import { api } from "../lib/api";
+import {
+  flattenFamilyOrderAfterReorder,
+  groupRelationalFamilies,
+} from "../lib/notebook";
+import type { TableInfo } from "../lib/types";
+
+vi.mock("../lib/api", () => ({
+  api: {
+    reorderTables: vi.fn(() => Promise.resolve({ ok: true })),
+    catalogColumns: vi.fn(() => Promise.resolve({ columns: [] })),
+    columnFields: vi.fn(() => Promise.resolve({ fields: [] })),
+  },
+}));
+
+function tbl(name: string, extra?: Partial<TableInfo>): TableInfo {
+  return {
+    engine: "duckdb",
+    name,
+    source: `${name}.csv`,
+    row_count: 1,
+    columns: [{ name: "id", type: "INTEGER" }],
+    ...extra,
+  };
+}
+
+const noop = () => {};
+
+function renderSidebar(tables: TableInfo[], onRefresh = vi.fn()) {
+  return render(
+    <Sidebar
+      tables={tables}
+      history={[]}
+      saved={[]}
+      workflows={[]}
+      onInsertTable={noop}
+      onInsertColumn={noop}
+      onLoadSql={noop}
+      onProfile={noop}
+      onReconcile={noop}
+      onChangeType={noop}
+      onRename={noop}
+      onDrop={noop}
+      onDropMany={noop}
+      onOptimize={noop}
+      onImport={noop}
+      onDisconnect={noop}
+      onDeleteSaved={noop}
+      onLoadWorkflow={noop}
+      onDeleteWorkflow={noop}
+      onActiveSave={noop}
+      onActiveSaveAs={noop}
+      onActiveOpen={noop}
+      activeView="ide"
+      onRefresh={onRefresh}
+      onClearHistory={noop}
+      onOpenLoad={noop}
+    />,
+  );
+}
+
+describe("flattenFamilyOrderAfterReorder", () => {
+  it("keeps children under their root when roots move", () => {
+    const families = groupRelationalFamilies([
+      tbl("hub"),
+      tbl("legs", { parent: "hub", columns: [{ name: "_rid", type: "BIGINT" }] }),
+      tbl("other"),
+    ]);
+    expect(families.map((f) => f.table.name)).toEqual(["hub", "other"]);
+    const order = flattenFamilyOrderAfterReorder(families, 0, 1);
+    expect(order.map((o) => o.name)).toEqual(["other", "hub", "legs"]);
+  });
+});
+
+describe("Sidebar loaded-tables drag reorder", () => {
+  beforeEach(() => {
+    vi.mocked(api.reorderTables).mockClear();
+  });
+
+  it("exposes a drag grip on each local root when 2+ tables are loaded", () => {
+    renderSidebar([tbl("alpha"), tbl("bravo")]);
+    const grips = screen.getAllByLabelText("Drag to reorder tables");
+    expect(grips).toHaveLength(2);
+  });
+
+  it("hides grips while the table filter is active", () => {
+    renderSidebar([tbl("alpha"), tbl("bravo")]);
+    fireEvent.change(screen.getByPlaceholderText("Filter tables…"), {
+      target: { value: "alp" },
+    });
+    expect(screen.queryByLabelText("Drag to reorder tables")).toBeNull();
+  });
+
+  it("posts the flattened family order and refreshes on drop", async () => {
+    const onRefresh = vi.fn();
+    const tables = [
+      tbl("hub"),
+      tbl("legs", { parent: "hub", columns: [{ name: "_rid", type: "BIGINT" }] }),
+      tbl("other"),
+    ];
+    renderSidebar(tables, onRefresh);
+
+    const grips = screen.getAllByLabelText("Drag to reorder tables");
+    expect(grips).toHaveLength(2); // roots only; child has no grip
+
+    const blocks = document.querySelectorAll(".fam-block");
+    expect(blocks.length).toBe(2);
+
+    fireEvent.dragStart(grips[0], {
+      dataTransfer: {
+        setData: vi.fn(),
+        effectAllowed: "move",
+      },
+    });
+    fireEvent.dragOver(blocks[1], {
+      dataTransfer: { dropEffect: "move" },
+    });
+    fireEvent.drop(blocks[1], {
+      dataTransfer: { getData: () => "0" },
+    });
+
+    await waitFor(() => expect(api.reorderTables).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.reorderTables).mock.calls[0][0]).toEqual([
+      { engine: "duckdb", name: "other" },
+      { engine: "duckdb", name: "hub" },
+      { engine: "duckdb", name: "legs" },
+    ]);
+    await waitFor(() => expect(onRefresh).toHaveBeenCalled());
+  });
+
+  it("keeps selection checkbox + insert click on the table name", () => {
+    const onInsert = vi.fn();
+    render(
+      <Sidebar
+        tables={[tbl("alpha"), tbl("bravo")]}
+        history={[]}
+        saved={[]}
+        workflows={[]}
+        onInsertTable={onInsert}
+        onInsertColumn={noop}
+        onLoadSql={noop}
+        onProfile={noop}
+        onReconcile={noop}
+        onChangeType={noop}
+        onRename={noop}
+        onDrop={noop}
+        onDropMany={noop}
+        onOptimize={noop}
+        onImport={noop}
+        onDisconnect={noop}
+        onDeleteSaved={noop}
+        onLoadWorkflow={noop}
+        onDeleteWorkflow={noop}
+        onActiveSave={noop}
+        onActiveSaveAs={noop}
+        onActiveOpen={noop}
+        activeView="ide"
+        onRefresh={noop}
+        onClearHistory={noop}
+        onOpenLoad={noop}
+      />,
+    );
+    fireEvent.click(screen.getByText("alpha"));
+    expect(onInsert).toHaveBeenCalledWith("alpha");
+    const boxes = screen.getAllByTitle("Select for bulk delete");
+    expect(boxes).toHaveLength(2);
+    fireEvent.click(boxes[0]);
+    expect(screen.getByText(/1 selected/)).toBeTruthy();
+  });
+
+  it("lifts the row while dragging and pops on drop", async () => {
+    renderSidebar([tbl("alpha"), tbl("bravo")]);
+    const grips = screen.getAllByLabelText("Drag to reorder tables");
+    const blocks = document.querySelectorAll(".fam-block");
+    fireEvent.dragStart(grips[0], {
+      dataTransfer: { setData: vi.fn(), effectAllowed: "move" },
+    });
+    await waitFor(() => expect(blocks[0].className).toMatch(/\bdragging\b/));
+    fireEvent.drop(blocks[1], {
+      dataTransfer: { getData: () => "0" },
+    });
+    await waitFor(() => expect(api.reorderTables).toHaveBeenCalled());
+    await waitFor(() => {
+      const popped = document.querySelector(".fam-block.drop-pop");
+      expect(popped).toBeTruthy();
+      expect(popped?.textContent).toContain("alpha");
+    });
+  });
+});

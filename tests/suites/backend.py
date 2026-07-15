@@ -487,6 +487,65 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_table_ui_reorder():
+        # Loaded-tables drag order is session-scoped: empty = alphabetical
+        # catalog default; set_table_ui_order reshapes /api/tables; rename
+        # keeps the key; drop/clear prune it. New tables not in the order
+        # list still append after ranked ones (flatten registration friendly).
+        s = _fresh_session()
+        try:
+            s.db.add_table_streaming(
+                "alpha", ["id"], iter([(1,), (2,)]))
+            s.db.add_table_streaming(
+                "bravo", ["id"], iter([(3,), (4,)]))
+            s.db.add_table_streaming(
+                "charlie", ["id"], iter([(5,), (6,)]))
+            s.db.sync_catalog()
+            names0 = [t["name"] for t in s.tables_tree()
+                      if t["engine"] == "sqlite"]
+            eq(names0, ["alpha", "bravo", "charlie"],
+               "default catalog order is alphabetical")
+            r = s.set_table_ui_order([
+                {"engine": "sqlite", "name": "charlie"},
+                {"engine": "sqlite", "name": "alpha"},
+                {"engine": "sqlite", "name": "bravo"},
+            ])
+            eq(r.get("ok"), True, "set_table_ui_order ok")
+            names1 = [t["name"] for t in s.tables_tree()
+                      if t["engine"] == "sqlite"]
+            eq(names1, ["charlie", "alpha", "bravo"],
+               "tables_tree honors session UI order")
+            s.rename_table("sqlite", "charlie", "delta")
+            names2 = [t["name"] for t in s.tables_tree()
+                      if t["engine"] == "sqlite"]
+            eq(names2, ["delta", "alpha", "bravo"],
+               "rename updates UI-order key")
+            s.drop_table("sqlite", "alpha")
+            names3 = [t["name"] for t in s.tables_tree()
+                      if t["engine"] == "sqlite"]
+            eq(names3, ["delta", "bravo"],
+               "drop removes UI-order key")
+            s.db.add_table_streaming(
+                "echo", ["id"], iter([(7,)]))
+            s.db.sync_catalog()
+            names4 = [t["name"] for t in s.tables_tree()
+                      if t["engine"] == "sqlite"]
+            eq(names4, ["delta", "bravo", "echo"],
+               "new unranked table appends after ranked")
+            # clear_all wipes order so the next session starts alphabetical
+            s.clear_all(clear_manifest=True)
+            s.db.add_table_streaming(
+                "zulu", ["id"], iter([(1,)]))
+            s.db.add_table_streaming(
+                "able", ["id"], iter([(2,)]))
+            s.db.sync_catalog()
+            names5 = [t["name"] for t in s.tables_tree()
+                      if t["engine"] == "sqlite"]
+            eq(names5, ["able", "zulu"],
+               "after clear, order is alphabetical again")
+        finally:
+            s.shutdown()
+
     def t_change_type():
         s = _loaded_session()
         try:
@@ -1212,6 +1271,166 @@ def backend_tests(datadir, csv_path, json_path):
              "a scalar column has no nested fields")
         need(cft("sqlite", "t", "whatever")["fields"] == [],
              "a flat (SQLite) column returns no field tree")
+
+    def t_field_explorer_table_rooted_highly_nested():
+        # Flatten-off highly nested JSON must stay ONE catalog table. Field
+        # Explorer then uses table_field_tree so the UI shows that one table
+        # with every column + nested field underneath -- not one "source" /
+        # table per nested STRUCT/LIST column (counterparty, terms, …).
+        # Also: scalar arrays like phones must NOT dead-end on a lone
+        # "(element)" leaf when expanded in the sidebar / Field Explorer.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        path = os.path.join(FRONTEND, "e2e", "fixtures",
+                            "highly_nested_trades.json")
+        need(os.path.isfile(path), "highly_nested_trades.json fixture missing")
+
+        def _collect_keys(obj, out):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    out.add(k)
+                    _collect_keys(v, out)
+            elif isinstance(obj, list):
+                for v in obj:
+                    _collect_keys(v, out)
+
+        expected_keys = set()
+        with open(path, encoding="utf-8-sig") as fh:
+            _collect_keys(json.load(fh), expected_keys)
+        # Structural markers are not JSON keys.
+        expected_keys.discard("(element)")
+        need(len(expected_keys) >= 30,
+             "fixture should have many nested keys, got %d" % len(expected_keys))
+
+        s = _fresh_session()
+        try:
+            loaded = s.load_file(path, destination="duckdb",
+                                 flatten=False, shred=False)
+            need(isinstance(loaded, list) and len(loaded) == 1,
+                 "flatten-off load must create exactly one table, got %r"
+                 % loaded)
+            name = loaded[0]["name"]
+            tree = [t for t in s.tables_tree()
+                    if t.get("engine") == "duckdb" and t.get("name") == name]
+            eq(len(tree), 1, "catalog has exactly one duckdb table for the file")
+            cols = tree[0].get("columns") or []
+            col_names = [c["name"] for c in cols]
+            for must in ("tradeId", "terms", "counterparty", "collateral",
+                         "audit"):
+                need(must in col_names,
+                     "expected top-level column %r in %r" % (must, col_names))
+            nested_hints = [c["name"] for c in cols if c.get("hint")]
+            need(len(nested_hints) >= 2,
+                 "fixture must expose multiple nested columns (the old FE "
+                 "bug listed each as its own source): %r" % nested_hints)
+
+            # Field Explorer source model: ONE entry for this table, not N.
+            fe_sources = []
+            for t in s.tables_tree():
+                if t.get("remote"):
+                    continue
+                if any(c.get("hint") for c in (t.get("columns") or [])):
+                    fe_sources.append(t["name"])
+            eq(fe_sources.count(name), 1,
+               "Field Explorer must list the loaded table once, not once per "
+               "nested column: %r" % fe_sources)
+
+            ft = s.table_field_tree("duckdb", name)
+            need(ft.get("ok") and not ft.get("error"),
+                 "table_field_tree failed: %r" % ft.get("error"))
+            fields = ft.get("fields") or []
+            need(len(fields) >= 20,
+                 "unified tree should include deep nests, got %d fields"
+                 % len(fields))
+            by_depth1 = [f["name"] for f in fields
+                         if int(f.get("depth") or 0) == 1]
+            for must in ("tradeId", "terms", "counterparty"):
+                need(must in by_depth1,
+                     "depth-1 tree must include top-level %r: %r"
+                     % (must, by_depth1))
+            names = [f["name"] for f in fields]
+            tree_names = set(names)
+            missing = sorted(expected_keys - tree_names)
+            # Every JSON key from the fixture must appear in the unified
+            # Field Explorer / sidebar field tree (loaded table expand).
+            need(not missing,
+                 "loaded table / Field Explorer missing nested fields: %r "
+                 "(tree has %d names)" % (missing[:40], len(tree_names)))
+
+            # contacts (array of objects) expands through (element) to real
+            # fields — not a dead-end leaf.
+            need("contacts" in tree_names and "role" in tree_names
+                 and "email" in tree_names and "phones" in tree_names,
+                 "contacts must expand to role/email/phones: %r" % names[:50])
+            cidx = next(i for i, f in enumerate(fields)
+                        if f.get("name") == "contacts")
+            # Next rows under contacts until depth returns.
+            cdepth = int(fields[cidx].get("depth") or 0)
+            under = []
+            for f in fields[cidx + 1:]:
+                d = int(f.get("depth") or 0)
+                if d <= cdepth:
+                    break
+                under.append(f)
+            under_names = [f["name"] for f in under]
+            need("(element)" in under_names,
+                 "object-array contacts keeps an (element) wrapper: %r"
+                 % under_names)
+            need("role" in under_names and "email" in under_names
+                 and "phones" in under_names,
+                 "expanding contacts must show role/email/phones, not only "
+                 "(element): %r" % under_names)
+
+            # phones is array-of-text: expanding it must NOT offer a useless
+            # lone "(element)" child (the bug: caret → only "element").
+            pidx = next(i for i, f in enumerate(fields)
+                        if f.get("name") == "phones")
+            phones = fields[pidx]
+            need(phones.get("kind") == "array-scalar",
+                 "phones should be array-scalar, got %r" % phones)
+            pdepth = int(phones.get("depth") or 0)
+            phone_kids = []
+            for f in fields[pidx + 1:]:
+                d = int(f.get("depth") or 0)
+                if d <= pdepth:
+                    break
+                phone_kids.append(f)
+            need(phone_kids == [],
+                 "phones (array of text) must not expand to a dead-end "
+                 "(element) leaf; type is already on the parent. kids=%r"
+                 % [{"name": k.get("name"), "kind": k.get("kind"),
+                     "type": k.get("type")} for k in phone_kids])
+
+            # Per-column sidebar expand (column_field_tree) matches.
+            cp = s.column_field_tree("duckdb", name, "counterparty")
+            cp_names = [f["name"] for f in (cp.get("fields") or [])]
+            need("contacts" in cp_names and "phones" in cp_names
+                 and "role" in cp_names,
+                 "sidebar counterparty expand lists contacts/role/phones: %r"
+                 % cp_names[:30])
+            p2 = next(i for i, f in enumerate(cp.get("fields") or [])
+                      if f.get("name") == "phones")
+            p2d = int(cp["fields"][p2].get("depth") or 0)
+            kids2 = []
+            for f in cp["fields"][p2 + 1:]:
+                if int(f.get("depth") or 0) <= p2d:
+                    break
+                kids2.append(f)
+            need(kids2 == [],
+                 "sidebar phones expand must not be only (element): %r"
+                 % kids2)
+
+            need(all(f.get("column") for f in fields),
+                 "every field row must carry owning column=")
+            legs = [f for f in fields if f.get("name") == "legs"]
+            need(legs and legs[0].get("column") == "terms",
+                 "legs must be owned by terms column, got %r" % legs[:1])
+            tid = next(f for f in fields if f["name"] == "tradeId")
+            need(tid.get("kind") == "scalar"
+                 and tid.get("access", {}).get("sel"),
+                 "tradeId must be a scalar with a SELECT recipe")
+        finally:
+            s.shutdown()
 
     def t_field_access_recipes():
         # Every node in a column's field tree carries an ACCESS recipe: the
@@ -2851,21 +3070,23 @@ def backend_tests(datadir, csv_path, json_path):
             'tags VARCHAR[])[]')
         plan = plan_shred("json", node, base="trades")
         by = {t["name"]: t for t in plan["tables"]}
-        eq(sorted(by), ["trades", "trades_joinkeys", "trades_payingleg",
-                        "trades_receivingleg",
-                        "trades_receivingleg_cashflows", "trades_tags"],
-           "one table per array level, path-named")
-        eq(by["trades_receivingleg_cashflows"]["keys"],
+        eq(sorted(by), ["trades__root", "trades_flattened",
+                        "trades_payingleg_flattened",
+                        "trades_receivingleg_cashflows_flattened",
+                        "trades_receivingleg_flattened",
+                        "trades_tags_flattened"],
+           "one table per array level, path-named (*_flattened)")
+        eq(by["trades_receivingleg_cashflows_flattened"]["keys"],
            ["_rid", "trades_ord", "receivingleg_ord", "cashflows_ord"],
            "keys are the parent's keys + this level's ordinal")
-        eq(by["trades_receivingleg_cashflows"]["parent"],
-           "trades_receivingleg", "parentage follows the nesting")
-        eq(sorted(by["trades"]["child_arrays"]),
+        eq(by["trades_receivingleg_cashflows_flattened"]["parent"],
+           "trades_receivingleg_flattened", "parentage follows the nesting")
+        eq(sorted(by["trades__root"]["child_arrays"]),
            ["payingLeg", "receivingLeg", "tags"],
            "child arrays are EXCLUDEd at the parent level")
-        need(by["trades_tags"]["elem_scalar"] is True,
+        need(by["trades_tags_flattened"]["elem_scalar"] is True,
              "an array of scalars becomes a value table")
-        sql = build_table_sql(by["trades_receivingleg"], "json",
+        sql = build_table_sql(by["trades_receivingleg_flattened"], "json",
                               "C:\\tmp\\fc.parquet")
         need("CREATE OR REPLACE TABLE" in sql
              and "read_parquet('C:/tmp/fc.parquet', file_row_number = true)"
@@ -2945,7 +3166,7 @@ def backend_tests(datadir, csv_path, json_path):
         mgr.native_op_cursor = _noc(mgr)
         r = run("duckdb", "big", "json")
         need(r.get("ok") and [c["name"] for c in r["created"]]
-             == ["big", "big_legs", "big_joinkeys"],
+             == ["big", "big_legs_flattened", "big_flattened"],
              "all planned tables are created: " + repr(r))
         creates = [s2 for s2 in ran if s2.startswith("CREATE")]
         need(len(creates) == 3
@@ -3041,7 +3262,7 @@ def backend_tests(datadir, csv_path, json_path):
                     calls["flatten"].append((tbl, base))
                     or {"ok": True, "created": [
                         {"name": base, "kind": "base"},
-                        {"name": base + "_joinkeys", "kind": "joinkeys"},
+                        {"name": base + "_flattened", "kind": "joinkeys"},
                         {"name": base + "_legs", "kind": "list"}]}))
             sess._shred_after_load = \
                 S.Session._shred_after_load.__get__(sess, S.Session)
@@ -3053,7 +3274,7 @@ def backend_tests(datadir, csv_path, json_path):
             eq(calls["flatten"], [("big", "big")],
                "the whole table is flattened once (not per column)")
             need(sorted(out[0].get("shredded") or [])
-                 == ["big", "big_joinkeys", "big_legs"],
+                 == ["big", "big_flattened", "big_legs_flattened"],
                  "base + joinkeys + per-list tables are reported")
             # a flatten error is nonfatal to the LOAD
             sess.flatten_table = lambda *a, **k: {"error": "boom"}
@@ -3460,7 +3681,7 @@ def backend_tests(datadir, csv_path, json_path):
                 calls.append((tbl, base))
                 return {"ok": True, "base": base, "created": [
                     {"name": base, "kind": "base"},
-                    {"name": base + "_joinkeys", "kind": "joinkeys"},
+                    {"name": base + "_flattened", "kind": "joinkeys"},
                     {"name": base + "_fees", "kind": "list"}]}
             s.flatten_table = fake_flatten
             _orig_duck = s.duckdb
@@ -4322,13 +4543,13 @@ def backend_tests(datadir, csv_path, json_path):
                 calls.append((tbl, base))
                 or {"ok": True, "created": [
                     {"name": tbl, "kind": "base"},
-                    {"name": tbl + "_joinkeys", "kind": "joinkeys"},
+                    {"name": tbl + "_flattened", "kind": "joinkeys"},
                     {"name": tbl + "_fees", "kind": "list"}]})
             loaded = [{"engine": "duckdb", "name": "soph"}]  # NO storage
             out = sess._shred_after_load(loaded)
             need(calls == [("soph", "soph")]
                  and out[0].get("shredded")
-                 == ["soph", "soph_joinkeys", "soph_fees"],
+                 == ["soph", "soph_flattened", "soph_fees_flattened"],
                  "a storage-less DuckDB item flattens (the allowlist is "
                  "gone): %r" % out)
             # a flatten error lands on the item, never silently
@@ -4409,7 +4630,7 @@ def backend_tests(datadir, csv_path, json_path):
             ("the wrapper blob itself is excluded from the root",
              'EXCLUDE ("json")' in blob),
             ("the hub joins on the row key and carries idents",
-             plan["hub"] == "t_flat_joinkeys"
+             plan["hub"] == "t_flat_flattened"
              and '"json"."code"' in [st["sql"] for st in
                                      plan["statements"]
                                      if st["kind"] == "hub"][0]),
@@ -4446,14 +4667,14 @@ def backend_tests(datadir, csv_path, json_path):
         # every _PYI_* variable and drops the launcher's own MEIPASS
         # from PATH while keeping everything else -- the .421 fix for
         # frozen children pinning the extraction dir, now enforced.
-        # server_candidates preserves the PowerShell search order
-        # verbatim: exe beside the launcher, exe in dist, python
-        # backend last. The temp root honors SAMQL_TMP and defaults
-        # under the system tempdir. DRIFT PINS: the VERSION header
-        # equals __version__ and BUILD. THE PIPELINE: the ship-email
-        # defang is REVERSIBLE byte-exact on the real expand script,
-        # and the spec bundles samql_core, names the exe SamQL, and
-        # treats the icon as optional.
+        # server_candidates matches Start-SamQL-AppWindow.ps1: source
+        # backend/server.py first (current UI/API), then exe beside the
+        # launcher, then dist\\, then frozen self-serve last. The temp
+        # root honors SAMQL_TMP and defaults under the system tempdir.
+        # DRIFT PINS: the VERSION header equals __version__ and BUILD.
+        # THE PIPELINE: the ship-email defang is REVERSIBLE byte-exact on
+        # the real expand script, and the spec bundles samql_core, names
+        # the exe SamQL, and treats the icon as optional.
         import re as _re, socket as _sk, tempfile as _tf
         _tmp = _tf.mkdtemp()
         _old_env = os.environ.get("SAMQL_TMP")
@@ -4511,9 +4732,11 @@ def backend_tests(datadir, csv_path, json_path):
                  "child env scrubbed of the PyInstaller runtime")
             kinds = [(k, os.path.basename(p))
                      for k, p in LA.server_candidates(base="/app")]
-            need(kinds[0] == ("exe", "SamQL.exe")
-                 and kinds[-1] == ("py", "server.py"),
-                 "candidate order exe -> dist -> py, verbatim")
+            need(kinds[0] == ("py", "server.py")
+                 and ("exe", "SamQL.exe") in kinds
+                 and kinds.index(("py", "server.py"))
+                 < kinds.index(("exe", "SamQL.exe")),
+                 "candidate order py -> exe -> dist (matches PS1)")
             eq(LA._temp_root(), _tmp, "temp root honors SAMQL_TMP")
             src = open(os.path.join(BACKEND, "launcher_app.py"),
                        encoding="utf-8").read()
@@ -6790,7 +7013,7 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
         creates = [o for o in order if o.startswith("CREATE:")]
-        need("CREATE:m_joinkeys" in creates,
+        need("CREATE:m_flattened" in creates,
              ".520: the records hub goes through the same CREATE path as "
              "the list tables")
         need("SYNC" in order, "the catalog is synced after the flatten")
@@ -7106,7 +7329,7 @@ def backend_tests(datadir, csv_path, json_path):
                      ("legs", _P("STRUCT(n BIGINT)[]")),
                      ("fees", _P("STRUCT(amt DOUBLE)[]"))], base="m")
         jks = [t for t in plm["tables"] if t["kind"] == "joinkeys"]
-        eq([t["name"] for t in jks], ["m_joinkeys"],
+        eq([t["name"] for t in jks], ["m_flattened"],
            ".520: ONE records hub per family (no per-list hubs, no cross "
            "product -- positions live in the list tables)")
         need(jks[0].get("scalars") == ["id"]
@@ -7125,7 +7348,7 @@ def backend_tests(datadir, csv_path, json_path):
                      ("addr", _P("STRUCT(city VARCHAR)")),
                      ("fees", _P("DOUBLE[]"))], base="s")
         sj = [t for t in pls["tables"] if t["kind"] == "joinkeys"]
-        eq([t["name"] for t in sj], ["s_joinkeys"],
+        eq([t["name"] for t in sj], ["s_flattened"],
            "a single list keeps the simple _joinkeys name")
 
         # .520: the hub is ALWAYS emitted -- under the no-base contract a
@@ -7148,8 +7371,8 @@ def backend_tests(datadir, csv_path, json_path):
         need("attrs" not in bt["scalars"],
              "a MAP column is not left inline on the base")
         mt = next(t for t in pmap["tables"] if t["kind"] == "map")
-        eq(mt["name"], "attrs",
-           "the MAP becomes its own element-named table (.501)")
+        eq(mt["name"], "attrs_flattened",
+           "the MAP becomes its own element-named *_flattened table (.501)")
         msql = _bsql(mt, _SRC, _RID)
         need('map_keys(t0."attrs")[g."attrs_ord"] AS "key"' in msql
              and 'map_values(t0."attrs")[g."attrs_ord"] AS "value"' in msql
@@ -7163,8 +7386,8 @@ def backend_tests(datadir, csv_path, json_path):
         need("raw" not in bj["scalars"],
              "a JSON blob is not left inline on the base")
         jt = next(t for t in pjs["tables"] if t["kind"] == "jsonside")
-        eq(jt["name"], "raw",
-           "the JSON blob becomes its own element-named side table (.501)")
+        eq(jt["name"], "raw_flattened",
+           "the JSON blob becomes its own element-named *_flattened side table")
         jsql2 = _bsql(jt, _SRC, _RID)
         need('t0."raw" AS "raw"' in jsql2 and '"_rid"' in jsql2,
              "the JSON side table carries _rid + the blob value")
@@ -7225,8 +7448,8 @@ def backend_tests(datadir, csv_path, json_path):
         need(child is not None,
              "a list nested in a struct now gets its OWN child table "
              "(was silently dropped)")
-        eq(child["name"], "record_items",
-           "the nested-list child table is path-named")
+        eq(child["name"], "record_items_flattened",
+           "the nested-list child table is path-named (*_flattened)")
         eq(child["list_path"], ["record", "items"],
            "the child carries the full struct path to the nested list")
 
@@ -7322,12 +7545,12 @@ def backend_tests(datadir, csv_path, json_path):
                  "flatten of a nested-list table succeeds: %s"
                  % res.get("error"))
             made = {c["name"]: c["rows"] for c in res.get("created", [])}
-            need("record_items" in made,
+            need("record_items_flattened" in made,
                  "the nested-list child table is created on DuckDB")
-            eq(made["record_items"], 3,
+            eq(made["record_items_flattened"], 3,
                "the child holds every nested element across records (2 + 1)")
             _c, rows = mgr.execute(
-                'SELECT "a", "b" FROM "record_items" '
+                'SELECT "a", "b" FROM "record_items_flattened" '
                 'WHERE "_rid" = 1 ORDER BY "record_items_ord"')
             eq([tuple(r) for r in (rows or [])], [(1, 2), (3, 4)],
                "the broken-out element fields are correct and ordered")
@@ -7398,7 +7621,7 @@ def backend_tests(datadir, csv_path, json_path):
                         children_use_base=False)
         rex = render_root_expr({"steps": ["code"], "in_list": None,
                                 "map": False}, "e0")
-        legs = dict(next(t for t in pl["tables"] if t["name"] == "legs"),
+        legs = dict(next(t for t in pl["tables"] if t["name"] == "legs_flattened"),
                     root_expr=rex)
         q = build_table_sql(legs, "json", "C:/c.pq")
         need('unnest(t0.json)."code" AS "root_id"' in q,
@@ -7411,14 +7634,14 @@ def backend_tests(datadir, csv_path, json_path):
         pl2 = plan_shred("json", cols2[0][1], base="f",
                          root_ord="json_ord", children_use_base=False)
         hub2 = dict(next(t for t in pl2["tables"]
-                         if t["name"] == "f_joinkeys"),
+                         if t["name"] == "f_flattened"),
                     root_expr=render_root_expr(
                         {"steps": ["code"], "map": False}, "e0"))
         qh2 = build_table_sql(hub2, "json", "C:/c.pq")
         need("AS root_id_1" in qh2 and qh2.count('AS "root_id"') == 1,
              "deep hub collision rename")
         need("root_id" not in build_table_sql(
-            next(t for t in pl2["tables"] if t["name"] == "legs"),
+            next(t for t in pl2["tables"] if t["name"] == "legs_flattened"),
             "json", "C:/c.pq"), "deep default byte-clean")
 
         # (c) SHALLOW: every kind (hub, list, map, jsonside) emits the
@@ -7469,8 +7692,8 @@ def backend_tests(datadir, csv_path, json_path):
 
         # (e) session end-to-end (fake mgr): validated choice -> every
         # CREATE carries root_id (the map render for identifier['sophis']),
-        # Master_Keys joins the family under the hub (suffixed past a
-        # foreign squatter), and the loud uniqueness stats come back.
+        # Master_Keys + Join_Keys join the family under the hub (suffixed
+        # past a foreign squatter), and the loud uniqueness stats come back.
         CAPT = []
 
         class _Cur:
@@ -7488,7 +7711,8 @@ def backend_tests(datadir, csv_path, json_path):
         class _Mgr:
             def __init__(s2):
                 s2.table_columns = {"t": ["json"],
-                                    "Master_Keys": ["root_id"]}
+                                    "Master_Keys": ["root_id"],
+                                    "Join_Keys": ["_sk", "_rid", "root_id"]}
                 s2.table_sources = {}
                 s2.write_lock = threading.RLock()
                 s2._cancel = threading.Event()
@@ -7523,21 +7747,35 @@ def backend_tests(datadir, csv_path, json_path):
                          "map_key": "sophis"})
             need(not r.get("error"), "flatten with root_id ok: %r" % r)
             names = [c["name"] for c in r["created"]]
-            need(names[0] == "t_joinkeys", "hub still first")
+            need(names[0].startswith("Master_Keys"),
+                 "Master_Keys listed first when root_id set: %r" % names)
+            need(names[1].startswith("Join_Keys"),
+                 "Join_Keys listed second when root_id set: %r" % names)
+            need("t_flattened" in names, "hub still created: %r" % names)
             need("Master_Keys_2" in names,
                  "Master_Keys suffixed past a foreign owner")
+            need("Join_Keys_2" in names,
+                 "Join_Keys suffixed past a foreign owner")
             st = r["root_id"]
             need((st["records"], st["duplicated"], st["nulls"])
                  == (100, 3, 2), "uniqueness stats: %r" % st)
             need(st["master_table"] == "Master_Keys_2", "stats name table")
-            need(ses._table_family.get("Master_Keys_2") == "t_joinkeys",
+            need(st["join_table"] == "Join_Keys_2", "stats name Join_Keys")
+            need(ses._table_family.get("Master_Keys_2") == "t_flattened",
                  "Master_Keys is a family member under the hub")
+            need(ses._table_family.get("Join_Keys_2") == "t_flattened",
+                 "Join_Keys is a family member under the hub")
             mk = [q3 for q3 in CAPT if "Master_Keys_2" in q3
                   and q3.startswith("CREATE")][0]
             need('SELECT DISTINCT "root_id"' in mk
-                 and "IS NOT NULL" in mk and '"t_joinkeys"' in mk,
+                 and "IS NOT NULL" in mk and '"t_flattened"' in mk,
                  "Master SQL: distinct, non-null, from the hub")
-            hubc = [q3 for q3 in CAPT if "t_joinkeys" in q3
+            jk = [q3 for q3 in CAPT if "Join_Keys_2" in q3
+                  and q3.startswith("CREATE")][0]
+            need('SELECT "_sk", "_rid", "root_id"' in jk
+                 and '"t_flattened"' in jk,
+                 "Join_Keys SQL: _sk + _rid + root_id from the hub")
+            hubc = [q3 for q3 in CAPT if "t_flattened" in q3
                     and q3.startswith("CREATE")][0]
             need("map_extract(unnest(t0.json).\"identifier\", "
                  "'sophis')[1]" in hubc
@@ -7965,8 +8203,10 @@ def backend_tests(datadir, csv_path, json_path):
         need("SystemExit(%r) escaped the test" in rt,
              "the runner converts a test's SystemExit into a FAIL")
         need("def _ping_maintenance" in la
-             and la.count("_ping_maintenance(args.port)") == 2,
-             "the launcher pings housekeeping after reuse AND boot")
+             and la.count("_ping_maintenance(args.port)") == 2
+             and 'name="samql-startup-maintenance"' in la,
+             "the launcher pings housekeeping after reuse AND boot "
+             "(daemon thread; never blocks the window handoff)")
 
         # ---- the six scenarios' anchors all present ----
         for frag, scen in (
@@ -9715,7 +9955,8 @@ def backend_tests(datadir, csv_path, json_path):
              "no test still pins the 5-step launcher schedule")
 
         # the flatten guide covers root_id end-to-end: where the picker
-        # lives, the stamped column, Master_Keys, and the loud verdict
+        # lives, the stamped column, Master_Keys + Join_Keys, and the
+        # loud verdict
         dm = open(os.path.join(FRONTEND, "src", "components",
                                "DocsModal.tsx"), encoding="utf-8").read()
         sec = dm.split("Unique identifier (root_id) and Master_Keys",
@@ -9725,6 +9966,7 @@ def backend_tests(datadir, csv_path, json_path):
         for frag, why in (
             ("every table in the family", "the stamped column"),
             ("Master_Keys", "the distinct list"),
+            ("Join_Keys", "the per-record _sk/_rid/root_id map"),
             ("records vs distinct", "the loud uniqueness verdict"),
             ("drag-drop", "the drop-prompt picker is documented"),
             ("sample", "the sample-scan behaviour is documented"),
@@ -10049,7 +10291,7 @@ def backend_tests(datadir, csv_path, json_path):
             need(st and st["master_table"].startswith("Master_Keys"),
                  "uniqueness stats surfaced on the item: %r" % st)
             hubq = next((q for q in CAPT if q.startswith("CREATE")
-                         and "_joinkeys" in q), None)
+                         and "_flattened" in q), None)
             need(hubq is not None,
                  "stage3: no hub CREATE; out=%r CAPT=%r"
                  % (out, [q[:70] for q in CAPT][:8]))
@@ -10258,7 +10500,7 @@ def backend_tests(datadir, csv_path, json_path):
         # zip-safe substitution -- scalar and map flavours; t0 untouched
         rex = render_root_expr({"steps": ["code"], "map": False}, "e0")
         q = build_table_sql(dict(next(t for t in pl["tables"]
-                                      if t["name"] == "legs"),
+                                      if t["name"] == "legs_flattened"),
                                  root_expr=rex), "json", "C:/c.pq")
         u0 = q.split("n0 AS")[0]
         need('unnest(t0.json)."code" AS "root_id"' in u0
@@ -10267,13 +10509,13 @@ def backend_tests(datadir, csv_path, json_path):
         mrex = render_root_expr({"steps": ["identifier"], "map": True},
                                 "e0", map_key="sophis")
         qh = build_table_sql(dict(next(t for t in pl["tables"]
-                                       if t["name"] == "f_joinkeys"),
+                                       if t["name"] == "f_flattened"),
                                   root_expr=mrex), "json", "C:/c.pq")
         need('map_extract(unnest(t0.json)."identifier"' in qh,
              "map flavour substitutes too")
         trex = render_root_expr({"steps": ["code"], "map": False}, "t0")
         qt = build_table_sql(dict(next(t for t in pl["tables"]
-                                       if t["name"] == "legs"),
+                                       if t["name"] == "legs_flattened"),
                                   root_expr=trex), "json", "C:/c.pq")
         need('t0."code" AS "root_id"' in qt.split("n0 AS")[0],
              "t0 flavour passes through untouched")
@@ -10304,7 +10546,7 @@ def backend_tests(datadir, csv_path, json_path):
         pl2 = plan_shred("json", cols2[0][1], base="f",
                          root_ord="json_ord", children_use_base=False)
         ql = build_table_sql(dict(next(t for t in pl2["tables"]
-                                       if t["name"] == "legs"),
+                                       if t["name"] == "legs_flattened"),
                                   root_expr=render_root_expr(
                                       {"steps": ["code"], "map": False},
                                       "e0")), "json", "C:/c.pq")
@@ -10368,15 +10610,20 @@ def backend_tests(datadir, csv_path, json_path):
                  "non-promoted deep subtrees use the t0 flavour")
             need(any("Master_Keys" in q2 for q2 in CAPT
                      if q2.startswith("CREATE")), "Master_Keys created")
-            # re-flatten: the family sweep frees Master_Keys; the second
-            # run succeeds and recreates it under the same name
+            need(any("Join_Keys" in q2 for q2 in CAPT
+                     if q2.startswith("CREATE")), "Join_Keys created")
+            need(r["root_id"].get("join_table") == "Join_Keys",
+                 "stats name Join_Keys on first flatten")
+            # re-flatten: the family sweep frees Master_Keys + Join_Keys;
+            # the second run succeeds and recreates them under the same names
             CAPT.clear()
             r2 = ses.flatten_table("t", base="t",
                                    root_id={"steps": ["id"],
                                             "map": False})
             need(not r2.get("error")
-                 and r2["root_id"]["master_table"] == "Master_Keys",
-                 "re-flatten frees + recreates Master_Keys")
+                 and r2["root_id"]["master_table"] == "Master_Keys"
+                 and r2["root_id"].get("join_table") == "Join_Keys",
+                 "re-flatten frees + recreates Master_Keys + Join_Keys")
         finally:
             ses.duckdb = None
             ses.shutdown()
@@ -10626,21 +10873,21 @@ def backend_tests(datadir, csv_path, json_path):
                  "notional DOUBLE, meta JSON, legs STRUCT(r DOUBLE)[])[]")
         p1 = _ps0("json", n1, base="f", root_ord="json_ord",
                   children_use_base=False)
-        hub1 = next(t for t in p1["tables"] if t["name"] == "f_joinkeys")
+        hub1 = next(t for t in p1["tables"] if t["name"] == "f_flattened")
         eq(hub1["fields"], p1["tables"][0]["fields"],
            "the hub carries EVERY record scalar (no 5-cap, JSON kept)")
         # S2
         n2 = _P0("STRUCT(code BIGINT, legs STRUCT(r DOUBLE)[])[]")
         p2 = _ps0("json", n2, base="f", root_ord="json_ord",
-                  children_use_base=False, reserved={"LEGS"})
-        need(any(t["name"] == "legs_2" for t in p2["tables"]),
-             "a live LEGS blocks a planned legs (case-insensitive catalog)")
+                  children_use_base=False, reserved={"LEGS_FLATTENED"})
+        need(any(t["name"] == "legs_flattened_2" for t in p2["tables"]),
+             "a live LEGS_FLATTENED blocks planned legs_flattened")
         # S3
         n3 = _P0('STRUCT("_sk" VARCHAR, "json_ord" BIGINT, code BIGINT, '
                  "legs STRUCT(r DOUBLE)[])[]")
         p3 = _ps0("json", n3, base="f", root_ord="json_ord",
                   children_use_base=False)
-        hub3 = next(t for t in p3["tables"] if t["name"] == "f_joinkeys")
+        hub3 = next(t for t in p3["tables"] if t["name"] == "f_flattened")
         s3 = _bt0(hub3, "json", "C:/c.pq")
         need(" AS _sk_1" in s3 and " AS json_ord_1" in s3,
              "record fields colliding with key columns get _1 suffixes "
@@ -10662,7 +10909,7 @@ def backend_tests(datadir, csv_path, json_path):
                 ("tags", _P0("VARCHAR[]"))]
         pf = _pf0(cols, base="t")
         hubs = [t for t in pf["tables"] if t["kind"] == "joinkeys"]
-        need(len(hubs) == 1 and hubs[0]["name"] == "t_joinkeys"
+        need(len(hubs) == 1 and hubs[0]["name"] == "t_flattened"
              and hubs[0]["scalars"] == ["id", "name"]
              and pf["tables"][1]["kind"] == "joinkeys",
              "ONE records hub, always, right after the base spec")
@@ -10726,9 +10973,9 @@ def backend_tests(datadir, csv_path, json_path):
             r = _sS.flatten_table("t", base="t")
             names = [c["name"] for c in r.get("created", [])]
             need(not r.get("error") and names
-                 and names[0] == "t_joinkeys" and "t" not in names,
+                 and names[0] == "t_flattened" and "t" not in names,
                  "slim shallow family: hub anchors, no base: %r" % names)
-            need(_sS._table_family.get("fees") == "t_joinkeys"
+            need(_sS._table_family.get("fees_flattened") == "t_flattened"
                  and "t" in _sS.duckdb.dropped,
                  "children parent to the REAL hub; the source is dropped")
         finally:
@@ -10753,7 +11000,7 @@ def backend_tests(datadir, csv_path, json_path):
                         children_use_base=False)
         # 1) unicode survives as a real table name
         pl = _plan('STRUCT(code BIGINT, "税率" STRUCT(r DOUBLE)[])[]')
-        tz = next((t for t in pl["tables"] if t["name"] == "税率"), None)
+        tz = next((t for t in pl["tables"] if t["name"] == "税率_flattened"), None)
         need(tz is not None, "a non-latin list keeps its name: %r"
              % [t["name"] for t in pl["tables"]])
         need(tz["keys"][-1] == "税率_ord", "and its ordinal follows it")
@@ -10765,7 +11012,7 @@ def backend_tests(datadir, csv_path, json_path):
         # 3) a record field literally named _sk: the SYSTEM column wins
         pl = _plan("STRUCT(_sk BIGINT, code VARCHAR, "
                    "legs STRUCT(r DOUBLE)[])[]")
-        hub = next(t for t in pl["tables"] if t["name"] == "f_joinkeys")
+        hub = next(t for t in pl["tables"] if t["name"] == "f_flattened")
         q = _btA(hub, "json", "C:/c.pq")
         need("e0._sk AS _sk_1" in q,
              "the user's _sk field is alias-suffixed")
@@ -10773,7 +11020,7 @@ def backend_tests(datadir, csv_path, json_path):
         # 4) a field named after a sibling's ordinal: no duplicate aliases
         pl = _plan("STRUCT(code BIGINT, legs_ord VARCHAR, "
                    "legs STRUCT(r DOUBLE)[])[]")
-        hub = next(t for t in pl["tables"] if t["name"] == "f_joinkeys")
+        hub = next(t for t in pl["tables"] if t["name"] == "f_flattened")
         q = _btA(hub, "json", "C:/c.pq")
         import re as _reA
         cols = [c for c in
@@ -10829,7 +11076,7 @@ def backend_tests(datadir, csv_path, json_path):
            "list-of-list keeps the inner list in value (documented)")
         # 11) embedded quotes are doubled on emission
         pl = _plan('STRUCT("we""ird" BIGINT, legs STRUCT(r DOUBLE)[])[]')
-        hub = next(t for t in pl["tables"] if t["name"] == "f_joinkeys")
+        hub = next(t for t in pl["tables"] if t["name"] == "f_flattened")
         need('e0."we""ird"' in _btA(hub, "json", "C:/c.pq"),
              "quoted-quote field names emit safely")
 
@@ -11091,7 +11338,7 @@ def backend_tests(datadir, csv_path, json_path):
         # .518 (on-box, repeatedly: SELECT * on the file name STILL served
         # nested json). The contract is now structural: the base data table
         # is NEVER created, the nested source under the base name is DROPPED,
-        # and the family = <base>_joinkeys (record keys + record scalars,
+        # and the family = <base>_flattened (record keys + record scalars,
         # same "_sk") plus the element-path children. Nothing answers to the
         # bare file name -- the whole failure class cannot exist.
         import threading as _t8, contextlib as _c8
@@ -11133,14 +11380,15 @@ def backend_tests(datadir, csv_path, json_path):
             names = [c["name"] for c in r.get("created", [])]
             need("t" not in names,
                  "NO table is created under the file name: %r" % names)
-            eq(names[0], "t_joinkeys", "the hub anchors the family (first)")
-            eq(r.get("base"), "t_joinkeys",
+            need(names[0].startswith("Master_Keys") or names[0] == "t_flattened",
+                 "Master_Keys or hub first: %r" % names)
+            eq(r.get("base"), "t_flattened",
                "the reported family base IS the hub")
             need("t" in _s8.duckdb.dropped,
                  "the nested SOURCE under the base name is dropped: %r"
                  % _s8.duckdb.dropped)
-            need(_s8._table_family.get("identifier") == "t_joinkeys"
-                 and _s8._table_family.get("legs") == "t_joinkeys",
+            need(_s8._table_family.get("identifier_flattened") == "t_flattened"
+                 and _s8._table_family.get("legs_flattened") == "t_flattened",
                  "children parent to the hub")
         finally:
             _S8._drop_named = _orig
@@ -11152,7 +11400,7 @@ def backend_tests(datadir, csv_path, json_path):
         pl = _ps8("json", _P8("STRUCT(code BIGINT, ccy VARCHAR, "
                               "legs STRUCT(r DOUBLE)[])[]"),
                   base="f", root_ord="json_ord", children_use_base=False)
-        hub = next(t for t in pl["tables"] if t["name"] == "f_joinkeys")
+        hub = next(t for t in pl["tables"] if t["name"] == "f_flattened")
         root = pl["tables"][0]
         eq(hub["fields"], root["fields"],
            "the hub carries the record's scalar fields")
@@ -11729,20 +11977,21 @@ def backend_tests(datadir, csv_path, json_path):
         pl = _ps7("json", node, base="sfile", root_ord="json_ord",
                   children_use_base=False)
         root = pl["tables"][0]
-        eq(root["name"], "sfile",
-           "the promoted deep root carries the file/base name")
+        eq(root["name"], "sfile__root",
+           "promoted deep root is plan-only (*__root); hub takes "
+           "sfile_flattened")
         eq(root["fields"], ["code", "currency"],
            "the root keeps the record's TOP-LEVEL fields")
         eq(root["leaves"], [],
            "no wrapper leaves are dumped onto the root anymore")
         wr = sorted(t["name"] for t in pl["tables"]
                     if t.get("wrapper_field"))
-        eq(wr, ["identifier", "pricing"],
-           "each depth-1 object with scalar leaves is its own table")
-        need(all(t["parent"] == "sfile" for t in pl["tables"]
+        eq(wr, ["identifier_flattened", "pricing_flattened"],
+           "each depth-1 object with scalar leaves is its own *_flattened table")
+        need(all(t["parent"] == "sfile__root" for t in pl["tables"]
                  if t.get("wrapper_field")),
              "wrapper tables parent to the records root")
-        legs = next(t for t in pl["tables"] if t["name"] == "legs")
+        legs = next(t for t in pl["tables"] if t["name"] == "legs_flattened")
         eq(legs["keys"], ["_rid", "json_ord", "legs_ord"],
            "children keep element-path names + compound keys")
         rsql = _bt7(root, "json", "C:/c.pq")
@@ -11758,8 +12007,9 @@ def backend_tests(datadir, csv_path, json_path):
              "emits rows only where the object exists")
         # default naming (no promotion) is unchanged: base-prefixed children
         pl2 = _ps7("json", node, base="t_json")
-        need(any(t["name"] == "t_json_legs" for t in pl2["tables"]),
-             "non-promoted deep children keep the historical prefix")
+        need(any(t["name"] == "t_json_legs_flattened" for t in pl2["tables"]),
+             "non-promoted deep children keep the historical prefix + "
+             "_flattened")
         # session-level: flatten_table of a single-list table skips the
         # keys-only base and roots the family at the table's own name
         import threading as _th7, contextlib as _cl7
@@ -11811,13 +12061,13 @@ def backend_tests(datadir, csv_path, json_path):
             # .518: NO base data table -- the joinkeys hub (same keys, same
             # record scalars, same "_sk") anchors the family
             need("t" not in _names and _names
-                 and _names[0] == "t_joinkeys",
+                 and (_names[0].startswith("Master_Keys") or _names[0] == "t_flattened"),
                  "nothing is created under the file name; the hub anchors "
                  "the family: %r" % _names)
-            need("identifier" in _names and "legs" in _names,
+            need("identifier_flattened" in _names and "legs_flattened" in _names,
                  "wrapper + list children are created under element names")
-            need(_s7._table_family.get("legs") == "t_joinkeys"
-                 and _s7._table_family.get("identifier") == "t_joinkeys",
+            need(_s7._table_family.get("legs_flattened") == "t_flattened"
+                 and _s7._table_family.get("identifier_flattened") == "t_flattened",
                  "children parent to the hub")
         finally:
             _s7.duckdb = None
@@ -11966,7 +12216,7 @@ def backend_tests(datadir, csv_path, json_path):
                    existing_names=set())
         eq(list(_top["children"].keys()), ["json"],
            "top-level child is named by its element path (no file prefix)")
-        need(_top.get("hub") == "myfile_joinkeys",
+        need(_top.get("hub") == "myfile_flattened",
              "the joinkeys hub stays with the ROOT's name")
         _rec = _up("src", _ct, "json", existing_names=set())
         eq(list(_rec["children"].keys()), ["json_json"],
@@ -11986,23 +12236,26 @@ def backend_tests(datadir, csv_path, json_path):
                  ("legs", _P("STRUCT(n BIGINT)[]"))]
         _pl = _pf(_cols, base="myfile", reserved={"unrelated"})
         eq([(t["kind"], t["name"]) for t in _pl["tables"]],
-           [("base", "myfile"), ("joinkeys", "myfile_joinkeys"),
-            ("map", "attrs"), ("jsonside", "raw"), ("list", "legs")],
+           [("base", "myfile"), ("joinkeys", "myfile_flattened"),
+            ("map", "attrs_flattened"), ("jsonside", "raw_flattened"),
+            ("list", "legs_flattened")],
            ".520: the records hub is ALWAYS in the plan; children carry "
-           "element names")
+           "element names with _flattened")
         _pl2 = _pf(_cols, base="myfile",
-                   reserved={"myfile", "attrs", "raw", "legs"})
+                   reserved={"myfile", "attrs_flattened", "raw_flattened",
+                             "legs_flattened"})
         eq([t["name"] for t in _pl2["tables"]],
-           ["myfile", "myfile_joinkeys", "attrs_2", "raw_2", "legs_2"],
+           ["myfile", "myfile_flattened", "attrs_flattened_2",
+            "raw_flattened_2", "legs_flattened_2"],
            "catalog-occupied child names suffix; the base replaces itself")
         _node = {"t": "list", "of": {"t": "struct", "fields": [
             ("legs", {"t": "list", "of": {"t": "struct", "fields": [
                 ("r", _P("DOUBLE"))]}})]}}
         _ps = _psh("json", _node, base="json", reserved={"json",
-                                                         "json_legs"})
+                                                         "json_legs_flattened"})
         eq([t["name"] for t in _ps["tables"]],
-           ["json", "json_legs_2", "json_joinkeys"],
-           "deep shred: root exempt from reserved; children uniquify")
+           ["json__root", "json_legs_flattened_2", "json_flattened"],
+           "deep shred: root skip-marked; children uniquify; hub *_flattened")
         # flatten_table wires the catalog into both planners
         need("_reserved = set(getattr(mgr, \"table_columns\", {}) or {})" in ss
              and "reserved=_reserved)" in ss,
@@ -12045,19 +12298,19 @@ def backend_tests(datadir, csv_path, json_path):
             need(not _r5.get("error"), "family-map flatten runs: %r"
                  % _r5.get("error"))
             # .518: children parent to the HUB (the family's anchor)
-            need(_s5._table_family.get("legs") == "t_joinkeys",
+            need(_s5._table_family.get("legs_flattened") == "t_flattened",
                  "flatten_table records the child's parent in _table_family")
             need("t" not in _s5._table_family,
                  "the base itself has no parent entry")
-            need(_s5._family_members("t_joinkeys") == {"legs"},
+            need(_s5._family_members("t_flattened") == {"legs_flattened"},
                  "_family_members resolves the family from the hub")
             # a re-flatten reuses its own names (no _2): the planner's
             # reserved set excludes the family
             _s5.duckdb.table_columns = {"t": ["_sk", "_rid", "id"],
-                                        "legs": ["_sk", "_rid"]}
+                                        "legs_flattened": ["_sk", "_rid"]}
             _r5b = _s5.flatten_table("t", base="t")
             _mk = [c["name"] for c in _r5b.get("created", [])]
-            need("legs" in _mk and "legs_2" not in _mk,
+            need("legs_flattened" in _mk and "legs_flattened_2" not in _mk,
                  "re-flatten replaces its own child names, never suffixes")
         finally:
             _s5.duckdb = None
@@ -12265,19 +12518,19 @@ def backend_tests(datadir, csv_path, json_path):
             # .507 promotion: the source table's ONLY column is the list,
             # so no keys-only base is created -- the RECORDS table takes the
             # table's own name and children keep element-path names.
-            need("deep_joinkeys" in made and "deep" not in made
+            need("deep_flattened" in made and "deep" not in made
                  and "json" not in made,
                  ".518 no-root: the RECORDS HUB (deep_joinkeys) anchors "
                  "the family; the bare table name is intentionally "
                  "unbound")
-            need("legs" in made,
+            need("legs_flattened" in made,
                  "the nested array INSIDE the list element is broken out "
                  "(was left as a residual json column)")
-            eq(made["legs"], 4,
+            eq(made["legs_flattened"], 4,
                "the deep child holds every nested leg across all records "
                "(2 + 1 + 1)")
             _c, rows = mgr.execute(
-                'SELECT "rate" FROM "legs" WHERE "_rid" = 1 '
+                'SELECT "rate" FROM "legs_flattened" WHERE "_rid" = 1 '
                 'ORDER BY "json_ord", "legs_ord"')
             eq([round(float(r[0]), 2) for r in (rows or [])],
                [0.5, 0.6, 0.7],
@@ -12396,15 +12649,15 @@ def backend_tests(datadir, csv_path, json_path):
             # .507: the RECORDS table IS the root (promotion) -- one row per
             # record, no keys-only base above it
             _c, rows = mgr.execute(
-                'SELECT COUNT(*) FROM "deep_joinkeys"')
+                'SELECT COUNT(*) FROM "deep_flattened"')
             eq(int(rows[0][0]), 3,
                ".518: the records HUB holds one row per record (the bare "
                "name is unbound)")
             # legs join to their parent record on ONE column; pair each leg's
             # rate with its parent's code, ordered by the surrogate path
             _c, rows = mgr.execute(
-                'SELECT j."code", l."rate" FROM "legs" l '
-                'JOIN "deep_joinkeys" j ON l."_parent_sk" = j."_sk" '
+                'SELECT j."code", l."rate" FROM "legs_flattened" l '
+                'JOIN "deep_flattened" j ON l."_parent_sk" = j."_sk" '
                 'ORDER BY l."_sk"')
             eq([(int(c), round(float(r), 2)) for c, r in (rows or [])],
                [(1, 0.5), (1, 0.6), (2, 0.7), (3, 0.9)],
@@ -12460,7 +12713,7 @@ def backend_tests(datadir, csv_path, json_path):
         #   <base>          one row per record: all top-level scalars PLUS
         #                   single-struct columns flattened INLINE
         #                   (product -> product_x); list columns dropped.
-        #   <base>_joinkeys _rid + one ordinal per top-level list.
+        #   <base>_flattened _rid + one ordinal per top-level list.
         #   <base>_<list>   one row per list element: _rid + <list>_ord +
         #                   the element's fields inlined.
         # JOURNAL TABS keep their order when clicked -- the strip is
@@ -12482,9 +12735,9 @@ def backend_tests(datadir, csv_path, json_path):
         kinds = [(t["name"], t["kind"]) for t in plan["tables"]]
         eq(kinds,
            [("input_derivatives_2", "base"),
-            ("input_derivatives_2_joinkeys", "joinkeys"),
-            ("fees", "list")],
-           "base + joinkeys + one table per top-level list")
+            ("input_derivatives_2_flattened", "joinkeys"),
+            ("fees_flattened", "list")],
+           "base + flattened hub + one table per top-level list")
 
         base = next(t for t in plan["tables"] if t["kind"] == "base")
         eq(base["scalars"], ["accrual", "bookName", "id", "status"],
@@ -14976,7 +15229,7 @@ def backend_tests(datadir, csv_path, json_path):
                 'z VARCHAR)[]', "d")
         # .510: the MAP now spawns its own (key, value) table; DECIMAL
         # params still spawn nothing.
-        eq(sorted(by2), ["d", "d_joinkeys", "d_y"],
+        eq(sorted(by2), ["d", "d_flattened", "d_y"],
            "DECIMAL params spawn nothing; the MAP is its own table")
         need(by2["d_y"].get("map_field") == "y"
              and "y" not in by2["d"]["fields"],
@@ -16046,7 +16299,9 @@ def backend_tests(datadir, csv_path, json_path):
                 'label: "SQL functions"'))
              and "<DocsTabs active={tab} onSelect={setTab} />" in dm),
             ("joins content intact (live templating + rule + trap)",
-             'endsWith("_joinkeys")' in dm
+             'endsWith("_flattened")' in dm
+             or '/_flattened$/' in dm
+             or "_flattened" in dm
              and "_parent_sk" in dm and "cartesian" in dm),
             ("journal doc teaches cell chaining",
              "FROM Cell1" in dm and "USES" in dm and "FEEDS" in dm),
@@ -16605,7 +16860,7 @@ def backend_tests(datadir, csv_path, json_path):
         # it as a second, CONSOLE-LESS executable from the same
         # one-command build. Behavior parity executed here: the port
         # probe, the 200-line launcher-log trim into the SAME file the
-        # Error-log viewer reads, and the exe -> dist -> python server
+        # Error-log viewer reads, and the py -> exe -> dist server
         # search order. Splash and window-wait degrade gracefully (no
         # tkinter / non-Windows), and importing the module never opens
         # a window.
@@ -16629,11 +16884,11 @@ def backend_tests(datadir, csv_path, json_path):
                  "the log is the SAME file Settings -> Error log reads")
             cands = L.server_candidates(base="/x")
             need([k for k, _ in cands]
-                 == ["exe", "exe", "exe", "exe", "py"]
-                 and "dist" in cands[2][1]
-                 and cands[-1][1].endswith(
-                     os.path.join("backend", "server.py")),
-                 "search order: exe beside -> dist -> python backend")
+                 == ["py", "exe", "exe", "exe", "exe"]
+                 and cands[0][1].endswith(
+                     os.path.join("backend", "server.py"))
+                 and "dist" in cands[3][1],
+                 "search order: source py -> exe beside -> dist")
             need(L.find_browser(
                 "auto", env={"ProgramFiles": "/nope",
                              "ProgramFiles(x86)": "/nope",
@@ -17324,9 +17579,10 @@ def backend_tests(datadir, csv_path, json_path):
         # build.ps1 and the normal tab flow stay untouched. Static
         # contract (PowerShell can't run in this sandbox): reuse a
         # running server, start one only when the port is closed
-        # (exe -> dist exe -> python backend server, in that order),
-        # wait for the port, PS5.1-safe throughout, and a tab fallback
-        # when no browser is found.
+        # (source server.py -> exe -> dist exe, so a checkout never
+        # silently serves a stale packaged UI/API), wait for /api/health
+        # (not TCP alone), PS5.1-safe throughout, and a tab fallback when
+        # no browser is found.
         ps = open(_root_script("Start-SamQL-AppWindow.ps1"),
                   encoding="utf-8").read()
         checks = [
@@ -17340,9 +17596,14 @@ def backend_tests(datadir, csv_path, json_path):
             ("reuses a live server; starts one only when needed",
              "Test-SamQLPort" in ps and "Reusing the server on port" in ps
              and "AddSeconds(120)" in ps),
-            ("start order: exe, dist exe, python backend",
-             ps.index('"samql.exe"') < ps.index('"dist\\samql.exe"')
-             < ps.index('"backend\\server.py"')),
+            ("cold start waits for /api/health, not TCP alone",
+             "function Test-SamQLHealth" in ps
+             and "Waiting for SamQL to be ready" in ps
+             and "/api/health" in ps
+             and '$wc.Proxy = $null' in ps),
+            ("start order: source server.py, exe, dist exe",
+             ps.index('"backend\\server.py"') < ps.index('"samql.exe"')
+             < ps.index('"dist\\samql.exe"')),
             ("browser fallback chain ends in a plain tab",
              "Find-BrowserExe" in ps
              and "opening a tab instead" in ps),
@@ -17792,7 +18053,7 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_shred_joinkeys_and_cache_guard():
         # .394: (a) every shred plan carries a slim JOIN HUB -- _rid + a
-        # few scalar identifiers -- named <base>_joinkeys with a
+        # few scalar identifiers -- named <base>_flattened with a
         # self-explaining path, built from explicit columns (never .*);
         # (b) clearing the conversion cache SKIPS files live tables still
         # point at and says so; (c) the journal export carries the group.
@@ -17802,8 +18063,8 @@ def backend_tests(datadir, csv_path, json_path):
              "legs STRUCT(r DOUBLE)[])[]")
         plan = plan_shred("json", parse_duckdb_type(t), base="trade")
         jk = [x for x in plan["tables"] if x.get("join_helper")]
-        need(len(jk) == 1 and jk[0]["name"] == "trade_joinkeys",
-             "one helper, named <base>_joinkeys")
+        need(len(jk) == 1 and jk[0]["name"] == "trade_flattened",
+             "one helper, named <base>_flattened")
         jk = jk[0]
         eq(jk["fields"], ["code", "currency", "note"],
            ".520: the hub IS the records table -- it carries EVERY "
@@ -18868,7 +19129,7 @@ def backend_tests(datadir, csv_path, json_path):
                                "%s flatten-off nested JSON queryable: %r"
                                % (fmt, got))
                     else:
-                        # Flatten-on shreds into {base}_joinkeys + child tables.
+                        # Flatten-on shreds into {base}_flattened + child tables.
                         need(all(t.get("method") == "flatten-table" for t in out),
                              "%s flatten-on uses flatten-table: %s" % (fmt, out))
                         if fmt == "object":
@@ -18896,7 +19157,7 @@ def backend_tests(datadir, csv_path, json_path):
                                  if n and "joinkeys" in n.lower()),
                                 None)
                             need(hub,
-                                 "%s flatten-on hub ({base}_joinkeys): %s"
+                                 "%s flatten-on hub ({base}_flattened): %s"
                                  % (fmt, names))
                             n = s.run_query(
                                 'SELECT COUNT(*) FROM "%s"' % hub,
@@ -20674,7 +20935,7 @@ def backend_tests(datadir, csv_path, json_path):
                         "created": [
                             {"name": table, "rows": 925, "kind": "base"},
                             {"name": "json", "rows": 5000, "kind": "list"},
-                            {"name": table + "_joinkeys", "rows": 925,
+                            {"name": table + "_flattened", "rows": 925,
                              "kind": "joinkeys"},
                         ]}
 
@@ -20700,7 +20961,7 @@ def backend_tests(datadir, csv_path, json_path):
                  "flatten-on: nested load FIRST, then flatten_table "
                  "replacing it in place: %r" % calls)
             need(isinstance(out, list)
-                 and any(t.get("table", "").endswith("_joinkeys")
+                 and any(t.get("table", "").endswith("_flattened")
                          for t in out)
                  and all("table" in t for t in out),
                  "the load result reports the flattened tree "
@@ -34515,7 +34776,7 @@ def backend_tests(datadir, csv_path, json_path):
         # Field Explorer flatten runs as a background JOB (flatten_table +
         # optional root_id) so it surfaces as a cancellable card in the
         # activity tray. The old path mocked flatten_json; this path is
-        # relational flatten_table.
+        # relational flatten_table with keep_source (source table preserved).
         import server as srv
         import time as _t
         s = _fresh_session()
@@ -34531,20 +34792,26 @@ def backend_tests(datadir, csv_path, json_path):
             calls = {}
             rid = {"steps": ["id"], "label": "id", "map": False}
 
-            def fake_flatten(table, base=None, query_id=None, root_id=None):
+            def fake_flatten(table, base=None, query_id=None, root_id=None,
+                             keep_source=False, column=None, path=None):
                 calls["table"] = table
                 calls["base"] = base
                 calls["query_id"] = query_id
                 calls["root_id"] = root_id
+                calls["keep_source"] = keep_source
+                calls["column"] = column
+                calls["path"] = path
                 return {"ok": True,
                         "created": [{"name": "t_flat", "rows": 30}],
                         "base": table,
+                        "kept_source": keep_source,
                         "root_id": {"column": "root_id", "unique": True}}
 
             s.flatten_table = fake_flatten
             out = srv.Api.flatten_table_start(
                 s, _M("mytbl"),
-                {"engine": "duckdb", "root_id": rid}, None)
+                {"engine": "duckdb", "root_id": rid,
+                 "column": "terms", "path": "terms.legs"}, None)
             jid = out["job_id"]
             need(jid in srv.JOBS, "flatten-start registers a background job")
             eq(srv.JOBS[jid]["kind"], "flatten", "job is tagged kind=flatten")
@@ -34559,11 +34826,18 @@ def backend_tests(datadir, csv_path, json_path):
             eq(calls.get("table"), "mytbl", "table flows through to flatten_table")
             eq(calls.get("root_id"), rid, "root_id flows through to flatten_table")
             eq(calls.get("query_id"), jid, "job id is the query_id for cancel")
+            eq(calls.get("keep_source"), True,
+               "Field Explorer flatten keeps the source table")
+            eq(calls.get("column"), "terms", "selected column is scoped")
+            eq(calls.get("path"), "terms.legs", "selected nest path is scoped")
+            eq(srv.JOBS[jid].get("kept_source"), True,
+               "job records kept_source")
             card = srv._task_card(srv.JOBS[jid])
             eq(card["kind"], "flatten", "the tray card is a flatten card")
 
             # cancellation via the generic per-card route (also covers Cancel all)
-            def fake_slow(table, base=None, query_id=None, root_id=None):
+            def fake_slow(table, base=None, query_id=None, root_id=None,
+                          **_kw):
                 for _ in range(2000):
                     j = srv.JOBS.get(query_id) or {}
                     if j.get("cancel") or s._run_is_cancelled(query_id):
@@ -34586,6 +34860,366 @@ def backend_tests(datadir, csv_path, json_path):
             for k in list(srv.JOBS):
                 srv.JOBS.pop(k, None)
             s.shutdown()
+
+    def t_flatten_keep_source_field_explorer():
+        # Field Explorer flatten must NOT drop the nested source table.
+        # Scoped column/path builds a family beside it; root_id still makes
+        # Master_Keys + Join_Keys. Load-time flatten (keep_source=False)
+        # still replaces.
+        import threading as _tKS, contextlib as _cKS
+        from samql_core.session import Session as _SKS
+
+        class _CurKS:
+            description = [("ok",)]
+            def execute(self, q, *a): return self
+            def fetchall(self): return [(0,)]
+            def fetchone(self): return (0,)
+
+        class _MgrKS:
+            def __init__(self):
+                self.table_columns = {
+                    "nest": ["tradeId", "terms", "counterparty"],
+                    "Master_Keys": ["root_id"],
+                    "Join_Keys": ["_sk", "_rid", "root_id"],
+                }
+                self.table_sources = {}
+                self.write_lock = _tKS.RLock()
+                self._cancel = _tKS.Event()
+                self.conn = _CurKS()
+                self.dropped = []
+                self.created_sql = []
+
+            def _column_types_raw(self, t):
+                return {
+                    "tradeId": "VARCHAR",
+                    "terms": ("STRUCT(effectiveDate VARCHAR, "
+                              "legs STRUCT(legId VARCHAR, "
+                              "cashflows STRUCT(d VARCHAR)[])[])"),
+                    "counterparty": ("STRUCT(lei VARCHAR, "
+                                     "contacts STRUCT(email VARCHAR)[])"),
+                }
+
+            def execute(self, q):
+                self.created_sql.append(q)
+                if "COUNT(" in q and "DISTINCT" in q:
+                    return ([], [(2, 2, 2)])
+                if "COUNT(*)" in q:
+                    return ([], [(2,)])
+                return ([], [])
+
+            def sync_catalog(self):
+                pass
+
+            def native_op_cursor(self):
+                @_cKS.contextmanager
+                def cm():
+                    yield _CurKS(), _tKS.RLock()
+                return cm()
+
+        _orig = _SKS._drop_named
+
+        def _spy(self, mgr, names):
+            getattr(mgr, "dropped", []).extend(names)
+            return _orig(self, mgr, names)
+
+        _SKS._drop_named = _spy
+        ses = _SKS()
+        ses.duckdb = _MgrKS()
+        try:
+            r = ses.flatten_table(
+                "nest", keep_source=True, column="terms",
+                path="terms.legs",
+                root_id={"steps": ["tradeId"], "map": False,
+                         "label": "tradeId"})
+            need(not r.get("error"), "keep-source flatten ok: %r" % r)
+            need(r.get("kept_source") is True, "result flags kept_source")
+            need("nest" not in ses.duckdb.dropped,
+                 "source table must not be dropped: %r" % ses.duckdb.dropped)
+            names = [c["name"] for c in r.get("created") or []]
+            need(any(n.endswith("_flattened") for n in names),
+                 "family hub created: %r" % names)
+            need(any("legs" in n for n in names),
+                 "selected legs nest produced a table: %r" % names)
+            need(not any("contacts" in n for n in names),
+                 "sibling counterparty.contacts must not be flattened: %r"
+                 % names)
+            need(any(n == "Master_Keys" or n.startswith("Master_Keys_")
+                     for n in names),
+                 "Master_Keys created when root_id set: %r" % names)
+            need(any(n == "Join_Keys" or n.startswith("Join_Keys_")
+                     for n in names),
+                 "Join_Keys created when root_id set: %r" % names)
+            need(r.get("root_id") and r["root_id"].get("master_table")
+                 and r["root_id"].get("join_table"),
+                 "root_id stats name Master_Keys + Join_Keys")
+            jk_sql = [q for q in ses.duckdb.created_sql
+                      if "Join_Keys" in q and q.startswith("CREATE")]
+            need(jk_sql and 'SELECT "_sk", "_rid", "root_id"' in jk_sql[0],
+                 "Join_Keys SQL selects _sk/_rid/root_id")
+
+            # Load-time posture unchanged: default still drops the source.
+            ses.duckdb.dropped.clear()
+            ses._table_family.clear()
+            r2 = ses.flatten_table("nest", base="nest")
+            need(not r2.get("error"), "load-style flatten ok: %r" % r2)
+            need("nest" in ses.duckdb.dropped,
+                 "load-time flatten still replaces the source")
+            need(r2.get("kept_source") is False,
+                 "load-time result does not claim kept_source")
+        finally:
+            _SKS._drop_named = _orig
+            ses.duckdb = None
+            ses.shutdown()
+
+        # FE + API wiring: column/path + keep_source on the Field Explorer path.
+        srv = open(os.path.join(BACKEND, "server.py"), encoding="utf-8").read()
+        need("keep_source=True" in srv,
+             "flatten_table_start keeps the source table")
+        need('b.get("column")' in srv and 'b.get("path")' in srv,
+             "flatten-start accepts column/path from Field Explorer")
+        fe = open(os.path.join(FRONTEND, "src", "components",
+                               "FieldExplorer.tsx"), encoding="utf-8").read()
+        need("onFlatten(src.engine, src.table, rootId, col, fieldPath)" in fe,
+             "Field Explorer passes selected column/path into flatten")
+        api = open(os.path.join(FRONTEND, "src", "lib", "api.ts"),
+                   encoding="utf-8").read()
+        need("...(column ? { column } : {})" in api
+             and "...(path ? { path } : {})" in api,
+             "api.flattenTableStart sends column/path")
+        # Opaque-JSON deep shred must compute root_id in u0 (Field Explorer
+        # path projection uses json_access + root_id together).
+        shred_src = open(os.path.join(BACKEND, "samql_core", "shred.py"),
+                         encoding="utf-8").read()
+        _json_fn = shred_src.split("def _build_table_sql_json", 1)[1].split(
+            "\ndef ", 1)[0]
+        need('AS "root_id"' in _json_fn and "_root_u0" in _json_fn,
+             "json_access deep shred computes root_id in u0")
+
+    def t_flatten_keep_source_deep_nest_children():
+        # Field Explorer nest-scoped flatten must deep-shred the selected
+        # subtree: arrays-of-objects under the nest (cashflows, adjustments,
+        # history) become child tables — not only the top nest list.
+        # Struct nests (terms) peel deep list fields into deep_cols; list
+        # nests (terms.legs) already route through deep shred.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        path = os.path.join(FRONTEND, "e2e", "fixtures",
+                            "highly_nested_trades.json")
+        if not os.path.isfile(path):
+            path = os.path.join(ROOT, "tests", "fixtures",
+                                "highly_nested_trades.json")
+        need(os.path.isfile(path), "highly_nested_trades.json fixture missing")
+
+        def _names(res):
+            return [c["name"] for c in (res.get("created") or [])]
+
+        def _any_name(names, pred):
+            return any(pred(n.lower()) for n in names)
+
+        s = _fresh_session()
+        try:
+            loaded = s.load_file(path, destination="duckdb",
+                                 flatten=False, shred=False)
+            need(isinstance(loaded, list) and loaded,
+                 "flatten-off load ok: %r" % loaded)
+            tbl = loaded[0]["name"]
+
+            r_terms = s.flatten_table(
+                tbl, keep_source=True, column="terms", path="terms",
+                root_id={"steps": ["tradeId"], "map": False,
+                         "label": "tradeId"})
+            need(not r_terms.get("error"),
+                 "flatten terms ok: %r" % r_terms)
+            need(r_terms.get("kept_source") is True, "terms keeps source")
+            need(tbl in (s.duckdb.table_columns or {}),
+                 "source table still in catalog after terms flatten")
+            nt = _names(r_terms)
+            need(_any_name(nt, lambda n: "legs" in n
+                           and "cashflows" not in n
+                           and "schedules" not in n),
+                 "terms flatten creates legs root: %r" % nt)
+            need(_any_name(nt, lambda n: "cashflows" in n
+                           and "adjust" not in n and "history" not in n),
+                 "terms flatten creates cashflows table: %r" % nt)
+            need(_any_name(nt, lambda n: "cashflows" in n and "adjust" in n),
+                 "terms flatten creates cashflows.adjustments: %r" % nt)
+            need(_any_name(nt, lambda n: "cashflows" in n and "history" in n),
+                 "terms flatten creates cashflows.history: %r" % nt)
+            need(any(n == "Master_Keys" or n.startswith("Master_Keys_")
+                     for n in nt),
+                 "Master_Keys from terms flatten: %r" % nt)
+            need(any(n == "Join_Keys" or n.startswith("Join_Keys_")
+                     for n in nt),
+                 "Join_Keys from terms flatten: %r" % nt)
+            need(r_terms.get("root_id")
+                 and r_terms["root_id"].get("join_table"),
+                 "terms flatten stats name Join_Keys")
+            jk = next(n for n in nt
+                      if n == "Join_Keys" or n.startswith("Join_Keys_"))
+            jk_cols = s.duckdb._column_types_raw(jk) or {}
+            need(all(c in jk_cols for c in ("_sk", "_rid", "root_id")),
+                 "Join_Keys has _sk/_rid/root_id: %r" % list(jk_cols))
+            need(not _any_name(nt, lambda n: "contact" in n),
+                 "sibling counterparty.contacts not flattened: %r" % nt)
+
+            # Fresh session for legs path so catalog names stay clean.
+        finally:
+            s.shutdown()
+
+        s2 = _fresh_session()
+        try:
+            loaded = s2.load_file(path, destination="duckdb",
+                                  flatten=False, shred=False)
+            tbl = loaded[0]["name"]
+            r_legs = s2.flatten_table(
+                tbl, keep_source=True, column="terms",
+                path="terms.legs")
+            need(not r_legs.get("error"),
+                 "flatten terms.legs ok: %r" % r_legs)
+            need(r_legs.get("kept_source") is True, "legs keeps source")
+            need(tbl in (s2.duckdb.table_columns or {}),
+                 "source table still in catalog after legs flatten")
+            nl = _names(r_legs)
+            need(_any_name(nl, lambda n: "cashflows" in n
+                           and "adjust" not in n and "history" not in n),
+                 "legs flatten creates cashflows: %r" % nl)
+            need(_any_name(nl, lambda n: "cashflows" in n and "adjust" in n),
+                 "legs flatten creates adjustments: %r" % nl)
+            need(_any_name(nl, lambda n: "cashflows" in n and "history" in n),
+                 "legs flatten creates history: %r" % nl)
+            need(not _any_name(nl, lambda n: "contact" in n),
+                 "legs flatten does not pull sibling contacts: %r" % nl)
+
+            # Path-projected struct peel is what makes terms→deep children
+            # work (load-time flatten without path is unchanged).
+            sess_src = open(os.path.join(BACKEND, "samql_core", "session.py"),
+                            encoding="utf-8").read()
+            need("_path_peels" in sess_src,
+                 "path-projected struct peels deep list fields for shred")
+            shred_src = open(os.path.join(BACKEND, "samql_core", "shred.py"),
+                             encoding="utf-8").read()
+            need('if json_access:' in shred_src
+                 and "_parr" in shred_src,
+                 "compound-key flatten SQL supports json_access")
+        finally:
+            s2.shutdown()
+
+    def t_flatten_keep_source_counterparty_contacts():
+        # Field Explorer flatten of counterparty (or a broken leaf path like
+        # counterparty.phones from a null-path (element) child) must create a
+        # contacts child table with role/email — not leave contacts as opaque
+        # JSON on the joinkeys hub alone.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        path = os.path.join(FRONTEND, "e2e", "fixtures",
+                            "highly_nested_trades.json")
+        if not os.path.isfile(path):
+            path = os.path.join(ROOT, "tests", "fixtures",
+                                "highly_nested_trades.json")
+        need(os.path.isfile(path), "highly_nested_trades.json fixture missing")
+
+        def _names(res):
+            return [c["name"] for c in (res.get("created") or [])]
+
+        def _has_contacts_child(names):
+            return any(
+                "contact" in n.lower()
+                and "phone" not in n.lower()
+                and not n.startswith("Master_Keys")
+                and not n.startswith("Join_Keys")
+                for n in names
+            )
+
+        def _hub_contacts_only_json(sess, names):
+            """True when hub still carries contacts JSON and no child."""
+            hubs = [n for n in names
+                    if n.endswith("_flattened")
+                    and "contact" not in n.lower()
+                    and "phone" not in n.lower()]
+            if not hubs or _has_contacts_child(names):
+                return False
+            raw = sess.duckdb._column_types_raw(hubs[0])
+            return any("contact" in k.lower()
+                       and "JSON" in (v or "").upper()
+                       for k, v in (raw or {}).items())
+
+        rid = {"steps": ["tradeId"], "map": False, "label": "tradeId"}
+
+        s = _fresh_session()
+        try:
+            loaded = s.load_file(path, destination="duckdb",
+                                 flatten=False, shred=False)
+            need(isinstance(loaded, list) and loaded,
+                 "flatten-off load ok: %r" % loaded)
+            tbl = loaded[0]["name"]
+
+            r_cp = s.flatten_table(
+                tbl, keep_source=True, column="counterparty",
+                path="counterparty", root_id=rid)
+            need(not r_cp.get("error"),
+                 "flatten counterparty ok: %r" % r_cp)
+            need(r_cp.get("kept_source") is True, "counterparty keeps source")
+            need(tbl in (s.duckdb.table_columns or {}),
+                 "source intact after counterparty flatten")
+            nc = _names(r_cp)
+            need(nc[:2] == ["Master_Keys", "Join_Keys"]
+                 or (nc[0].startswith("Master_Keys")
+                     and nc[1].startswith("Join_Keys")),
+                 "Master_Keys then Join_Keys first in family list: %r" % nc)
+            need(_has_contacts_child(nc),
+                 "counterparty flatten creates contacts child: %r" % nc)
+            need(any(n == "Master_Keys" or n.startswith("Master_Keys_")
+                     for n in nc),
+                 "Master_Keys from counterparty flatten: %r" % nc)
+            need(any(n == "Join_Keys" or n.startswith("Join_Keys_")
+                     for n in nc),
+                 "Join_Keys from counterparty flatten: %r" % nc)
+            jk = next(n for n in nc
+                      if n == "Join_Keys" or n.startswith("Join_Keys_"))
+            jk_cols = s.duckdb._column_types_raw(jk) or {}
+            need(all(c in jk_cols for c in ("_sk", "_rid", "root_id")),
+                 "Join_Keys columns: %r" % list(jk_cols))
+            # Contacts table has role/email; hub must not be contacts-only JSON.
+            ct = next(n for n in nc
+                      if "contact" in n.lower()
+                      and "phone" not in n.lower())
+            cols = s.duckdb._column_types_raw(ct) or {}
+            need("role" in cols and "email" in cols,
+                 "contacts child has role/email: %r" % list(cols))
+            need(not _hub_contacts_only_json(s, nc),
+                 "contacts not residual JSON-only on hub: %r" % nc)
+            need(any(n.endswith("_flattened") for n in nc),
+                 "flattened hub/child suffix: %r" % nc)
+        finally:
+            s.shutdown()
+
+        # Simulate FE bug path: (element).phones has path=null → name "phones"
+        # becomes counterparty.phones. Walk-up must still land on counterparty
+        # (or contacts) and peel contacts into a child table.
+        s2 = _fresh_session()
+        try:
+            loaded = s2.load_file(path, destination="duckdb",
+                                  flatten=False, shred=False)
+            tbl = loaded[0]["name"]
+            r_ph = s2.flatten_table(
+                tbl, keep_source=True, column="counterparty",
+                path="phones", root_id=rid)
+            need(not r_ph.get("error"),
+                 "flatten phones leaf (walk-up) ok: %r" % r_ph)
+            need(r_ph.get("kept_source") is True, "phones walk-up keeps source")
+            np = _names(r_ph)
+            need(_has_contacts_child(np),
+                 "phones leaf walk-up creates contacts child: %r" % np)
+            need(not _hub_contacts_only_json(s2, np),
+                 "phones leaf must not leave contacts JSON-only on hub: %r"
+                 % np)
+            need(not any(n.startswith("counterparty_phones")
+                         for n in np),
+                 "walk-up renames family off bogus phones stem: %r" % np)
+            need(any(n.endswith("_flattened") for n in np),
+                 "walk-up family uses _flattened names: %r" % np)
+        finally:
+            s2.shutdown()
 
     def t_sync_ops_cancellable():
         # Synchronous engine reads (reconcile / pivot / chart / field profile)
@@ -34847,6 +35481,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("pivot table", t_pivot),
         ("pivot NODE crosstab: multi-col + multi-measure + subtotals", t_pivot_node_crosstab),
         ("rename table", t_rename),
+        ("table UI reorder (session order + rename/drop/append)",
+         t_table_ui_reorder),
         ("change column type", t_change_type),
         ("change type persists", t_change_type_persists),
         ("duckdb change column type", t_duckdb_change_column_type),
@@ -35139,6 +35775,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_column_types_typeof_fallback),
         ("tables tree: a nested column expands into a field tree",
          t_column_field_tree),
+        ("field explorer: flatten-off highly nested JSON is one table-rooted tree",
+         t_field_explorer_table_rooted_highly_nested),
         ("memory: the DuckDB memory probe never blocks on the engine",
          t_memory_probe_never_blocks),
         ("field explorer: per-node access recipes ([1] path + UNNEST chain)",
@@ -35960,6 +36598,12 @@ def backend_tests(datadir, csv_path, json_path):
          t_convert_materialized_table),
         ("in-place flatten runs as a cancellable background job (both modals)",
          t_flatten_table_start_job),
+        ("Field Explorer flatten keeps source + scopes nest + Master_Keys",
+         t_flatten_keep_source_field_explorer),
+        ("Field Explorer nest flatten deep-shreds child arrays-of-objects",
+         t_flatten_keep_source_deep_nest_children),
+        ("flatten keep_source counterparty.contacts child table",
+         t_flatten_keep_source_counterparty_contacts),
         ("a flatten card's X cancels via the shared job cancel flag",
          t_flatten_tray_cancel),
         ("cancellation contract: every job kind + scoped/panic cancel + rollback",

@@ -7,7 +7,9 @@ execution policy and no hidden-relaunch dance).
 
 Behavior parity with the PowerShell launcher, v3:
   * probe 127.0.0.1:<port>; reuse a live server, else start one
-    (SamQL exe beside the launcher -> dist\\ -> python backend/server.py)
+    (backend/server.py -> SamQL exe beside the launcher -> dist\\
+    -> frozen self-serve last)
+  * wait for /api/health (not TCP alone) before opening WebView2
   * a borderless, topmost splash (tkinter; degrades to log-only when
     tkinter is unavailable) pumped through every wait
   * open Edge/Chrome as a chromeless app window (--app=)
@@ -262,15 +264,19 @@ def _here():
 
 
 def server_candidates(base=None):
-    """The PowerShell launcher's search order, verbatim: a SamQL exe
-    beside the launcher, then dist\\, then the python backend."""
+    """Match Start-SamQL-AppWindow.ps1: source ``backend/server.py`` first
+    (current UI/API), then a SamQL exe beside the launcher, then
+    ``dist\\``, then (frozen only) self-serve as last resort.
+
+    Preferring a stale ``dist\\samql.exe`` over source caused cold packaged
+    boots and mismatched APIs in checkouts that also had a built exe."""
     base = base or _here()
     out = []
+    out.append(("py", os.path.join(base, "backend", "server.py")))
     for nm in ("SamQL.exe", "samql.exe"):
         out.append(("exe", os.path.join(base, nm)))
     for nm in ("SamQL.exe", "samql.exe"):
         out.append(("exe", os.path.join(base, "dist", nm)))
-    out.append(("py", os.path.join(base, "backend", "server.py")))
     # .535: LAST resort -- this very launcher, self-spawned with --serve.
     # A lone SamQL-AppWindow.exe (sent to a colleague with nothing beside
     # it) bundles the whole backend now and serves itself.
@@ -337,10 +343,11 @@ def start_server(port, splash):
                 # --no-browser: the LAUNCHER owns window-opening; the
                 # server's own auto-open gave the on-box double window
                 # (a normal tab AND the app window).
-                # .512: KEEP the handle -- after the window closes we verify
-                # the server actually exited and terminate it if not.
+                # Pass --port explicitly -- SAMQL_PORT alone is not read by
+                # server.py, so a non-default launcher --port must be argv.
+                # .512: KEEP the handle -- after revoke/restart we can reap it.
                 globals()["_SERVER_PROC"] = subprocess.Popen(
-                    [path, "--no-browser"],
+                    [path, "--no-browser", "--port", str(port)],
                     creationflags=creation,
                     startupinfo=startup, env=env,
                     cwd=os.path.dirname(path))
@@ -359,7 +366,7 @@ def start_server(port, splash):
                 if not py:
                     continue
                 globals()["_SERVER_PROC"] = subprocess.Popen(
-                    [py, path, "--no-browser"],
+                    [py, path, "--no-browser", "--port", str(port)],
                     creationflags=creation,
                     startupinfo=startup, env=env,
                     cwd=os.path.dirname(
@@ -715,22 +722,26 @@ def _ping_maintenance(port):
     """.544: fire-and-forget housekeeping on the server we just attached
     to (or booted): reclaim dead-instance temp and the _MEI extractions
     stranded by previous window closes (the frozen hard-exit skips the
-    bootloader's own cleanup). Never blocks a launch."""
-    try:
-        import json as _json
-        r = _local_urlopen(
-            "http://127.0.0.1:%d/api/maintenance/sweep-temp" % port,
-            data=_json.dumps({"mei_min_age": 90}).encode("utf-8"),
-            method="POST", timeout=2.5,
-            headers={"Content-Type": "application/json"})
-        body = _json.loads(r.read().decode("utf-8"))
-        if body.get("removed") or body.get("mei_removed"):
-            write_log("INFO startup housekeeping: %s stale instance "
-                      "dir(s), %s old _MEI extraction(s) reclaimed"
-                      % (body.get("removed", 0),
-                         body.get("mei_removed", 0)))
-    except Exception:
-        pass
+    bootloader's own cleanup). Never blocks a launch -- runs on a daemon
+    thread so splash → window handoff is not delayed by disk sweeps."""
+    def _run():
+        try:
+            import json as _json
+            r = _local_urlopen(
+                "http://127.0.0.1:%d/api/maintenance/sweep-temp" % port,
+                data=_json.dumps({"mei_min_age": 90}).encode("utf-8"),
+                method="POST", timeout=2.5,
+                headers={"Content-Type": "application/json"})
+            body = _json.loads(r.read().decode("utf-8"))
+            if body.get("removed") or body.get("mei_removed"):
+                write_log("INFO startup housekeeping: %s stale instance "
+                          "dir(s), %s old _MEI extraction(s) reclaimed"
+                          % (body.get("removed", 0),
+                             body.get("mei_removed", 0)))
+        except Exception:
+            pass
+    threading.Thread(target=_run, daemon=True,
+                     name="samql-startup-maintenance").start()
 
 
 def _read_kept_mei(root):
