@@ -2,12 +2,26 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-15.608
+Current build:   2026-07-15.609
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-15.609  (v2.16.4)
+
+FIELD EXPLORER SHRED + LARGE-JSON QUERY FIX.
+Field Explorer recipes over flatten-off opaque JSON / JSON[] / STRUCT+JSON now
+prefer from_json(["JSON"]) with a VARCHAR + json(e) fallback for double-encoded
+arrays, and a new /api/column/access-preview endpoint executes First SQL
+(LIMIT 1) so copy buttons use a validated non-NULL recipe. Shred/flatten plan
+list-inside-list-element nests as compound-key child tables (_sk / _parent_sk)
+instead of dropping them. Opaque JSON columns infer a LIST/STRUCT plan from
+sampled cells and CTAS over Parquet with JSON extract/unnest (JSON then
+VARCHAR schema, then row-range OOM batches) — never a silent in-engine CTAS for
+size-forced large JSON loads.
 
 ----------------------------------------------------------------------
 build 2026-07-15.608  (v2.16.4)

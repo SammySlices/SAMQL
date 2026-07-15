@@ -483,7 +483,8 @@ def plan_shred(column, node, base="rec", max_tables=40, root_ord=None,
 
 
 def build_table_sql(spec, column, src_parquet, row_range=None,
-                    insert=False):
+                    insert=False, json_access=False,
+                    json_arr_schema='"JSON"', root_is_json_list=False):
     """The full CREATE OR REPLACE TABLE statement for one plan entry.
 
     Shape (two array hops, struct elements):
@@ -500,10 +501,24 @@ def build_table_sql(spec, column, src_parquet, row_range=None,
 
     Every hop is index-by-ordinal (generate_series + LATERAL), so the ordinal
     IS the key and the element gets a real alias for ``e.*`` / EXCLUDE.
+
+    ``json_access``: opaque JSON / JSON[] columns (flatten-off) cannot use
+    STRUCT field hops. Emit ``from_json(..., ['JSON'|'VARCHAR'])`` +
+    ``json_extract`` instead so CTAS stays projection-friendly over Parquet.
+    ``json_arr_schema`` is the from_json element type token (JSON or VARCHAR).
+    ``root_is_json_list``: column is already JSON[] — unnest directly.
     """
     fwd = src_parquet.replace("\\", "/").replace("'", "''")
     hops = [column] + list(spec["hop_path"])
     keys = spec["keys"]  # ["_rid", ord0, ord1, ...] -> one ord per hop
+    _root = spec.get("root_expr")
+    if json_access:
+        return _build_table_sql_json(
+            spec, column, fwd, hops, keys, _root,
+            row_range=row_range, insert=insert,
+            arr_schema=json_arr_schema,
+            root_is_json_list=root_is_json_list)
+
     # .429: the hop engine is an UNNEST PIPELINE with per-stage
     # narrowing, replacing generate_series + LATERAL element-indexing.
     # The old pattern carried the ENTIRE parent cell across a cross
@@ -515,7 +530,6 @@ def build_table_sql(spec, column, src_parquet, row_range=None,
     # streams, and forwards ONLY the keys plus the exact subtree the
     # next hop needs -- untouched siblings die at each CTE boundary,
     # so the working set per batch is keys + one subtree.
-    _root = spec.get("root_expr")
     # .522 audit: an e0-flavoured expression cannot reference the unnest
     # ALIAS from the same SELECT (lateral column aliases are version-
     # fragile there); substitute the unnest expression itself. DuckDB
@@ -717,6 +731,132 @@ def build_table_sql(spec, column, src_parquet, row_range=None,
                ",\n       ".join(sel), len(hops) - 1))
 
 
+def _json_ptr(parts):
+    """JSONPath under ``$`` for field parts (quoted when needed)."""
+    out = ["$"]
+    for p in parts:
+        s = str(p)
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", s):
+            out.append("." + s)
+        else:
+            out.append("['%s']" % s.replace("'", "''"))
+    return "".join(out)
+
+
+def _json_field_expr(elem, parts, as_text=True):
+    ptr = _json_ptr(parts)
+    if as_text:
+        return "(%s->>'%s')" % (elem, ptr)
+    return "json_extract(%s, '%s')" % (elem, ptr)
+
+
+def _json_arr_expr(base_expr, arr_schema):
+    """Coerce a JSON/text cell to a DuckDB list via from_json."""
+    sch = arr_schema if arr_schema.startswith('"') else '"%s"' % arr_schema
+    return "from_json(CAST(%s AS VARCHAR), '[%s]')" % (base_expr, sch)
+
+
+def _json_elem_wrap(elem_expr, arr_schema):
+    """Wrap a from_json element when schema was VARCHAR (double-encoded)."""
+    if "VARCHAR" in (arr_schema or "").upper():
+        return "json(%s)" % elem_expr
+    return elem_expr
+
+
+def _build_table_sql_json(spec, column, fwd, hops, keys, _root,
+                          row_range=None, insert=False, arr_schema='"JSON"',
+                          root_is_json_list=False):
+    """Opaque-JSON shred CTAS: from_json + json_extract over Parquet."""
+    col0 = _q(hops[0])
+    if root_is_json_list:
+        root_arr = "t0.%s" % col0
+        e0_expr = "unnest(%s)" % root_arr
+    else:
+        root_arr = "_a0"
+        e0_raw = "unnest(_a0)"
+        e0_expr = _json_elem_wrap(e0_raw, arr_schema)
+    where = (" WHERE t0.file_row_number + 1 BETWEEN %d AND %d"
+             % (int(row_range[0]), int(row_range[1]))) if row_range else ""
+    ctes = []
+    if root_is_json_list:
+        ctes.append(
+            'u0 AS (SELECT t0.file_row_number + 1 AS "_rid", '
+            "generate_subscripts(%s, 1) AS %s, "
+            "%s AS e0 "
+            "FROM read_parquet('%s', file_row_number = true) AS t0%s)"
+            % (root_arr, _q(keys[1]), e0_expr, fwd, where))
+    else:
+        arr = _json_arr_expr("t0.%s" % col0, arr_schema)
+        ctes.append(
+            'u0 AS (SELECT t0.file_row_number + 1 AS "_rid", '
+            "generate_subscripts(_a0, 1) AS %s, "
+            "%s AS e0 "
+            "FROM read_parquet('%s', file_row_number = true) AS t0, "
+            "LATERAL (SELECT %s AS _a0) AS _j0%s)"
+            % (_q(keys[1]), e0_expr, fwd, arr, where))
+    prev_keys = ['"_rid"', _q(keys[1])]
+    carry = list(prev_keys) + (['"root_id"'] if _root else [])
+    for i2, part in enumerate(hops[1:], start=1):
+        parts = part.split(".")
+        lst = "_l%d" % i2
+        child_json = _json_field_expr("e%d" % (i2 - 1), parts, as_text=False)
+        child_arr = _json_arr_expr(child_json, arr_schema)
+        ctes.append(
+            "n%d AS (SELECT %s, %s AS %s FROM u%d WHERE %s IS NOT NULL)"
+            % (i2 - 1, ", ".join(carry), child_arr, lst,
+               i2 - 1, child_json))
+        ei = _json_elem_wrap("unnest(%s)" % lst, arr_schema)
+        ctes.append(
+            "u%d AS (SELECT %s, generate_subscripts(%s, 1) AS %s, "
+            "%s AS e%d FROM n%d)"
+            % (i2, ", ".join(carry), lst, _q(keys[i2 + 1]),
+               ei, i2, i2 - 1))
+        prev_keys.append(_q(keys[i2 + 1]))
+        carry.append(_q(keys[i2 + 1]))
+    prev_elem = "e%d" % (len(hops) - 1)
+    _sk, _psk = _surrogate_frags(list(prev_keys))
+    sel = [_sk] + ([_psk] if _psk else []) + list(prev_keys)
+    if _root:
+        sel.append('"root_id"')
+    if spec["elem_scalar"]:
+        sel.append('CAST(%s AS VARCHAR) AS "value"' % prev_elem)
+    elif spec.get("join_helper") or spec.get("leaves") is not None \
+            or spec.get("map_field") or spec.get("wrapper_field"):
+        used = {k.lower(): 0 for k in spec["keys"]}
+        used["_sk"] = 0
+        used["_parent_sk"] = 0
+        if _root:
+            used["root_id"] = 0
+
+        def _out(name):
+            base = name
+            low = base.lower()
+            if low in used:
+                used[low] += 1
+                base = "%s_%d" % (base, used[low])
+                used[base.lower()] = 0
+            else:
+                used[low] = 0
+            return base
+        for f in spec.get("fields") or []:
+            sel.append("%s AS %s" % (
+                _json_field_expr(prev_elem, [f], as_text=True),
+                _q(_out(f))))
+        for parts, alias in (spec.get("leaves") or []):
+            # wrapper_field tables use relative leaf paths; others are absolute
+            # under the element. For JSON, both are field parts under prev_elem.
+            sel.append("%s AS %s" % (
+                _json_field_expr(prev_elem, parts, as_text=True),
+                _q(_out(alias))))
+    else:
+        sel.append('CAST(%s AS VARCHAR) AS "value"' % prev_elem)
+    head = ("INSERT INTO %s" if insert
+            else "CREATE OR REPLACE TABLE %s AS") % _q(spec["name"])
+    return ("%s\nWITH %s\nSELECT %s\nFROM u%d"
+            % (head, ",\n     ".join(ctes),
+               ",\n       ".join(sel), len(hops) - 1))
+
+
 # ---------------------------------------------------------------------------
 # .474: TABLE-LEVEL flatten (the Load-modal "flatten" toggle).
 #
@@ -910,18 +1050,15 @@ def plan_flatten_table(columns, base="rec", reserved=None):
         elem = (node or {}).get("of") or {}
         leaves = []
         elem_scalar = elem.get("t") != "struct"
+        nested_child_specs = []
         if not elem_scalar:
             seen = set()
-            # .490: a list element's OWN nested lists still need a compound
-            # key (per parent element) and stay out of scope -- but NOTE them
-            # so they are not silently lost.
+            # Nested lists inside list elements get compound keys
+            # (_rid + parent ordinals + own ordinal) — same model as plan_shred.
             enest = []
             _struct_inline(elem, "", [], leaves, seen, nested_lists=enest)
-            for np, _n in enest:
-                notes.append(
-                    "list nested inside '%s' elements not broken out "
-                    "(needs a compound key): %s"
-                    % (_pathkey(p), ".".join(np)))
+            for np, nnode in enest:
+                nested_child_specs.append((list(p) + list(np), nnode, p, ordc))
         tables.append({
             "kind": "list",
             "name": uniq(_pathkey(p)),
@@ -929,7 +1066,39 @@ def plan_flatten_table(columns, base="rec", reserved=None):
             "ord_col": ordc,
             "elem_scalar": elem_scalar,
             "leaves": leaves,   # element struct subfields, inlined
+            # key ordinals from the root down to this list (exclusive of own)
+            "parent_ords": [],
+            "parent_list_path": None,
         })
+        # Emit one child table per nested-in-element list, keyed on the full
+        # compound path so rows join: child._parent_sk == parent._sk.
+        for full_path, nnode, parent_path, parent_ord in nested_child_specs:
+            n_elem = (nnode or {}).get("of") or {}
+            n_leaves = []
+            n_scalar = n_elem.get("t") != "struct"
+            if not n_scalar:
+                n_seen = set()
+                # One more level of nesting still noted (rare); deeper levels
+                # go through plan_shred via flatten_table's deep_cols route.
+                deeper = []
+                _struct_inline(n_elem, "", [], n_leaves, n_seen,
+                               nested_lists=deeper)
+                for dp, _dn in deeper:
+                    notes.append(
+                        "list nested deeper than compound-key flatten "
+                        "(%s); use Shred / deep flatten for full breakout"
+                        % (".".join(full_path + dp)))
+            n_ord = _pathkey(full_path) + "_ord"
+            tables.append({
+                "kind": "list",
+                "name": uniq(_pathkey(full_path)),
+                "list_path": full_path,
+                "ord_col": n_ord,
+                "elem_scalar": n_scalar,
+                "leaves": n_leaves,
+                "parent_ords": [parent_ord],
+                "parent_list_path": parent_path,
+            })
 
     if not lists and not inline_structs and not maps and not json_cols:
         notes.append("no nested columns to flatten")
@@ -956,12 +1125,17 @@ def _surrogate_frags(key_exprs):
     return sk, '%s AS "_parent_sk"' % cat(key_exprs[:-1])
 
 
-def build_flatten_sql(spec, src_expr, row_expr):
+def build_flatten_sql(spec, src_expr, row_expr, json_access=False,
+                      json_arr_schema='"JSON"'):
     """CREATE OR REPLACE TABLE statement for one plan_flatten_table spec.
     ``src_expr`` is a ready FROM source -- either a table name or a
     ``read_parquet(...)`` expression, wrapped by the caller so it drops
     straight into ``FROM <src_expr> AS t0``. ``row_expr`` yields the
-    stable 1-based _rid per source row."""
+    stable 1-based _rid per source row.
+
+    ``json_access``: opaque JSON column — use from_json + json_extract
+    instead of STRUCT subscript hops.
+    """
     Q = _qq          # .485: every JSON-derived identifier is quoted here
     qsrc = src_expr
 
@@ -1058,15 +1232,73 @@ def build_flatten_sql(spec, src_expr, row_expr):
         return ('CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s AS t0'
                 % (Q(spec["name"]), ", ".join(sel), qsrc))
 
-    # kind == "list": explode ONE list (top-level or struct-nested), element
-    # fields inlined. .478 audit: index-by-subscript form -- the ordinal is a
-    # subscript and the element is list[ordinal], so ord<->elem alignment is
-    # guaranteed BY CONSTRUCTION (no reliance on zipping two separate
-    # set-returning functions). .490: addressed by PATH, so t0."record"."items"
-    # explodes exactly like t0."fees" (postfix "." then "[]" chain left to
-    # right); a nested list keys on _rid alone (one per source row).
+    # kind == "list": explode ONE list (top-level, struct-nested, or
+    # nested-inside-a-list-element with compound keys).
     path = spec["list_path"]
     ordc = spec["ord_col"]
+    parent_ords = list(spec.get("parent_ords") or [])
+    parent_list_path = spec.get("parent_list_path")
+
+    if json_access and not parent_ords:
+        # Opaque JSON top-level list via from_json over Parquet.
+        col = path[0]
+        if len(path) > 1:
+            arr = _json_arr_expr(
+                _json_field_expr("t0.%s" % Q(col), path[1:], as_text=False),
+                json_arr_schema)
+        else:
+            arr = _json_arr_expr("t0.%s" % Q(col), json_arr_schema)
+        elem_raw = "_arr[g.%s]" % Q(ordc)
+        elem = _json_elem_wrap(elem_raw, json_arr_schema)
+        sk, psk = _surrogate_frags([row_expr, "g.%s" % Q(ordc)])
+        sel = [sk, psk, '%s AS "_rid"' % row_expr]
+        if _root:
+            sel.append('%s AS "root_id"' % _root)
+        sel += ["g.%s AS %s" % (Q(ordc), Q(ordc))]
+        if spec["elem_scalar"]:
+            sel.append('CAST(%s AS VARCHAR) AS "value"' % elem)
+        else:
+            for parts, alias in spec["leaves"]:
+                sel.append("%s AS %s" % (
+                    _json_field_expr(elem, parts, as_text=True), Q(alias)))
+        return ('CREATE OR REPLACE TABLE %s AS SELECT %s '
+                "FROM %s AS t0, LATERAL (SELECT %s AS _arr) AS _j, "
+                "LATERAL (SELECT generate_subscripts(_arr, 1) AS %s) AS g"
+                % (Q(spec["name"]), ", ".join(sel), qsrc, arr, Q(ordc)))
+
+    if parent_ords and parent_list_path:
+        # Compound-key child: unnest the parent list, then this list at
+        # the relative path under each parent element.
+        parent_acc = _inline_path(parent_list_path[0], parent_list_path[1:])
+        parent_ord = parent_ords[0]
+        rel = path[len(parent_list_path):]
+        parent_elem = "t0.%s[g0.%s]" % (parent_acc, Q(parent_ord))
+        child_list = parent_elem
+        for part in rel:
+            child_list = "%s.%s" % (child_list, Q(part))
+        elem = "%s[g.%s]" % (child_list, Q(ordc))
+        key_exprs = [row_expr, "g0.%s" % Q(parent_ord), "g.%s" % Q(ordc)]
+        sk, psk = _surrogate_frags(key_exprs)
+        sel = [sk, psk, '%s AS "_rid"' % row_expr]
+        if _root:
+            sel.append('%s AS "root_id"' % _root)
+        sel += ["g0.%s AS %s" % (Q(parent_ord), Q(parent_ord)),
+                "g.%s AS %s" % (Q(ordc), Q(ordc))]
+        if spec["elem_scalar"]:
+            sel.append('%s AS "value"' % elem)
+        else:
+            for parts, alias in spec["leaves"]:
+                sel.append("%s AS %s" % (_inline_path_expr(elem, parts),
+                                         Q(alias)))
+        return ('CREATE OR REPLACE TABLE %s AS SELECT %s '
+                "FROM %s AS t0, LATERAL ("
+                "SELECT generate_subscripts(t0.%s, 1) AS %s) AS g0, "
+                "LATERAL ("
+                "SELECT generate_subscripts(%s, 1) AS %s) AS g"
+                % (Q(spec["name"]), ", ".join(sel), qsrc,
+                   parent_acc, Q(parent_ord), child_list, Q(ordc)))
+
+    # Standard single-level list (top-level or struct-nested under record).
     acc = _inline_path(path[0], path[1:])
     elem = "t0.%s[g.%s]" % (acc, Q(ordc))
     sk, psk = _surrogate_frags([row_expr, "g.%s" % Q(ordc)])

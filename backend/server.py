@@ -1684,6 +1684,17 @@ class Api:
                                    b.get("table", ""), b.get("column", ""))
 
     @staticmethod
+    def column_access_preview(s, m, body, ctx):
+        """Validate Field Explorer SQL by executing First (LIMIT 1) with fallbacks."""
+        b = body or {}
+        return s.preview_column_access(
+            b.get("engine", "duckdb"),
+            b.get("table", ""),
+            b.get("column", ""),
+            field_idx=b.get("field_idx"),
+            field_path=b.get("field_path"))
+
+    @staticmethod
     def table_profile(s, m, body, ctx):
         name = unquote(m.group("name"))
         engine = (body or {}).get("engine", "sqlite")
@@ -4069,6 +4080,7 @@ ROUTES = [
     ("POST", r"^/api/settings/load-thresholds$", Api.load_thresholds_settings),
     ("GET", r"^/api/tables$", Api.tables),
     ("POST", r"^/api/column/fields$", Api.column_fields),
+    ("POST", r"^/api/column/access-preview$", Api.column_access_preview),
     ("POST", r"^/api/load/files$", Api.load_files),
     ("POST", r"^/api/load/files-start$", Api.load_files_start),
     ("POST", r"^/api/excel/sheets$", Api.excel_sheets),
