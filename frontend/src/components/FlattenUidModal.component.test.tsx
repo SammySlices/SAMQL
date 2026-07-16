@@ -59,7 +59,7 @@ describe("FlattenUidModal", () => {
     expect(texts.filter((t) => t === "href" || t === "rel")).toHaveLength(0);
   });
 
-  it("lists fields and disables Confirm until the pick is unique", async () => {
+  it("warns when the pick is not unique but still allows Confirm Flatten", async () => {
     vi.mocked(api.tableRootIdStats).mockResolvedValue({
       ok: true,
       unique: false,
@@ -87,10 +87,17 @@ describe("FlattenUidModal", () => {
     fireEvent.change(select, { target: { value: "1" } });
 
     const verdict = await screen.findByTestId("fx-uid-verdict");
-    expect(verdict.textContent).toMatch(/Not unique/i);
+    expect(verdict.textContent).toMatch(/May not be unique/i);
     expect(verdict.textContent).toMatch(/2 duplicate/);
-    expect(screen.getByTestId("fx-uid-confirm")).toBeDisabled();
-    expect(onConfirm).not.toHaveBeenCalled();
+    expect(verdict.textContent).toMatch(/can still proceed/i);
+    expect(screen.getByTestId("fx-uid-not-unique-warn")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByTestId("fx-uid-confirm")).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByTestId("fx-uid-confirm"));
+    expect(onConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({ steps: ["code"], label: "code" }),
+    );
   });
 
   it("enables Confirm Flatten when the pick is unique", async () => {

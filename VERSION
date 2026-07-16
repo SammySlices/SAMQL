@@ -16,6 +16,8 @@ BUILD ASSISTANT PACK MODES. build.ps1 / build.sh prompt for lean /
 post-build folder / PyInstaller-embed packaging of the offline SQL
 assistant (~+1 GB for post/embed). samql.spec honors SAMQL_ASSISTANT_EMBED;
 find_pack reads sys._MEIPASS. Refreshed samql_txt full-source bundle.
+Merged master build 617 product fixes: bulk drop confirm + FlattenUidModal
+warn-only uniqueness probe.
 
 ----------------------------------------------------------------------
 build 2026-07-15.618  (v2.16.4)

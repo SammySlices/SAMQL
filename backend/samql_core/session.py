@@ -7387,7 +7387,7 @@ class Session:
         """Uniqueness probe for a chosen root_id on a loaded table.
 
         Returns counts so the Field Explorer picker can warn on duplicates
-        before Confirm Flatten.
+        or nulls before Confirm Flatten (warn-only; Confirm is not blocked).
         """
         from . import shred as _shred
         from .sqlutil import quote_ident as _qid
