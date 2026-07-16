@@ -11,6 +11,13 @@ Phase 1 design (beta):
   * Scheduling: refuse generation while DuckDB is busy (queries preempt chat)
   * Prompt: schema summary only — no nested JSON sample dumps
 
+Networking:
+  * Local pack mode is offline by design: llama-server binds 127.0.0.1,
+    loads a local GGUF, and chat is plain ``/v1/chat/completions`` with no
+    tools / MCP / URL fetch. Hugging Face / GitHub downloads happen only in
+    ``tools/fetch_assistant_pack.py`` (build/Fetch time), not at chat time.
+  * API mode intentionally uses the configured base URL (may be remote).
+
 The assistant pack is optional. When missing (and API mode is not selected),
 status reports install instructions; chat returns a clear error. No
 load/join/flatten behaviour is changed by this module.
@@ -25,6 +32,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -409,7 +417,7 @@ def probe_api(base_url=None, api_key=None, model=None, timeout=12.0):
     models_url = base.rstrip("/") + "/v1/models"
     try:
         req = urllib.request.Request(models_url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
+        with _urlopen(req, timeout=float(timeout)) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             status_code = getattr(resp, "status", 200)
         if 200 <= status_code < 300:
@@ -920,7 +928,40 @@ def _free_port():
             pass
 
 
+def _is_loopback_url(url):
+    """True when *url* targets loopback (local offline sidecar / local API)."""
+    u = str(url or "").strip()
+    if not u:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(u if "://" in u else "http://" + u)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
+def _validate_local_llama_url(url):
+    """Require loopback for local-mode external llama-server URLs."""
+    u = str(url or "").strip().rstrip("/")
+    if not u:
+        return None
+    if not _is_loopback_url(u):
+        raise RuntimeError(
+            "SAMQL_LLAMA_URL must be a loopback URL "
+            "(http://127.0.0.1:PORT or http://localhost:PORT) for local "
+            "offline mode. Use Settings → SQL assistant → API for remote "
+            "OpenAI-compatible endpoints."
+        )
+    return u
+
+
 def _llama_base_url():
+    """Return the local sidecar base URL, or None.
+
+    Does not raise on a mis-set ``SAMQL_LLAMA_URL`` (status UI); 
+    :func:`ensure_server` enforces loopback before chat.
+    """
     env = (os.environ.get("SAMQL_LLAMA_URL") or "").strip().rstrip("/")
     if env:
         return env
@@ -928,6 +969,77 @@ def _llama_base_url():
         if _proc_port:
             return "http://127.0.0.1:%d" % _proc_port
     return None
+
+
+# Env keys that can make llama-server download models, enable agent tools,
+# or turn on the WebUI MCP CORS proxy. Cleared in the child process so a
+# parent shell cannot re-enable outbound/agent features at runtime.
+_LLAMA_CHILD_ENV_CLEAR = (
+    "LLAMA_ARG_HF_REPO",
+    "LLAMA_ARG_HF_FILE",
+    "LLAMA_ARG_HF_REPO_V",
+    "LLAMA_ARG_HF_FILE_V",
+    "LLAMA_ARG_MODEL_URL",
+    "LLAMA_ARG_DOCKER_REPO",
+    "LLAMA_ARG_TOOLS",
+    "LLAMA_ARG_AGENT",
+    "LLAMA_ARG_UI_MCP_PROXY",
+    "LLAMA_ARG_WEBUI_MCP_PROXY",
+)
+
+
+def _llama_server_child_env(base_env=None):
+    """Environment for the bundled llama-server: offline, no agent/tools/HF.
+
+    Does not mutate the parent SamQL process environment.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    for key in _LLAMA_CHILD_ENV_CLEAR:
+        env.pop(key, None)
+    # Prefer explicit offline + no WebUI even if the binary ignores unknown
+    # CLI flags on very old builds (fetch pulls current llama.cpp releases).
+    env["LLAMA_ARG_OFFLINE"] = "1"
+    env["LLAMA_ARG_UI"] = "0"
+    env["LLAMA_ARG_WEBUI"] = "0"
+    return env
+
+
+def _llama_server_cmd(binary, model, port, ctx):
+    """Args for a local, offline-only llama-server sidecar.
+
+    No ``--hf-*`` / ``--model-url`` / ``--tools`` / ``--agent`` /
+    ``--ui-mcp-proxy``. Chat from SamQL never passes tool schemas.
+    """
+    return [
+        str(binary),
+        "-m", str(model),
+        "--host", "127.0.0.1",
+        "--port", str(port),
+        "-c", str(ctx),
+        "-ngl", "0",  # CPU-only for ThinkPad / locked GPUs
+        "--offline",  # block HF / model-url network inside llama-server
+        "--no-webui",  # no browser UI / MCP host surface
+    ]
+
+
+def _chat_completion_payload(model_id, messages, *, max_tokens=800):
+    """OpenAI chat body for the SQL assistant — never includes tools."""
+    return {
+        "model": model_id,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": int(max_tokens),
+        "stream": False,
+    }
+
+
+def _urlopen(req, timeout):
+    """urllib open; disable HTTP(S)_PROXY for loopback (local pack path)."""
+    url = getattr(req, "full_url", None) or req.get_full_url()
+    if _is_loopback_url(url):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return opener.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def _http_json(url, payload, timeout=120.0, headers=None):
@@ -944,7 +1056,7 @@ def _http_json(url, payload, timeout=120.0, headers=None):
         headers=hdrs,
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8", errors="replace")
     return json.loads(body) if body else {}
 
@@ -957,7 +1069,7 @@ def _wait_ready(base, timeout=45.0):
             return False
         try:
             req = urllib.request.Request(health, method="GET")
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
+            with _urlopen(req, timeout=1.5) as resp:
                 if 200 <= getattr(resp, "status", 200) < 500:
                     return True
         except Exception:
@@ -965,7 +1077,7 @@ def _wait_ready(base, timeout=45.0):
         # Some builds expose only /v1/models
         try:
             req = urllib.request.Request(base.rstrip("/") + "/v1/models", method="GET")
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
+            with _urlopen(req, timeout=1.5) as resp:
                 if 200 <= getattr(resp, "status", 200) < 500:
                     return True
         except Exception:
@@ -982,10 +1094,10 @@ def ensure_server(pack=None):
     desired model. External ``SAMQL_LLAMA_URL`` servers are left alone.
     """
     global _proc, _proc_port, _proc_model
-    if (os.environ.get("SAMQL_LLAMA_URL") or "").strip():
-        existing = _llama_base_url()
-        if existing:
-            return existing
+    env_url = (os.environ.get("SAMQL_LLAMA_URL") or "").strip()
+    if env_url:
+        # Local mode may only talk to a loopback llama-server.
+        return _validate_local_llama_url(env_url)
     pack = pack or find_pack()
     if not pack.get("ok"):
         raise RuntimeError(pack.get("hint") or "Assistant pack not available.")
@@ -1028,14 +1140,9 @@ def ensure_server(pack=None):
         # Chat template: leave unset so llama-server uses the template
         # embedded in the GGUF (Qwen, Phi-4-mini, etc.). Do NOT pass
         # --chat-template / --jinja overrides that assume one family.
-        cmd = [
-            pack["binary"],
-            "-m", pack["model"],
-            "--host", "127.0.0.1",
-            "--port", str(port),
-            "-c", str(ctx),
-            "-ngl", "0",  # CPU-only for ThinkPad / locked GPUs
-        ]
+        # Offline hardening: --offline / --no-webui + scrubbed child env
+        # (no HF download args, no --tools / --agent / MCP proxy).
+        cmd = _llama_server_cmd(pack["binary"], pack["model"], port, ctx)
         creationflags = 0
         if _is_windows():
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -1044,6 +1151,7 @@ def ensure_server(pack=None):
         _proc = subprocess.Popen(
             cmd,
             cwd=bin_dir,
+            env=_llama_server_child_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creationflags,
@@ -1347,13 +1455,7 @@ def chat(session, question, dialect="native", timeout_s=180.0):
                     "status": status(session),
                 }
             model_id = api.get("model") or "samql"
-            payload = {
-                "model": model_id,
-                "messages": messages,
-                "temperature": 0.1,
-                "max_tokens": 800,
-                "stream": False,
-            }
+            payload = _chat_completion_payload(model_id, messages, max_tokens=800)
             try:
                 data = _http_json(
                     url,
@@ -1386,13 +1488,9 @@ def chat(session, question, dialect="native", timeout_s=180.0):
         if _cancel.is_set():
             return {"ok": False, "error": "Cancelled.", "cancelled": True}
 
-        payload = {
-            "model": DEFAULT_MODEL_NAME,
-            "messages": messages,
-            "temperature": 0.1,
-            "max_tokens": 800,
-            "stream": False,
-        }
+        payload = _chat_completion_payload(
+            DEFAULT_MODEL_NAME, messages, max_tokens=800
+        )
         url = base.rstrip("/") + "/v1/chat/completions"
         try:
             data = _http_json(url, payload, timeout=float(timeout_s))

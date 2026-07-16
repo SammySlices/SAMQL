@@ -163,11 +163,12 @@ export const AssistantModelsPanel: React.FC<{
   const body = (
     <div className="asst-models-panel" data-testid="assistant-models-panel">
       <div className="hint" style={{ marginBottom: 10 }}>
-        Choose a <strong>local GGUF</strong> (offline llama-server pack) or an{" "}
-        <strong>OpenAI-compatible API</strong> (
-        <span className="mono">POST …/v1/chat/completions</span>
-        ). The SQL assistant only runs while DuckDB is idle. API keys are stored
-        with Windows DPAPI when available and are never shown again after save.
+        Choose a <strong>local GGUF</strong> (offline llama-server pack — no
+        internet at chat time) or an <strong>OpenAI-compatible API</strong> (
+        <span className="mono">POST …/v1/chat/completions</span>; uses the
+        network when the base URL is remote). The SQL assistant only runs while
+        DuckDB is idle. API keys are stored with Windows DPAPI when available
+        and are never shown again after save.
       </div>
 
       {error && (
@@ -343,10 +344,11 @@ export const AssistantModelsPanel: React.FC<{
       ) : (
         <>
           <div className="hint" style={{ marginBottom: 10 }}>
-            Register downloaded{" "}
-            <span className="mono">.gguf</span> models from this PC, then pick
-            which one the SQL assistant uses. If none is selected, SamQL uses
-            pack discovery under{" "}
+            Local mode stays offline at runtime: SamQL talks only to a
+            loopback llama-server with a local{" "}
+            <span className="mono">.gguf</span> (no tools / web fetch). Register
+            models from this PC, then pick which one the SQL assistant uses. If
+            none is selected, SamQL uses pack discovery under{" "}
             <span className="mono">assistant/models/</span> (4B when present,
             otherwise the only GGUF found).
           </div>
