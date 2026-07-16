@@ -1214,8 +1214,10 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         # runs. Exercise the real handler with its destructive steps stubbed
         # (no server/session teardown, no real file removal), then restore.
         import samql_core.tmputil as _tu
-        calls = {"cleanup": 0, "sweep": 0}
+        import samql_core.assistant as _asst
+        calls = {"cleanup": 0, "sweep": 0, "assistant": 0}
         orig_cleanup, orig_sweep = _tu.cleanup_instance, _tu.sweep_stale
+        orig_asst_stop = _asst.stop_server
         orig_httpd, orig_session = server._HTTPD, server.SESSION
         orig_done = server._SHUTDOWN_DONE
         try:
@@ -1223,6 +1225,8 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
                 "cleanup", calls["cleanup"] + 1)
             _tu.sweep_stale = lambda: calls.__setitem__(
                 "sweep", calls["sweep"] + 1)
+            _asst.stop_server = lambda sess=None: calls.__setitem__(
+                "assistant", calls["assistant"] + 1)
             server._HTTPD = None       # skip the real server stop
             server.SESSION = None      # skip the real session shutdown
             server._SHUTDOWN_DONE = False
@@ -1230,8 +1234,11 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             eq(calls["cleanup"], 1, "shutdown removes this instance's temp dir")
             eq(calls["sweep"], 1,
                "shutdown sweeps stale temp dirs left by prior runs")
+            eq(calls["assistant"], 1,
+               "shutdown stops the llama-server assistant sidecar")
         finally:
             _tu.cleanup_instance, _tu.sweep_stale = orig_cleanup, orig_sweep
+            _asst.stop_server = orig_asst_stop
             server._HTTPD, server.SESSION = orig_httpd, orig_session
             server._SHUTDOWN_DONE = orig_done
 

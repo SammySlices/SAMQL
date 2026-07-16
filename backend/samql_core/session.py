@@ -13610,12 +13610,11 @@ class Session:
             self.connections.clear()
         except Exception:
             pass
-        # Graceful shutdown (Ctrl+C / SIGTERM / Exit → stop) is a clean exit:
-        # drop every table (loaded + temp) AND clear the restore manifest, so
-        # the next launch comes up empty with nothing loaded. (A hard crash
-        # never reaches here, so its manifest survives for crash recovery.)
-        # AppWindow window-close alone does NOT call this -- the server is
-        # left running for reattach (.534); only /api/shutdown does.
+        # Graceful shutdown (Ctrl+C / SIGTERM / Exit → stop / AppWindow close
+        # via launcher stop_server → /api/shutdown) is a clean exit: drop
+        # every table (loaded + temp) AND clear the restore manifest, so the
+        # next launch comes up empty with nothing loaded. (A hard crash never
+        # reaches here, so its manifest survives for crash recovery.)
         self.clear_all(clear_manifest=True)
         try:
             self.db.recycle()

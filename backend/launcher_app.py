@@ -70,8 +70,8 @@ _MUTEX_WINDOW_GRACE_S = 15.0  # .544: server up -> wait this for its window
 # .546: the launcher supervises the server it started while the window is
 # open -- if the backend dies (a standby suspend/kill, a crash), the
 # supervisor respawns it so the window's Reconnect finds a live server
-# instead of nothing. Off once the window closes (the server is meant to
-# persist then; see .534).
+# instead of nothing. Off once the window closes; the launcher then stops
+# the server it started so nothing is left in Task Manager.
 _SUPERVISE = {"on": False, "port": None, "restarts": 0}
 
 
@@ -359,12 +359,10 @@ def start_server(port, splash):
                     | 0x00000200)  # CREATE_NEW_PROCESS_GROUP
     env = clean_child_env()
     env["SAMQL_PORT"] = str(port)
-    # .534: the server is deliberately NOT tied to the launcher's life
-    # anymore (the .512 SAMQL_PARENT_PID tag is gone): the window is a
-    # view, and closing it -- or a launcher crash -- must leave the
-    # server running so the next launch reattaches with the session
-    # intact. The server-side watchdog remains for embedders that set
-    # the env themselves.
+    # Do NOT set SAMQL_PARENT_PID here: the browser --app fallback exits the
+    # launcher immediately after opening Edge/Chrome, and a parent-watchdog
+    # would kill the server under that window. Native AppWindow close calls
+    # stop_server() instead. Embedders may still set SAMQL_PARENT_PID themselves.
     # .527: tell the server WHICH _MEI extraction belongs to this RUNNING
     # launcher, so the storage report can label it "held by the launcher --
     # frees on exit" instead of counting it as an unremovable orphan.
@@ -528,14 +526,41 @@ def stop_supervisor():
     _SUPERVISE["on"] = False
 
 
+def _kill_process_tree(pid):
+    """Best-effort: kill ``pid`` and its children (llama-server sidecar).
+
+    On Windows a plain ``terminate()`` of SamQL.exe leaves grandchild
+    llama-server processes in Task Manager; ``taskkill /T`` reaps the tree.
+    Never raises."""
+    if not pid:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(int(pid))],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5, check=False)
+        else:
+            try:
+                os.kill(int(pid), 9)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def stop_server(port):
     """.490: gracefully stop the server WE started once the native window
     closes. The launcher owns that server, so 'close the window' should quit
     the app -- and, crucially, a graceful stop lets the frozen server exit
     cleanly so PyInstaller releases its onefile extraction (_MEIxxxxxx). Left
     running, that directory stays locked 'in use' and never clears from temp.
-    Best-effort: a short timeout, every failure swallowed, so it can never
-    delay or crash the launcher's own exit."""
+
+    Also reaps ``_SERVER_PROC``: POST /api/shutdown returns before the child
+    actually exits (delayed teardown + ``os._exit``). Wait briefly, then
+    kill the process tree so SamQL.exe / python / llama-server never linger
+    in Task Manager. Best-effort: every failure swallowed so this never
+    crashes the launcher's own exit."""
     try:
         _local_urlopen(
             "http://127.0.0.1:%d/api/shutdown" % port,
@@ -545,6 +570,30 @@ def stop_server(port):
     except Exception as e:
         write_log("INFO server shutdown request failed (%s)"
                   % e.__class__.__name__)
+    proc = globals().get("_SERVER_PROC")
+    if proc is None:
+        return
+    try:
+        # /api/shutdown sleeps ~0.4s then tears down; allow headroom.
+        proc.wait(timeout=8)
+        write_log("INFO server process exited after shutdown request")
+    except Exception:
+        write_log("INFO server still alive after shutdown request; "
+                  "killing process tree")
+        pid = getattr(proc, "pid", None)
+        _kill_process_tree(pid)
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+    globals()["_SERVER_PROC"] = None
 
 
 # ------------------------------------------------- single instance
@@ -2264,17 +2313,14 @@ def main(argv=None):
     if open_native_window(url, args, splash):
         stop_supervisor()  # .546: window closed -> stop respawning
         write_log("INFO native window closed; launcher done")
-        # .534: the window is a VIEW; the SERVER PERSISTS. Closing the
-        # window used to quit the server we started (.490, to release
-        # the onefile _MEI lock) -- but reopening the exe then
-        # cold-started a FRESH instance, which read as "it created
-        # another instance". The server is left running now, and the
-        # next launch reattaches to it with the session intact (the
-        # running exe's _MEI staying 'in use' is labeled in Storage).
+        # Window close must not leave SamQL.exe / python / llama-server in
+        # Task Manager. Stop the server WE started (graceful /api/shutdown
+        # + reap). A server we only reattached to is left alone -- the
+        # in-app Exit modal still offers "keep server" / "stop server".
         if we_started_server:
-            write_log("INFO window closed; the server is left running "
-                      "on port %d -- launch SamQL-AppWindow again to "
-                      "reopen it" % args.port)
+            stop_server(args.port)
+            write_log("INFO window closed; stopped the server on port %d"
+                      % args.port)
         # .537: END THE PROCESS. pythonnet/WinForms can leave non-daemon
         # threads after webview.start() returns; a launcher that lingers
         # holds the single-instance mutex (and its _MEI extraction)

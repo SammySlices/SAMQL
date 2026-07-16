@@ -11813,10 +11813,10 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_process_lifecycle_512():
         # .512 (on-box: SamQL.exe visible in Task Manager next to the
-        # window exe, and lingering after close). Two processes IS the
-        # design -- the launcher owns the window, SamQL.exe serves. What
-        # must never happen is the server OUTLIVING the window. Three
-        # independent guarantees now enforce that:
+        # window exe, and lingering after close). Two processes while the
+        # window is open IS the design -- the launcher owns the window,
+        # SamQL.exe serves. What must never happen is the server OUTLIVING
+        # the window. Guarantees:
         la = open(os.path.join(BACKEND, "launcher_app.py"),
                   encoding="utf-8").read()
         sv = open(os.path.join(BACKEND, "server.py"),
@@ -11826,14 +11826,17 @@ def backend_tests(datadir, csv_path, json_path):
         need('_SERVER_PROC = None' in la
              and la.count('globals()["_SERVER_PROC"]') >= 2,
              "the launcher keeps the Popen of a server it spawned")
-        need("the server is left running " in la
-             and "stop_server(args.port)" not in la,
-             ".534: window close leaves the server running to reattach")
-        # (2) .534 repoint: the child is NOT tied to the launcher's life
-        # anymore -- the server must survive the window so the exe can
-        # reattach. The server-side watchdog stays, opt-in via env.
+        need("stop_server(args.port)" in la
+             and "proc.wait(timeout=" in la
+             and "stopped the server on port" in la
+             and "def _kill_process_tree" in la
+             and 'taskkill", "/F", "/T"' in la,
+             "window close stops the server we started and reaps the tree")
+        # (2) the launcher does not set SAMQL_PARENT_PID (browser --app
+        # fallback exits immediately and would kill the server). Watchdog
+        # remains for embedders that set the env themselves.
         need('env["SAMQL_PARENT_PID"]' not in la,
-             "the launcher no longer ties the server to its own pid")
+             "the launcher does not auto-tag SAMQL_PARENT_PID")
         need('os.environ.get("SAMQL_PARENT_PID")' in sv
              and "WaitForSingleObject" in sv
              and 'name="parent-watchdog"' in sv
@@ -11844,12 +11847,130 @@ def backend_tests(datadir, csv_path, json_path):
         need("_graceful_shutdown()\n            # .512" in sv
              and sv.count("os._exit(0)") >= 2,
              "endpoint shutdown hard-exits after teardown")
+        # (4) graceful shutdown stops the llama-server sidecar first
+        need("_asst.stop_server(SESSION)" in sv
+             or "assistant" in sv and "stop_server(SESSION)" in sv,
+             "graceful shutdown stops the assistant sidecar")
         # reuse is identified (health marker) and logged; foreign port
         # owners are refused instead of silently attached to
         need("def _is_samql(" in la
              and "reusing the SamQL server already on port" in la
              and "not SamQL -- close it or use --port" in la,
              "reuse probes the health marker; foreign owners are refused")
+        # Functional: stop_server reaps a stubborn child tree after
+        # /api/shutdown fails, so Task Manager cannot keep SamQL.exe /
+        # llama-server forever.
+        import launcher_app as _LA
+        killed = {"tree": None, "wait": 0}
+        class _StubProc:
+            pid = 4242
+            def wait(self, timeout=None):
+                killed["wait"] += 1
+                if killed["wait"] == 1:
+                    raise Exception("still running")
+                return 0
+            def kill(self):
+                pass
+        keep_ss = (_LA._SERVER_PROC, _LA._local_urlopen, _LA.write_log,
+                   _LA._kill_process_tree)
+        try:
+            _LA._SERVER_PROC = _StubProc()
+            def _boom(*_a, **_k):
+                raise OSError("no server")
+            _LA._local_urlopen = _boom
+            _LA.write_log = lambda *_a, **_k: None
+            _LA._kill_process_tree = lambda pid: killed.__setitem__(
+                "tree", pid)
+            _LA.stop_server(18765)
+            eq(killed["tree"], 4242, "stubborn child process tree is killed")
+            eq(_LA._SERVER_PROC, None, "Popen handle cleared after stop")
+        finally:
+            (_LA._SERVER_PROC, _LA._local_urlopen, _LA.write_log,
+             _LA._kill_process_tree) = keep_ss
+        # Functional: native window close after WE started the server calls
+        # stop_server (orphan cleanup). Reuse path is covered by .519.
+        import types as _tyC
+        saved_c = {m: sys.modules.get(m) for m in
+                   ("webview", "webview.platforms",
+                    "webview.platforms.edgechromium",
+                    "webview.platforms.winforms", "clr",
+                    "System", "System.Drawing")}
+        wv = _tyC.ModuleType("webview")
+        wv.guilib = _tyC.SimpleNamespace(__name__="webview.platforms.edgechromium")
+        wv.gui = None
+        created = {}
+        def _cw(title, url, **kw):
+            w = _tyC.SimpleNamespace(
+                events=_tyC.SimpleNamespace(shown=_tyC.SimpleNamespace(
+                    wait=lambda t: True)),
+                native=_tyC.SimpleNamespace(Icon=None, ShowIcon=True,
+                                            Handle=1, BeginInvoke=lambda a: a()))
+            created["title"] = title
+            created["win"] = w
+            return w
+        wv.create_window = _cw
+        def _start(func=None, *a, **kw):
+            wv.gui = "edgechromium"
+            if func:
+                func()
+        wv.start = _start
+        sys.modules["webview"] = wv
+        for m in ("webview.platforms", "webview.platforms.edgechromium",
+                  "webview.platforms.winforms"):
+            sys.modules[m] = _tyC.ModuleType(m)
+        sys.modules["clr"] = _tyC.ModuleType("clr")
+        sdC = _tyC.ModuleType("System.Drawing")
+        sdC.Icon = lambda p: ("ICO", p)
+        smC = _tyC.ModuleType("System"); smC.Drawing = sdC
+        sys.modules["System"] = smC
+        sys.modules["System.Drawing"] = sdC
+        stops = []
+        keep_c = {n: getattr(_LA, n) for n in
+                  ("write_log", "_bundled_asset", "set_app_user_model_id",
+                   "apply_app_icon", "set_relaunch_icon",
+                   "wait_for_app_window", "port_open", "_is_samql",
+                   "_server_alive_now", "start_server", "start_supervisor",
+                   "stop_supervisor", "stop_server", "find_browser",
+                   "make_splash", "_ping_maintenance", "find_samql_window",
+                   "focus_window", "_acquire_single_instance",
+                   "_sweep_stale_mei_early", "_set_process_aumid")}
+        try:
+            _LA.write_log = lambda m: None
+            _LA._bundled_asset = lambda name: None
+            _LA.set_app_user_model_id = lambda *a, **k: None
+            _LA.apply_app_icon = lambda *a, **k: None
+            _LA.set_relaunch_icon = lambda *a, **k: None
+            _LA.wait_for_app_window = lambda *a, **k: None
+            _LA.find_samql_window = lambda: None
+            _LA.focus_window = lambda h: False
+            _LA._acquire_single_instance = lambda: (True, False)
+            _LA._sweep_stale_mei_early = lambda: None
+            _LA._set_process_aumid = lambda *a, **k: None
+            # no live server -> start one, then native window closes
+            _LA.port_open = lambda p, **k: False
+            _LA._is_samql = lambda p: False
+            _LA._server_alive_now = lambda p: True
+            _LA.start_server = lambda p, s: True
+            _LA.start_supervisor = lambda p: None
+            _LA.stop_supervisor = lambda: None
+            _LA.stop_server = lambda p: stops.append(p)
+            _LA.find_browser = lambda w: None
+            _LA._ping_maintenance = lambda p: None
+            _LA.make_splash = lambda: _tyC.SimpleNamespace(
+                set_text=lambda t: None, close=lambda: None,
+                pump=lambda s=0: None)
+            rc = _LA.main(["--port", "8765"])
+            eq(rc, 0, "launcher exits after native close")
+            eq(stops, [8765],
+               "window close stops the server we started: %r" % stops)
+        finally:
+            for n, v in keep_c.items():
+                setattr(_LA, n, v)
+            for m, v in saved_c.items():
+                if v is None:
+                    sys.modules.pop(m, None)
+                else:
+                    sys.modules[m] = v
 
     def t_frontend_syntax_gate_511():
         # .511 (on-box: tsc exploded with TS1136/TS1005 across api.ts). A
@@ -17450,17 +17571,19 @@ def backend_tests(datadir, csv_path, json_path):
              and "def _webview_storage_path" in srv
              and 'os.path.join(base, "SamQL", "webview")' in la
              and 'os.path.join(base, "SamQL", "webview")' in srv),
-            # (1) .534: window close leaves the server RUNNING; the next
-            # launch reattaches (stop_server stays for manual use)
+            # (1) window close stops the server the launcher started so
+            # SamQL.exe / llama-server do not linger in Task Manager
             ("the launcher has a graceful stop_server via /api/shutdown",
              "def stop_server" in la and "/api/shutdown" in la),
-            ("closing the window leaves the server running to reattach",
+            ("closing the window stops the server the launcher started",
              "we_started_server = True" in la
              and "if we_started_server:" in la
-             and "the server is left running" in la
-             and "stop_server(args.port)" not in la),
+             and "stop_server(args.port)" in la
+             and "stopped the server on port" in la),
             ("the server honours that request with a graceful shutdown route",
              "_graceful_shutdown()" in srv and "^/api/shutdown$" in srv),
+            ("graceful shutdown stops the llama-server sidecar",
+             "_asst.stop_server(SESSION)" in srv),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing,

@@ -1233,6 +1233,14 @@ def _graceful_shutdown(*_args):
         if _SHUTDOWN_DONE:
             return
         _SHUTDOWN_DONE = True
+    # Stop the local llama-server sidecar BEFORE session teardown / os._exit
+    # so Task Manager never keeps an orphaned assistant process after close.
+    try:
+        from samql_core import assistant as _asst
+        _asst.stop_server(SESSION)
+    except Exception as exc:
+        print("[samql] shutdown: assistant stop failed: %s" % exc,
+              file=sys.stderr)
     try:
         if _HTTPD is not None:
             _HTTPD.shutdown()
