@@ -96,6 +96,8 @@ export const SqlAssistant: React.FC<{
       text: allowInsert ? WELCOME_INSERT : WELCOME_COPY,
     },
   ]);
+  // Bumped on Clear so a late assistantChat reply cannot repopulate the thread.
+  const chatGen = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
   const { pos, setPos, startDrag, dragging, settled, winRef } = useWinDrag({
     x: Math.max(20, window.innerWidth - 420),
@@ -146,14 +148,22 @@ export const SqlAssistant: React.FC<{
     if (el) el.scrollTop = el.scrollHeight;
   }, [msgs, open, busy]);
 
+  const welcomeMsg = (): ChatMsg => ({
+    id: "welcome",
+    role: "system",
+    text: allowInsert ? WELCOME_INSERT : WELCOME_COPY,
+  });
+
   const send = async () => {
     const q = input.trim();
     if (!q || busy) return;
+    const gen = chatGen.current;
     setInput("");
     setMsgs((m) => [...m, { id: uid(), role: "user", text: q }]);
     setBusy(true);
     try {
       const res = await api.assistantChat(q, dialect);
+      if (gen !== chatGen.current) return;
       if (!res.ok) {
         setMsgs((m) => [
           ...m,
@@ -178,6 +188,7 @@ export const SqlAssistant: React.FC<{
       ]);
       if (res.status) setStatus(res.status);
     } catch (e: any) {
+      if (gen !== chatGen.current) return;
       setMsgs((m) => [
         ...m,
         {
@@ -188,7 +199,7 @@ export const SqlAssistant: React.FC<{
         },
       ]);
     } finally {
-      setBusy(false);
+      if (gen === chatGen.current) setBusy(false);
       void refreshStatus();
     }
   };
@@ -200,6 +211,22 @@ export const SqlAssistant: React.FC<{
       /* ignore */
     }
   };
+
+  /** Reset local chat UI only — does not stop llama-server or change Settings. */
+  const clearConversation = () => {
+    chatGen.current += 1;
+    const wasBusy = busy;
+    setBusy(false);
+    setInput("");
+    setCopiedId(null);
+    setMsgs([welcomeMsg()]);
+    if (wasBusy) void cancel();
+  };
+
+  const canClearConversation =
+    busy ||
+    input.trim().length > 0 ||
+    msgs.some((m) => m.id !== "welcome");
 
   const copySql = (msgId: string, sql: string) => {
     void copyText(sql)
@@ -276,8 +303,21 @@ export const SqlAssistant: React.FC<{
         </span>
         <span className="spacer" />
         <button
+          type="button"
+          className="btn sm ghost"
+          title="Clear conversation"
+          aria-label="Clear conversation"
+          data-testid="sql-assistant-clear"
+          disabled={!canClearConversation}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={clearConversation}
+        >
+          Clear
+        </button>
+        <button
           className="btn sm ghost"
           title="Close"
+          aria-label="Close"
           onMouseDown={(e) => e.stopPropagation()}
           onClick={() => onOpenChange(false)}
         >
