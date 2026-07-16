@@ -1566,6 +1566,61 @@ def get_session() -> Session:
     return SESSION
 
 
+def _boot_stage_label():
+    """Cheap BootBar phase string for /api/health ``stage`` (launcher splash/logs)."""
+    bar = _BOOT_BAR
+    if bar is None:
+        return None
+    try:
+        label = getattr(bar, "_label", None)
+        if label:
+            return str(label)
+    except Exception:
+        pass
+    return None
+
+
+def _health_payload(session=None):
+    """Build the /api/health JSON body.
+
+    When ``session`` is None the payload is the lightweight launcher
+    readiness marker only -- ``app`` / version / build / frontend_built.
+    Full feature flags require a live Session. This split matters because
+    ``serve_forever`` starts BEFORE ``get_session()``; if health blocked on
+    Session() construction, AppWindow cold starts (AV, assistant prefs,
+    first DuckDB open) could burn the whole boot budget and fail once,
+    then succeed on retry when imports/AV were warm.
+
+    Optional ``stage`` mirrors the terminal BootBar label so AppWindow
+    splash/logs can show more than static "Waiting..." text. ``warming``
+    remains True until a Session exists; the launcher opens once ``app``
+    is SamQL and does not wait for warming to clear.
+    """
+    base = {
+        "ok": True,
+        "app": "SamQL",
+        "version": __version__,
+        "build": BUILD,
+        "frontend_built": _FRONTEND_DIR is not None,
+    }
+    stage = _boot_stage_label()
+    if session is None:
+        base["features"] = {}
+        base["warming"] = True
+        base["restoring"] = False
+        base["restored"] = 0
+        base["stage"] = stage or "starting"
+        return base
+    base["features"] = session.optional_features()
+    base["concurrent_reads"] = session.concurrent_reads_enabled()
+    base["flatten_json"] = session.flatten_json_enabled()
+    base["restoring"] = bool(getattr(session, "restoring", False))
+    base["restored"] = int(getattr(session, "_restored_count", 0))
+    base["warming"] = False
+    base["stage"] = stage or "ready"
+    return base
+
+
 # --------------------------------------------------------------------- #
 # Route table: each entry is (method, compiled-regex, handler-name)
 # Handlers take (session, match, body_dict, ctx) and return a JSON-able
@@ -1577,14 +1632,7 @@ class Api:
     # ---- health & capabilities -------------------------------------
     @staticmethod
     def health(s, m, body, ctx):
-        return {"ok": True, "app": "SamQL", "version": __version__,
-                "build": BUILD,
-                "features": s.optional_features(),
-                "concurrent_reads": s.concurrent_reads_enabled(),
-                "flatten_json": s.flatten_json_enabled(),
-                "restoring": bool(getattr(s, "restoring", False)),
-                "restored": int(getattr(s, "_restored_count", 0)),
-                "frontend_built": _FRONTEND_DIR is not None}
+        return _health_payload(s)
 
     @staticmethod
     def features(s, m, body, ctx):
@@ -4731,6 +4779,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch_api_inner(self, method, parsed, ctx):
         path = parsed.path
+        # Launcher / second-instance probes only need the app marker. Answer
+        # BEFORE get_session() so a long cold Session()+restore cannot make
+        # every /api/health probe time out and trip AppWindow's boot budget.
+        # Static UI assets also do not need the session; API routes below
+        # still wait on get_session() as before.
+        if path == "/api/health" and method in ("GET", "HEAD"):
+            self._send_json(200, _health_payload(SESSION))
+            return
         body = None
         raw = b""
         ctype = self.headers.get("Content-Type", "")

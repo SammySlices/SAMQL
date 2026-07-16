@@ -1,16 +1,28 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api, copyText } from "../lib/api";
 import type { AssistantStatus } from "../lib/types";
 import { Icon } from "./Icon";
 import { useWinDrag } from "./ActivityShared";
 
 const WELCOME_INSERT =
-  "Ask how to query your loaded tables. I write DuckDB SQL or SparkSQL " +
-  "and can insert it into the IDE. I only run while DuckDB is idle.";
+  "Ask how to query your loaded tables. I write DuckDB SQL (or SparkSQL " +
+  "when that dialect is selected) and can insert it into the IDE. Prefer " +
+  "DuckDB functions — not MySQL/Postgres. I only run while DuckDB is idle.";
 
 const WELCOME_COPY =
-  "Ask how to query your loaded tables. I write DuckDB SQL or SparkSQL — " +
-  "copy it and paste into a Journal cell. I only run while DuckDB is idle.";
+  "Ask how to query your loaded tables. I write DuckDB SQL (or SparkSQL " +
+  "when that dialect is selected) — copy it and paste into a Journal cell. " +
+  "Prefer DuckDB functions — not MySQL/Postgres. I only run while DuckDB is idle.";
+
+function clampAssistantPos(x: number, y: number) {
+  const maxX = Math.max(20, window.innerWidth - 80);
+  const maxY = Math.max(40, window.innerHeight - 80);
+  return {
+    x: Math.min(Math.max(12, x), maxX),
+    y: Math.min(Math.max(12, y), maxY),
+  };
+}
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -85,7 +97,7 @@ export const SqlAssistant: React.FC<{
     },
   ]);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const { pos, startDrag, dragging, settled, winRef } = useWinDrag({
+  const { pos, setPos, startDrag, dragging, settled, winRef } = useWinDrag({
     x: Math.max(20, window.innerWidth - 420),
     y: Math.max(40, window.innerHeight - 520),
   });
@@ -114,9 +126,18 @@ export const SqlAssistant: React.FC<{
 
   useEffect(() => {
     if (!open) return;
+    // Re-clamp when opening so a prior drag / small AppWindow cannot leave
+    // the chat off-screen (green toolbar button with no visible panel).
+    const next = clampAssistantPos(
+      Number.isFinite(pos.x) ? pos.x : Math.max(20, window.innerWidth - 420),
+      Number.isFinite(pos.y) ? pos.y : Math.max(40, window.innerHeight - 520),
+    );
+    if (next.x !== pos.x || next.y !== pos.y) setPos(next);
     void refreshStatus();
     const iv = window.setInterval(() => void refreshStatus(), 2500);
     return () => window.clearInterval(iv);
+    // Intentionally only when `open` flips true — avoid fighting drag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   useEffect(() => {
@@ -227,7 +248,9 @@ export const SqlAssistant: React.FC<{
 
   if (!open) return null;
 
-  return (
+  // Portal to document.body so AppWindow / nested flex stacking contexts
+  // cannot hide the panel while the toolbar button still shows primary.
+  const panel = (
     <div
       ref={winRef as React.RefObject<HTMLDivElement>}
       className={
@@ -373,4 +396,7 @@ export const SqlAssistant: React.FC<{
       </div>
     </div>
   );
+
+  if (typeof document === "undefined" || !document.body) return panel;
+  return createPortal(panel, document.body);
 };

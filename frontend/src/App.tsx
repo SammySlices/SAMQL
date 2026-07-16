@@ -956,6 +956,8 @@ export default function App() {
   /** false when opened from Journal (copy-only; no Insert / Open in tab). */
   const [assistantAllowInsert, setAssistantAllowInsert] = useState(true);
   const toggleAssistant = (allowInsert: boolean) => {
+    // Same entry point again → close. Switching IDE ↔ Journal keeps the
+    // panel open and only flips insert/copy mode (panel stays mounted).
     if (assistantOpen && assistantAllowInsert === allowInsert) {
       setAssistantOpen(false);
       return;

@@ -21,6 +21,7 @@ Examples:
   python tools/fetch_assistant_pack.py
   python tools/fetch_assistant_pack.py --model 4b
   python tools/fetch_assistant_pack.py --model 7b
+  python tools/fetch_assistant_pack.py --skip-model   # runtime only (build default)
   python tools/fetch_assistant_pack.py --root . --force
   python tools/fetch_assistant_pack.py --platform win-cpu
 """
@@ -418,22 +419,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Only download llama-server",
     )
     args = parser.parse_args(argv)
+    if args.skip_llama and args.skip_model:
+        _die("nothing to do: both --skip-llama and --skip-model were set")
 
     root = Path(args.root).resolve()
     out = root / "assistant"
     models = out / "models"
     plat = args.platform or _detect_platform()
-    model_key = _choose_model_key(args.model, no_prompt=args.no_prompt)
-    spec = resolve_model(model_key)
 
     print(f"Assistant pack directory: {out}")
     print(f"Platform: {plat}")
-    print(f"Model: {spec['label']} ({spec['key']}, {spec['approx_size']})")
-    print(f"  file: {spec['filename']}")
+
+    # Runtime-only builds / -SkipModel: never prompt for or download a GGUF.
+    model_key: str | None = None
+    spec: dict[str, str] | None = None
+    if not args.skip_model:
+        model_key = _choose_model_key(args.model, no_prompt=args.no_prompt)
+        spec = resolve_model(model_key)
+        print(f"Model: {spec['label']} ({spec['key']}, {spec['approx_size']})")
+        print(f"  file: {spec['filename']}")
+    else:
+        print("Model: (skipped — runtime only; drop a .gguf into Model/ later)")
 
     if not args.skip_llama:
         fetch_llama(out, plat, force=args.force)
-    if not args.skip_model:
+    if not args.skip_model and model_key is not None:
         fetch_model(models, model_key, force=args.force)
 
     print()
@@ -448,13 +458,19 @@ def main(argv: list[str] | None = None) -> int:
     present = _list_models(models)
     if present:
         print(f"  assistant/models/  ({len(present)} GGUF file(s); others kept if present)")
+        fetched_name = spec["filename"] if spec else None
         for p in present:
             size_mib = p.stat().st_size / (1024 * 1024)
-            mark = "  [fetched]" if p.name == spec["filename"] else ""
+            mark = "  [fetched]" if fetched_name and p.name == fetched_name else ""
             print(f"    {p.name}  ({size_mib:.1f} MiB){mark}")
+    elif args.skip_model:
+        print("  assistant/models/  (empty — no GGUF downloaded)")
     print()
     print("Copy the whole assistant/ folder next to SamQL if this machine")
     print("is not the one that will run the app. Runtime needs no internet.")
+    print("Packaged lean/runtime installs also accept a .gguf in the")
+    print("install-root Model/ folder (next to _internal); SamQL prefers")
+    print("assistant/models/ when present, then Model/.")
     return 0
 
 

@@ -20,6 +20,15 @@
 #   pywin32  -- Windows auth / DPAPI helpers used with SQL Server + secrets
 #   msal     -- SharePoint sign-in (device code / interactive OAuth)
 #   requests + requests-negotiate-sspi -- Windows Integrated Auth for on-prem SP
+#
+# NOT pip-installable (fetched separately into assistant/runtime/):
+#   llama.cpp llama-server CPU build from ggml-org/llama.cpp GitHub releases.
+#   Default ``build.ps1`` / ``build.sh`` mode ``-AssistantPack runtime``
+#   calls ``tools/assistant_build_pack.py ensure --runtime-only``, which
+#   uses ``tools/fetch_assistant_pack.py --skip-model`` (same as
+#   ``.\Fetch-SamQL-Assistant.ps1 -SkipModel``) when the runtime is missing.
+#   GGUF weights are NOT bundled by default — recipients drop a .gguf into
+#   the install-root ``Model/`` folder (or ``assistant/models/``).
 duckdb>=0.9.0
 pyarrow
 pandas

@@ -52,8 +52,41 @@ Download a model later (pick one size; runtime is already present):
     python tools/fetch_assistant_pack.py --model 4b
     python tools/fetch_assistant_pack.py --model 7b
 
-Models land under assistant/models/. The llama-server runtime under
+  Runtime only (no GGUF; used by default AppWindow builds):
+    .\\Fetch-SamQL-Assistant.ps1 -SkipModel
+    python tools/fetch_assistant_pack.py --skip-model
+
+Repo-dev fetch writes under assistant/models/. Packaged installs that omit
+a GGUF also ship an empty Model/ folder next to _internal (and
+frontend_dist) -- drop a .gguf there. SamQL prefers assistant/models/
+when present, then Model/. The llama-server runtime under
 assistant/runtime/ is shared across model sizes.
+"""
+
+USER_MODEL_README = """Drop a GGUF model file here for the offline SQL assistant.
+
+This Model/ folder sits next to _internal and frontend_dist in the
+SamQL-AppWindow install. It is for builds that do not ship a bundled
+model (lean / runtime packs).
+
+Supported examples:
+  Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+  Phi-4-mini-instruct-Q3_K_M.gguf
+
+  1. Download an Instruct GGUF (4b / Phi-4-mini recommended), e.g. via
+     Fetch-SamQL-Assistant.ps1 -Model 4b on a machine with network, or
+     copy a Phi-4-mini Q3_K_M GGUF you already have.
+  2. Copy the .gguf into this Model/ folder (keep the filename).
+  3. Ensure assistant/runtime/llama-server is present (Assistant zip, or
+     copy assistant/ from a fetch). Lean zip needs the runtime first.
+
+SamQL looks for models in this order:
+  Settings preferred path (if set)
+  assistant/models/   (bundled / fetch default)
+  Model/              (this folder -- user drop-in)
+
+Repo-dev fetch still writes to assistant/models/; packaged lean users
+drop into Model/. Chat templates come from the GGUF (no Qwen-only flags).
 """
 
 PROMPT = """
@@ -182,10 +215,21 @@ def ensure_pack(
         return st
     if not fetch:
         need = "runtime + GGUF" if require_model else "runtime (llama-server)"
+        if require_model:
+            hint = (
+                "Run:  python tools/fetch_assistant_pack.py\n"
+                "  or: .\\Fetch-SamQL-Assistant.ps1\n"
+            )
+        else:
+            hint = (
+                "Run:  python tools/fetch_assistant_pack.py --skip-model\n"
+                "  or: .\\Fetch-SamQL-Assistant.ps1 -SkipModel\n"
+                "Offline builders: use -AssistantPack lean / "
+                "--assistant-pack lean instead.\n"
+            )
         raise SystemExit(
             f"assistant pack incomplete under assistant/ (need {need}).\n"
-            "Run:  python tools/fetch_assistant_pack.py\n"
-            "  or: .\\Fetch-SamQL-Assistant.ps1\n"
+            f"{hint}"
             f"Missing binary={st['binary']!r} model={st['model']!r}"
         )
     kind = "runtime + GGUF" if require_model else "runtime only (no GGUF)"
@@ -221,6 +265,25 @@ def _write_models_readme(models_dir: Path) -> None:
     readme.write_text(MODELS_README, encoding="utf-8")
 
 
+def ensure_user_model_drop_dir(onedir: Path) -> Path:
+    """Create install-root ``Model/`` next to ``_internal`` for user GGUFs.
+
+    Used by lean/runtime AppWindow packs that omit a bundled model. Always
+    safe to call when a GGUF is already staged -- the folder is an extra
+    drop-in location, not a replacement for assistant/models/.
+    """
+    onedir = Path(onedir)
+    model_dir = onedir / "Model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    readme = model_dir / "README.txt"
+    if not readme.is_file():
+        readme.write_text(USER_MODEL_README, encoding="utf-8")
+    keep = model_dir / ".gitkeep"
+    if not keep.is_file() and not any(model_dir.glob("*.gguf")):
+        keep.write_text("", encoding="utf-8")
+    return model_dir
+
+
 def stage_post_build(root: Path, *, include_models: bool = True) -> list[Path]:
     """Copy assistant/ beside dist outputs (modes runtime / post)."""
     src = root / "assistant"
@@ -252,6 +315,11 @@ def stage_post_build(root: Path, *, include_models: bool = True) -> list[Path]:
                     gguf.unlink()
             _write_models_readme(models_dest)
         written.append(dest)
+    # Runtime (no GGUF) and post packs: ensure Model/ beside _internal for
+    # user drop-ins. post still creates it so an extra GGUF can be added.
+    if onedir.is_dir():
+        ensure_user_model_drop_dir(onedir)
+        print(f"ensured user Model/ drop-in -> {onedir / 'Model'}")
     return written
 
 
@@ -328,6 +396,9 @@ def write_onedir_distribution_zips(
     onedir = onedir.resolve()
     if not onedir.is_dir():
         raise SystemExit(f"onedir missing: {onedir}")
+    # Lean and Assistant zips both include Model/ (user GGUF drop-in next
+    # to _internal / frontend_dist). Safe when a bundled GGUF is present.
+    ensure_user_model_drop_dir(onedir)
     written: list[Path] = []
     asst = onedir / "assistant"
     asst_aside: Path | None = None

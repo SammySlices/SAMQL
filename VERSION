@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-16.622
+Current build:   2026-07-16.623
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-16.623  (v2.16.4)
+
+ASSISTANT BOOT HEARTBEAT + PHI/MODEL DISCOVERY. AppWindow cold-start
+waits on /api/health heartbeats (idle + absolute budgets); health answers
+before Session() so splash cannot stall. Discover Phi-4-mini Q3_K_M and
+install-root Model/ drop-ins; DuckDB-first assistant prompts; portal and
+llama runtime build-pack wiring. Bump identity and refresh samql_txt
+full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-16.622  (v2.16.4)

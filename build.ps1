@@ -114,8 +114,13 @@ if ($AssistantMode -eq "embed" -or $AssistantMode -eq "post") {
   Write-Host "==> ensuring assistant runtime (llama-server only, no GGUF)…"
   & $py $asstTool ensure --root $Root --fetch --platform win-cpu --runtime-only
   if ($LASTEXITCODE -ne 0) {
-    Write-Error ("Assistant runtime is required for mode 'runtime' but could " +
-                 "not be prepared. Offline builders: use -AssistantPack lean.")
+    $asstErr = @(
+      "Assistant runtime is required for mode 'runtime' but could not be prepared.",
+      "  With network: .\\Fetch-SamQL-Assistant.ps1 -SkipModel",
+      "            or: python tools\\fetch_assistant_pack.py --skip-model",
+      "  Offline builders: .\\build.ps1 -AssistantPack lean"
+    ) -join "`n"
+    Write-Error $asstErr
     exit 1
   }
 }
@@ -459,6 +464,7 @@ if ($AssistantMode -eq "runtime") {
   Write-Host "==> assistant pack: lean mode (not staged). To add later:"
   Write-Host "    .\\Fetch-SamQL-Assistant.ps1 -Model 4b"
   Write-Host "    then copy .\\assistant next to dist\\SamQL-AppWindow\\"
+  Write-Host "    and/or drop a .gguf into dist\\SamQL-AppWindow\\Model\\"
 } else {
   Write-Host "==> assistant pack: embedded in PyInstaller payload (mode embed)"
 }
@@ -551,7 +557,8 @@ if ($UseOneDir) {
       if ($AssistantMode -eq "runtime") {
         Write-Host "    (llama-server + DLLs; no GGUF). To add a model:"
         Write-Host "      .\\Fetch-SamQL-Assistant.ps1 -Model 4b|7b"
-        Write-Host "      then copy assistant\\models\\*.gguf into the install's assistant\\models\\"
+        Write-Host "      then drop the .gguf into the install's Model\\ folder"
+        Write-Host "      (or copy into assistant\\models\\)"
       } elseif ($AssistantMode -eq "post") {
         Write-Host "    (llama-server + GGUF from post-build pack)"
       }

@@ -14,7 +14,7 @@ Behavior parity with the PowerShell launcher, v3:
     tkinter is unavailable) pumped through every wait
   * open Edge/Chrome as a chromeless app window (--app=)
   * hold the splash until a browser window titled "SamQL" exists
-    (ctypes EnumWindows -- a real check, not a sleep), 12 s cap
+    (ctypes EnumWindows -- a real check, not a sleep), APP_WINDOW_WAIT_S
   * failures show a red splash for ~6 s AND append to the launcher log
     in the samql temp root -- the same file Settings -> Error log reads
 
@@ -31,15 +31,22 @@ import threading
 import tempfile
 import time
 
-# .490: how long the launcher waits for the backend to bind its port before
-# giving up. .500: bumped 60 -> 120 s. On-box the ONEFILE exe was launched from
-# a OneDrive-synced, bank-managed folder, where the first-run _MEI unpack + AV
-# scan of a ~50 MB exe routinely takes longer than 60 s and the launcher gave up
-# with "server did not come up" even though the server was still coming up. The
-# real fix is to run the exe from a LOCAL (non-OneDrive) folder -- the failure
-# message says so -- but a longer wait keeps the common case working. One place,
-# so the wait and the failure message can never disagree.
-SERVER_BOOT_TIMEOUT_S = 120
+# Boot wait for a server WE spawned: idle timeout + absolute ceiling.
+# .490/.500/.623/.624: wall-clock alone was raised 60 -> 300 s for OneDrive/AV
+# cold starts, but a dead child still burned the whole budget, and a hung-but-
+# alive process had no separate guard. Heartbeat wait (.625):
+#   * child exit during wait -> fail immediately
+#   * process-alive + TCP/health/stage progress reset an idle timer
+#   * absolute ceiling still caps hung-but-alive (cannot sit forever)
+# One place for both knobs so wait logic and failure messages never disagree.
+SERVER_BOOT_TIMEOUT_S = 300          # absolute ceiling (hard max)
+SERVER_BOOT_IDLE_TIMEOUT_S = 90      # no heartbeat for this long -> fail
+
+# How long to poll for the visible app window title when branding the
+# browser --app fallback (and the native icon stamper). A miss only WARNs;
+# the window is still opened. First WebView2 / Edge cold start often exceeds
+# the old 12 s cap on managed boxes.
+APP_WINDOW_WAIT_S = 75.0
 
 # Match samql_core._brand.CHROME_BG -- kept local so the launcher stays
 # stdlib-only when run from source (no samql_core import on the hot path).
@@ -65,8 +72,13 @@ _AUMID_SET = []   # filled when SetCurrentProcessExplicitAppUserModelID succeeds
 _MUTEX_NAME = "Local\\SamQL.AppWindow"
 _MUTEX_HANDLE = []
 _MUTEX_WAIT_S = 10.0  # .537: grace for a booting first click's window
-_MUTEX_BOOT_WAIT_S = 90.0  # .544: matches the server's own boot budget
-_MUTEX_WINDOW_GRACE_S = 15.0  # .544: server up -> wait this for its window
+# Must track SERVER_BOOT_TIMEOUT_S -- a shorter mutex budget used to treat a
+# still-booting first click as stale and start a second server.
+_MUTEX_BOOT_WAIT_S = float(SERVER_BOOT_TIMEOUT_S)
+# .544/.623/.624: after the first launch's server answers, wait this long for
+# its window (WebView2 cold start) before opening a window of our own on that
+# server. Scaled with the 300 s boot budget (was 60 s at 180 s).
+_MUTEX_WINDOW_GRACE_S = 100.0
 # .546: the launcher supervises the server it started while the window is
 # open -- if the backend dies (a standby suspend/kill, a crash), the
 # supervisor respawns it so the window's Reconnect finds a live server
@@ -425,9 +437,10 @@ def _server_alive_now(port):
 def restart_server(port):
     """.546: bring the backend back in place. Reuses start_server's
     spawn (clean env, no-window, the same candidate ladder incl. the
-    bundled --serve self-spawn), then waits up to the boot budget for
-    /api/health. Returns True once the server answers. Safe to call from
-    the supervisor thread or an API-triggered path; never raises."""
+    bundled --serve self-spawn), then waits with the same heartbeat
+    boot semantics as cold start. Returns True once the server answers.
+    Safe to call from the supervisor thread or an API-triggered path;
+    never raises."""
     try:
         if _server_alive_now(port):
             return True
@@ -442,14 +455,11 @@ def restart_server(port):
         if not start_server(port, _NullSplash()):
             write_log("WARN restart_server: nothing to start")
             return False
-        deadline = time.time() + SERVER_BOOT_TIMEOUT_S
-        while time.time() < deadline:
-            if _server_alive_now(port):
-                write_log("INFO server is back up on port %d" % port)
-                return True
-            time.sleep(0.3)
-        write_log("WARN restart_server: server did not answer within "
-                  "%ds" % SERVER_BOOT_TIMEOUT_S)
+        err = wait_for_server_ready(port, _NullSplash())
+        if err is None:
+            write_log("INFO server is back up on port %d" % port)
+            return True
+        write_log("WARN restart_server: %s" % err)
         return False
     except Exception as e:
         write_log("WARN restart_server failed (%r)" % (e,))
@@ -977,7 +987,7 @@ def find_browser(prefer="auto", env=None):
     return None
 
 
-def wait_for_app_window(title_contains="SamQL", timeout_s=12.0,
+def wait_for_app_window(title_contains="SamQL", timeout_s=None,
                         splash=None, owned_by_pid=None,
                         exe_basenames=None):
     """Poll top-level VISIBLE windows for a title containing "SamQL"
@@ -985,12 +995,16 @@ def wait_for_app_window(title_contains="SamQL", timeout_s=12.0,
     sleep. Non-Windows (and any ctypes surprise) falls back to a short
     pump so the flow still completes.
 
+    ``timeout_s`` defaults to APP_WINDOW_WAIT_S (cold-start budget).
+
     Ownership filters (.550): branding used to stamp AppUserModelID on
     ANY title match -- a Teams/Explorer window whose title happened to
     contain "SamQL" then joined the SamQL-APP taskbar group. Pass
     ``owned_by_pid`` (native pywebview host) and/or ``exe_basenames``
     (browser --app fallback, e.g. msedge.exe) so foreign HWNDs are
     never returned for AUMID / icon stamping."""
+    if timeout_s is None:
+        timeout_s = APP_WINDOW_WAIT_S
     if os.name != "nt":
         (splash.pump(1.0) if splash else time.sleep(1.0))
         return False
@@ -1032,7 +1046,7 @@ def wait_for_app_window(title_contains="SamQL", timeout_s=12.0,
             found["hwnd"] = hwnd  # .461: hand the window back
             return False
 
-        deadline = time.time() + timeout_s
+        deadline = time.time() + float(timeout_s)
         while time.time() < deadline:
             found["hit"] = False
             user32.EnumWindows(proto(_cb), 0)
@@ -1824,16 +1838,129 @@ def _local_urlopen(url, data=None, timeout=3, method=None, headers=None):
     return opener.open(req, timeout=timeout)
 
 
-def _is_samql(port):
-    """True when the thing answering on the port identifies as SamQL."""
+def _fetch_health(port):
+    """Return /api/health JSON dict, or None on any failure."""
     try:
         import json as _j
         with _local_urlopen("http://127.0.0.1:%d/api/health" % port,
                             timeout=1.5) as r:
-            data = _j.loads(r.read().decode("utf-8", "replace") or "{}")
-        return (data.get("app") or "").lower() == "samql"
+            return _j.loads(r.read().decode("utf-8", "replace") or "{}")
     except Exception:
-        return False
+        return None
+
+
+def _is_samql(port):
+    """True when the thing answering on the port identifies as SamQL."""
+    data = _fetch_health(port)
+    return bool(data) and (data.get("app") or "").lower() == "samql"
+
+
+def wait_for_server_ready(port, splash=None):
+    """Wait until /api/health identifies as SamQL (open window then).
+
+    Heartbeat wait (not a single wall-clock to first health):
+      * fail immediately if the server child we spawned has exited
+      * process-still-alive and TCP / health-stage progress reset an
+        idle timer (SERVER_BOOT_IDLE_TIMEOUT_S)
+      * absolute ceiling SERVER_BOOT_TIMEOUT_S still applies so a
+        hung-but-alive child cannot sit forever
+    ``warming: true`` does not hold the splash -- once health answers
+    with app=SamQL we open (session warm continues in the background).
+    Optional health ``stage`` (from the server BootBar) is logged and
+    shown on the splash when present.
+
+    Returns None on success, or an error message string on failure.
+    """
+    if splash is None:
+        splash = _NullSplash()
+    t0 = time.time()
+    abs_deadline = t0 + float(SERVER_BOOT_TIMEOUT_S)
+    idle_s = float(SERVER_BOOT_IDLE_TIMEOUT_S)
+    last_beat = t0
+    last_log = 0.0
+    saw_tcp = False
+    last_stage = None
+    write_log(
+        "INFO waiting for /api/health on port %d "
+        "(idle %ds / absolute %ds)"
+        % (port, int(idle_s), int(SERVER_BOOT_TIMEOUT_S))
+    )
+    splash.set_text("Waiting for SamQL to be ready...")
+    while True:
+        now = time.time()
+        # 1) Child we spawned died -> fail immediately (do not burn budget).
+        proc = globals().get("_SERVER_PROC")
+        if proc is not None:
+            try:
+                rc = proc.poll()
+            except Exception:
+                rc = None
+            if rc is not None:
+                msg = ("The SamQL server process exited before it was "
+                       "ready (exit %s)." % rc)
+                write_log("ERROR %s" % msg)
+                return msg
+            # Process still alive counts as a heartbeat.
+            last_beat = now
+
+        # 2) Ready: health identifies as SamQL (even while warming).
+        if _server_alive_now(port):
+            write_log("INFO server ready on port %d after %.1fs"
+                      % (port, now - t0))
+            return None
+
+        # 3) Progress heartbeats: TCP bind, health stage text.
+        try:
+            tcp = port_open(port)
+        except Exception:
+            tcp = False
+        if tcp:
+            if not saw_tcp:
+                saw_tcp = True
+                write_log("INFO TCP bound on port %d (still waiting "
+                          "for /api/health)" % port)
+            last_beat = now
+            health = _fetch_health(port)
+            if isinstance(health, dict):
+                stage = (health.get("stage") or "").strip()
+                if stage and stage != last_stage:
+                    last_stage = stage
+                    last_beat = now
+                    write_log("INFO boot stage: %s" % stage)
+                    splash.set_text("Starting SamQL (%s)..." % stage)
+
+        # 4) Idle / absolute ceilings.
+        if (now - last_beat) >= idle_s:
+            msg = ("The SamQL server stopped making boot progress on "
+                   "port %d (no heartbeat for %d s)."
+                   % (port, int(idle_s)))
+            write_log("ERROR %s" % msg)
+            return msg
+        if now >= abs_deadline:
+            msg = ("The server did not come up on port %d within %d s "
+                   "(see the error log in Settings)."
+                   % (port, int(SERVER_BOOT_TIMEOUT_S)))
+            write_log("ERROR %s" % msg)
+            return msg
+
+        elapsed = now - t0
+        if elapsed - last_log >= 15.0:
+            write_log(
+                "INFO still waiting for /api/health on port %d "
+                "(%.0fs elapsed, idle %.0fs / abs %ds%s)"
+                % (port, elapsed, now - last_beat,
+                   int(SERVER_BOOT_TIMEOUT_S),
+                   (", stage=%s" % last_stage) if last_stage else "")
+            )
+            last_log = elapsed
+        # Pump the splash (tk message loop). _NullSplash.pump is a no-op,
+        # so always yield at least ~250 ms -- restart_server / supervisor
+        # must not busy-spin a core while waiting.
+        t_pump = time.time()
+        splash.pump(0.25)
+        remain = 0.25 - (time.time() - t_pump)
+        if remain > 0.01:
+            time.sleep(remain)
 
 
 def _log_webview_diag(webview):
@@ -2013,9 +2140,11 @@ def open_native_window(url, args, splash):
                 # .550: only our process -- never stamp Teams/Explorer/Edge
                 # just because the title contains "SamQL".
                 hwnd = wait_for_app_window(
-                    "SamQL", 15.0, None, owned_by_pid=os.getpid())
+                    "SamQL", APP_WINDOW_WAIT_S, None,
+                    owned_by_pid=os.getpid())
                 if not hwnd or hwnd is True:
-                    write_log("INFO native window not found to stamp its icon")
+                    write_log("INFO native window not found to stamp its icon "
+                              "(waited %.0fs)" % APP_WINDOW_WAIT_S)
                     return
                 # .517: name the stamp TARGET -- class + whether the hwnd
                 # belongs to THIS process. If the taskbar still shows Edge,
@@ -2266,32 +2395,24 @@ def main(argv=None):
             fail_visibly(splash, "Nothing to start: no SamQL exe or "
                          "python backend found beside the launcher.")
         we_started_server = True
-        # Wait for /api/health, not merely TCP bind. The server binds the
-        # port before it can accept (and before the session is warm), so
-        # opening the WebView on port_open alone navigates into a hang and
-        # looks like a white, frozen window on first launch.
-        deadline = time.time() + SERVER_BOOT_TIMEOUT_S
-        splash.set_text("Waiting for SamQL to be ready...")
-        while time.time() < deadline and not _server_alive_now(args.port):
-            splash.pump(0.25)
-        if not _server_alive_now(args.port):
-            msg = ("The server did not come up on port %d within %d s "
-                   "(see the error log in Settings)."
-                   % (args.port, SERVER_BOOT_TIMEOUT_S))
-            # .500: the ONEFILE exe unpacks to a temp dir and is AV-scanned on
-            # first run; from a OneDrive-synced, bank-managed folder that can
-            # blow past even a long timeout. If we can see we're launched from
-            # OneDrive, say so -- the fix is to run it from a LOCAL folder.
+        # Heartbeat wait for /api/health (not TCP alone, not a single
+        # wall-clock). Child exit fails immediately; process-alive +
+        # TCP/stage progress reset idle; absolute ceiling still applies.
+        # Open once health says SamQL (warming may still be true).
+        err = wait_for_server_ready(args.port, splash)
+        if err is not None:
+            # .500: OneDrive/AV note when the absolute ceiling is the cause.
             try:
                 _selfdir = _here()
-                if "onedrive" in (_selfdir or "").lower():
-                    msg += (" It looks like SamQL is running from a OneDrive "
+                if ("onedrive" in (_selfdir or "").lower()
+                        and "within" in (err or "")):
+                    err += (" It looks like SamQL is running from a OneDrive "
                             "folder, which makes first-run unpack/AV-scan very "
                             "slow -- copy the app to a LOCAL folder (e.g. "
                             "C:\\SamQL) and run it from there.")
             except Exception:
                 pass
-            fail_visibly(splash, msg)
+            fail_visibly(splash, err)
         # .544: our own boot succeeded -- take the previous sessions'
         # leftovers (dead-instance temp + hard-exit _MEI orphans) now.
         _ping_maintenance(args.port)
@@ -2352,11 +2473,11 @@ def main(argv=None):
     # already-running msedge/chrome process -- filter by browser image
     # name (same as the PS1 flow), never by "any SamQL title" (Teams).
     _bx_base = os.path.basename(bx).lower()
-    hwnd = wait_for_app_window("SamQL", 12.0, splash,
+    hwnd = wait_for_app_window("SamQL", APP_WINDOW_WAIT_S, splash,
                                exe_basenames=(_bx_base,))
     if not hwnd:
-        write_log("WARN app window title not seen within 12s "
-                  "(opened anyway)")
+        write_log("WARN app window title not seen within %.0fs "
+                  "(opened anyway)" % APP_WINDOW_WAIT_S)
     elif hwnd is not True:
         # .461: brand the window -- its own taskbar identity (so it
         # stops grouping under the browser), then the SamQL mark, and

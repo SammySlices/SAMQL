@@ -50,6 +50,7 @@ describe("assistantModelBadge", () => {
     expect(
       assistantModelBadge("qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"),
     ).toBe(" · 1.5B");
+    expect(assistantModelBadge("Phi-4-mini-instruct-Q3_K_M")).toMatch(/Phi-4-mini/i);
   });
 
   it("does not hardcode 1.5B when status has no model yet", () => {
@@ -89,11 +90,18 @@ describe("SqlAssistant", () => {
     render(<Harness />);
     fireEvent.click(screen.getByTestId("sql-assistant-fab"));
     expect(screen.getByTestId("sql-assistant-panel")).toBeTruthy();
+    // Portaled to document.body (not trapped in App flex stacking).
+    expect(screen.getByTestId("sql-assistant-panel").parentElement).toBe(
+      document.body,
+    );
     await waitFor(() => {
       expect(
         screen.getByText(/Copy an offline assistant pack/i),
       ).toBeTruthy();
     });
+    expect(
+      screen.getByText(/Prefer DuckDB functions/i),
+    ).toBeTruthy();
   });
 
   it("asks the API and offers Insert into IDE for returned SQL", async () => {

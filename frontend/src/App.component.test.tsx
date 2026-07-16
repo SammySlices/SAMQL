@@ -159,6 +159,39 @@ describe("App runtime behavior", () => {
     expect(screen.queryByRole("button", { name: "Insert into IDE" })).toBeNull();
   });
 
+  it("opens SQL assistant panel from the IDE toolbar (green = visible chat)", async () => {
+    apiMock.assistantStatus = vi.fn().mockResolvedValue({
+      available: false,
+      pack_ok: false,
+      hint: "Copy an offline assistant pack to ./assistant/",
+      duckdb_busy: false,
+    });
+    await renderFreshApp();
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute("data-ready", "true"),
+    );
+    const fab = screen.getByTestId("sql-assistant-fab");
+    expect(fab).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByTestId("sql-assistant-panel")).toBeNull();
+
+    fireEvent.click(fab);
+    await waitFor(() => {
+      expect(screen.getByTestId("sql-assistant-panel")).toBeTruthy();
+    });
+    expect(fab).toHaveAttribute("aria-pressed", "true");
+    expect(fab.className).toMatch(/primary/);
+    expect(
+      screen.getByText(/insert it into the IDE/i),
+    ).toBeTruthy();
+
+    // Second click closes — toolbar primary and panel stay in sync.
+    fireEvent.click(fab);
+    await waitFor(() => {
+      expect(screen.queryByTestId("sql-assistant-panel")).toBeNull();
+    });
+    expect(fab).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("recovers a stale saved active tab id to the first real editor tab", async () => {
     localStorage.setItem(
       "samql.session.v1",
