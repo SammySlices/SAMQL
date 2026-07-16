@@ -1,5 +1,5 @@
 import React from "react";
-import type { NbNode } from "../../lib/nodeFlowModel";
+import { canvasWorldSize, type NbNode } from "../../lib/nodeFlowModel";
 import { wirePath } from "../../lib/nodegraph";
 import {
   NodeMinimap,
@@ -66,6 +66,7 @@ export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
   renderedNodeCount,
   children,
 }: NodeFlowCanvasShellProps) {
+  const world = canvasWorldSize(nodes);
   return (
     <div className="nb2-canvas-col">
       <div
@@ -86,7 +87,10 @@ export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
         >
           <div
             className="nb2-canvas-scaler"
-            style={{ width: 3200 * zoom, height: 2000 * zoom }}
+            style={{ width: world.w * zoom, height: world.h * zoom }}
+            data-testid="nb2-canvas-scaler"
+            data-canvas-w={world.w}
+            data-canvas-h={world.h}
           >
             <div
               className={"nb2-canvas" + (snap ? " snap" : "")}
@@ -94,7 +98,12 @@ export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
               data-rendered-nodes={renderedNodeCount}
               data-virtualized={renderedNodeCount < nodes.length ? "true" : "false"}
               ref={contentRef as React.Ref<HTMLDivElement>}
-              style={{ transform: `scale(${zoom})`, transformOrigin: "0 0" }}
+              style={{
+                width: world.w,
+                height: world.h,
+                transform: `scale(${zoom})`,
+                transformOrigin: "0 0",
+              }}
             >
               <WireLayer
                 wires={wires}

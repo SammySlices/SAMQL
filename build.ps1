@@ -1,6 +1,11 @@
-# Build SamQL into a single distributable executable (Windows).
+# Build SamQL into a distributable AppWindow package (Windows).
 #
 # Requires: node + npm (to build the frontend) and Python 3 + pip.
+#
+# Primary product (default): dist\SamQL-AppWindow\ (onedir folder) + zip.
+# Double-click SamQL-AppWindow.exe inside the extracted folder. The old
+# console/browser-tab SamQL.exe is still produced as a sidecar server binary
+# inside that folder, but is NOT the promoted distribution artifact.
 #
 # Optional code signing (recommended for distribution -- bank IT often blocks
 # unsigned executables). Signing is OFF unless you pass a certificate:
@@ -17,15 +22,40 @@
 # The signature is SHA-256 and RFC-3161 timestamped (so it stays valid after
 # the certificate expires). With no certificate the build still completes and
 # leaves the .exe unsigned.
+#
+# Layout:
+#   .\build.ps1              # default: AppWindow onedir folder + zip(s)
+#   .\build.ps1 -OneFile     # opt-in: single self-extracting SamQL-AppWindow.exe
+#   .\build.ps1 -OneDir      # accepted for back-compat (onedir is already default)
+#
+# Onedir zips (after a successful AppWindow folder build):
+#   dist\SamQL-AppWindow.zip            — lean AppWindow (no assistant/)
+#   dist\SamQL-AppWindow-Assistant.zip  — same + SQL assistant runtime
+#                                         (llama.cpp llama-server; GGUF only
+#                                         when -AssistantPack post/embed pack
+#                                         already staged models). Written when
+#                                         assistant/ was staged into the folder.
+#
+# SQL assistant packaging (prompted interactively if omitted):
+#   .\build.ps1 -AssistantPack runtime # 2: llama-server runtime, no GGUF (default)
+#   .\build.ps1 -AssistantPack lean    # 1: SamQL only (no assistant/)
+#   .\build.ps1 -AssistantPack post    # 3: full assistant/ with GGUF (~+1GB+)
+#   .\build.ps1 -AssistantPack embed   # 4: bake full assistant into PyInstaller
+# Or set $env:SAMQL_ASSISTANT_PACK = lean|runtime|post|embed
+#
+# Recipients download a GGUF later:
+#   .\Fetch-SamQL-Assistant.ps1 -Model 4b|7b
 param(
   [string]$CertThumbprint,
   [string]$CertPath,
   [string]$CertPassword,
   [string]$TimestampUrl = "http://timestamp.digicert.com",
   [switch]$NoSign,
-  [switch]$OneDir  # .549: build SamQL-AppWindow as a FOLDER (dist\\SamQL-AppWindow\\)
-                   # + zip it for distribution -- no per-launch _MEI unpack,
-                   # no "failed to remove temp dir" dialog, faster start.
+  [switch]$OneDir,   # back-compat: onedir is now the default product layout
+  [switch]$OneFile,  # opt-in: self-extracting SamQL-AppWindow.exe (not recommended)
+  [ValidateSet("", "1", "2", "3", "4", "lean", "runtime", "runtime-only",
+               "post", "embed", "sidecar")]
+  [string]$AssistantPack = ""
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -40,6 +70,54 @@ try {
 } catch {
   Write-Error "Python not found. Install Python 3.10+ or set `$env:PYTHON."
   exit 1
+}
+
+# ---- SQL assistant packaging (1 lean / 2 runtime / 3 post / 4 embed) -----
+$asstTool = Join-Path $Root "tools\assistant_build_pack.py"
+if (-not (Test-Path -LiteralPath $asstTool)) {
+  Write-Error "Missing $asstTool"
+  exit 1
+}
+$resolveArgs = @($asstTool, "resolve")
+if ($AssistantPack) {
+  $resolveArgs += @("--mode", $AssistantPack, "--no-prompt")
+} elseif ($env:SAMQL_ASSISTANT_PACK) {
+  $resolveArgs += @("--mode", $env:SAMQL_ASSISTANT_PACK, "--no-prompt")
+}
+# When neither flag nor env is set, resolve prompts on a TTY (default runtime).
+$AssistantMode = (& $py @resolveArgs).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $AssistantMode) {
+  Write-Error "Failed to resolve SQL assistant packaging mode."
+  exit 1
+}
+$env:SAMQL_ASSISTANT_PACK = $AssistantMode
+if ($AssistantMode -eq "embed") {
+  $env:SAMQL_ASSISTANT_EMBED = "1"
+} else {
+  Remove-Item Env:\SAMQL_ASSISTANT_EMBED -ErrorAction SilentlyContinue
+}
+Write-Host "==> assistant pack mode: $AssistantMode"
+switch ($AssistantMode) {
+  "lean"    { Write-Host "    lean: SamQL only (no assistant/ staged)" }
+  "runtime" { Write-Host "    runtime: will stage llama-server + DLLs (no GGUF; fetch model later)" }
+  "post"    { Write-Host "    post: will stage full assistant/ next to dist/ (~+1 GB+)" }
+  "embed"   { Write-Host "    embed: will bake full assistant/ into the PyInstaller payload (~+1 GB+)" }
+}
+if ($AssistantMode -eq "embed" -or $AssistantMode -eq "post") {
+  Write-Host "==> ensuring assistant pack (runtime + GGUF)…"
+  & $py $asstTool ensure --root $Root --fetch --platform win-cpu
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error "Assistant pack is required for mode '$AssistantMode' but could not be prepared."
+    exit 1
+  }
+} elseif ($AssistantMode -eq "runtime") {
+  Write-Host "==> ensuring assistant runtime (llama-server only, no GGUF)…"
+  & $py $asstTool ensure --root $Root --fetch --platform win-cpu --runtime-only
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error ("Assistant runtime is required for mode 'runtime' but could " +
+                 "not be prepared. Offline builders: use -AssistantPack lean.")
+    exit 1
+  }
 }
 
 # .506 / splash: brand PNGs are binary drop-ins (not in SOURCE_MANIFEST).
@@ -288,11 +366,19 @@ Write-Host "==> 3/4  Packaging the executable"
 # root input and the generated backend copy -- the spec's unconditional rewrite
 # already defeats the stale-icon problem the old delete was working around.)
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
-if ($OneDir) {
+# Default product layout is AppWindow onedir (folder + zip). -OneFile opts
+# into the older self-extracting AppWindow.exe. -OneDir remains accepted.
+if ($OneFile -and $OneDir) {
+  Write-Error "Pass either -OneFile or -OneDir, not both."
+  exit 1
+}
+$UseOneDir = -not $OneFile
+if ($UseOneDir) {
   $env:SAMQL_ONEDIR = "1"
-  Write-Host "    ONEDIR mode: SamQL-AppWindow will be a folder (dist\\SamQL-AppWindow\\)"
+  Write-Host "    ONEDIR mode (default): SamQL-AppWindow will be a folder (dist\\SamQL-AppWindow\\)"
 } else {
   Remove-Item Env:\\SAMQL_ONEDIR -ErrorAction SilentlyContinue
+  Write-Host "    ONEFILE mode: SamQL-AppWindow.exe (self-extracting; not the recommended ship)"
 }
 & $py -m PyInstaller --clean --noconfirm backend/samql.spec
 
@@ -313,10 +399,10 @@ else {
   catch { Write-Host "    WARN could not write dist\SamQL.ico" }
 }
 
-# --- 4/4  Verify BOTH outputs, then optional code signing -----------------
-# SamQL.exe (console server) and SamQL-AppWindow.exe (windowed launcher)
-# are produced by the SAME spec from the SAME shared payload. Refuse a
-# half-build: if either target is missing, distribution is incomplete.
+# --- 4/4  Verify primary AppWindow output (+ server sidecar), then sign ----
+# Primary ship is SamQL-AppWindow (onedir folder by default). SamQL.exe is
+# still built from the shared payload as a console/server sidecar (copied
+# into the onedir folder) but is not the promoted browser-tab product.
 $serverExe = Join-Path $Root "dist\SamQL.exe"
 $appExeOnefile = Join-Path $Root "dist\SamQL-AppWindow.exe"
 $appExeOnedir = Join-Path $Root "dist\SamQL-AppWindow\SamQL-AppWindow.exe"
@@ -324,7 +410,7 @@ if (-not (Test-Path $serverExe)) {
   Write-Error "Build incomplete: dist\SamQL.exe is missing."
   exit 1
 }
-if ($OneDir) {
+if ($UseOneDir) {
   if (-not (Test-Path $appExeOnedir)) {
     Write-Error "Build incomplete: dist\SamQL-AppWindow\SamQL-AppWindow.exe is missing."
     exit 1
@@ -347,11 +433,34 @@ if (-not (Test-Path (Join-Path $feAdj "index.html"))) {
   exit 1
 }
 Write-Host "    OK: staged dist\frontend_dist (exe-adjacent UI)"
-if ($OneDir) {
+if ($UseOneDir) {
   $feOnedir = Join-Path $Root "dist\SamQL-AppWindow\frontend_dist"
   if (Test-Path $feOnedir) { Remove-Item -Recurse -Force $feOnedir }
   Copy-Item -Recurse -Force $feSrc $feOnedir
   Write-Host "    OK: staged dist\SamQL-AppWindow\frontend_dist"
+}
+
+# Stage assistant/ next to dist outputs (and inside the AppWindow onedir).
+if ($AssistantMode -eq "runtime") {
+  Write-Host "==> staging assistant runtime beside dist (no GGUF)…"
+  & $py $asstTool stage-post --root $Root --runtime-only
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to stage assistant/ runtime into dist/."
+    exit 1
+  }
+} elseif ($AssistantMode -eq "post") {
+  Write-Host "==> staging full assistant pack beside dist outputs…"
+  & $py $asstTool stage-post --root $Root
+  if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to stage assistant/ into dist/."
+    exit 1
+  }
+} elseif ($AssistantMode -eq "lean") {
+  Write-Host "==> assistant pack: lean mode (not staged). To add later:"
+  Write-Host "    .\\Fetch-SamQL-Assistant.ps1 -Model 4b"
+  Write-Host "    then copy .\\assistant next to dist\\SamQL-AppWindow\\"
+} else {
+  Write-Host "==> assistant pack: embedded in PyInstaller payload (mode embed)"
 }
 
 function Find-SignTool {
@@ -375,7 +484,7 @@ function Find-SignTool {
 # the AppWindow exe inside the folder; the later SamQL.exe folder copy
 # inherits the already-signed server binary.
 $signTargets = @($serverExe)
-if ($OneDir) { $signTargets += $appExeOnedir } else { $signTargets += $appExeOnefile }
+if ($UseOneDir) { $signTargets += $appExeOnedir } else { $signTargets += $appExeOnefile }
 
 if ($NoSign) {
   Write-Host "    Skipping code signing (-NoSign)."
@@ -409,7 +518,9 @@ else {
   }
 }
 
-if ($OneDir) {
+$LeanZip = $null
+$AssistantZip = $null
+if ($UseOneDir) {
   $folder = Join-Path $Root "dist\\SamQL-AppWindow"
   if (Test-Path $folder) {
     # ship the (already signed) server exe + shortcut icon INSIDE the folder
@@ -418,25 +529,55 @@ if ($OneDir) {
     if (Test-Path "$Root\\dist\\SamQL.ico") {
       Copy-Item "$Root\\dist\\SamQL.ico" $folder -Force
     }
-    $zip = Join-Path $Root "dist\\SamQL-AppWindow.zip"
-    Remove-Item $zip -ErrorAction SilentlyContinue
+    # Dual zip when assistant/ is staged: lean (no assistant/) + with SQL
+    # assistant runtime. Uses tar/ZIP64 (not Compress-Archive) for large packs.
     Write-Host "==> Zipping the onedir folder for distribution..."
-    Compress-Archive -Path $folder -DestinationPath $zip -Force
-    Write-Host "    wrote $zip"
+    & $py $asstTool zip-onedir --root $Root
+    if ($LASTEXITCODE -ne 0) {
+      Write-Error "Failed to write AppWindow distribution zip(s)."
+      exit 1
+    }
+    $LeanZip = Join-Path $Root "dist\\SamQL-AppWindow.zip"
+    $AssistantZip = Join-Path $Root "dist\\SamQL-AppWindow-Assistant.zip"
     Write-Host ""
-    Write-Host "DISTRIBUTE: send dist\\SamQL-AppWindow.zip. The recipient"
-    Write-Host "  EXTRACTS it (e.g. to C:\\SamQL) and runs SamQL-AppWindow.exe"
-    Write-Host "  from INSIDE the extracted folder. No Python/Node needed."
+    Write-Host "DISTRIBUTE: send a zip from dist\\. The recipient EXTRACTS it"
+    Write-Host "  (e.g. to C:\\SamQL) and runs SamQL-AppWindow.exe from INSIDE"
+    Write-Host "  the extracted folder. No Python/Node needed."
+    if (Test-Path $LeanZip) {
+      Write-Host "  Lean (no assistant/):          dist\\SamQL-AppWindow.zip"
+    }
+    if (Test-Path $AssistantZip) {
+      Write-Host "  With SQL assistant runtime:    dist\\SamQL-AppWindow-Assistant.zip"
+      if ($AssistantMode -eq "runtime") {
+        Write-Host "    (llama-server + DLLs; no GGUF). To add a model:"
+        Write-Host "      .\\Fetch-SamQL-Assistant.ps1 -Model 4b|7b"
+        Write-Host "      then copy assistant\\models\\*.gguf into the install's assistant\\models\\"
+      } elseif ($AssistantMode -eq "post") {
+        Write-Host "    (llama-server + GGUF from post-build pack)"
+      }
+    }
   }
 }
 Write-Host ""
 Write-Host "Done. Your build is in:  $Root\dist\"
-Write-Host "  SamQL.exe            -- console server (+ --window native UI)"
-if ($OneDir) {
-  Write-Host "  SamQL-AppWindow\     -- windowed launcher folder (same payload)"
-  Write-Host "Onedir: extract SamQL-AppWindow.zip and run the exe inside the folder."
+Write-Host "  Assistant packaging mode: $AssistantMode"
+Write-Host "  PRIMARY: SamQL-AppWindow  -- windowed AppWindow product (distribute this)"
+if ($UseOneDir) {
+  Write-Host "  SamQL-AppWindow\              -- onedir folder (default ship)"
+  if ($LeanZip -and (Test-Path $LeanZip)) {
+    Write-Host "  SamQL-AppWindow.zip           -- lean AppWindow (no assistant/)"
+  }
+  if ($AssistantZip -and (Test-Path $AssistantZip)) {
+    Write-Host "  SamQL-AppWindow-Assistant.zip -- AppWindow + SQL assistant runtime"
+  }
+  Write-Host "Onedir: extract a zip and run SamQL-AppWindow.exe inside the folder."
 } else {
-  Write-Host "  SamQL-AppWindow.exe  -- windowed launcher (same payload as SamQL.exe)"
-  Write-Host "Run either exe to launch; both ship the same frontend + load stack."
+  Write-Host "  SamQL-AppWindow.exe  -- onefile windowed launcher (-OneFile)"
+}
+Write-Host "  SamQL.exe            -- console/server sidecar (not the browser-tab product)"
+if ($AssistantMode -eq "runtime") {
+  Write-Host "  assistant\           -- llama-server runtime only (no GGUF; fetch model later)"
+} elseif ($AssistantMode -eq "post") {
+  Write-Host "  assistant\           -- offline SQL assistant pack (llama-server + GGUF)"
 }
 Get-ChildItem dist -ErrorAction SilentlyContinue

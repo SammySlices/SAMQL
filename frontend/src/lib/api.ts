@@ -5,6 +5,7 @@ import type {
   LoadedTable, FsListing, LoadProgress, JobSummary, ColumnFilter,
   ReconcileDrill, ActivityStatus, EngineResetResult,
   TaskCard, DiagnosticsList, DiagnosticRun,
+  AssistantStatus, AssistantChatResult,
 } from "./types";
 import { buildLoadForm } from "./loadForm";
 import type { ReconcileDetailRequest } from "./reconcileRequest";
@@ -123,6 +124,7 @@ const UNBOUNDED_ENDPOINTS = new Set<string>([
   "/api/load/sniff",
   "/api/directory/read",
   "/api/folder/read",
+  "/api/assistant/chat",
 ]);
 function isUnboundedPath(path: string): boolean {
   const p = path.split("?")[0];
@@ -265,6 +267,52 @@ export type LoadThresholdsInfo = {
   overrides?: Record<string, number>;
 };
 
+export type AssistantModelEntry = {
+  id: string;
+  path: string;
+  label: string;
+  exists?: boolean;
+};
+
+export type AssistantApiInfo = {
+  base_url?: string | null;
+  model?: string | null;
+  has_api_key?: boolean;
+  secrets_available?: boolean;
+  configured?: boolean;
+};
+
+export type AssistantApiProbe = {
+  ok: boolean;
+  probe?: string;
+  error?: string;
+  base_url?: string;
+  model?: string;
+  model_ids?: string[];
+  status_code?: number;
+  has_choices?: boolean;
+};
+
+export type AssistantModelsInfo = {
+  ok?: boolean;
+  mode?: "local" | "api";
+  models: AssistantModelEntry[];
+  selected_id: string | null;
+  use_default: boolean;
+  active_model?: string | null;
+  active_model_name?: string | null;
+  using_default?: boolean;
+  preferred_missing?: boolean;
+  default_model?: string | null;
+  pack_ok?: boolean;
+  pack_hint?: string | null;
+  server_url?: string | null;
+  api?: AssistantApiInfo;
+  api_probe?: AssistantApiProbe;
+  status?: AssistantStatus;
+  retarget?: { stopped?: boolean; reason?: string };
+};
+
 export interface FlowCacheInfo {
   ok?: boolean;
   error?: string;
@@ -342,6 +390,43 @@ export const api = {
   // "Resetting…" forever when the engine is bottlenecked. (abortInflight is a
   // standalone export, since it makes no /api call of its own.)
   status: () => jsonFetch<ActivityStatus>("/api/status", { timeoutMs: 8000 }),
+  // Optional SQL assistant (local llama.cpp pack and/or OpenAI-compatible
+  // API; DuckDB-idle gated).
+  assistantStatus: () =>
+    jsonFetch<AssistantStatus>("/api/assistant/status", { timeoutMs: 8000 }),
+  assistantChat: (question: string, dialect: string = "native") =>
+    jsonFetch<AssistantChatResult>("/api/assistant/chat", {
+      method: "POST",
+      body: JSON.stringify({ question, dialect }),
+    }),
+  assistantCancel: () =>
+    jsonFetch<{ ok: boolean }>("/api/assistant/cancel", {
+      method: "POST",
+      body: "{}",
+      timeoutMs: 8000,
+    }),
+  assistantModelsInfo: () =>
+    jsonFetch<AssistantModelsInfo>("/api/settings/assistant-models"),
+  assistantModelsConfigure: (opts: {
+    add?: { path: string; label?: string } | string;
+    remove_id?: string;
+    selected_id?: string | null;
+    use_default?: boolean;
+    clear?: boolean;
+    mode?: "local" | "api";
+    api?: {
+      base_url?: string;
+      model?: string;
+      api_key?: string;
+      clear_api_key?: boolean;
+    };
+    clear_api?: boolean;
+    test_api?: boolean;
+  }) =>
+    jsonFetch<AssistantModelsInfo>("/api/settings/assistant-models", {
+      method: "POST",
+      body: JSON.stringify(opts),
+    }),
   // The unified activity feed: every background task normalized into a card.
   // The tray polls this in place of the per-task progress modals.
   tasks: () => jsonFetch<{ tasks: TaskCard[] }>("/api/tasks", { timeoutMs: 8000 }),

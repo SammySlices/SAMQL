@@ -7,6 +7,7 @@ DESIGN_iterator_dynamic_nodes.md
 DISTRIBUTION.md
 Decode-SamQL-APHEX.ps1
 Expand-SamQL.ps1
+Fetch-SamQL-Assistant.ps1
 Pack-SamQL.ps1
 README.md
 RELEASE_CHECKLIST.md
@@ -17,6 +18,7 @@ Start-SamQL-AppWindow.ps1
 Test-SamQL-All.ps1
 VERSION
 WINDOWS_BUILD_CHECKLIST.txt
+assistant/README.txt
 backend/launcher_app.py
 backend/requirements.txt
 backend/samql.spec
@@ -24,6 +26,7 @@ backend/samql_core/__init__.py
 backend/samql_core/_brand.py
 backend/samql_core/apiload.py
 backend/samql_core/applyvars.py
+backend/samql_core/assistant.py
 backend/samql_core/connection_profiles.py
 backend/samql_core/diagnostics.py
 backend/samql_core/engines.py
@@ -84,6 +87,8 @@ frontend/src/components/AboutModal.tsx
 frontend/src/components/ActivityModal.tsx
 frontend/src/components/ActivityShared.engineReset.component.test.tsx
 frontend/src/components/ActivityShared.tsx
+frontend/src/components/AssistantModelsPanel.component.test.tsx
+frontend/src/components/AssistantModelsPanel.tsx
 frontend/src/components/ChartPanel.abort.component.test.tsx
 frontend/src/components/ChartPanel.tsx
 frontend/src/components/ChartView.tsx
@@ -130,6 +135,8 @@ frontend/src/components/ServerWatchdog.component.test.tsx
 frontend/src/components/ServerWatchdog.tsx
 frontend/src/components/Sidebar.tablesReorder.component.test.tsx
 frontend/src/components/Sidebar.tsx
+frontend/src/components/SqlAssistant.component.test.tsx
+frontend/src/components/SqlAssistant.tsx
 frontend/src/components/SqlEditor.longline.component.test.tsx
 frontend/src/components/SqlEditor.tsx
 frontend/src/components/StorageMemoryModal.tsx
@@ -182,6 +189,7 @@ frontend/src/components/nodeflow/useNodeFlowViewport.ts
 frontend/src/components/notebook/NoteNotebookCell.tsx
 frontend/src/components/notebook/NotebookCellShared.tsx
 frontend/src/components/notebook/NotebookCellTypes.ts
+frontend/src/components/notebook/NotebookSqlEditor.component.test.tsx
 frontend/src/components/notebook/ReconcileNotebookCell.tsx
 frontend/src/components/notebook/SqlNotebookCell.tsx
 frontend/src/components/notebook/VisualizationNotebookCell.tsx
@@ -225,6 +233,7 @@ frontend/src/lib/loadForm.ts
 frontend/src/lib/menuPos.ts
 frontend/src/lib/migrations.ts
 frontend/src/lib/namedProfiles.ts
+frontend/src/lib/nodeFlowCanvasExtent.component.test.ts
 frontend/src/lib/nodeFlowDense.component.test.ts
 frontend/src/lib/nodeFlowDenseApp.component.test.tsx
 frontend/src/lib/nodeFlowFavorites.component.test.ts
@@ -284,14 +293,19 @@ tests/suites/__init__.py
 tests/suites/backend.py
 tests/suites/frontend.py
 tests/suites/http_api.py
+tests/test_assistant.py
+tests/test_assistant_build_pack.py
+tests/test_fetch_assistant_pack.py
 tests/test_nodeflow_resources.py
 tests/test_optimizations_dual_engine.py
 tests/test_refactor_phase2.py
 tests/test_release_hardening.py
 tests/test_wave3_stabilization.py
 tools/aphex_transport.py
+tools/assistant_build_pack.py
 tools/bench_large_load.py
 tools/diag_load.py
+tools/fetch_assistant_pack.py
 tools/gen_nested_json_stall_sample.py
 tools/install_frontend_deps.py
 tools/normalize_npm_lock.py

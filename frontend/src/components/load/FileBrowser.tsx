@@ -13,7 +13,17 @@ export const FileBrowser: React.FC<{
   // save mode: navigate to a folder + type a filename, then confirm
   saveMode?: boolean;
   defaultFileName?: string;
-}> = ({ initialPath, onPick, onClose, pickFolder, saveMode, defaultFileName }) => {
+  /** When set (e.g. "gguf"), only files with that extension are pickable. */
+  acceptExt?: string;
+}> = ({
+  initialPath,
+  onPick,
+  onClose,
+  pickFolder,
+  saveMode,
+  defaultFileName,
+  acceptExt,
+}) => {
   const [listing, setListing] = useState<FsListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState(defaultFileName || "");
@@ -82,7 +92,15 @@ export const FileBrowser: React.FC<{
 
   return (
     <Modal
-      title={saveMode ? "Save to a folder" : pickFolder ? "Select a folder" : "Select a file"}
+      title={
+        saveMode
+          ? "Save to a folder"
+          : pickFolder
+            ? "Select a folder"
+            : acceptExt
+              ? `Select a .${acceptExt.replace(/^\./, "")} file`
+              : "Select a file"
+      }
       onClose={onClose}
       wide
       footer={
@@ -195,19 +213,32 @@ export const FileBrowser: React.FC<{
           </div>
         )}
         {!loading &&
-          listing?.entries.map((e) => (
+          listing?.entries.map((e) => {
+            const extOk =
+              !acceptExt ||
+              e.is_dir ||
+              e.name.toLowerCase().endsWith(
+                "." + acceptExt.replace(/^\./, "").toLowerCase(),
+              );
+            const fileDisabled =
+              !e.is_dir && (pickFolder || (!saveMode && !extOk));
+            return (
             <div
               key={e.path}
               className={
                 "fb-row" +
-                (e.is_dir ? " dir" : pickFolder ? " disabled" : "")
+                (e.is_dir ? " dir" : fileDisabled ? " disabled" : "")
               }
               onClick={() => {
                 if (e.is_dir) load(e.path);
-                else if (saveMode) setFileName(e.name);
-                else if (!pickFolder) onPick(e.path);
+                else if (saveMode && extOk) setFileName(e.name);
+                else if (!pickFolder && extOk) onPick(e.path);
               }}
-              title={e.path}
+              title={
+                !extOk && !e.is_dir
+                  ? `Only .${acceptExt?.replace(/^\./, "")} files can be selected`
+                  : e.path
+              }
             >
               {e.is_dir ? (
                 <Icon.Folder size={15} className="fb-ic dir" />
@@ -219,7 +250,8 @@ export const FileBrowser: React.FC<{
                 <span className="fb-size faint">{formatBytes(e.size)}</span>
               )}
             </div>
-          ))}
+            );
+          })}
         {!loading &&
           listing &&
           listing.entries.length === 0 &&
@@ -232,7 +264,9 @@ export const FileBrowser: React.FC<{
       <div className="hint">
         {pickFolder
           ? "Open the folder you want to export into, then click Use this folder."
-          : "Click a folder to open it; click a file to choose it."}
+          : acceptExt
+            ? `Click a folder to open it; click a .${acceptExt.replace(/^\./, "")} file to choose it.`
+            : "Click a folder to open it; click a file to choose it."}
       </div>
     </Modal>
   );

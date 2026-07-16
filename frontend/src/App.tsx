@@ -48,6 +48,10 @@ const Dashboard = lazy(() =>
 import { Modal } from "./components/Modal";
 import { ErrorLogModal } from "./components/ErrorLogModal";
 import { DiagnosticsModal } from "./components/DiagnosticsModal";
+import { SqlAssistant } from "./components/SqlAssistant";
+import {
+  AssistantModelsModal,
+} from "./components/AssistantModelsPanel";
 import {
   StorageMemoryModal,
   type StorageMemoryTab,
@@ -278,7 +282,6 @@ export default function App() {
     target,
     setTarget,
     readOnly,
-    setReadOnly,
     dialect,
     setDialect,
     setSql,
@@ -948,6 +951,18 @@ export default function App() {
   };
 
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [assistantModelsOpen, setAssistantModelsOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  /** false when opened from Journal (copy-only; no Insert / Open in tab). */
+  const [assistantAllowInsert, setAssistantAllowInsert] = useState(true);
+  const toggleAssistant = (allowInsert: boolean) => {
+    if (assistantOpen && assistantAllowInsert === allowInsert) {
+      setAssistantOpen(false);
+      return;
+    }
+    setAssistantAllowInsert(allowInsert);
+    setAssistantOpen(true);
+  };
   const [tableProps, setTableProps] = useState<
     { engine: string; name: string } | null
   >(null);
@@ -2752,6 +2767,16 @@ export default function App() {
                 <div className="sep" />
                 <div className="label">Tools</div>
                 <button
+                  data-testid="sql-assistant-settings-menu"
+                  title="Local GGUF models or OpenAI-compatible API for the SQL assistant"
+                  onClick={() => {
+                    setAssistantModelsOpen(true);
+                    setSettingsOpen(false);
+                  }}
+                >
+                  SQL assistant…
+                </button>
+                <button
                   disabled={tables.length < 2}
                   onClick={() => {
                     setReconcileInitial(undefined);
@@ -2947,6 +2972,8 @@ export default function App() {
               onWorkflowsChanged={refreshWorkflows}
               command={journalCmd}
               features={feats || null}
+              assistantOpen={assistantOpen && !assistantAllowInsert}
+              onAssistantToggle={() => toggleAssistant(false)}
             />
           </div>
           <FieldExplorer
@@ -3179,14 +3206,20 @@ export default function App() {
               <option value="native">Native SQL</option>
               <option value="spark">Spark SQL</option>
             </select>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={readOnly}
-                onChange={(e) => setReadOnly(e.target.checked)}
-              />
-              Read-only
-            </label>
+            <button
+              type="button"
+              className={
+                "btn sm" +
+                (assistantOpen && assistantAllowInsert ? " primary" : "")
+              }
+              data-testid="sql-assistant-fab"
+              title="SQL assistant"
+              aria-label="Open SQL assistant"
+              aria-pressed={assistantOpen && assistantAllowInsert}
+              onClick={() => toggleAssistant(true)}
+            >
+              <Icon.MessageCircle size={14} />
+            </button>
             <span className="spacer" />
             <button
               className="btn sm"
@@ -4147,6 +4180,12 @@ export default function App() {
 
       {confirmUi}
       {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
+      {assistantModelsOpen && (
+        <AssistantModelsModal
+          onClose={() => setAssistantModelsOpen(false)}
+          onToast={toast}
+        />
+      )}
       {createdNodesUi.modals}
       {dashboardUi.modals}
       {tableProps && (
@@ -4433,6 +4472,20 @@ export default function App() {
           </FloatingPanel>
         );
       })}
+
+      <SqlAssistant
+        dialect={dialect}
+        open={assistantOpen}
+        onOpenChange={setAssistantOpen}
+        allowInsert={assistantAllowInsert}
+        onToast={toast}
+        onInsertSql={insertText}
+        onLoadSql={(sql) => {
+          loadSqlIntoEditor(sql);
+          switchView("ide");
+        }}
+        onSwitchIde={() => switchView("ide")}
+      />
 
       {/* ---------- toasts ---------- */}
       {dropChip && (

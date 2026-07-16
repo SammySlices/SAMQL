@@ -1874,59 +1874,78 @@ def open_native_window(url, args, splash):
                                     background_color=CHROME_BG)
 
         def _set_native_icon(_w=win):
-            """.513/.517: runs inside the GUI loop. Setting the WinForms
-            Form.Icon is the REAL fix -- frame, taskbar and alt-tab all read
-            it -- where WM_SETICON stamping raced WebView2 repaints. .517
-            (on-box "native icon skipped (AttributeError)"): the start-func
-            fires before window.native exists, so WAIT for the shown event
-            and for .native to appear, then brand through the Form itself --
-            its Handle is the authoritative hwnd, so the AUMID + relaunch
-            icon land on the RIGHT window with no title search. Every
-            failure now logs the repr, not just the class."""
-            try:
-                ip = _bundled_asset("samql.ico")
-                if not ip:
-                    write_log("INFO native icon skipped (no bundled ico)")
-                    return
+            """.513/.517: schedule Form.Icon branding without blocking the
+            GUI thread. Setting the WinForms Form.Icon is the REAL fix --
+            frame, taskbar and alt-tab all read it -- where WM_SETICON
+            stamping raced WebView2 repaints. .517 (on-box "native icon
+            skipped (AttributeError)"): the start-func fires before
+            window.native exists, so WAIT for the shown event and for
+            .native to appear, then brand through the Form itself -- its
+            Handle is the authoritative hwnd, so the AUMID + relaunch
+            icon land on the RIGHT window with no title search.
+
+            Critical: this callback runs on the pywebview GUI thread.
+            Waiting / sleeping here deadlocks the message pump (shown
+            cannot fire while we block) and Windows marks the window
+            Not Responding ~5s after open -- reproduced with and without
+            a bundled GGUF. Do the wait on a daemon thread; return here
+            immediately so first paint stays responsive."""
+            def _brand_form_icon():
                 try:
-                    ev = getattr(getattr(_w, "events", None), "shown", None)
-                    if ev is not None:
-                        ev.wait(10)
-                except Exception:
-                    pass
-                native = None
-                for _ in range(50):                    # up to ~10s
-                    native = getattr(_w, "native", None)
-                    if native is not None:
-                        break
-                    time.sleep(0.2)
-                if native is None:
-                    write_log("INFO native icon skipped (window.native "
-                              "never appeared); stamper will cover")
-                    return
-                import clr  # noqa: F401  (pythonnet, bundled)
-                from System.Drawing import Icon as _Icon  # type: ignore
-                native.Icon = _Icon(ip)
-                try:
-                    native.ShowIcon = True
-                except Exception:
-                    pass
-                hwnd = None
-                try:
-                    hwnd = int(str(native.Handle))
-                except Exception:
-                    hwnd = None
-                if hwnd:
-                    # brand the KNOWN hwnd too -- taskbar identity + pinned
-                    # relaunch icon, no wait_for_app_window guesswork
-                    set_app_user_model_id(hwnd)
-                    apply_app_icon(hwnd, ip)
-                    set_relaunch_icon(hwnd, ip)
-                write_log("INFO native WinForms icon set (hwnd=%s)"
-                          % (hwnd or "?"))
-            except Exception as _e:
-                write_log("INFO native icon skipped (%r); stamper will cover"
-                          % (_e,))
+                    ip = _bundled_asset("samql.ico")
+                    if not ip:
+                        write_log("INFO native icon skipped (no bundled ico)")
+                        return
+                    try:
+                        ev = getattr(getattr(_w, "events", None), "shown", None)
+                        if ev is not None:
+                            ev.wait(10)
+                    except Exception:
+                        pass
+                    native = None
+                    for _ in range(50):                    # up to ~10s
+                        native = getattr(_w, "native", None)
+                        if native is not None:
+                            break
+                        time.sleep(0.2)
+                    if native is None:
+                        write_log("INFO native icon skipped (window.native "
+                                  "never appeared); stamper will cover")
+                        return
+
+                    def _apply():
+                        import clr  # noqa: F401  (pythonnet, bundled)
+                        from System.Drawing import Icon as _Icon  # type: ignore
+                        native.Icon = _Icon(ip)
+                        try:
+                            native.ShowIcon = True
+                        except Exception:
+                            pass
+                        hwnd = None
+                        try:
+                            hwnd = int(str(native.Handle))
+                        except Exception:
+                            hwnd = None
+                        if hwnd:
+                            # brand the KNOWN hwnd too -- taskbar identity +
+                            # pinned relaunch icon, no title-search guesswork
+                            set_app_user_model_id(hwnd)
+                            apply_app_icon(hwnd, ip)
+                            set_relaunch_icon(hwnd, ip)
+                        write_log("INFO native WinForms icon set (hwnd=%s)"
+                                  % (hwnd or "?"))
+
+                    # Prefer marshaling onto the WinForms UI thread.
+                    try:
+                        from System import Action  # type: ignore
+                        native.BeginInvoke(Action(_apply))
+                    except Exception:
+                        _apply()
+                except Exception as _e:
+                    write_log("INFO native icon skipped (%r); stamper will cover"
+                              % (_e,))
+            threading.Thread(target=_brand_form_icon, daemon=True,
+                             name="samql-native-icon").start()
         write_log("INFO opening a native pywebview window (%dx%d)" % (w, h))
         # Close the splash on THIS (main) thread, BEFORE the blocking GUI loop:
         # tkinter is not thread-safe and webview.start() never returns to us

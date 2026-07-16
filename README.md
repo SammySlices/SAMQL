@@ -286,10 +286,19 @@ compatible and migrate automatically to the new format and keys.
 
 Either script builds the frontend, installs the full optional dependency
 manifest into the packaging Python, hard-verifies the load stack, and runs
-PyInstaller. The result lands in `dist/` — both `SamQL.exe` (console server)
-and `SamQL-AppWindow.exe` (windowed launcher) on Windows, built from the
-**same shared payload** (frontend, DuckDB/openpyxl stack, icon, native-window
-packages). The build refuses to finish if either target is missing.
+PyInstaller. The **primary product** is **SamQL-AppWindow** as an onedir
+folder (`dist/SamQL-AppWindow/`). On Windows the build writes two handoff
+zips when the SQL assistant was staged: `SamQL-AppWindow.zip` (lean) and
+`SamQL-AppWindow-Assistant.zip` (AppWindow + llama.cpp runtime). A console
+`SamQL.exe` server sidecar is still built from the same shared payload but
+is **not** the promoted browser-tab distribution artifact. See
+[DISTRIBUTION.md](DISTRIBUTION.md).
+
+Default SQL assistant packaging is **runtime-only** (llama.cpp
+`llama-server` + DLLs under `assistant/runtime/`, **no GGUF**). Recipients
+download a model later with `.\Fetch-SamQL-Assistant.ps1 -Model 4b|7b`.
+Use `-AssistantPack lean` for offline/CI builds that must not fetch the
+runtime, or `post` / `embed` to ship a full pack with a GGUF.
 
 To build manually:
 
@@ -297,20 +306,20 @@ To build manually:
 cd frontend && npm install && npm run build && cd ..
 pip install -r requirements-optional.txt
 pip install pyinstaller
-pyinstaller backend/samql.spec
-# -> dist/SamQL (the server+UI) AND dist/SamQL-AppWindow
-#    (the console-less app-window launcher; both from one command)
+# AppWindow onedir (matches build.ps1 / build.sh default):
+SAMQL_ONEDIR=1 pyinstaller backend/samql.spec
+# -> dist/SamQL-AppWindow/  (primary) and dist/SamQL (server sidecar)
 ```
 
 Whatever optional libraries are installed in your Python environment at
-build time get bundled automatically into **both** exes, so install those
+build time get bundled automatically into **both** targets, so install those
 first if you want DuckDB, Parquet, xlsx export, etc. baked in.
 
 ### Code signing (Windows, optional)
 
 Unsigned executables are frequently blocked by corporate IT (SmartScreen /
-AppLocker), so for distribution you'll usually want to sign **both**
-`SamQL.exe` and `SamQL-AppWindow.exe`. `build.ps1` has an opt-in signing
+AppLocker), so for distribution you'll usually want to sign the AppWindow
+exe (and the server sidecar). `build.ps1` has an opt-in signing
 step — off by default, so a plain `.\build.ps1` still produces unsigned
 binaries:
 

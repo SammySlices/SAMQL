@@ -506,6 +506,12 @@ export const CHART_BODY_H = 168;
 export const DASH_BODY_H = 360;
 export const SQL_BODY_H = 96; // default height of the read-only query body on a sql node
 export const SQL_W = 300; // default width of a sql node (wider than NODE_W to show a line)
+/** Soft ceiling for resized SQL/Python node bodies (was 820 — clipped long queries). */
+export const SQL_BODY_H_MAX = 8000;
+/** Minimum NodeFlow canvas world size; grows when nodes sit past the edge. */
+export const CANVAS_MIN_W = 3200;
+export const CANVAS_MIN_H = 2000;
+export const CANVAS_PAD = 240;
 export const HEAD_H = 30;
 export const PORT_TOP = 46;
 export const PORT_GAP = 24;
@@ -626,14 +632,33 @@ export function nodeHeight(n: NbNode) {
   const leftIns = p.inputs.filter((port) => !isTopInput(n.type, port));
   const rows = Math.max(leftIns.length, p.outputs.length, 1);
   const base = portTop + rows * portGap + densify(8);
-  const bodyH = (def: number) =>
+  const bodyH = (def: number, maxH = 820) =>
     typeof n.config.bodyH === "number"
-      ? Math.max(110, Math.min(820, densify(n.config.bodyH)))
+      ? Math.max(110, Math.min(maxH, densify(n.config.bodyH)))
       : densify(def);
   if (n.type === "chart" && nodeShowsBody(n)) return base + bodyH(CHART_BODY_H);
   if (n.type === "dashboard" && nodeShowsBody(n))
     return base + bodyH(DASH_BODY_H);
-  if (n.type === "sql" || n.type === "python") return base + bodyH(SQL_BODY_H);
+  if (n.type === "sql" || n.type === "python") {
+    // Prefer explicit resize; otherwise grow with query/code lines so the
+    // canvas preview is not stuck at ~96px (looks "cut off").
+    if (typeof n.config.bodyH === "number") {
+      return base + bodyH(SQL_BODY_H, densify(SQL_BODY_H_MAX));
+    }
+    const src =
+      n.type === "sql"
+        ? String(n.config.sql || "")
+        : String(n.config.code || "");
+    const lines = src.split("\n").reduce(
+      (acc, ln) => acc + Math.max(1, Math.ceil(ln.length / 42)),
+      0,
+    );
+    const auto = Math.max(
+      densify(SQL_BODY_H),
+      Math.min(densify(SQL_BODY_H_MAX), densify(24 + lines * 16)),
+    );
+    return base + auto;
+  }
   if (n.type === "group" || n.type === "iterator") {
     const k = ((n.config && n.config.children) || []).length;
     return Math.max(
@@ -643,6 +668,20 @@ export function nodeHeight(n: NbNode) {
   }
   return base;
 }
+
+/** Canvas world size: at least CANVAS_MIN_*, grows so nodes are never clipped. */
+export function canvasWorldSize(nodes: NbNode[]): { w: number; h: number } {
+  let maxX = CANVAS_MIN_W;
+  let maxY = CANVAS_MIN_H;
+  for (const n of nodes) {
+    const x = Number(n.x) || 0;
+    const y = Number(n.y) || 0;
+    maxX = Math.max(maxX, x + nodeWidth(n) + CANVAS_PAD);
+    maxY = Math.max(maxY, y + nodeHeight(n) + CANVAS_PAD);
+  }
+  return { w: Math.ceil(maxX), h: Math.ceil(maxY) };
+}
+
 // How many input ports a node actually shows. Most nodes show their whole
 // static port list. A group shows only as many inputs as it needs: every
 // connected input plus one spare to wire next, capped at the five it supports

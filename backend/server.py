@@ -3201,6 +3201,68 @@ class Api:
             raise ApiError(400, "pos must be an integer.")
         return s.statement_at_cursor(_sql, _pos)
 
+    # ---- Local SQL assistant (optional llama.cpp pack) -------------
+    @staticmethod
+    def assistant_models_settings(s, m, body, ctx):
+        # Registered GGUF library + API endpoint + active selection
+        # (ConfigStore / SecretStore). Assistant only — does not touch
+        # load/join/flatten.
+        if m == "GET" or body is None:
+            return s.assistant_models_info()
+        b = body or {}
+        try:
+            return s.configure_assistant_models(
+                add=b.get("add"),
+                remove_id=b.get("remove_id"),
+                selected_id=b.get("selected_id") if "selected_id" in b else None,
+                use_default=bool(b.get("use_default")),
+                clear=bool(b.get("clear")),
+                # Explicit key (even null) means update selection; omit = leave as-is.
+                update_selected=True if "selected_id" in b else (
+                    True if b.get("use_default") else False
+                ),
+                mode=b.get("mode") if "mode" in b else None,
+                api=b.get("api") if isinstance(b.get("api"), dict) else None,
+                clear_api=bool(b.get("clear_api")),
+                test_api=bool(b.get("test_api")),
+            )
+        except ValueError as e:
+            raise ApiError(400, str(e))
+
+    @staticmethod
+    def assistant_status(s, m, body, ctx):
+        from samql_core import assistant as _asst
+        # Keep preferred path / API runtime aligned with Settings.
+        try:
+            s._sync_assistant_preferred()
+        except Exception:
+            pass
+        try:
+            s._sync_assistant_api()
+        except Exception:
+            pass
+        return _asst.status(s)
+
+    @staticmethod
+    def assistant_chat(s, m, body, ctx):
+        # English → DuckDB/SparkSQL via local llama-server or configured
+        # OpenAI-compatible API. Refuses while DuckDB is busy; never mutates
+        # load/join/flatten state.
+        from samql_core import assistant as _asst
+        b = body or {}
+        question = b.get("question", "")
+        if not isinstance(question, str):
+            raise ApiError(400, "question must be a string.")
+        dialect = b.get("dialect", "native")
+        if not isinstance(dialect, str):
+            dialect = "native"
+        return _asst.chat(s, question, dialect=dialect)
+
+    @staticmethod
+    def assistant_cancel(s, m, body, ctx):
+        from samql_core import assistant as _asst
+        return _asst.cancel()
+
     # ---- history / saved -------------------------------------------
     @staticmethod
     def history_get(s, m, body, ctx):
@@ -4176,6 +4238,11 @@ ROUTES = [
     ("POST", r"^/api/run-tests$", Api.run_tests),
     ("POST", r"^/api/sql/format$", Api.sql_format),
     ("POST", r"^/api/sql/statement-at$", Api.sql_statement_at),
+    ("GET", r"^/api/assistant/status$", Api.assistant_status),
+    ("POST", r"^/api/assistant/chat$", Api.assistant_chat),
+    ("POST", r"^/api/assistant/cancel$", Api.assistant_cancel),
+    ("GET", r"^/api/settings/assistant-models$", Api.assistant_models_settings),
+    ("POST", r"^/api/settings/assistant-models$", Api.assistant_models_settings),
     ("GET", r"^/api/history$", Api.history_get),
     ("DELETE", r"^/api/history$", Api.history_clear),
     ("GET", r"^/api/errors$", Api.errors_get),
@@ -5377,44 +5444,59 @@ def main(argv=None):
 
                 def _set_srv_icon(_w=_win):
                     """.519: mirror of the launcher's icon landing -- wait
-                    for shown + .native, set Form.Icon/ShowIcon."""
-                    try:
-                        ip = _srv_ico()
-                        if not ip:
-                            return
+                    for shown + .native, set Form.Icon/ShowIcon.
+
+                    Must not block the pywebview GUI thread: waiting here
+                    deadlocks the message pump and surfaces as Not
+                    Responding on first open (same fix as launcher_app)."""
+                    def _brand_form_icon():
                         try:
-                            ev = getattr(getattr(_w, "events", None),
-                                         "shown", None)
-                            if ev is not None:
-                                ev.wait(10)
-                        except Exception:
-                            pass
-                        native = None
-                        for _ in range(50):
-                            native = getattr(_w, "native", None)
-                            if native is not None:
-                                break
-                            time.sleep(0.2)
-                        if native is None:
-                            return
-                        import clr  # noqa: F401
-                        from System.Drawing import Icon as _I  # type: ignore
-                        native.Icon = _I(ip)
-                        try:
-                            native.ShowIcon = True
-                        except Exception:
-                            pass
-                        try:
-                            _hwnd = int(str(native.Handle))
-                            if _srv_set_window_aumid(_hwnd):
-                                print("  native window AppUserModelID set.",
-                                      flush=True)
-                        except Exception:
-                            pass
-                        print("  native window icon set.", flush=True)
-                    except Exception as _ie:
-                        print("  native window icon skipped (%r)." % (_ie,),
-                              flush=True)
+                            ip = _srv_ico()
+                            if not ip:
+                                return
+                            try:
+                                ev = getattr(getattr(_w, "events", None),
+                                             "shown", None)
+                                if ev is not None:
+                                    ev.wait(10)
+                            except Exception:
+                                pass
+                            native = None
+                            for _ in range(50):
+                                native = getattr(_w, "native", None)
+                                if native is not None:
+                                    break
+                                time.sleep(0.2)
+                            if native is None:
+                                return
+
+                            def _apply():
+                                import clr  # noqa: F401
+                                from System.Drawing import Icon as _I  # type: ignore
+                                native.Icon = _I(ip)
+                                try:
+                                    native.ShowIcon = True
+                                except Exception:
+                                    pass
+                                try:
+                                    _hwnd = int(str(native.Handle))
+                                    if _srv_set_window_aumid(_hwnd):
+                                        print("  native window AppUserModelID "
+                                              "set.", flush=True)
+                                except Exception:
+                                    pass
+                                print("  native window icon set.", flush=True)
+
+                            try:
+                                from System import Action  # type: ignore
+                                native.BeginInvoke(Action(_apply))
+                            except Exception:
+                                _apply()
+                        except Exception as _ie:
+                            print("  native window icon skipped (%r)."
+                                  % (_ie,), flush=True)
+                    threading.Thread(target=_brand_form_icon, daemon=True,
+                                     name="samql-srv-native-icon").start()
                 # Blocks until the window closes. .490: private_mode=False + a
                 # stable storage_path persist localStorage/cookies across runs.
                 # .508: AUTO-DETECT FIRST (the .499 on-box log shows the

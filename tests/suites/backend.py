@@ -8692,13 +8692,12 @@ def backend_tests(datadir, csv_path, json_path):
 
     
     def t_onedir_packaging_549():
-        # .549: onedir packaging for the AppWindow (SAMQL_ONEDIR=1). A
-        # FOLDER (exe + pre-extracted _internal/) instead of a
-        # self-extracting exe -> no per-launch _MEI extraction, so the
-        # "failed to remove temporary directory" bootloader dialog is
-        # impossible, startup skips the re-unpack, and the runtime layout
-        # is stable. Onefile stays the default; the server exe is
-        # unchanged. Recipients need neither Python nor Node.
+        # .549 / AppWindow-primary: onedir packaging for the AppWindow
+        # (SAMQL_ONEDIR=1) is the DEFAULT ship. A FOLDER (exe + pre-extracted
+        # _internal/) instead of a self-extracting exe -> no per-launch _MEI
+        # extraction. Onefile remains available via -OneFile / --onefile.
+        # The SamQL.exe server sidecar is still built; it is not the promoted
+        # browser-tab product. Recipients need neither Python nor Node.
         spec = open(os.path.join(BACKEND, "samql.spec"),
                     encoding="utf-8").read()
         need('SAMQL_ONEDIR = os.environ.get("SAMQL_ONEDIR"' in spec,
@@ -8709,7 +8708,7 @@ def backend_tests(datadir, csv_path, json_path):
              "onedir builds an EXE(exclude_binaries)+COLLECT folder")
         need("else:" in spec.split("if SAMQL_ONEDIR:")[1]
              and spec.count('name="SamQL-AppWindow"') >= 2,
-             "onefile remains the default path")
+             "onefile remains an available path")
         # the server exe (single) is untouched by the flag
         need(spec.index('name="SamQL"') < spec.index("if SAMQL_ONEDIR:"),
              "the single-exe server target is unchanged")
@@ -8752,16 +8751,24 @@ def backend_tests(datadir, csv_path, json_path):
              "the server writes the keep-marker only under a temp root "
              "(onefile), never in onedir")
 
-        # build.ps1: -OneDir switch, sets the env flag, zips the folder
+        # build.ps1: onedir is default ($UseOneDir); -OneFile opts out;
+        # still sets the env flag and zips the folder (lean + assistant)
         b = open(_root_script("build.ps1"),
                  encoding="utf-8").read()
-        need("[switch]$OneDir" in b
+        need("[switch]$OneFile" in b
+             and "$UseOneDir = -not $OneFile" in b
              and '$env:SAMQL_ONEDIR = "1"' in b
-             and "Compress-Archive" in b
-             and "SamQL-AppWindow.zip" in b,
-             "build.ps1 gains -OneDir: env flag + folder zip")
+             and "zip-onedir" in b
+             and "SamQL-AppWindow.zip" in b
+             and "SamQL-AppWindow-Assistant.zip" in b,
+             "build.ps1 defaults to onedir; dual zip via zip-onedir")
         need("EXTRACTS it" in b or "extract" in b.lower(),
              "build.ps1 prints distribution guidance")
+        need("AssistantPack runtime" in b
+             or "runtime: will stage llama-server" in b,
+             "build.ps1 documents runtime-only assistant packaging")
+        need("Compress-Archive" not in b,
+             "build.ps1 must not use Compress-Archive (large-archive failures)")
 
         # the distribution doc exists and answers the dependency question
         dp = os.path.join(ROOT, "DISTRIBUTION.md")
@@ -8771,6 +8778,13 @@ def backend_tests(datadir, csv_path, json_path):
              and "_internal" in d
              and "Extract" in d,
              "the guide states no runtime deps + how to run the folder")
+        need("runtime without model" in d.lower()
+             or "No multi-GB GGUF" in d
+             or "runtime-only" in d.lower(),
+             "the guide documents runtime-without-model assistant shipping")
+        need("SamQL-AppWindow-Assistant.zip" in d
+             and "SamQL-AppWindow.zip" in d,
+             "the guide documents lean + assistant distribution zips")
 
     
     def t_explorer_window_match_548():
@@ -11588,6 +11602,13 @@ def backend_tests(datadir, csv_path, json_path):
         need('native = getattr(_w, "native", None)' in la
              and "time.sleep(0.2)" in la,
              "it polls for window.native instead of assuming it")
+        # Must not wait/sleep on the pywebview GUI thread (Not Responding).
+        need('name="samql-native-icon"' in la
+             and "BeginInvoke" in la
+             and la.index("def _set_native_icon")
+             < la.index("ev.wait(10)")
+             < la.index('name="samql-native-icon"'),
+             "shown/native wait runs on a daemon thread, not the GUI callback")
         need('hwnd = int(str(native.Handle))' in la
              and la.index("native.Icon = _Icon(ip)")
              < la.index('hwnd = int(str(native.Handle))'),
@@ -17618,7 +17639,10 @@ def backend_tests(datadir, csv_path, json_path):
              "browser) before the Edge --app fallback",
              ps.index("SamQL-AppWindow.exe") < ps.index("--app=$url")
              and "find_spec('webview')" in ps
-             and 'Start-Process -FilePath $nativeExe' in ps),
+             and 'Start-Process -FilePath $nativeExe' in ps
+             and r'dist\SamQL-AppWindow\SamQL-AppWindow.exe' in ps
+             and ps.index(r'dist\SamQL-AppWindow\SamQL-AppWindow.exe')
+             < ps.index(r'dist\SamQL-AppWindow.exe')),
             ("chromeless app mode with a size option",
              '--app=$url' in ps and "--window-size=" in ps),
             ("reuses a live server; starts one only when needed",

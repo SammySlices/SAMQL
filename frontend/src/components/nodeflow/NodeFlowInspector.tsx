@@ -6353,7 +6353,13 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   <label className="nb2-lbl">Query</label>
                   <textarea
                     className="nb2-in nb2-sql-area"
-                    rows={9}
+                    rows={Math.max(
+                      6,
+                      Math.min(
+                        80,
+                        String(sel.config.sql || "").split("\n").length + 1,
+                      ),
+                    )}
                     spellCheck={false}
                     value={sel.config.sql || ""}
                     placeholder={"SELECT *\nFROM input\nWHERE ..."}
@@ -6395,7 +6401,13 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   <label className="nb2-lbl">Python script</label>
                   <textarea
                     className="nb2-in nb2-sql-area"
-                    rows={12}
+                    rows={Math.max(
+                      8,
+                      Math.min(
+                        80,
+                        String(sel.config.code || "").split("\n").length + 1,
+                      ),
+                    )}
                     spellCheck={false}
                     value={sel.config.code || ""}
                     placeholder={
