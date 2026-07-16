@@ -841,6 +841,67 @@ def _json_tree_new():
             "elem": None, "max_items": 0}
 
 
+def _json_elem_has_shape(el):
+    """True when an array element node has discoverable keys/types.
+
+    Empty arrays, ``[null]``, and ``[{}]`` leave the element node without a
+    useful shape — those must not render as a dead-end ``(element)`` leaf."""
+    if not el:
+        return False
+    kind = el.get("kind")
+    if kind == "object":
+        return bool(el.get("children"))
+    if kind == "array":
+        return True
+    if kind == "scalar":
+        return bool(set(el.get("types") or ()) - {"null"})
+    return False
+
+
+def _json_shape_has_hollow_array(node):
+    """True when any nested array still lacks element field names/types.
+
+    Live-cell field discovery samples a prefix of rows; files often front-load
+    empty nested arrays. Callers keep reading more sample batches while this
+    is True so keys that appear later still surface under ``(element)``."""
+    if not node:
+        return False
+    kind = node.get("kind")
+    if kind == "array":
+        el = node.get("elem")
+        if not _json_elem_has_shape(el):
+            return True
+        return _json_shape_has_hollow_array(el)
+    if kind == "object":
+        for ch in (node.get("children") or {}).values():
+            if _json_shape_has_hollow_array(ch):
+                return True
+        return False
+    return False
+
+
+def _json_shape_has_resolved_array(node):
+    """True when at least one nested array already has element keys/types.
+
+    Used with hollow-array re-sampling: once some arrays have a real shape,
+    remaining empty optional siblings (``tags: []``) must not force scanning
+    to the discovery max — only a fully unresolved hollow prefix should."""
+    if not node:
+        return False
+    kind = node.get("kind")
+    if kind == "array":
+        el = node.get("elem")
+        if _json_elem_has_shape(el):
+            return True
+        return _json_shape_has_resolved_array(el)
+    if kind == "object":
+        for ch in (node.get("children") or {}).values():
+            if _json_shape_has_resolved_array(ch):
+                return True
+        return False
+    return False
+
+
 def _json_tree_merge(node, val, depth):
     """Merge one Python value into a shape tree (mutates ``node``)."""
     if depth > JSON_TREE_MAX_DEPTH:
@@ -997,7 +1058,10 @@ def _field_tree_from_root(root, colname="json", access_style="json",
                          "double_encoded": bool(nd.get("double_encoded"))})
             # Same as flatten_type_tree: scalar-array phones/tags don't get a
             # dead-end "(element)" leaf — the parent type already names it.
-            if nd["elem"] and not scalar_elem:
+            # Also skip empty / null / {} element shapes (array of value with
+            # a lone useless "(element)" placeholder).
+            if (nd["elem"] and not scalar_elem
+                    and _json_elem_has_shape(nd["elem"])):
                 walk("(element)", nd["elem"], depth + 1, None, True)
         else:
             rows.append({"depth": depth, "name": name,

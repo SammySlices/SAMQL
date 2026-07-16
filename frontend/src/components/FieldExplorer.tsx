@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useWinDrag } from "./ActivityShared";
 import { api, copyText } from "../lib/api";
 import type { RootIdChoice } from "../lib/api";
@@ -201,6 +201,14 @@ export const FieldExplorer: React.FC<Props> = ({
   const [validatedFirstSql, setValidatedFirstSql] = useState<string | null>(null);
   const [validatedAllSql, setValidatedAllSql] = useState<string | null>(null);
   const src = sources.find((s) => s.key === srcKey) || null;
+  // Avoid stale closures when a slow tableFields response arrives after the
+  // user already switched sources (or tables refreshed under the same key).
+  const srcKeyRef = useRef(srcKey);
+  srcKeyRef.current = srcKey;
+  // Monotonic fetch id so an older in-flight tableFields cannot overwrite a
+  // newer result (same srcKey) — that looked like nested keys "reverting"
+  // to a hollow JSON/(element) placeholder.
+  const fieldsFetchGen = useRef(0);
 
   const primaryColumn = (row: FieldRow | null | undefined) =>
     row?.column || row?.name || "";
@@ -217,6 +225,7 @@ export const FieldExplorer: React.FC<Props> = ({
   };
 
   const reloadFields = (engine: string, table: string, key: string) => {
+    const gen = ++fieldsFetchGen.current;
     setBusy(true);
     setSelIdx(null);
     setSelIdxs([]);
@@ -231,14 +240,17 @@ export const FieldExplorer: React.FC<Props> = ({
     api
       .tableFields(engine, table)
       .then((r) => {
-        if (key !== srcKey) return;
+        if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
         setFields((r.fields || []) as FieldRow[]);
       })
       .catch(() => {
-        if (key === srcKey) setFields([]);
+        if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
+        setFields([]);
       })
       .finally(() => {
-        if (key === srcKey) setBusy(false);
+        if (gen === fieldsFetchGen.current && key === srcKeyRef.current) {
+          setBusy(false);
+        }
       });
   };
   const initPos = {
@@ -295,7 +307,7 @@ export const FieldExplorer: React.FC<Props> = ({
         field_path: row.path || row.name,
       })
       .then((r) => {
-        if (forKey !== srcKey || idx !== selIdx) return;
+        if (forKey !== srcKeyRef.current || idx !== selIdx) return;
         if (r.ok && r.access) {
           setValidatedAccess(r.access);
           setValidatedFirstSql(r.sql || null);
@@ -318,12 +330,12 @@ export const FieldExplorer: React.FC<Props> = ({
         }
       })
       .catch((e) => {
-        if (forKey !== srcKey || idx !== selIdx) return;
+        if (forKey !== srcKeyRef.current || idx !== selIdx) return;
         setPreviewErr(String(e?.message || e || "Preview failed"));
         setValidatedAccess(fields[idx]?.access || null);
       })
       .finally(() => {
-        if (forKey === srcKey && idx === selIdx) setPreviewBusy(false);
+        if (forKey === srcKeyRef.current && idx === selIdx) setPreviewBusy(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selIdx, srcKey]);

@@ -20151,6 +20151,143 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_field_tree_skips_empty_array_prefix_rows():
+        # Intermittent Field Explorer bug: early rows with empty nested arrays
+        # (contacts: []) made live-cell sampling emit a dead-end "(element)"
+        # and hide real keys that only appear later in the table. Discovery
+        # must keep sampling past the hollow prefix (still discovery-only).
+        from samql_core.diagnostics import (json_values_to_field_tree,
+                                            _json_shape_has_hollow_array,
+                                            _json_tree_new, _json_tree_merge,
+                                            _coerce_json_sample)
+
+        hollow = {"lei": "x", "name": "y", "contacts": []}
+        full = {"lei": "x", "name": "y", "contacts": [
+            {"role": "trader", "email": "t@x.com", "phones": ["1"]},
+        ]}
+        ft_h = json_values_to_field_tree([hollow], colname="counterparty")
+        hnames = [n["name"] for n in ft_h.get("nodes") or []]
+        need("contacts" in hnames,
+             "empty contacts still listed as an array: %r" % hnames)
+        need("role" not in hnames,
+             "empty array has no element keys yet: %r" % hnames)
+        # No dead-end "(element)" placeholder for a shape-less array.
+        need("(element)" not in hnames,
+             "hollow array must not emit dead-end (element): %r" % hnames)
+
+        root = _json_tree_new()
+        _json_tree_merge(root, _coerce_json_sample(hollow), 0)
+        need(_json_shape_has_hollow_array(root),
+             "empty nested array is detected as hollow for re-sample")
+        _json_tree_merge(root, _coerce_json_sample(full), 0)
+        need(not _json_shape_has_hollow_array(root),
+             "populated contacts clears hollow flag")
+
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+
+        rows = []
+        for i in range(100):
+            rows.append({
+                "tradeId": "T-%d" % i,
+                "counterparty": {
+                    "lei": "LEI", "name": "EmptyCo", "contacts": [],
+                },
+            })
+        rows.append({
+            "tradeId": "T-FULL",
+            "counterparty": {
+                "lei": "LEI-FULL", "name": "FullCo",
+                "contacts": [
+                    {"role": "trader", "email": "t@x.com", "phones": ["1"]},
+                ],
+            },
+        })
+        path = os.path.join(tempfile.mkdtemp(prefix="samql_ft_hollow_"),
+                            "empty_prefix.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rows, fh)
+        s = _fresh_session()
+        try:
+            loaded = s.load_file(path, destination="duckdb",
+                                 flatten=False, shred=False)
+            need(isinstance(loaded, list) and loaded,
+                 "flatten-off load produced a table")
+            name = loaded[0]["name"]
+            # Single-pass LIMIT 80 would only see empty contacts.
+            need(Session._FIELD_TREE_SAMPLE_ROWS < 100,
+                 "test assumes default sample batch < empty prefix")
+            tree = s.column_field_tree("duckdb", name, "counterparty")
+            tnames = [f["name"] for f in tree.get("fields") or []]
+            need(tree.get("source") == "sampled-values",
+                 "uses live-cell sampling: %r" % tree.get("source"))
+            need(tnames != ["lei", "name", "contacts", "(element)"],
+                 "must not stop at dead-end (element): %r" % tnames)
+            for key in ("role", "email", "phones"):
+                need(key in tnames,
+                     "keys after empty-array prefix listed %r: %r"
+                     % (key, tnames))
+            # Unified Field Explorer tree must show them too.
+            ft = s.table_field_tree("duckdb", name)
+            fnames = [f["name"] for f in (ft.get("fields") or [])]
+            need("role" in fnames and "email" in fnames,
+                 "table_field_tree lists contacts element keys: %r"
+                 % fnames[:40])
+
+            # Keys past the sequential MAX budget: mid/end window probes must
+            # still find them (empty prefix longer than SAMPLE_MAX_ROWS).
+            long_rows = []
+            empty_n = int(Session._FIELD_TREE_SAMPLE_MAX_ROWS) + 50
+            for i in range(empty_n):
+                long_rows.append({
+                    "tradeId": "L-%d" % i,
+                    "counterparty": {
+                        "lei": "LEI", "name": "EmptyCo", "contacts": [],
+                    },
+                })
+            long_rows.append({
+                "tradeId": "L-FULL",
+                "counterparty": {
+                    "lei": "LEI-FULL", "name": "FullCo",
+                    "contacts": [
+                        {"role": "ops", "email": "o@x.com", "phones": ["9"]},
+                    ],
+                },
+            })
+            long_path = os.path.join(os.path.dirname(path),
+                                     "empty_prefix_long.json")
+            with open(long_path, "w", encoding="utf-8") as fh:
+                json.dump(long_rows, fh)
+            loaded2 = s.load_file(long_path, destination="duckdb",
+                                  flatten=False, shred=False)
+            need(isinstance(loaded2, list) and loaded2,
+                 "long empty-prefix load produced a table")
+            name2 = loaded2[0]["name"]
+            tree2 = s.column_field_tree("duckdb", name2, "counterparty")
+            tnames2 = [f["name"] for f in tree2.get("fields") or []]
+            need("role" in tnames2 and "email" in tnames2,
+                 "mid/end probes find keys past SAMPLE_MAX: %r" % tnames2)
+
+            # Optional empty sibling must not force max scan once contacts
+            # already has element keys (resolved-array early exit).
+            from samql_core.diagnostics import _json_shape_has_resolved_array
+            mixed = {
+                "contacts": [{"role": "t"}],
+                "tags": [],
+            }
+            root_m = _json_tree_new()
+            _json_tree_merge(root_m, _coerce_json_sample(mixed), 0)
+            need(_json_shape_has_hollow_array(root_m),
+                 "empty tags still counts as hollow")
+            need(_json_shape_has_resolved_array(root_m),
+                 "populated contacts counts as resolved")
+        finally:
+            s.shutdown()
+            try:
+                shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+            except Exception:
+                pass
+
     def t_field_explorer_recipes_execute():
         # Field Explorer copies access.first / access.sel + unnests into SQL.
         # Those recipes must actually run against flatten-off opaque JSON,
@@ -37157,6 +37294,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_json_field_tree_deep_nested_and_heterogeneous),
         ("CashFlows.receivingLeg[].fixingdate field discovery",
          t_cashflows_receiving_leg_field_tree),
+        ("Field tree: skip empty nested-array prefix rows",
+         t_field_tree_skips_empty_array_prefix_rows),
         ("Field Explorer recipes execute on flatten-off JSON / JSON[] / STRUCT+JSON",
          t_field_explorer_recipes_execute),
         ("Opaque JSON shred + nested-list flatten retain compound-key children",

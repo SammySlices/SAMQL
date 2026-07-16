@@ -214,12 +214,18 @@ const TablesTree: React.FC<
     table: string,
     col: string,
   ) => {
-    if (colFields[key] || colFieldsBusy.has(key)) return;
+    if (colFieldsBusy.has(key)) return;
+    // Successful results are cached (including empty). Failed fetches must
+    // not cache — a expand during/just-after load used to stick on
+    // "no nested fields" forever.
+    if (Object.prototype.hasOwnProperty.call(colFields, key)) return;
     setColFieldsBusy((p) => new Set(p).add(key));
     api
       .columnFields(engine, table, col)
       .then((r) => setColFields((p) => ({ ...p, [key]: r.fields || [] })))
-      .catch(() => setColFields((p) => ({ ...p, [key]: [] })))
+      .catch(() => {
+        /* leave unset so a later expand retries */
+      })
       .finally(() =>
         setColFieldsBusy((p) => {
           const n = new Set(p);
@@ -466,6 +472,13 @@ const TablesTree: React.FC<
     prevNamesRef.current = now;
     if (!prev) return; // first paint: nothing is "new"
     const added = new Set([...now].filter((k) => !prev.has(k)));
+    const removed = [...prev].filter((k) => !now.has(k));
+    // Drop cached nested-field trees when the catalog changes so a hollow
+    // sample taken mid-load / pre-refresh cannot stick after tables update.
+    if (added.size || removed.length) {
+      setColFields({});
+      setColFieldsBusy(new Set());
+    }
     if (!added.size) return;
     setFreshNames(added);
     if (freshTimer.current != null)
