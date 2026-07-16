@@ -13,7 +13,20 @@ type ToastFn = (
 
 type StorageReport = Awaited<ReturnType<typeof api.storageReport>>;
 
-export type StorageMemoryTab = "storage" | "cache" | "loads";
+export type StorageMemoryTab = "storage" | "cache" | "loads" | "jsonflatten";
+
+/** JSON load / flatten controls surfaced on the "JSON & flatten" sub-tab. */
+const JSON_FLATTEN_FIELDS = [
+  "json_max_depth",
+  "flatten_max_depth",
+  "json_object_mb",
+  "json_stream_flatten_mb",
+] as const;
+
+const JSON_FLATTEN_HINT =
+  "How deeply nested JSON is expanded on load. Depth controls apply to the " +
+  "next load without a restart. Defaults are unchanged — lower to save " +
+  "memory on wide/deep files, raise for more columns.";
 
 const gb = (n: number) =>
   n >= 1e9 ? (n / 1e9).toFixed(2) + " GB" : Math.round(n / 1e6) + " MB";
@@ -43,7 +56,7 @@ export const StorageMemoryModal: React.FC<{
     <Modal
       title="Storage & memory"
       onClose={onClose}
-      wide={tab === "cache" || tab === "loads"}
+      wide={tab === "cache" || tab === "loads" || tab === "jsonflatten"}
       testId="storage-memory-modal"
     >
       <div
@@ -81,6 +94,17 @@ export const StorageMemoryModal: React.FC<{
         <button
           type="button"
           role="tab"
+          aria-selected={tab === "jsonflatten"}
+          data-testid="json-flatten-tab"
+          className={"btn sm" + (tab === "jsonflatten" ? " primary" : " ghost")}
+          onClick={() => setTab("jsonflatten")}
+          title="JSON load depth, flatten nesting depth, and JSON parser limits"
+        >
+          JSON &amp; flatten
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={tab === "cache"}
           data-testid="flow-cache-tab"
           className={"btn sm" + (tab === "cache" ? " primary" : " ghost")}
@@ -95,6 +119,15 @@ export const StorageMemoryModal: React.FC<{
         <FlowCachePanel embedded onToast={onToast} />
       ) : tab === "loads" ? (
         <LoadThresholdsPanel onToast={onToast} />
+      ) : tab === "jsonflatten" ? (
+        <LoadThresholdsPanel
+          onToast={onToast}
+          fieldKeys={JSON_FLATTEN_FIELDS}
+          hint={JSON_FLATTEN_HINT}
+          panelTestId="json-flatten-panel"
+          applyTestId="json-flatten-apply"
+          resetTestId="json-flatten-reset"
+        />
       ) : busy || !report ? (
         <div className="faint">
           <span className="spin" /> measuring…

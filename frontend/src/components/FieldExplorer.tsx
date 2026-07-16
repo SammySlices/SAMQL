@@ -274,6 +274,16 @@ export const FieldExplorer: React.FC<Props> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey]);
 
+  // Clear stale fields if the selected source disappears without srcKey
+  // changing (e.g. its table was removed/renamed on a tables refresh), so
+  // the "no table selected" state never leaves the previous list on screen.
+  useEffect(() => {
+    if (!src) {
+      setFields(null);
+      setShredInfo(null);
+    }
+  }, [src]);
+
   // Validate Field Explorer SQL when a field is selected (primary → alt → rewrite).
   useEffect(() => {
     if (!src || selIdx == null || !fields || !fields[selIdx]) {
@@ -649,7 +659,11 @@ export const FieldExplorer: React.FC<Props> = ({
             ))}
           </select>
           <div className="fx-tree">
-            {busy ? (
+            {!src ? (
+              <div className="faint" style={{ padding: 8 }} data-testid="fx-no-table">
+                Pick a table above.
+              </div>
+            ) : busy ? (
               <div className="faint" style={{ padding: 8 }}>
                 <span className="spin" /> loading fields…
               </div>

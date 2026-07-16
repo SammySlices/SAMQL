@@ -40,6 +40,7 @@ function makeSceneProps(
     nodes,
     edges: [],
     running: false,
+    runningNodeIds: new Set(),
     wrapRef: { current: null },
     contentRef: { current: null },
     onScroll: vi.fn(),

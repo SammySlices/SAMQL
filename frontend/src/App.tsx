@@ -3771,6 +3771,13 @@ export default function App() {
                           : null
                       }
                       onToast={toast}
+                      onExpired={() =>
+                        toast(
+                          "warn",
+                          "Result expired",
+                          "Re-run the query to pivot it again.",
+                        )
+                      }
                       onPopOut={() => floatView(activeResultTab.id, "pivot")}
                     />
                   )
@@ -4449,6 +4456,13 @@ export default function App() {
                   : null
               }
               onToast={toast}
+              onExpired={() =>
+                toast(
+                  "warn",
+                  "Result expired",
+                  "Re-run the query to pivot it again.",
+                )
+              }
             />
           );
         else body = renderGridForRes(f.resId);

@@ -21,6 +21,7 @@ export const WireLayer = React.memo(function WireLayer({
   onDelete,
   dying,
   dyingEdges,
+  runningNodeIds = null,
 }: {
   wires: Wire[];
   selectedId: string | null;
@@ -30,6 +31,8 @@ export const WireLayer = React.memo(function WireLayer({
   dying?: Set<string>;
   /** Edge ids currently playing the connector-delete retract animation. */
   dyingEdges?: Set<string>;
+  /** Null means per-node state is unavailable, so CSS may use the global fallback. */
+  runningNodeIds?: Set<string> | null;
 }) {
   return (
     <svg className="nb2-wires">
@@ -38,6 +41,7 @@ export const WireLayer = React.memo(function WireLayer({
         const retracting =
           !!dyingEdges?.has(w.id) ||
           !!(dying && (dying.has(w.fromN) || dying.has(w.toN)));
+        const glowing = runningNodeIds == null || runningNodeIds.has(w.toN);
         const mx = (w.ax + w.bx) / 2;
         const my = (w.ay + w.by) / 2;
         return (
@@ -59,6 +63,11 @@ export const WireLayer = React.memo(function WireLayer({
             />
             <path
               className="nb2-wire-line"
+              d={wirePath(w.ax, w.ay, w.bx, w.by)}
+              pathLength={1}
+            />
+            <path
+              className={"nb2-wire-glow" + (glowing ? " active" : "")}
               d={wirePath(w.ax, w.ay, w.bx, w.by)}
               pathLength={1}
             />

@@ -59,6 +59,38 @@ describe("selectFields search + sort", () => {
   });
 });
 
+describe("reconcileSelectFields case-insensitive matching", () => {
+  it("preserves keep/rename/type on a case-only upstream rename (Name -> name)", () => {
+    const current: SelField[] = [
+      { name: "Name", keep: false, rename: "label", type: "text" },
+      { name: "amount", keep: true },
+    ];
+    // upstream renamed "Name" -> "name" (case only); the backend Select
+    // matches names case-insensitively, so the user's field must survive.
+    const next = reconcileSelectFields(["name", "amount"], current);
+    expect(next).toEqual(current);
+    // no reset: keep/rename/type kept, and no duplicate "name" appended
+    expect(next.map((f) => f.name)).toEqual(["Name", "amount"]);
+    expect(next[0].keep).toBe(false);
+    expect(next[0].rename).toBe("label");
+    expect(next[0].type).toBe("text");
+  });
+
+  it("still appends genuinely-new columns and drops removed ones", () => {
+    const current: SelField[] = [
+      { name: "Region", keep: true, rename: "geo" },
+      { name: "gone", keep: true },
+    ];
+    const next = reconcileSelectFields(["region", "extra"], current);
+    // "Region" matches "region" case-insensitively (kept, settings intact);
+    // "gone" dropped; "extra" appended new.
+    expect(next).toEqual([
+      { name: "Region", keep: true, rename: "geo" },
+      { name: "extra", keep: true },
+    ]);
+  });
+});
+
 describe("select fields follow upstream Input table changes", () => {
   it("lists only Selects wired on in", () => {
     expect(

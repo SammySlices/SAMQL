@@ -97,12 +97,15 @@ export function useNodeFlowExecutionController({
   const [preview, setPreview] = useState<NodeFlowPreview | null>(null);
   const [previewHeight, setPreviewHeight] = useState(300);
   const [running, setRunning] = useState(false);
+  const [runningNodeIds, setRunningNodeIds] = useState<Set<string>>(new Set());
   const [runId, setRunId] = useState<string | null>(null);
   const runDepth = useRef(0);
   const cancelRequested = useRef(false);
   const activeRunIds = useRef<Set<string>>(new Set());
   const runIdRef = useRef<string | null>(null);
   const runScopesRef = useRef<Map<string, number>>(new Map());
+  const runNodeIdsRef = useRef<Map<string, Set<string>>>(new Map());
+  const runningNodeCountsRef = useRef<Map<string, number>>(new Map());
   const scopeVersionRef = useRef(0);
   const previousTabRef = useRef(activeTabId);
   const mountedRef = useRef(true);
@@ -128,6 +131,41 @@ export function useNodeFlowExecutionController({
 
   const isRunCurrent = (id: string) =>
     mountedRef.current && runScopesRef.current.get(id) === scopeVersionRef.current;
+
+  const publishRunningNodes = () => {
+    setRunningNodeIds(new Set(runningNodeCountsRef.current.keys()));
+  };
+
+  const markRunNodes = (runId: string, nodeIds: Iterable<string | null | undefined>) => {
+    const ids = new Set([...nodeIds].filter((id): id is string => !!id));
+    if (!ids.size) return;
+    runNodeIdsRef.current.set(runId, ids);
+    for (const nodeId of ids) {
+      runningNodeCountsRef.current.set(
+        nodeId,
+        (runningNodeCountsRef.current.get(nodeId) || 0) + 1,
+      );
+    }
+    publishRunningNodes();
+  };
+
+  const clearRunNodes = (runId: string) => {
+    const ids = runNodeIdsRef.current.get(runId);
+    if (!ids) return;
+    runNodeIdsRef.current.delete(runId);
+    for (const nodeId of ids) {
+      const next = (runningNodeCountsRef.current.get(nodeId) || 1) - 1;
+      if (next > 0) runningNodeCountsRef.current.set(nodeId, next);
+      else runningNodeCountsRef.current.delete(nodeId);
+    }
+    publishRunningNodes();
+  };
+
+  const clearAllRunningNodes = (publish = true) => {
+    runNodeIdsRef.current.clear();
+    runningNodeCountsRef.current.clear();
+    if (publish) publishRunningNodes();
+  };
 
   const abortAuxRequests = () => {
     for (const owner of auxRequestsRef.current.values()) {
@@ -207,6 +245,7 @@ export function useNodeFlowExecutionController({
     abortAuxRequests();
     activeRunIds.current.clear();
     runScopesRef.current.clear();
+    clearAllRunningNodes(updateUi);
     runDepth.current = 0;
     runIdRef.current = null;
     cancelRequested.current = false;
@@ -248,7 +287,10 @@ export function useNodeFlowExecutionController({
 
   // run / preview -----------------------------------------------------------
   const newRunId = () => uid() + uid();
-  const startRun = (text: string): string => {
+  const startRun = (
+    text: string,
+    nodeIds: Iterable<string | null | undefined> = [],
+  ): string => {
     if (cancelRecoveryTimerRef.current != null) {
       window.clearTimeout(cancelRecoveryTimerRef.current);
       cancelRecoveryTimerRef.current = null;
@@ -262,6 +304,7 @@ export function useNodeFlowExecutionController({
     setRunId(id);
     setRunning(true);
     setStatus({ kind: "running", text });
+    markRunNodes(id, nodeIds);
     return id;
   };
   const finishRun = (
@@ -272,6 +315,7 @@ export function useNodeFlowExecutionController({
     if (!isRunCurrent(id)) return;
     runScopesRef.current.delete(id);
     activeRunIds.current.delete(id);
+    clearRunNodes(id);
     if (runDepth.current === 0) {
       // Nothing is considered active. This is either a defensive double-finish
       // or the late result of a run we already force-recovered from after a
@@ -314,6 +358,7 @@ export function useNodeFlowExecutionController({
     cancelRequested.current = false;
     activeRunIds.current.clear();
     runScopesRef.current.clear();
+    clearAllRunningNodes();
     if (cancelRecoveryTimerRef.current != null) {
       window.clearTimeout(cancelRecoveryTimerRef.current);
       cancelRecoveryTimerRef.current = null;
@@ -385,7 +430,7 @@ export function useNodeFlowExecutionController({
       });
       return;
     }
-    const id = startRun(`Running ${node.config.label}…`);
+    const id = startRun(`Running ${node.config.label}…`, [node.id]);
     // if this is a child inside a group, preview the pipeline up to and
     // including it by running the group's output on a truncated graph.
     const cctx = childCtx(node.id);
@@ -414,10 +459,12 @@ export function useNodeFlowExecutionController({
       if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
       if (r.error) {
         // the backend names the node that actually failed (r.node); fall back
-        // to the run target if it didn't attribute one.
+        // to the run target if it didn't attribute one. Surface the failure on
+        // the node's red badge + the status bar only (matching the Run path):
+        // previewing a node with no output (e.g. a disconnected input) is a
+        // normal in-progress state, so it no longer also pops an error toast.
         const culprit = (r as { node?: string }).node || node.id;
         setNodeErrors((p) => ({ ...p, [culprit]: r.error as string }));
-        onToast("error", "Flow error", r.error);
         return finishRun(id, r, "");
       }
       setNodeErrors((p) => {
@@ -457,7 +504,7 @@ export function useNodeFlowExecutionController({
   // run a node's pipeline to completion (no Output node needed) and show the
   // result in the drawer; returns an outcome so Run all can tally it.
   const runLeaf = async (node: NbNode): Promise<RunOutcome> => {
-    const id = startRun(`Running ${node.config.label}…`);
+    const id = startRun(`Running ${node.config.label}…`, [node.id]);
     const cctx = childCtx(node.id);
     const graph = cctx
       ? partialGroupGraph(cctx.groupId, cctx.index + 1)
@@ -511,7 +558,10 @@ export function useNodeFlowExecutionController({
   // execute on separate registered child connections. Group children retain
   // their partial-graph semantics and therefore stay on runLeaf individually.
   const runLeafBatch = async (leaves: NbNode[]): Promise<RunOutcome[]> => {
-    const id = startRun(`Running ${leaves.length} NodeFlow branches…`);
+    const id = startRun(
+      `Running ${leaves.length} NodeFlow branches…`,
+      leaves.map((node) => node.id),
+    );
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
@@ -749,7 +799,7 @@ export function useNodeFlowExecutionController({
       onToast("error", "Pick an X field", "Choose what to plot.");
       return;
     }
-    const id = startRun(`Charting ${node.config.label}…`);
+    const id = startRun(`Charting ${node.config.label}…`, [node.id]);
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
@@ -826,7 +876,7 @@ export function useNodeFlowExecutionController({
   };
 
   const doProfile = async (node: NbNode) => {
-    const id = startRun(`Profiling ${node.config.label}…`);
+    const id = startRun(`Profiling ${node.config.label}…`, [node.id]);
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
@@ -872,7 +922,7 @@ export function useNodeFlowExecutionController({
       onToast("error", "Pick a key", "Choose at least one key field to match on.");
       return;
     }
-    const id = startRun(`Reconciling ${node.config.label}…`);
+    const id = startRun(`Reconciling ${node.config.label}…`, [node.id]);
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
@@ -955,7 +1005,7 @@ export function useNodeFlowExecutionController({
     let fmt = (node.config.format || "png").toLowerCase();
     const allowed = kind === "chart" ? IMAGE_FORMATS_CHART : IMAGE_FORMATS_DASH;
     if (!allowed.includes(fmt)) fmt = allowed[0];
-    const id = startRun(`Rendering ${node.config.label}…`);
+    const id = startRun(`Rendering ${node.config.label}…`, [node.id]);
     try {
       let dataUrl = "";
       if (kind === "chart") {
@@ -1020,7 +1070,7 @@ export function useNodeFlowExecutionController({
   const doExport = async (node: NbNode): Promise<RunOutcome> => {
     // Empty folder → server writes to the user's Downloads folder.
     const folder = (node.config.folder || "").trim();
-    const id = startRun(`Exporting ${node.config.label}…`);
+    const id = startRun(`Exporting ${node.config.label}…`, [node.id]);
     try {
       const r = await api.nodeflowExport(
         graphForApi(),
@@ -1076,7 +1126,10 @@ export function useNodeFlowExecutionController({
       fmt: n.config.format || "csv",
       base_name: n.config.base_name || "output",
     }));
-    const id = startRun(`Exporting ${outs.length} outputs…`);
+    const id = startRun(
+      `Exporting ${outs.length} outputs…`,
+      outs.map((node) => node.id),
+    );
     let r: Awaited<ReturnType<typeof api.nodeflowExportMany>>;
     try {
       r = await api.nodeflowExportMany(graphForRun(), items, id);
@@ -1123,7 +1176,7 @@ export function useNodeFlowExecutionController({
       onToast("error", "Name the table", "Give the output table a name.");
       return { ok: false };
     }
-    const id = startRun(`Writing ${node.config.label}…`);
+    const id = startRun(`Writing ${node.config.label}…`, [node.id]);
     try {
       const r = await api.nodeflowToTable(graphForRun(), node.id, name, id);
       if (wasCancelled(r, id)) {
@@ -1188,7 +1241,7 @@ export function useNodeFlowExecutionController({
     }
   };
   const doReadDirectory = async (node: NbNode, path: string, file: string) => {
-    const id = startRun(`Reading ${file}…`);
+    const id = startRun(`Reading ${file}…`, [node.id]);
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
@@ -1229,7 +1282,7 @@ export function useNodeFlowExecutionController({
   };
 
   const doReadFolder = async (node: NbNode, folder: string) => {
-    const id = startRun(`Reading folder…`);
+    const id = startRun(`Reading folder…`, [node.id]);
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
@@ -1321,7 +1374,7 @@ export function useNodeFlowExecutionController({
     const fetchConfig = configExtra
       ? { ...node.config, ...configExtra }
       : node.config;
-    const id = startRun(`Fetching ${node.config.label}…`);
+    const id = startRun(`Fetching ${node.config.label}…`, [node.id]);
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
@@ -1414,7 +1467,7 @@ export function useNodeFlowExecutionController({
     // driver; the backend validates that and returns a clear error if neither
     // is set, so we don't pre-require a loop-variable name here — a container
     // iterator binds each values row's columns as ${vars} and uses no var name.
-    const id = startRun(`Iterating ${node.config.label}…`);
+    const id = startRun(`Iterating ${node.config.label}…`, [node.id]);
     try {
       const r = await api.iteratorRun({
         node_id: node.id,
@@ -1473,7 +1526,7 @@ export function useNodeFlowExecutionController({
       onToast("error", "Name the output table", "Give the controller's accumulator a table name.");
       return { ok: false };
     }
-    const id = startRun(`Repeating ${node.config.label}…`);
+    const id = startRun(`Repeating ${node.config.label}…`, [node.id]);
     try {
       const r = await api.whileRun({
         node_id: node.id,
@@ -1738,7 +1791,7 @@ export function useNodeFlowExecutionController({
       return;
     }
     const name = (node.config.label || "table").trim() || "table";
-    const id = startRun(`Creating ${name}…`);
+    const id = startRun(`Creating ${name}…`, [node.id]);
     const ctrl = new AbortController();
     registerRun(id, ctrl);
     try {
@@ -1788,6 +1841,7 @@ export function useNodeFlowExecutionController({
     previewHeight,
     setPreviewHeight,
     running,
+    runningNodeIds,
     runId,
     status,
     setDocumentStatus,

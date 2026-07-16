@@ -983,6 +983,14 @@ class JSONFlattener:
         self._spill_threshold = int(spill_threshold or 0)
         self._spill_dir = spill_dir
         self._progress_cb = progress_cb
+        # Per-instance nest-depth cap, read fresh so a Storage & memory →
+        # JSON & flatten change (``flatten_max_depth`` / SAMQL_FLATTEN_MAX_DEPTH)
+        # applies to the next load. Falls back to the class default (64).
+        try:
+            from . import load_thresholds as _LT
+            self._MAX_NEST_DEPTH = int(_LT.get_int("flatten_max_depth"))
+        except Exception:
+            pass
         self._col_order = defaultdict(list)
         self._seen_cols = defaultdict(set)
         # Map each original key PATH to the column name it was assigned, per

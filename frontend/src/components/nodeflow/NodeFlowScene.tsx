@@ -49,6 +49,7 @@ interface NodeFlowSceneProps {
   nodes: NbNode[];
   edges: NbEdge[];
   running: boolean;
+  runningNodeIds: Set<string>;
   wrapRef: React.RefObject<HTMLDivElement | null>;
   contentRef: React.RefObject<HTMLDivElement | null>;
   onScroll: () => void;
@@ -110,6 +111,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   nodes,
   edges,
   running,
+  runningNodeIds,
   wrapRef,
   contentRef,
   onScroll,
@@ -239,6 +241,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   return (
     <NodeFlowCanvasShell
       running={running}
+      runningNodeIds={runningNodeIds}
       isWiring={!!pendingWire}
       wrapRef={wrapRef}
       contentRef={contentRef}

@@ -30,22 +30,30 @@ export function reconcileSelectFields(
   upstreamCols: string[],
   current: SelField[],
 ): SelField[] {
-  const up = new Set(upstreamCols || []);
+  const cols = upstreamCols || [];
+  // match names case-insensitively -- the backend Select resolves columns
+  // case-insensitively, so a case-only upstream rename (Name -> name) must
+  // keep the user's field (its keep / rename / type / order), not be treated
+  // as a remove + re-add that discards those settings.
+  const upByLower = new Set(cols.map((c) => c.toLowerCase()));
   const seen = new Set<string>();
   const out: SelField[] = [];
   // keep the user's existing fields, in their current order, for columns that
-  // still exist upstream
+  // still exist upstream (case-insensitive)
   for (const f of current || []) {
-    if (up.has(f.name) && !seen.has(f.name)) {
+    const key = String(f.name).toLowerCase();
+    if (upByLower.has(key) && !seen.has(key)) {
       out.push(f);
-      seen.add(f.name);
+      seen.add(key);
     }
   }
-  // append columns that are newly available upstream, in upstream order
-  for (const c of upstreamCols || []) {
-    if (!seen.has(c)) {
+  // append columns that are genuinely new upstream (not already matched
+  // case-insensitively above), in upstream order
+  for (const c of cols) {
+    const key = c.toLowerCase();
+    if (!seen.has(key)) {
       out.push({ name: c, keep: true });
-      seen.add(c);
+      seen.add(key);
     }
   }
   return out;

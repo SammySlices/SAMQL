@@ -1397,8 +1397,15 @@ def _json_shallow_depth_default():
 
     Depth 2: top-level scalars stay BIGINT/VARCHAR/BOOLEAN; nested objects and
     arrays become JSON / JSON[] instead of deep STRUCTs that OOM on multi-GB
-    files. Override with ``SAMQL_JSON_MAX_DEPTH`` (``0`` = single json column).
+    files. Set via Storage & memory → JSON & flatten (``json_max_depth``) or
+    the ``SAMQL_JSON_MAX_DEPTH`` env var (``0`` = single json column). Read
+    fresh each load so UI changes apply to the next load without a restart.
     """
+    try:
+        from . import load_thresholds as LT
+        return max(0, LT.get_int("json_max_depth"))
+    except Exception:
+        pass
     raw = os.environ.get("SAMQL_JSON_MAX_DEPTH", "2")
     try:
         return max(0, int(raw))

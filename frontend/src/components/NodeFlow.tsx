@@ -353,6 +353,7 @@ export const NodeFlow: React.FC<{
     previewHeight,
     setPreviewHeight,
     running,
+    runningNodeIds,
     status,
     setDocumentStatus,
     browseFolder,
@@ -549,6 +550,7 @@ export const NodeFlow: React.FC<{
           nodes={nodes}
           edges={edges}
           running={status.kind === "running"}
+          runningNodeIds={runningNodeIds}
           wrapRef={wrapRef}
           contentRef={contentRef}
           onScroll={measureViewport}

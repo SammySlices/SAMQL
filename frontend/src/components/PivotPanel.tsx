@@ -169,6 +169,11 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     () => tables.find((t) => t.name === source)?.engine,
     [source, tables],
   );
+  // Identity of the data behind the current source: the result id when the
+  // source is "Current result" (so switching result tabs recomputes instead of
+  // reusing the stale aggregate), else the table name. Included in specKey and
+  // the layout-reset gate below.
+  const srcId = source === RESULT_SRC ? result?.id ?? "" : source;
 
   const [rows, setRows] = useState<string[]>([]);
   const [cols, setCols] = useState<string[]>([]);
@@ -184,9 +189,24 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
   const [filEdit, setFilEdit] = useState<{ id: number; x: number; y: number } | null>(
     null,
   );
+  // Escape closes whichever editing popover is open (no full modal needed).
+  useEffect(() => {
+    if (!valEdit && !filEdit) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setValEdit(null);
+        setFilEdit(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [valEdit, filEdit]);
 
   const [data, setData] = useState<PivotResult | null>(null);
   const [loading, setLoading] = useState(false);
+  // set when the backing result has expired: shows an explicit re-run prompt
+  // instead of leaving the panel stuck on "Building…".
+  const [expired, setExpired] = useState(false);
   // .471: the running aggregate is a registered, cancellable run --
   // Stop (or a superseding spec change, or unmount) interrupts the
   // backend statement exactly like a query cell's Stop.
@@ -216,20 +236,23 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
   }, [cancelInflight]);
   const [elapsed, setElapsed] = useState(0);
 
-  // reset the layout when the source changes (fields differ)
-  const firstSrc = useRef(source);
+  // reset the layout when the underlying source changes (fields differ). Keyed
+  // on srcId, not source, so switching result tabs (same "Current result"
+  // slot, different result id) also resets instead of reusing a stale layout.
+  const firstSrc = useRef(srcId);
   useEffect(() => {
-    if (firstSrc.current !== source) {
-      firstSrc.current = source;
+    if (firstSrc.current !== srcId) {
+      firstSrc.current = srcId;
       setRows([]);
       setCols([]);
       setValues([]);
       setFilters([]);
       setData(null);
+      setExpired(false);
       setValEdit(null);
       setFilEdit(null);
     }
-  }, [source]);
+  }, [srcId]);
 
   // ---- drag and drop ------------------------------------------------------
   const startDrag = (e: React.DragEvent, payload: DragPayload) => {
@@ -261,13 +284,12 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     const field = fieldOf(p);
     if (!field) return;
     const setT = target === "rows" ? setRows : setCols;
-    const other = target === "rows" ? cols : rows;
     const setOther = target === "rows" ? setCols : setRows;
-    // moving between axes: remove from the source axis
-    if (p.from === "rows" || p.from === "cols") {
-      if (p.from !== target) {
-        setOther(other.filter((f) => f !== field));
-      }
+    // remove the field from the opposite axis no matter where the drag came
+    // from -- a drawer field dropped on cols must leave rows (and vice versa)
+    // so the same field never sits in both axes.
+    if (p.from !== target) {
+      setOther((prev) => prev.filter((f) => f !== field));
     }
     setT((prev) => {
       const without = prev.filter((f) => f !== field);
@@ -333,7 +355,14 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
 
   // ---- auto-run -----------------------------------------------------------
   const canRun = sourceCols.length > 0 && (rows.length > 0 || cols.length > 0);
-  const specKey = JSON.stringify({ source, rows, cols, values, filters });
+  const specKey = JSON.stringify({
+    srcId,
+    engine: sourceEngine ?? null,
+    rows,
+    cols,
+    values,
+    filters,
+  });
 
   useEffect(() => {
     if (!canRun) {
@@ -342,6 +371,7 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     }
     let alive = true;
     stopRequested.current = false;
+    setExpired(false);
     setLoading(true);
     const started = Date.now();
     setElapsed(0);
@@ -404,8 +434,21 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
             onToast("warn", "Pivot cancelled", "Stopped at your request.");
             return;
           }
-          if (res.error === "result expired") onExpired?.();
-          else onToast("error", "Pivot failed", res.error);
+          if (res.error === "result expired") {
+            setExpired(true);
+            setData(null);
+            // notify the host if it wired a handler; otherwise surface it here
+            // so an expired result is never silent (no permanent "Building…").
+            if (onExpired) onExpired();
+            else
+              onToast(
+                "warn",
+                "Result expired",
+                "Re-run the query to pivot it again.",
+              );
+            return;
+          }
+          onToast("error", "Pivot failed", res.error);
           setData(null);
         } else {
           setData(res);
@@ -441,7 +484,12 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [specKey]);
 
-  const usedAxis = new Set([...rows, ...cols]);
+  const usedAxis = new Set<string>([
+    ...rows,
+    ...cols,
+    ...values.map((v) => v.field).filter((f): f is string => !!f),
+    ...filters.map((f) => f.field),
+  ]);
   const fieldList = sourceCols.filter((c) =>
     c.toLowerCase().includes(fieldQuery.trim().toLowerCase()),
   );
@@ -866,6 +914,11 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
                   pivot. Add fields to <b>Summarize</b> to aggregate, and{" "}
                   <b>Filters</b> to narrow the data.
                 </p>
+              </div>
+            ) : expired ? (
+              <div className="pv-empty" data-testid="pivot-expired">
+                <Icon.Table size={26} />
+                <p>This result expired — re-run the query to pivot it again.</p>
               </div>
             ) : data && data.rows.length ? (
               <div className="pv-grid-wrap">

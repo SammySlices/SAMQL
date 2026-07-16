@@ -7,6 +7,7 @@ import {
   listWiredSelectUpstreams,
   reconcileSelectFields,
 } from "../../lib/selectFields";
+import { reconcilePivotFields } from "../../lib/pivotFields";
 import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import type { NodeFlowInspectorContext } from "./NodeFlowInspector";
 
@@ -294,6 +295,20 @@ export function useNodeFlowInspectorController({
     const cur = sel.config.fields || [];
     const next = reconcileSelectFields(cols, cur);
     if (fieldsDiffer(next, cur)) patch(sel.id, { fields: next });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey, inspCols, selId]);
+
+  // Same for a pivot node: drop rows/cols/values that reference columns no
+  // longer coming from upstream. Gated on inspCols.in having entries so a
+  // momentarily-disconnected node isn't wiped.
+  useEffect(() => {
+    if (!sel || sel.type !== "pivot" || !inspCols.in || !inspCols.in.length)
+      return;
+    const { patch: p, changed } = reconcilePivotFields(
+      inspCols.in,
+      sel.config || {},
+    );
+    if (changed) patch(sel.id, p);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, inspCols, selId]);
 

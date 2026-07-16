@@ -25920,6 +25920,91 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
             _shj.rmtree(d, ignore_errors=True)
 
+    def t_join_alias_dedup_and_ci_keys():
+        # F1: join/crossjoin must never emit two columns with the same name,
+        # and a configured key must be excluded case-insensitively (only the
+        # alias/exclusion logic changed -- rows and join semantics are the same).
+        s = Session()
+        try:
+            # (i) duplicate-name collision: the left already has `name` AND
+            # `r_name`; the right side also has `name`. The right `name`
+            # collides with left `name` -> `r_name`, which ALSO already exists
+            # -> must become `r_name_2` (no duplicate column names).
+            g = {"nodes": [
+                {"id": "L", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS id, 'L' AS name, 'LR' AS r_name",
+                    "label": "L"}},
+                {"id": "R", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS id, 'R' AS name", "label": "R"}},
+                {"id": "J", "type": "join", "config": {
+                    "label": "join",
+                    "keys": [{"left": "id", "right": "id"}]}}],
+                "edges": [
+                    {"from": {"node": "L", "port": "out"},
+                     "to": {"node": "J", "port": "left"}},
+                    {"from": {"node": "R", "port": "out"},
+                     "to": {"node": "J", "port": "right"}}]}
+            r = s.run_nodeflow(g, "J", "inner")
+            need(not r.get("error"), "join runs: %s" % r.get("error"))
+            cols = r["columns"]
+            eq(len(set(cols)), len(cols),
+               "join output column names are all unique: %s" % cols)
+            need("r_name_2" in cols,
+                 "a right column colliding with an existing r_ alias is "
+                 "suffixed (_2), not duplicated: %s" % cols)
+            eq(r["total_rows"], 1, "inner join still matches on the key")
+
+            # (ii) case-mismatched configured key: the real column is `id` but
+            # the key is stored as `ID`. It must still be excluded from the
+            # right projection (never leak as `r_id`), matching case-insensitively.
+            g2 = {"nodes": [
+                {"id": "L", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS id, 'L' AS lval", "label": "L"}},
+                {"id": "R", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS id, 'R' AS rval", "label": "R"}},
+                {"id": "J", "type": "join", "config": {
+                    "label": "join",
+                    "keys": [{"left": "ID", "right": "ID"}]}}],
+                "edges": [
+                    {"from": {"node": "L", "port": "out"},
+                     "to": {"node": "J", "port": "left"}},
+                    {"from": {"node": "R", "port": "out"},
+                     "to": {"node": "J", "port": "right"}}]}
+            r2 = s.run_nodeflow(g2, "J", "inner")
+            need(not r2.get("error"),
+                 "case-mismatched key join runs: %s" % r2.get("error"))
+            lc = [c.lower() for c in r2["columns"]]
+            need("r_id" not in lc,
+                 "a case-mismatched key (ID vs id) is excluded, not leaked as "
+                 "r_id: %s" % r2["columns"])
+            eq(lc.count("id"), 1,
+               "only the left key column survives once: %s" % r2["columns"])
+            eq(r2["total_rows"], 1, "case-insensitive key still joins the row")
+
+            # crossjoin de-dups too (no keys): right `a` collides with left
+            # `a` and the existing `r_a`, so it becomes `r_a_2`.
+            g3 = {"nodes": [
+                {"id": "L", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS a, 2 AS r_a", "label": "L"}},
+                {"id": "R", "type": "sql", "config": {
+                    "sql": "SELECT 3 AS a", "label": "R"}},
+                {"id": "cj", "type": "crossjoin", "config": {}}],
+                "edges": [
+                    {"from": {"node": "L", "port": "out"},
+                     "to": {"node": "cj", "port": "left"}},
+                    {"from": {"node": "R", "port": "out"},
+                     "to": {"node": "cj", "port": "right"}}]}
+            r3 = s.run_nodeflow(g3, "cj", "out")
+            need(not r3.get("error"), "crossjoin runs: %s" % r3.get("error"))
+            c3 = r3["columns"]
+            eq(len(set(c3)), len(c3),
+               "crossjoin output column names are all unique: %s" % c3)
+            need("r_a_2" in c3,
+                 "right `a` colliding with left `a` + `r_a` becomes r_a_2: %s"
+                 % c3)
+        finally:
+            s.shutdown()
+
     def t_nodeflow_formula_summarize():
         import csv as _cf
         import tempfile as _tff
@@ -36403,6 +36488,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("flow cache: blocking join checkpoint reused on downstream edit",
          t_flow_cache_checkpoint),
         ("NodeFlow join (3 outputs) + union + select", t_nodeflow_join_union_select),
+        ("NodeFlow join/crossjoin alias de-dup + case-insensitive keys",
+         t_join_alias_dedup_and_ci_keys),
         ("NodeFlow formula + summarize", t_nodeflow_formula_summarize),
         ("NodeFlow pivot + chart + reconcile", t_nodeflow_pivot_chart_reconcile),
         ("NodeFlow columns probe + temp-table cleanup", t_nodeflow_columns_and_temp_cleanup),

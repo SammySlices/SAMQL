@@ -73,9 +73,11 @@ describe("Phase 8 NodeFlow controllers", () => {
       pending = result.current.doPreview(source, "out", "Source preview");
     });
     expect(result.current.running).toBe(true);
+    expect([...result.current.runningNodeIds]).toEqual(["source-a"]);
 
     rerender({ tabId: "tab-b" });
     expect(result.current.running).toBe(false);
+    expect(result.current.runningNodeIds.size).toBe(0);
     expect(result.current.preview).toBeNull();
 
     await act(async () => {
@@ -130,19 +132,74 @@ describe("Phase 8 NodeFlow controllers", () => {
       pendingB = result.current.doPreview(b, "out", "B");
     });
     expect(result.current.running).toBe(true);
+    expect(result.current.runningNodeIds).toEqual(new Set(["source-a", "source-b"]));
 
     await act(async () => {
       first.resolve({ columns: ["id"], rows: [[1]], total_rows: 1 });
       await pendingA;
     });
     expect(result.current.running).toBe(true);
+    expect(result.current.runningNodeIds).toEqual(new Set(["source-b"]));
 
     await act(async () => {
       second.resolve({ columns: ["id"], rows: [[2]], total_rows: 1 });
       await pendingB;
     });
     expect(result.current.running).toBe(false);
+    expect(result.current.runningNodeIds.size).toBe(0);
     expect(result.current.status.kind).toBe("done");
+  });
+
+  it("tracks all terminal nodes during a client-side batch run", async () => {
+    const batch = deferred<any>();
+    vi.spyOn(api, "nodeflowRunBatch").mockImplementation(
+      () => batch.promise as ReturnType<typeof api.nodeflowRunBatch>,
+    );
+    const a = node("source-a");
+    const b = node("source-b");
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes: [a, b], edges: [] },
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-a",
+        nodes: [a, b],
+        edges: [],
+        liveRef,
+        graphSig: "graph-a",
+        graphForApi: () => ({ nodes: [], edges: [] }),
+        graphForRun: () => ({ nodes: [], edges: [] }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.runAll();
+    });
+    expect(result.current.running).toBe(true);
+    expect(result.current.runningNodeIds).toEqual(new Set(["source-a", "source-b"]));
+
+    await act(async () => {
+      batch.resolve({
+        ok: true,
+        results: [
+          { node: "source-a", columns: ["id"], rows: [[1]], total_rows: 1 },
+          { node: "source-b", columns: ["id"], rows: [[2]], total_rows: 1 },
+        ],
+      });
+      await pending;
+    });
+
+    expect(result.current.running).toBe(false);
+    expect(result.current.runningNodeIds.size).toBe(0);
   });
 
   it("keeps only the latest asynchronous workflow file open", async () => {

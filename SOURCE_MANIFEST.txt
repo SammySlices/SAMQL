@@ -124,6 +124,7 @@ frontend/src/components/NodeFlowCanvas.tsx
 frontend/src/components/Notebook.tsx
 frontend/src/components/NotebookCell.component.test.tsx
 frontend/src/components/NotebookCell.tsx
+frontend/src/components/PivotPanel.audit.component.test.tsx
 frontend/src/components/PivotPanel.cancel.component.test.tsx
 frontend/src/components/PivotPanel.tsx
 frontend/src/components/Profiler.cancel.component.test.tsx
@@ -244,6 +245,8 @@ frontend/src/lib/nodeHelp.ts
 frontend/src/lib/nodegraph.ts
 frontend/src/lib/notebook.ts
 frontend/src/lib/notebookOptimization.component.test.ts
+frontend/src/lib/pivotFields.component.test.ts
+frontend/src/lib/pivotFields.ts
 frontend/src/lib/pointerDrag.ts
 frontend/src/lib/prettyStruct.ts
 frontend/src/lib/profileExport.ts
