@@ -199,7 +199,7 @@ describe("SqlAssistant", () => {
     expect(screen.getByText(/Prefer DuckDB functions/i)).toBeTruthy();
   });
 
-  it("Stop x next to Thinking aborts the request and interrupts the backend, keeping the thread", async () => {
+  it("footer Stop aborts the request and interrupts the backend while busy, keeping the thread", async () => {
     (api.assistantStatus as any).mockResolvedValue({
       available: true,
       pack_ok: true,
@@ -219,13 +219,17 @@ describe("SqlAssistant", () => {
       target: { value: "select one" },
     });
     fireEvent.click(screen.getByTestId("sql-assistant-send"));
-    // The Stop "x" renders in the same row as the "Thinking…" indicator.
+    // While busy the footer send button becomes the canonical Stop control.
     const thinking = await screen.findByText(/Thinking/i);
-    const stopBtn = within(thinking.closest(".sql-asst-msg-body") as HTMLElement)
-      .getByTestId("sql-assistant-stop");
+    const stopBtn = screen.getByTestId("sql-assistant-stop");
     expect(stopBtn.getAttribute("aria-label")).toBe("Stop generating");
-    // Old footer Stop control is gone (only the inline x cancels now).
-    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(stopBtn.textContent).toBe("Stop");
+    // No inline x lives next to the "Thinking…" indicator anymore.
+    expect(
+      within(thinking.closest(".sql-asst-msg-body") as HTMLElement).queryByTestId(
+        "sql-assistant-stop",
+      ),
+    ).toBeNull();
     fireEvent.click(stopBtn);
     expect(capturedSignal?.aborted).toBe(true);
     expect(api.assistantCancel).toHaveBeenCalledTimes(1);

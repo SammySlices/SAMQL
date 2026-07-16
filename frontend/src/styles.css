@@ -9721,19 +9721,6 @@ button:hover .icon-trash svg {
   align-items: center;
   gap: 8px;
 }
-.sql-asst-stop {
-  padding: 0;
-  width: 18px;
-  height: 18px;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-dim);
-}
-.sql-asst-stop:hover {
-  color: var(--error);
-}
 .sql-asst-sql {
   margin: 6px 16px 0 0;
 }

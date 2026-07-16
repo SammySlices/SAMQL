@@ -455,17 +455,6 @@ export const SqlAssistant: React.FC<{
           <div className="sql-asst-msg assistant">
             <div className="sql-asst-msg-body sql-asst-thinking">
               <span className="spin" /> Thinking…
-              <button
-                type="button"
-                className="btn xs ghost sql-asst-stop"
-                title="Stop generating"
-                aria-label="Stop generating"
-                data-testid="sql-assistant-stop"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => void cancel()}
-              >
-                <Icon.X size={12} />
-              </button>
             </div>
           </div>
         )}
@@ -487,15 +476,28 @@ export const SqlAssistant: React.FC<{
             }
           }}
         />
-        <button
-          className="btn primary"
-          type="button"
-          disabled={busy || !input.trim()}
-          data-testid="sql-assistant-send"
-          onClick={() => void send()}
-        >
-          Ask
-        </button>
+        {busy ? (
+          <button
+            className="btn"
+            type="button"
+            title="Stop generating"
+            aria-label="Stop generating"
+            data-testid="sql-assistant-stop"
+            onClick={() => void cancel()}
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            className="btn primary"
+            type="button"
+            disabled={!input.trim()}
+            data-testid="sql-assistant-send"
+            onClick={() => void send()}
+          >
+            Ask
+          </button>
+        )}
       </div>
     </div>
   );
