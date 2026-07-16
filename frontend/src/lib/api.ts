@@ -394,10 +394,15 @@ export const api = {
   // API; DuckDB-idle gated).
   assistantStatus: () =>
     jsonFetch<AssistantStatus>("/api/assistant/status", { timeoutMs: 8000 }),
-  assistantChat: (question: string, dialect: string = "native") =>
+  assistantChat: (
+    question: string,
+    dialect: string = "native",
+    opts?: { signal?: AbortSignal },
+  ) =>
     jsonFetch<AssistantChatResult>("/api/assistant/chat", {
       method: "POST",
       body: JSON.stringify({ question, dialect }),
+      signal: opts?.signal,
     }),
   assistantCancel: () =>
     jsonFetch<{ ok: boolean }>("/api/assistant/cancel", {

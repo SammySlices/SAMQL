@@ -504,7 +504,8 @@ class AssistantApiRuntimeTests(unittest.TestCase):
             update_key=True,
         )
 
-        def fake_http(url, payload, timeout=120.0, headers=None):
+        def fake_http(url, payload, timeout=120.0, headers=None,
+                      cancellable=False):
             self.assertTrue(url.endswith("/v1/chat/completions"))
             self.assertEqual(payload.get("model"), "demo-model")
             self.assertIn("Authorization", headers or {})
@@ -523,6 +524,59 @@ class AssistantApiRuntimeTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out.get("sql"), "SELECT 1;")
         self.assertEqual(out.get("mode"), "api")
+
+    def test_cancel_sets_flag_and_closes_inflight_response(self):
+        asst._cancel.clear()
+
+        class FakeResp:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        resp = FakeResp()
+        asst._track_response(resp)
+        try:
+            out = asst.cancel()
+        finally:
+            asst._untrack_response(resp)
+            asst._cancel.clear()
+        self.assertTrue(out["ok"])
+        self.assertTrue(resp.closed)
+
+    def test_chat_returns_cancelled_when_model_call_aborted(self):
+        class Sess:
+            def status(self):
+                return {"engines": {"duckdb": {"active": True, "busy": False}}}
+
+            def tables_tree(self):
+                return [{"engine": "duckdb", "name": "t", "columns": []}]
+
+            _running_lock = mock.MagicMock()
+            _running = {}
+
+        asst.set_api_runtime(
+            mode=asst.ASSISTANT_MODE_API,
+            base_url="https://api.example.com",
+            model="demo-model",
+            update_key=False,
+        )
+
+        def fake_http(url, payload, timeout=120.0, headers=None,
+                      cancellable=False):
+            # Simulate cancel() closing the socket mid-read.
+            asst.cancel()
+            raise OSError("connection closed")
+
+        try:
+            with mock.patch.object(asst, "duckdb_busy", return_value=False), \
+                 mock.patch.object(asst, "_http_json", side_effect=fake_http):
+                out = asst.chat(Sess(), "select one", dialect="native")
+        finally:
+            asst._cancel.clear()
+        self.assertFalse(out["ok"])
+        self.assertTrue(out.get("cancelled"))
 
     def test_chat_api_still_refuses_when_duckdb_busy(self):
         class Sess:
