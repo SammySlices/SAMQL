@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-16.625
+Current build:   2026-07-16.626
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-16.626  (v2.16.4)
+
+LLM OFFLINE SAFEGUARDS. Local SQL assistant mode hardens llama-server
+launch (--offline / --no-webui), scrubs HF/tools/agent/MCP child env,
+requires loopback SAMQL_LLAMA_URL, and keeps chat payloads tool-free.
+Settings/README clarify offline local vs intentional remote API. Bump
+identity and refresh samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-16.625  (v2.16.4)

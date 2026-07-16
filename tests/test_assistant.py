@@ -300,13 +300,77 @@ class PackAndGateTests(unittest.TestCase):
         start = src.index("def ensure_server")
         end = src.index("\ndef stop_server", start)
         body = src[start:end]
-        self.assertIn('"-m", pack["model"]', body)
+        self.assertIn("_llama_server_cmd(", body)
         self.assertIn("embedded in the GGUF", body)
-        cmd_block = body.split("cmd = [", 1)[1].split("]", 1)[0]
-        self.assertNotIn("--chat-template", cmd_block)
-        self.assertNotIn("--jinja", cmd_block)
-        self.assertNotIn("qwen", cmd_block.lower())
-        self.assertNotIn("phi", cmd_block.lower())
+        self.assertIn("_llama_server_child_env(", body)
+        # No literal template overrides in the launch call (comments may mention).
+        self.assertNotIn('--chat-template"', body)
+        self.assertNotIn('"--jinja"', body)
+        self.assertNotIn("'--jinja'", body)
+
+    def test_llama_server_cmd_is_offline_hardened(self):
+        cmd = asst._llama_server_cmd("/bin/llama-server", "/m.gguf", 1234, 2048)
+        self.assertEqual(cmd[0], "/bin/llama-server")
+        self.assertIn("-m", cmd)
+        self.assertIn("/m.gguf", cmd)
+        self.assertIn("127.0.0.1", cmd)
+        self.assertIn("--offline", cmd)
+        self.assertIn("--no-webui", cmd)
+        joined = " ".join(cmd)
+        self.assertNotIn("--chat-template", joined)
+        self.assertNotIn("--jinja", joined)
+        self.assertNotIn("--tools", joined)
+        self.assertNotIn("--agent", joined)
+        self.assertNotIn("--hf-", joined)
+        self.assertNotIn("--model-url", joined)
+        self.assertNotIn("mcp", joined.lower())
+
+    def test_llama_server_child_env_scrubs_agent_and_hf(self):
+        dirty = {
+            "PATH": "/usr/bin",
+            "LLAMA_ARG_HF_REPO": "org/model",
+            "LLAMA_ARG_MODEL_URL": "https://example.com/m.gguf",
+            "LLAMA_ARG_TOOLS": "all",
+            "LLAMA_ARG_AGENT": "1",
+            "LLAMA_ARG_UI_MCP_PROXY": "1",
+            "LLAMA_ARG_WEBUI_MCP_PROXY": "1",
+            "KEEP_ME": "yes",
+        }
+        env = asst._llama_server_child_env(dirty)
+        self.assertEqual(env.get("KEEP_ME"), "yes")
+        self.assertEqual(env.get("LLAMA_ARG_OFFLINE"), "1")
+        self.assertEqual(env.get("LLAMA_ARG_UI"), "0")
+        for key in asst._LLAMA_CHILD_ENV_CLEAR:
+            self.assertNotIn(key, env)
+
+    def test_chat_completion_payload_has_no_tools(self):
+        payload = asst._chat_completion_payload(
+            "m", [{"role": "user", "content": "hi"}], max_tokens=16
+        )
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+        self.assertNotIn("functions", payload)
+        self.assertFalse(payload.get("stream"))
+
+    def test_loopback_url_helpers(self):
+        self.assertTrue(asst._is_loopback_url("http://127.0.0.1:8080"))
+        self.assertTrue(asst._is_loopback_url("http://localhost:1234/v1"))
+        self.assertFalse(asst._is_loopback_url("https://api.openai.com"))
+        self.assertFalse(asst._is_loopback_url("http://192.168.1.5:8080"))
+        with self.assertRaises(RuntimeError):
+            asst._validate_local_llama_url("https://api.openai.com/v1")
+        self.assertEqual(
+            asst._validate_local_llama_url("http://127.0.0.1:9090/"),
+            "http://127.0.0.1:9090",
+        )
+
+    def test_ensure_server_rejects_non_loopback_samql_llama_url(self):
+        with mock.patch.dict(
+            os.environ, {"SAMQL_LLAMA_URL": "https://api.openai.com"}, clear=False
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                asst.ensure_server()
+        self.assertIn("loopback", str(ctx.exception).lower())
 
     def test_set_preferred_model_and_sync_stops_mismatch(self):
         asst.set_preferred_model(None)

@@ -90,10 +90,23 @@ Behaviour:
   * Generates only while DuckDB is idle (queries preempt chat).
   * Prompts use loaded table/column schema only -- not raw nested JSON dumps.
 
+Runtime networking (local pack vs API)
+--------------------------------------
+Local models mode is offline by design at chat time:
+  * SamQL starts llama-server on 127.0.0.1 with a local .gguf only.
+  * Launch flags include --offline and --no-webui; HF/model-url, --tools,
+    --agent, and WebUI MCP proxy env vars are cleared for the child process.
+  * Chat is plain POST /v1/chat/completions (no tool schemas, no URL fetch).
+  * SAMQL_LLAMA_URL, if set, must be loopback (127.0.0.1 / localhost).
+
+Fetching models (Fetch-SamQL-Assistant / tools/fetch_assistant_pack.py)
+needs GitHub + Hugging Face once; that is separate from runtime chat.
+
 API mode (Settings → SQL assistant → API)
 -----------------------------------------
 Instead of (or as an alternative to) the local pack, you can point SamQL at
-any OpenAI-compatible chat endpoint:
+any OpenAI-compatible chat endpoint. This path DOES use the network when
+the base URL is remote (intentional):
 
   Base URL   e.g. https://api.openai.com  or  http://127.0.0.1:8080
   Model id   optional (provider-specific, e.g. gpt-4o-mini)
@@ -104,3 +117,6 @@ SamQL calls:  POST {base}/v1/chat/completions
 Use Test connection in Settings, then Save. Switch back to Local models to
 use the pack / preferred GGUF again. Clear API removes the saved endpoint
 and key. DuckDB-idle gating still applies in API mode.
+
+There is no hard lock that disables API mode: air-gapped users should stay
+on Local models (and not set a remote API base URL).
