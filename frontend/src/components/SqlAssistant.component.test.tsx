@@ -134,6 +134,37 @@ describe("SqlAssistant", () => {
     expect(onInsert).toHaveBeenCalledWith("SELECT 1;");
   });
 
+  it("clears the conversation without calling cancel when idle", async () => {
+    (api.assistantStatus as any).mockResolvedValue({
+      available: true,
+      pack_ok: true,
+      duckdb_busy: false,
+    });
+    (api.assistantChat as any).mockResolvedValue({
+      ok: true,
+      reply: "Here you go.\n```sql\nSELECT 1;\n```",
+      sql: "SELECT 1;",
+      dialect: "duckdb",
+    });
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("sql-assistant-fab"));
+    const clearBtn = screen.getByTestId("sql-assistant-clear");
+    expect(clearBtn).toHaveProperty("disabled", true);
+    fireEvent.change(screen.getByTestId("sql-assistant-input"), {
+      target: { value: "select one" },
+    });
+    fireEvent.click(screen.getByTestId("sql-assistant-send"));
+    await screen.findByRole("button", { name: "Insert into IDE" });
+    expect(screen.getByText("select one")).toBeTruthy();
+    expect(clearBtn).toHaveProperty("disabled", false);
+    fireEvent.click(clearBtn);
+    expect(screen.queryByText("select one")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Insert into IDE" })).toBeNull();
+    expect(screen.getByText(/Prefer DuckDB functions/i)).toBeTruthy();
+    expect(api.assistantCancel).not.toHaveBeenCalled();
+    expect(clearBtn).toHaveProperty("disabled", true);
+  });
+
   it("copy-only mode offers Copy SQL and hides Insert / Open in tab", async () => {
     (api.assistantStatus as any).mockResolvedValue({
       available: true,

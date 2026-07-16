@@ -1468,8 +1468,11 @@ class Session:
 
     # Live-cell field discovery: how many rows to pull when DESCRIBE stops at
     # opaque JSON (flatten-off maximum_depth). Kept modest — union of shapes,
-    # not a full scan.
+    # not a full scan. When early rows only have empty nested arrays, read
+    # additional OFFSET batches up to MAX so keys that appear later still
+    # surface (discovery-only; never mutates the loaded table).
     _FIELD_TREE_SAMPLE_ROWS = 80
+    _FIELD_TREE_SAMPLE_MAX_ROWS = 400
 
     @staticmethod
     def _fe_quote_select_ident(name):
@@ -1515,23 +1518,116 @@ class Session:
                 return True
         return False
 
+    def _fetch_shape_sample_values(self, mgr, table, select_expr,
+                                   batch=None, max_rows=None):
+        """Read live cells for shape discovery, skipping empty-array prefixes.
+
+        A single ``LIMIT N`` often only sees front-loaded empty nested arrays
+        (common in trade/event JSON), which used to leave Field Explorer on a
+        dead-end ``(element)`` placeholder. While every nested array is still
+        hollow, read further OFFSET batches up to ``max_rows``, then probe
+        mid/end windows so keys past the sequential budget still surface.
+        Once any array has a real element shape, stop — remaining empty
+        optional siblings must not force a full max scan.
+        Discovery-only — never writes or alters table contents.
+        """
+        from .diagnostics import (
+            _coerce_json_sample, _json_shape_has_hollow_array,
+            _json_shape_has_resolved_array, _json_tree_merge, _json_tree_new)
+        from .sqlutil import quote_ident as _qid
+        batch = int(batch if batch is not None
+                    else Session._FIELD_TREE_SAMPLE_ROWS)
+        max_rows = int(max_rows if max_rows is not None
+                       else Session._FIELD_TREE_SAMPLE_MAX_ROWS)
+        if batch < 1 or max_rows < 1:
+            return []
+        reader = getattr(mgr, "read", None) or getattr(mgr, "execute_read",
+                                                      None)
+        values = []
+        root = _json_tree_new()
+        seen_offsets = set()
+
+        def _read_window(offset, take):
+            sql = ('SELECT %s FROM %s LIMIT %d OFFSET %d'
+                   % (select_expr, _qid(table), take, offset))
+            try:
+                if reader is not None:
+                    _c, rows = reader(sql)
+                else:
+                    _c, rows = mgr.execute(sql)
+            except Exception:
+                return []
+            return [r[0] for r in (rows or []) if r]
+
+        def _merge(batch_vals):
+            for raw in batch_vals:
+                _json_tree_merge(root, _coerce_json_sample(raw), 0)
+            values.extend(batch_vals)
+
+        def _shape_done():
+            if not root.get("kind"):
+                return False
+            if not _json_shape_has_hollow_array(root):
+                return True
+            # Some arrays resolved; leftover hollows are optional empties.
+            return _json_shape_has_resolved_array(root)
+
+        offset = 0
+        while offset < max_rows:
+            take = min(batch, max_rows - offset)
+            seen_offsets.add(offset)
+            batch_vals = _read_window(offset, take)
+            if not batch_vals:
+                break
+            _merge(batch_vals)
+            if _shape_done():
+                return values
+            if len(batch_vals) < take:
+                break
+            offset += len(batch_vals)
+
+        # Still no resolved array shape — probe later windows (keys past the
+        # sequential budget, or sparse populated rows after a long empty run).
+        if _shape_done():
+            return values
+        try:
+            cnt_sql = 'SELECT count(*) FROM %s' % _qid(table)
+            if reader is not None:
+                _c, crow = reader(cnt_sql)
+            else:
+                _c, crow = mgr.execute(cnt_sql)
+            total = int((crow or [[0]])[0][0] or 0)
+        except Exception:
+            return values
+        if total <= max_rows:
+            return values
+        # Windows past the sequential budget: resume at max_rows, a mid
+        # slice of the unread tail, and the table end.
+        last_off = max(0, total - batch)
+        probes = [max_rows]
+        unread = total - max_rows
+        if unread > batch:
+            probes.append(max_rows + unread // 2)
+        probes.append(last_off)
+        for off in probes:
+            off = max(0, min(int(off), last_off))
+            if off in seen_offsets:
+                continue
+            seen_offsets.add(off)
+            batch_vals = _read_window(off, batch)
+            if not batch_vals:
+                continue
+            _merge(batch_vals)
+            if _shape_done():
+                break
+        return values
+
     def _sample_column_field_tree(self, mgr, table, column, raw_type):
         """Sample live values and build a field tree for opaque JSON columns."""
         from .diagnostics import json_values_to_field_tree, access_recipes
         from .sqlutil import quote_ident as _qid
-        try:
-            sql = ('SELECT %s FROM %s LIMIT %d'
-                   % (_qid(column), _qid(table),
-                      int(Session._FIELD_TREE_SAMPLE_ROWS)))
-            reader = getattr(mgr, "read", None) or getattr(mgr, "execute_read",
-                                                          None)
-            if reader is not None:
-                _c, rows = reader(sql)
-            else:
-                _c, rows = mgr.execute(sql)
-        except Exception:
-            return None
-        values = [r[0] for r in (rows or []) if r]
+        values = self._fetch_shape_sample_values(
+            mgr, table, _qid(column))
         if not values:
             return None
         # Sidebar `path` tooltips: STRUCT shells keep dotted labels; pure
@@ -7344,16 +7440,8 @@ class Session:
         # Opaque / shallow DESCRIBE: infer LIST/STRUCT from sampled cells.
         if column_needs_json_shred(raw, node) and engine == "duckdb":
             try:
-                sql = ('SELECT %s FROM %s LIMIT %d'
-                       % (_qid(column), _qid(table),
-                          int(Session._FIELD_TREE_SAMPLE_ROWS)))
-                reader = getattr(mgr, "read", None) or getattr(
-                    mgr, "execute_read", None)
-                if reader is not None:
-                    _c, rows = reader(sql)
-                else:
-                    _c, rows = mgr.execute(sql)
-                values = [r[0] for r in (rows or []) if r]
+                values = self._fetch_shape_sample_values(
+                    mgr, table, _qid(column))
                 syn = json_samples_to_type_node(values) if values else None
                 if syn and syn.get("t") == "list":
                     node = syn
@@ -7601,16 +7689,8 @@ class Session:
             node = _P(typ)
             if column_needs_json_shred(typ, node):
                 try:
-                    sql = ('SELECT %s FROM %s LIMIT %d'
-                           % (_qid(name), _qid(table),
-                              int(Session._FIELD_TREE_SAMPLE_ROWS)))
-                    reader = getattr(mgr, "read", None) or getattr(
-                        mgr, "execute_read", None)
-                    if reader is not None:
-                        _c, rows = reader(sql)
-                    else:
-                        _c, rows = mgr.execute(sql)
-                    values = [r[0] for r in (rows or []) if r]
+                    values = self._fetch_shape_sample_values(
+                        mgr, table, _qid(name))
                     syn = json_samples_to_type_node(values) if values else None
                     if syn and syn.get("t") in ("list", "struct"):
                         node = syn
@@ -7651,23 +7731,14 @@ class Session:
         from .sqlutil import quote_ident as _qid
         if not path_parts:
             return None
-        reader = getattr(mgr, "read", None) or getattr(
-            mgr, "execute_read", None)
         stem = "_".join(
             re.sub(r"[^A-Za-z0-9_]+", "_", p).strip("_") or "x"
             for p in path_parts)
         synth = (stem + "_nest") if stem else "fx_nest"
         for acc in self._flatten_path_sql_exprs(path_parts):
             try:
-                sql = ('SELECT %s FROM %s LIMIT %d'
-                       % (acc, _qid(table),
-                          int(Session._FIELD_TREE_SAMPLE_ROWS)))
-                if reader is not None:
-                    _c, rows = reader(sql)
-                else:
-                    _c, rows = mgr.execute(sql)
-                values = [r[0] for r in (rows or [])
-                          if r and r[0] is not None]
+                values = self._fetch_shape_sample_values(mgr, table, acc)
+                values = [v for v in values if v is not None]
                 if not values:
                     continue
                 syn = json_samples_to_type_node(values)

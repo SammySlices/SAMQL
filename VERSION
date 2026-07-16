@@ -2,12 +2,31 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-16.623
+Current build:   2026-07-16.625
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-16.625  (v2.16.4)
+
+CLEAR ASSISTANT CONVERSATION + NESTED ARRAY FIELD DISCOVERY. SQL
+assistant header Clear resets local chat only (keeps model/Settings /
+llama-server). Field Explorer live sampling skips empty nested-array
+prefixes so element keys surface; Sidebar retries failed column-field
+fetches. Bump identity and refresh samql_txt full-source bundle.
+
+----------------------------------------------------------------------
+build 2026-07-16.624  (v2.16.4)
+
+NESTED ARRAY FIELD DISCOVERY. Live-cell Field Explorer sampling keeps
+reading past empty nested-array prefixes (and probes mid/end windows)
+so element keys still surface under (element); skip hollow element
+placeholders. Sidebar retries failed column-field fetches; Field Explorer
+ignores stale in-flight tableFields. Bump identity and refresh samql_txt
+full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-16.623  (v2.16.4)
