@@ -124,7 +124,9 @@ export const FlattenUidModal: React.FC<{
     }
   };
 
-  const canConfirm = !!choice && !!stats?.unique && !statsBusy;
+  // Prefer a finished uniqueness probe so the user sees the warning, but do
+  // not block Confirm when the identifier is not unique (warn-only).
+  const canConfirm = !!choice && !statsBusy && !!stats;
 
   return (
     <Modal
@@ -133,10 +135,10 @@ export const FlattenUidModal: React.FC<{
       testId="fx-flatten-uid-modal"
     >
       <p className="hint" style={{ marginTop: 0 }}>
-        Pick a field that uniquely identifies each source record (any level of
-        this table). It is carried onto every flattened table as{" "}
-        <code>root_id</code>, aligned to each flattened row. A{" "}
-        <code>Master_Keys</code> table lists the distinct values, and a{" "}
+        Pick a field that identifies each source record (any level of this
+        table). Prefer a unique field when possible. It is carried onto every
+        flattened table as <code>root_id</code>, aligned to each flattened row.
+        A <code>Master_Keys</code> table lists the distinct values, and a{" "}
         <code>Join_Keys</code> table maps <code>_sk</code>, <code>_rid</code>,
         and <code>root_id</code> per record.
       </p>
@@ -220,8 +222,8 @@ export const FlattenUidModal: React.FC<{
               distinct non-null values.
             </div>
           ) : (
-            <div>
-              <b>Not unique.</b>{" "}
+            <div data-testid="fx-uid-not-unique-warn">
+              <b>May not be unique.</b>{" "}
               {(stats.duplicated || 0) > 0 && (
                 <span>
                   {(stats.duplicated || 0).toLocaleString()} duplicate value
@@ -236,8 +238,9 @@ export const FlattenUidModal: React.FC<{
                   {". "}
                 </span>
               )}
-              Pick a different field — Confirm Flatten stays disabled until the
-              identifier is truly unique.
+              Flatten can still proceed, but the same <code>root_id</code> may
+              appear on more than one source record (and thus on flattened
+              rows). Prefer a different field if you need a true key.
             </div>
           )}
           <div className="hint" style={{ marginTop: 4 }}>
@@ -264,9 +267,13 @@ export const FlattenUidModal: React.FC<{
           data-testid="fx-uid-confirm"
           disabled={!canConfirm}
           title={
-            canConfirm
-              ? "Flatten with this unique identifier"
-              : "Pick a truly unique field first"
+            !choice
+              ? "Pick an identifier field first"
+              : statsBusy || !stats
+                ? "Checking uniqueness…"
+                : stats.unique
+                  ? "Flatten with this unique identifier"
+                  : "Flatten anyway — identifier may not be unique"
           }
           onClick={() => choice && canConfirm && onConfirm(choice)}
         >

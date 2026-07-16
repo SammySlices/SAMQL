@@ -213,6 +213,8 @@ frontend/src/lib/dashboardModel.ts
 frontend/src/lib/dashboardPdf.component.test.ts
 frontend/src/lib/dashboardPdf.ts
 frontend/src/lib/docking.ts
+frontend/src/lib/dropManyConfirm.component.test.ts
+frontend/src/lib/dropManyConfirm.ts
 frontend/src/lib/echart.ts
 frontend/src/lib/eyeCare.component.test.tsx
 frontend/src/lib/fieldExplorerSql.component.test.ts

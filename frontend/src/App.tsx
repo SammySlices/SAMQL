@@ -17,6 +17,7 @@ import { api,
   exportResultToFile,
   saveToDownloads } from "./lib/api";
 import type { RootIdChoice } from "./lib/api";
+import { dropManyConfirmMessage } from "./lib/dropManyConfirm";
 import { menuPos } from "./lib/menuPos";
 import { startPointerDrag } from "./lib/pointerDrag";
 import { statementAt } from "./lib/sql";
@@ -2288,11 +2289,12 @@ export default function App() {
     items: { engine: EngineKind; name: string }[],
   ) => {
     if (!items.length) return;
-    const list = items.map((i) => i.name).join(", ");
+    const allLocal = tables
+      .filter((t) => !t.remote)
+      .map((t) => ({ engine: t.engine, name: t.name }));
     askConfirm(
       { left: 268, top: 150, side: "right" as const },
-      `Drop ${items.length} table${items.length === 1 ? "" : "s"}? ` +
-        `This cannot be undone. (${list})`,
+      dropManyConfirmMessage(items, allLocal),
       () => reallyDropMany(items),
       "Drop",
     );
