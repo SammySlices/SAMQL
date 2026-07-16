@@ -193,6 +193,21 @@ function Test-SamQLHealth {
     }
 }
 
+# Best-effort BootBar stage from /api/health (empty string when unavailable).
+function Get-SamQLHealthStage {
+    param([int]$P)
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $wc.Headers.Add("Cache-Control", "no-cache")
+        $body = $wc.DownloadString("http://127.0.0.1:$P/api/health")
+        if ($body -match '"stage"\s*:\s*"([^"]+)"') {
+            return $Matches[1]
+        }
+    } catch { }
+    return ""
+}
+
 function Find-BrowserExe {
     param([string]$Which)
     $pf = $env:ProgramFiles
@@ -218,6 +233,10 @@ function Find-BrowserExe {
 
 Show-Splash
 
+# Tracks a server WE started (PassThru) so boot wait can fail immediately
+# if the child exits -- matches launcher_app._SERVER_PROC semantics.
+$script:ServerProc = $null
+
 # ---- 1) server: reuse when up; start only when the port is closed ----
 if (-not (Test-SamQLPort -P $Port)) {
     if ($NoServer) {
@@ -238,17 +257,17 @@ if (-not (Test-SamQLPort -P $Port)) {
             Fail-Visibly "python is not on PATH (needed for backend\server.py)."
         }
         # Pass --port so -Port N matches the health wait below (default 8765).
-        Start-Process -FilePath $py.Source `
+        $script:ServerProc = Start-Process -FilePath $py.Source `
             -ArgumentList @("`"$serverPy`"", "--no-browser", "--port", "$Port") `
-            -WorkingDirectory $here -WindowStyle Minimized | Out-Null
+            -WorkingDirectory $here -WindowStyle Minimized -PassThru
     } elseif (Test-Path $exe) {
-        Start-Process -FilePath $exe `
+        $script:ServerProc = Start-Process -FilePath $exe `
             -ArgumentList @("--no-browser", "--port", "$Port") `
-            -WorkingDirectory $here | Out-Null
+            -WorkingDirectory $here -PassThru
     } elseif (Test-Path $distExe) {
-        Start-Process -FilePath $distExe `
+        $script:ServerProc = Start-Process -FilePath $distExe `
             -ArgumentList @("--no-browser", "--port", "$Port") `
-            -WorkingDirectory $here | Out-Null
+            -WorkingDirectory $here -PassThru
     } else {
         Fail-Visibly "Nothing to start: no samql exe, no backend server."
     }
@@ -258,14 +277,60 @@ if (-not (Test-SamQLPort -P $Port)) {
     Set-SplashText "Reusing the server on port $Port."
 }
 
-# Wait for /api/health (accepting HTTP), not merely TCP bind -- matches
-# launcher_app cold-start posture and avoids the listen-backlog hang.
+# Heartbeat wait for /api/health (not TCP alone). Tracks launcher_app:
+#   SERVER_BOOT_IDLE_TIMEOUT_S = 90, SERVER_BOOT_TIMEOUT_S = 300
+# Child exit fails immediately; process-alive + TCP/stage reset idle;
+# absolute ceiling still caps hung-but-alive. Open once health says SamQL
+# (warming may still be true -- do not hold the splash for session warm).
 if (-not (Test-SamQLHealth -P $Port)) {
     Set-SplashText "Waiting for SamQL to be ready..."
-    $deadline = (Get-Date).AddSeconds(120)
+    $bootBudgetS = 300
+    $bootIdleS = 90
+    $deadline = (Get-Date).AddSeconds($bootBudgetS)
+    $waitStarted = Get-Date
+    $lastBeat = $waitStarted
+    $lastLog = $waitStarted
+    $sawTcp = $false
+    $lastStage = ""
+    Write-LauncherLog "INFO waiting for /api/health on port $Port (idle ${bootIdleS}s / absolute ${bootBudgetS}s)"
     while (-not (Test-SamQLHealth -P $Port)) {
-        if ((Get-Date) -gt $deadline) {
-            Fail-Visibly "SamQL did not answer /api/health on port $Port within 120s."
+        $now = Get-Date
+        if ($null -ne $script:ServerProc) {
+            try { $script:ServerProc.Refresh() } catch { }
+            if ($script:ServerProc.HasExited) {
+                $code = $script:ServerProc.ExitCode
+                Fail-Visibly "The SamQL server process exited before it was ready (exit $code)."
+            }
+            # Process still alive counts as a heartbeat.
+            $lastBeat = $now
+        }
+        if (Test-SamQLPort -P $Port) {
+            if (-not $sawTcp) {
+                $sawTcp = $true
+                Write-LauncherLog "INFO TCP bound on port $Port (still waiting for /api/health)"
+            }
+            $lastBeat = $now
+            $stage = Get-SamQLHealthStage -P $Port
+            if ($stage -and ($stage -ne $lastStage)) {
+                $lastStage = $stage
+                $lastBeat = $now
+                Write-LauncherLog "INFO boot stage: $stage"
+                Set-SplashText "Starting SamQL ($stage)..."
+            }
+        }
+        if (($now - $lastBeat).TotalSeconds -ge $bootIdleS) {
+            Fail-Visibly "The SamQL server stopped making boot progress on port $Port (no heartbeat for ${bootIdleS}s)."
+        }
+        if ($now -gt $deadline) {
+            Fail-Visibly "The server did not come up on port $Port within ${bootBudgetS}s (see the error log in Settings)."
+        }
+        if (($now - $lastLog).TotalSeconds -ge 15) {
+            $elapsed = [int](($now - $waitStarted).TotalSeconds)
+            $idleElapsed = [int](($now - $lastBeat).TotalSeconds)
+            $stageNote = ""
+            if ($lastStage) { $stageNote = ", stage=$lastStage" }
+            Write-LauncherLog "INFO still waiting for /api/health on port $Port ($elapsed s elapsed, idle ${idleElapsed}s / abs ${bootBudgetS}s$stageNote)"
+            $lastLog = $now
         }
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 300
@@ -333,7 +398,9 @@ Start-Process -FilePath $bx -ArgumentList $bargs | Out-Null
 # hold the splash until the APP WINDOW itself is up: poll for a browser
 # window titled "SamQL" (the document title), not a blind sleep
 $browserProc = [IO.Path]::GetFileNameWithoutExtension($bx)
-$appDeadline = (Get-Date).AddSeconds(12)
+# Tracks launcher_app.APP_WINDOW_WAIT_S -- branding only; miss is a WARN.
+$appWindowWaitS = 75
+$appDeadline = (Get-Date).AddSeconds($appWindowWaitS)
 $appUp = $false
 while ((Get-Date) -lt $appDeadline) {
     $hit = Get-Process -Name $browserProc -ErrorAction SilentlyContinue |
@@ -343,7 +410,7 @@ while ((Get-Date) -lt $appDeadline) {
     Start-Sleep -Milliseconds 250
 }
 if (-not $appUp) {
-    Write-LauncherLog "WARN app window title not seen within 12s (opened anyway)"
+    Write-LauncherLog "WARN app window title not seen within ${appWindowWaitS}s (opened anyway)"
 }
 Close-Splash
 

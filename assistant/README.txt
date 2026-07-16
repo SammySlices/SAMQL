@@ -32,17 +32,20 @@ Download (on a machine that CAN reach GitHub + Hugging Face):
     .\Fetch-SamQL-Assistant.ps1
     .\Fetch-SamQL-Assistant.ps1 -Model 4b
     .\Fetch-SamQL-Assistant.ps1 -Model 7b
+    .\Fetch-SamQL-Assistant.ps1 -SkipModel   # llama-server only (no GGUF)
 
   Any OS with Python 3.10+:
     python tools/fetch_assistant_pack.py
     python tools/fetch_assistant_pack.py --model 4b
     python tools/fetch_assistant_pack.py --model 7b
+    python tools/fetch_assistant_pack.py --skip-model
 
   Re-download:
     python tools/fetch_assistant_pack.py --force --model 4b
 
   Without --model / -Model on a terminal, the fetch script prompts and
   defaults to 4b on Enter. Non-interactive runs (CI / build) default to 4b.
+  Default AppWindow builds fetch with --skip-model when runtime is missing.
 
 Or choose packaging during the SamQL build (build.ps1 / build.sh prompts):
   1) lean     -- SamQL only; no assistant/ staged
@@ -57,11 +60,16 @@ Or choose packaging during the SamQL build (build.ps1 / build.sh prompts):
     .\Fetch-SamQL-Assistant.ps1 -Model 4b|7b
     python tools/fetch_assistant_pack.py --model 4b|7b
 
+  Packaged lean/runtime installs also include an empty Model/ folder next
+  to _internal (sibling of assistant/). Drop a .gguf there. SamQL prefers
+  assistant/models/ when present, then Model/. Repo-dev fetch still writes
+  to assistant/models/.
+
 Locked-down work PC workflow:
   1. Run the fetch script on a home/build PC (pick 4b / 7b as needed).
   2. Copy the whole assistant/ folder next to SamQL-AppWindow (or set
      SAMQL_ASSISTANT_DIR). If the install already has assistant/runtime/,
-     you only need to copy the GGUF into assistant/models/.
+     drop the GGUF into Model/ or assistant/models/.
 
 Sources used by the fetch script:
   * llama-server: https://github.com/ggml-org/llama.cpp/releases (CPU build)

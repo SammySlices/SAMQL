@@ -89,21 +89,34 @@ assistant\
     └── README.txt    <- how to fetch a GGUF later (no .gguf shipped)
 ```
 
-No multi-GB GGUF is bundled. Recipients (or you) download a model later:
+No multi-GB GGUF is bundled. At build time, if `assistant/runtime/` is
+missing, `build.ps1` / `build.sh` fetch the llama.cpp CPU release via
+`tools/fetch_assistant_pack.py --skip-model` (same as
+`.\Fetch-SamQL-Assistant.ps1 -SkipModel`). Offline builders that cannot
+reach GitHub should use `-AssistantPack lean`.
+
+Recipients (or you) download a model later:
 
 ```powershell
 .\Fetch-SamQL-Assistant.ps1 -Model 4b   # or 7b
 ```
 
-Then copy `assistant\models\*.gguf` into the install’s `assistant\models\`
-(or re-run fetch against that tree). The picker and Fetch script support
-**4b / 7b** (default **4b**).
+Then either:
+
+- copy `assistant\models\*.gguf` into the install’s `assistant\models\`, or
+- drop the `.gguf` into the install-root **`Model\`** folder (next to
+  `_internal` / `frontend_dist` — created empty in lean/runtime packs).
+
+SamQL prefers `assistant/models/` when present, then `Model/`. Settings →
+preferred path still wins when set. Repo-dev fetch writes to
+`assistant/models/`; packaged lean users typically use `Model/`. The
+picker and Fetch script support **4b / 7b** (default **4b**).
 
 Other packaging modes:
 
 | Mode | Flag | What ships |
 |------|------|------------|
-| lean | `-AssistantPack lean` | No `assistant/` |
+| lean | `-AssistantPack lean` | No `assistant/` (still ships empty `Model/`) |
 | runtime (default) | `-AssistantPack runtime` | llama-server only |
 | post | `-AssistantPack post` | runtime + GGUF (~+1 GB+) |
 | embed | `-AssistantPack embed` | full pack baked into PyInstaller |
@@ -119,6 +132,7 @@ SamQL-AppWindow\
 ├── SamQL-AppWindow.exe     <- double-click THIS
 ├── SamQL.exe               <- server sidecar (rides along; not the UI product)
 ├── SamQL.ico               <- shortcut icon
+├── Model\                  <- drop a .gguf here when the pack omits a model
 ├── assistant\              <- runtime-only by default (see above)
 ├── python3xx.dll           <- the bundled Python runtime
 └── _internal\              <- everything else, pre-extracted
@@ -148,14 +162,14 @@ won't find its files.
 No Python. No Node.js. No admin rights needed to run.
 
 Optional — offline SQL assistant model (Assistant zip already has the
-llama-server runtime; lean zip needs the full pack first):
+llama-server runtime; lean zip needs the runtime/`assistant\` pack first):
 
 ```powershell
 .\Fetch-SamQL-Assistant.ps1 -Model 4b
 ```
 
-Copy `assistant\` (or just `assistant\models\*.gguf` if runtime is already
-present) next to `SamQL-AppWindow.exe`.
+Copy `assistant\` next to `SamQL-AppWindow.exe` if missing, then drop the
+`.gguf` into `Model\` (or `assistant\models\`).
 
 ---
 

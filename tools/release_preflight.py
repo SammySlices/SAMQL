@@ -794,8 +794,9 @@ def _check_docs_and_transport(root: Path, release: dict[str, Any], checks: Check
     )
     checks.add(
         "standalone launcher cold-start budget",
-        "AddSeconds(120)" in launcher and "within 120s" in launcher,
-        "120 seconds",
+        "$bootBudgetS = 300" in launcher
+        and "within ${bootBudgetS}s" in launcher,
+        "300 seconds",
     )
 
 

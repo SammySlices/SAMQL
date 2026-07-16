@@ -9622,10 +9622,12 @@ button:hover .icon-trash svg {
 }
 
 /* ---------- Local SQL assistant (beta) ---------- */
-/* Launcher is the IDE toolbar chat icon (data-testid=sql-assistant-fab). */
+/* Launcher is the IDE toolbar chat icon (data-testid=sql-assistant-fab).
+   Panel portals to document.body; z-index must clear Field Explorer (140)
+   and typical chrome so a green toolbar button always meets a visible chat. */
 .sql-asst-win {
   position: fixed;
-  z-index: 96;
+  z-index: 160;
   width: 380px;
   max-width: calc(100vw - 24px);
   height: 460px;

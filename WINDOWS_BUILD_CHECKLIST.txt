@@ -57,6 +57,11 @@ EXPECT both commands to pass before any executable packaging begins.
        dist\SamQL-AppWindow.zip            (lean — no assistant/)
        dist\SamQL-AppWindow-Assistant.zip  (AppWindow + SQL assistant runtime;
                                             default runtime mode, no *.gguf)
+     Both zips include an empty Model\ folder (README.txt) for user GGUF
+     drop-in. Assistant zip has assistant\runtime\llama-server.exe (+ DLLs);
+     no multi-GB *.gguf unless -AssistantPack post/embed. If runtime was
+     missing at build start, expect a GitHub llama.cpp fetch via
+     fetch_assistant_pack --skip-model (or fail with a -SkipModel hint).
      Zips are written via tar/ZIP64 (not Compress-Archive). SamQL.exe may
      ride along as a server sidecar inside the folder; do not promote it
      as the browser-tab product. Size sanity: tens–hundreds of MB for the

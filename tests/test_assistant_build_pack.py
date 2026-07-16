@@ -46,6 +46,18 @@ class ModeResolveTests(unittest.TestCase):
             )
 
 
+class EnsureHintTests(unittest.TestCase):
+    def test_ensure_without_fetch_runtime_only_mentions_skip_model(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with self.assertRaises(SystemExit) as ctx:
+                abp.ensure_pack(root, fetch=False, require_model=False)
+            msg = str(ctx.exception)
+            self.assertIn("--skip-model", msg)
+            self.assertIn("-SkipModel", msg)
+            self.assertIn("runtime", msg.lower())
+
+
 class PackStatusTests(unittest.TestCase):
     def test_pack_status_full_and_runtime_only(self):
         with tempfile.TemporaryDirectory() as td:
@@ -98,6 +110,16 @@ class PackStatusTests(unittest.TestCase):
             self.assertIn(
                 "Fetch-SamQL-Assistant",
                 (dist / "assistant" / "models" / "README.txt").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            # Runtime (no GGUF): install-root Model/ drop-in beside _internal.
+            self.assertTrue(
+                (dist / "SamQL-AppWindow" / "Model" / "README.txt").is_file()
+            )
+            self.assertIn(
+                "Drop a GGUF",
+                (dist / "SamQL-AppWindow" / "Model" / "README.txt").read_text(
                     encoding="utf-8"
                 ),
             )
@@ -170,8 +192,20 @@ class OnedirZipTests(unittest.TestCase):
                 any(f"assistant/runtime/{bin_name}" in n.replace("\\", "/")
                     for n in asst_names)
             )
+            # Both zips include Model/ (user GGUF drop-in).
+            self.assertTrue(
+                any("/Model/" in n.replace("\\", "/")
+                    or n.replace("\\", "/").endswith("/Model/README.txt")
+                    for n in lean_names)
+            )
+            self.assertTrue(
+                any("/Model/" in n.replace("\\", "/")
+                    or n.replace("\\", "/").endswith("/Model/README.txt")
+                    for n in asst_names)
+            )
             # Live onedir keeps assistant/ after zipping.
             self.assertTrue((asst_rt / bin_name).is_file())
+            self.assertTrue((onedir / "Model" / "README.txt").is_file())
 
     def test_lean_only_when_no_assistant_dir(self):
         with tempfile.TemporaryDirectory() as td:
@@ -187,6 +221,12 @@ class OnedirZipTests(unittest.TestCase):
             self.assertEqual(written, [lean_zip.resolve()])
             self.assertTrue(lean_zip.is_file())
             self.assertFalse(asst_zip.exists())
+            lean_names = _zip_names(lean_zip)
+            self.assertTrue(
+                any("Model/README.txt" in n.replace("\\", "/")
+                    for n in lean_names)
+            )
+            self.assertTrue((onedir / "Model" / "README.txt").is_file())
 
 
 if __name__ == "__main__":

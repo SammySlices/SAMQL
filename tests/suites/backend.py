@@ -4744,22 +4744,33 @@ def backend_tests(datadir, csv_path, json_path):
                  and src.index("if not port_open")
                  < src.index("find_browser(args.browser)"),
                  "a live port REUSES the instance, never restarts")
-            need("deadline = time.time() + SERVER_BOOT_TIMEOUT_S" in src
-                 and "SERVER_BOOT_TIMEOUT_S = 120" in src
+            need("def wait_for_server_ready" in src
+                 and "SERVER_BOOT_TIMEOUT_S = 300" in src
+                 and "SERVER_BOOT_IDLE_TIMEOUT_S = 90" in src
+                 and "wait_for_server_ready(args.port, splash)" in src
                  and "did not come up" in src
+                 and "exited before it was" in src
                  and "--no-server" in src
-                 and "_server_alive_now(args.port)" in src
+                 and "_server_alive_now(port)" in src
                  and "Waiting for SamQL to be ready" in src,
-                 "dead servers fail visibly after the boot timeout (120 s); "
-                 "cold start waits for /api/health, not TCP alone")
+                 "heartbeat boot wait: child-death fail, idle+absolute "
+                 "ceilings, /api/health readiness (not TCP alone)")
             need('background_color=CHROME_BG' in src
                  and 'CHROME_BG = "#16181d"' in src
                  and 'webview.create_window("SamQL"' in src,
                  "native window uses a dark WebView2 background "
                  "(avoids the white first-open flash)")
-            need(LA.SERVER_BOOT_TIMEOUT_S == 120,
-                 "the server boot timeout is 120 s (bumped for OneDrive/AV "
-                 "cold starts)")
+            need(LA.SERVER_BOOT_TIMEOUT_S == 300,
+                 "absolute boot ceiling is 300 s (close-stops-server "
+                 "colder starts + OneDrive/AV)")
+            need(LA.SERVER_BOOT_IDLE_TIMEOUT_S == 90,
+                 "boot idle timeout is 90 s (no heartbeat)")
+            need(LA._MUTEX_BOOT_WAIT_S == float(LA.SERVER_BOOT_TIMEOUT_S),
+                 "mutex boot wait tracks the server boot budget "
+                 "(no stale-mutex second-server race)")
+            need(LA.APP_WINDOW_WAIT_S >= 75.0
+                 and LA._MUTEX_WINDOW_GRACE_S >= 100.0,
+                 "window wait / grace budgets cover WebView2 cold start")
             from samql_core import __version__, BUILD
             vh = open(os.path.join(ROOT, "VERSION"),
                       encoding="utf-8").read()
@@ -8217,7 +8228,10 @@ def backend_tests(datadir, csv_path, json_path):
             ("waiting for the first launch's server", "D port-aware"),
             ("treating it as stale", "F crash-stale mutex"),
             ("ignored a phantom", "ghost windows"),
-            ("the server is left running", "close persists"),
+            # .622: close stops the server we started (no lingering Task
+            # Manager / llama-server). Reattach still works when a server
+            # was left up by another path (e.g. Exit → keep server).
+            ("stopped the server on port", "close stops server we started"),
         ):
             need(frag in la, "lifecycle anchor for %s" % scen)
 
@@ -9553,14 +9567,14 @@ def backend_tests(datadir, csv_path, json_path):
 
     
     def t_single_instance_534():
-        # .534, on-box: exiting SamQL-AppWindow left the server up (or
-        # killed the one WE started -- .490), and clicking the exe again
+        # .534, on-box: exiting SamQL-AppWindow and clicking the exe again
         # opened a SECOND window / cold-started a FRESH instance. One
         # SamQL at a time now: (a) an already-open window is surfaced
         # and the new launch exits; (b) a named mutex closes the
-        # double-click race while the first window boots; (c) closing
-        # the window leaves the server RUNNING, and the next launch
-        # reattaches to it with the session intact.
+        # double-click race while the first window boots; (c) .622:
+        # closing the window stops the server WE started (no Task
+        # Manager leftovers); a live foreign/kept server is still
+        # reused on the next launch.
         sys.path.insert(0, BACKEND)
         try:
             import launcher_app as _LA
@@ -9604,7 +9618,8 @@ def backend_tests(datadir, csv_path, json_path):
              "the boot race waits on the first window"),
             ("treating it as stale",
              ".537: a wedged holder never locks a launch out"),
-            ("the server is left running", "window close persists"),
+            ("stopped the server on port",
+             ".622: window close stops the server we started"),
         ):
             need(frag in la, why)
         need("proc.terminate()" not in la.split("def main")[1],
@@ -12074,6 +12089,161 @@ def backend_tests(datadir, csv_path, json_path):
              and '"_parent_sk"' in _msql,
              "the map SQL aligns key/value by subscript, keyed to the "
              "record, skipping absent maps")
+        # .623 companion: health must not require get_session either
+        need("def _health_payload(" in sv
+             and '_health_payload(SESSION)' in sv
+             and 'path == "/api/health"' in sv,
+             " /api/health has a session-free readiness path")
+
+    def t_health_ready_without_session_623():
+        # .623: AppWindow failed the first cold open when /api/health blocked
+        # on Session() (assistant prefs, DuckDB, AV) for the whole boot
+        # budget; retry worked because imports were warm. Health must answer
+        # the app marker while SESSION is still None; full fields appear
+        # once the session exists. Also lock the launcher wait budgets.
+        import json as _j623
+        import threading as _th623
+        import urllib.request as _ur623
+        sys.path.insert(0, BACKEND)
+        try:
+            import server as _sv623
+            import launcher_app as _LA623
+        finally:
+            sys.path.pop(0)
+
+        need(_LA623.SERVER_BOOT_TIMEOUT_S == 300,
+             "cold-start absolute boot ceiling is 300 s")
+        need(_LA623.SERVER_BOOT_IDLE_TIMEOUT_S == 90,
+             "cold-start idle heartbeat budget is 90 s")
+        need(_LA623._MUTEX_BOOT_WAIT_S == float(_LA623.SERVER_BOOT_TIMEOUT_S),
+             "mutex boot wait equals server boot budget")
+        need(_LA623.APP_WINDOW_WAIT_S >= 75.0, "app-window poll budget")
+        need(_LA623._MUTEX_WINDOW_GRACE_S >= 100.0,
+             "post-server window grace covers WebView2 cold start")
+        need(hasattr(_LA623, "wait_for_server_ready"),
+             "launcher exposes heartbeat wait_for_server_ready")
+
+        light = _sv623._health_payload(None)
+        need(light.get("app") == "SamQL" and light.get("warming") is True
+             and light.get("features") == {}
+             and isinstance(light.get("stage"), str)
+             and light.get("stage"),
+             "lightweight health is the launcher readiness marker "
+             "(+ stage): %r" % light)
+
+        # Behavioral: HTTP up, SESSION deliberately None -- health must
+        # still identify as SamQL without constructing a Session.
+        prev = _sv623.SESSION
+        httpd, _p = _sv623.make_server("127.0.0.1", 0)
+        port = httpd.server_address[1]
+        _th623.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            _sv623.SESSION = None
+            op = _ur623.build_opener(_ur623.ProxyHandler({}))
+            with op.open("http://127.0.0.1:%d/api/health" % port,
+                         timeout=3) as resp:
+                body = _j623.loads(
+                    resp.read().decode("utf-8", "replace") or "{}")
+            need((body.get("app") or "").lower() == "samql"
+                 and body.get("warming") is True
+                 and _sv623.SESSION is None,
+                 "health answers while SESSION is None (no get_session): %r"
+                 % body)
+            full = _sv623._health_payload(_sv623.Session())
+            need(full.get("warming") is False
+                 and "concurrent_reads" in full
+                 and isinstance(full.get("features"), dict)
+                 and isinstance(full.get("stage"), str)
+                 and bool(full.get("stage")),
+                 "warm health includes session fields (+ stage): %r"
+                 % full)
+        finally:
+            _sv623.SESSION = prev
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+
+    def t_boot_heartbeat_wait_625():
+        # .625: pre-health wait must fail immediately on child death, use
+        # idle+absolute ceilings (not a single wall-clock only), and treat
+        # process-alive / TCP progress as heartbeats. Open when health
+        # says SamQL (warming may still be true).
+        import types as _types625
+        sys.path.insert(0, BACKEND)
+        try:
+            import launcher_app as _LA625
+        finally:
+            sys.path.pop(0)
+
+        keep = {n: getattr(_LA625, n) for n in (
+            "write_log", "_server_alive_now", "port_open", "_fetch_health",
+            "SERVER_BOOT_TIMEOUT_S", "SERVER_BOOT_IDLE_TIMEOUT_S",
+        )}
+        prev_proc = _LA625._SERVER_PROC
+        logs = []
+        try:
+            _LA625.write_log = lambda m: logs.append(m)
+
+            # --- child exit fails immediately ---
+            dead = _types625.SimpleNamespace(
+                poll=lambda: 7, pid=1)
+            _LA625._SERVER_PROC = dead
+            _LA625._server_alive_now = lambda p: False
+            _LA625.port_open = lambda p, **k: False
+            _LA625.SERVER_BOOT_TIMEOUT_S = 30.0
+            _LA625.SERVER_BOOT_IDLE_TIMEOUT_S = 30.0
+            err = _LA625.wait_for_server_ready(8765, _LA625._NullSplash())
+            need(err and "exited before it was ready" in err
+                 and "7" in err,
+                 "child death fails immediately: %r" % err)
+
+            # --- idle timeout when no child handle and no progress ---
+            logs.clear()
+            _LA625._SERVER_PROC = None
+            _LA625._server_alive_now = lambda p: False
+            _LA625.port_open = lambda p, **k: False
+            _LA625._fetch_health = lambda p: None
+            _LA625.SERVER_BOOT_TIMEOUT_S = 30.0
+            _LA625.SERVER_BOOT_IDLE_TIMEOUT_S = 0.35
+            t_idle0 = __import__("time").time()
+            err = _LA625.wait_for_server_ready(8765, _LA625._NullSplash())
+            elapsed_idle = __import__("time").time() - t_idle0
+            need(err and "no heartbeat" in err,
+                 "idle timeout without heartbeat: %r" % err)
+            need(elapsed_idle < 8.0,
+                 "idle fail is prompt, not absolute ceiling: %.2fs"
+                 % elapsed_idle)
+
+            # --- absolute ceiling for hung-but-alive (idle keeps resetting) ---
+            logs.clear()
+            alive = _types625.SimpleNamespace(
+                poll=lambda: None, pid=2)
+            _LA625._SERVER_PROC = alive
+            _LA625._server_alive_now = lambda p: False
+            _LA625.port_open = lambda p, **k: False
+            _LA625.SERVER_BOOT_TIMEOUT_S = 0.4
+            _LA625.SERVER_BOOT_IDLE_TIMEOUT_S = 30.0
+            t_abs0 = __import__("time").time()
+            err = _LA625.wait_for_server_ready(8765, _LA625._NullSplash())
+            elapsed_abs = __import__("time").time() - t_abs0
+            need(err and "within" in err and "did not come up" in err,
+                 "hung-alive hits absolute ceiling: %r" % err)
+            need(elapsed_abs < 8.0,
+                 "absolute fail is near the ceiling: %.2fs" % elapsed_abs)
+
+            # --- success when health answers (even if warming) ---
+            logs.clear()
+            _LA625._SERVER_PROC = alive
+            _LA625._server_alive_now = lambda p: True
+            _LA625.SERVER_BOOT_TIMEOUT_S = 5.0
+            _LA625.SERVER_BOOT_IDLE_TIMEOUT_S = 5.0
+            err = _LA625.wait_for_server_ready(8765, _LA625._NullSplash())
+            need(err is None, "health ready returns success: %r" % err)
+        finally:
+            _LA625._SERVER_PROC = prev_proc
+            for n, v in keep.items():
+                setattr(_LA625, n, v)
 
     def t_local_http_no_proxy_509():
         # .509 (on-box launcher.log: "server shutdown request failed
@@ -17770,12 +17940,20 @@ def backend_tests(datadir, csv_path, json_path):
              '--app=$url' in ps and "--window-size=" in ps),
             ("reuses a live server; starts one only when needed",
              "Test-SamQLPort" in ps and "Reusing the server on port" in ps
-             and "AddSeconds(120)" in ps),
-            ("cold start waits for /api/health, not TCP alone",
+             and "$bootBudgetS = 300" in ps
+             and "$bootIdleS = 90" in ps
+             and "AddSeconds($bootBudgetS)" in ps),
+            ("cold start heartbeat wait for /api/health (not TCP alone)",
              "function Test-SamQLHealth" in ps
              and "Waiting for SamQL to be ready" in ps
              and "/api/health" in ps
-             and '$wc.Proxy = $null' in ps),
+             and '$wc.Proxy = $null' in ps
+             and "$bootBudgetS = 300" in ps
+             and "$bootIdleS = 90" in ps
+             and "HasExited" in ps
+             and "-PassThru" in ps
+             and "no heartbeat for" in ps
+             and "Get-SamQLHealthStage" in ps),
             ("start order: source server.py, exe, dist exe",
              ps.index('"backend\\server.py"') < ps.index('"samql.exe"')
              < ps.index('"dist\\samql.exe"')),
@@ -36522,7 +36700,7 @@ def backend_tests(datadir, csv_path, json_path):
          "bundled and the launcher spawns itself with --serve",
          t_selfserve_535),
         (".534: one SamQL at a time -- focus the open window, mutex the "
-         "boot race, window close leaves the server running to reattach",
+         "boot race; .622 close stops the server we started",
          t_single_instance_534),
         (".533: version/date in UI + journal, cancellable export cards "
          "everywhere, gated tab/cell deletes, window.confirm eradicated",
@@ -36595,6 +36773,12 @@ def backend_tests(datadir, csv_path, json_path):
          "without node_modules", t_frontend_syntax_gate_511),
         (".510: first-query import warmup, storage-report cache, export to "
          "Downloads, element MAP tables", t_first_query_stall_and_export_510),
+        (".623: /api/health answers without Session() so AppWindow cold "
+         "starts do not burn the boot budget; wait budgets aligned",
+         t_health_ready_without_session_623),
+        (".625: boot wait fails on child death; idle + absolute ceilings; "
+         "alive/TCP heartbeats",
+         t_boot_heartbeat_wait_625),
         (".509: local HTTP bypasses corporate proxies (zombie-server fix)",
          t_local_http_no_proxy_509),
         (".507: keys-only base promoted away; wrapper objects become their "

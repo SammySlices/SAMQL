@@ -37,6 +37,18 @@ class SchemaPromptTests(unittest.TestCase):
         self.assertIn("json_extract", meta["schema"])
         self.assertNotIn("dbo.x", meta["schema"])
 
+    def test_schema_prompt_steers_duckdb_not_mysql_postgres(self):
+        meta = asst.schema_prompt([], dialect="native")
+        sys_msg = meta["system"].lower()
+        self.assertEqual(meta["dialect"], "duckdb")
+        self.assertIn("duckdb", sys_msg)
+        self.assertIn("json_extract", sys_msg)
+        self.assertIn("unnest", sys_msg)
+        self.assertIn("mysql", sys_msg)
+        self.assertIn("postgres", sys_msg)
+        # Must steer AWAY from those dialects, not recommend them.
+        self.assertIn("not mysql", sys_msg)
+
     def test_extract_sql_from_fenced_block(self):
         text = "Sure.\n```sql\nSELECT 1 AS n;\n```\n"
         self.assertEqual(asst.extract_sql(text), "SELECT 1 AS n;")
@@ -50,6 +62,7 @@ class SchemaPromptTests(unittest.TestCase):
         self.assertEqual(msgs[0]["role"], "system")
         self.assertLessEqual(len(msgs[1]["content"]), asst._MAX_PROMPT_CHARS)
         self.assertEqual(meta["dialect"], "duckdb")
+        self.assertIn("DuckDB", msgs[0]["content"])
 
 
 class PackAndGateTests(unittest.TestCase):
@@ -188,6 +201,112 @@ class PackAndGateTests(unittest.TestCase):
         self.assertTrue(got.get("preferred_missing"))
         self.assertTrue(got.get("using_default"))
         self.assertTrue(asst._same_path(got["model"], default))
+
+    def test_find_pack_uses_install_model_folder_when_models_empty(self):
+        # Packaged lean/runtime: llama-server under assistant/, GGUF dropped
+        # into sibling Model/ (next to _internal). Prefer assistant/models/
+        # when present; Model/ is the user drop-in.
+        with tempfile.TemporaryDirectory() as td:
+            install = Path(td)
+            asst_root = install / "assistant"
+            runtime = asst_root / "runtime"
+            runtime.mkdir(parents=True)
+            bin_name = "llama-server.exe" if asst._is_windows() else "llama-server"
+            (runtime / bin_name).write_bytes(b"x")
+            (asst_root / "models").mkdir()
+            user_model = install / "Model"
+            user_model.mkdir()
+            gguf = user_model / "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+            gguf.write_bytes(b"user")
+            got = asst.find_pack(asst_root)
+        self.assertTrue(got["ok"])
+        self.assertTrue(asst._same_path(got["model"], gguf))
+
+    def test_find_pack_prefers_assistant_models_over_model_folder(self):
+        with tempfile.TemporaryDirectory() as td:
+            install = Path(td)
+            asst_root = install / "assistant"
+            runtime = asst_root / "runtime"
+            runtime.mkdir(parents=True)
+            bin_name = "llama-server.exe" if asst._is_windows() else "llama-server"
+            (runtime / bin_name).write_bytes(b"x")
+            models = asst_root / "models"
+            models.mkdir()
+            bundled = models / "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+            bundled.write_bytes(b"bundled")
+            user_model = install / "Model"
+            user_model.mkdir()
+            (user_model / "qwen2.5-coder-7b-instruct-q4_k_m.gguf").write_bytes(
+                b"user"
+            )
+            got = asst.find_pack(asst_root)
+        self.assertTrue(got["ok"])
+        self.assertTrue(asst._same_path(got["model"], bundled))
+
+    def test_find_pack_accepts_sole_phi4_mini_q3(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bin_name = "llama-server.exe" if asst._is_windows() else "llama-server"
+            runtime = root / "runtime"
+            runtime.mkdir()
+            (runtime / bin_name).write_bytes(b"x")
+            models = root / "models"
+            models.mkdir()
+            phi = models / "Phi-4-mini-instruct-Q3_K_M.gguf"
+            phi.write_bytes(b"phi")
+            got = asst.find_pack(root)
+        self.assertTrue(got["ok"])
+        self.assertTrue(asst._same_path(got["model"], phi))
+        self.assertIn("phi", (got.get("model_name") or "").lower())
+
+    def test_find_pack_phi_in_model_dropin_folder(self):
+        with tempfile.TemporaryDirectory() as td:
+            install = Path(td)
+            asst_root = install / "assistant"
+            runtime = asst_root / "runtime"
+            runtime.mkdir(parents=True)
+            bin_name = "llama-server.exe" if asst._is_windows() else "llama-server"
+            (runtime / bin_name).write_bytes(b"x")
+            (asst_root / "models").mkdir()
+            user_model = install / "Model"
+            user_model.mkdir()
+            phi = user_model / "Phi-4-mini-instruct-Q3_K_M.gguf"
+            phi.write_bytes(b"phi")
+            got = asst.find_pack(asst_root)
+        self.assertTrue(got["ok"])
+        self.assertTrue(asst._same_path(got["model"], phi))
+
+    def test_find_pack_preferred_phi_beats_default_qwen(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bin_name = "llama-server.exe" if asst._is_windows() else "llama-server"
+            runtime = root / "runtime"
+            runtime.mkdir()
+            (runtime / bin_name).write_bytes(b"x")
+            models = root / "models"
+            models.mkdir()
+            qwen = models / "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+            phi = models / "Phi-4-mini-instruct-Q3_K_M.gguf"
+            qwen.write_bytes(b"qwen")
+            phi.write_bytes(b"phi")
+            got = asst.find_pack(root, preferred_model=str(phi))
+        self.assertTrue(got["ok"])
+        self.assertTrue(asst._same_path(got["model"], phi))
+        self.assertFalse(got.get("using_default"))
+
+    def test_ensure_server_cmd_has_no_qwen_only_chat_template(self):
+        # llama-server must use the GGUF-embedded template (Phi + Qwen).
+        src = Path(asst.__file__).read_text(encoding="utf-8")
+        start = src.index("def ensure_server")
+        end = src.index("\ndef stop_server", start)
+        body = src[start:end]
+        self.assertIn('"-m", pack["model"]', body)
+        self.assertIn("embedded in the GGUF", body)
+        cmd_block = body.split("cmd = [", 1)[1].split("]", 1)[0]
+        self.assertNotIn("--chat-template", cmd_block)
+        self.assertNotIn("--jinja", cmd_block)
+        self.assertNotIn("qwen", cmd_block.lower())
+        self.assertNotIn("phi", cmd_block.lower())
 
     def test_set_preferred_model_and_sync_stops_mismatch(self):
         asst.set_preferred_model(None)

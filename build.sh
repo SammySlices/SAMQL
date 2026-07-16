@@ -97,6 +97,7 @@ elif [ "$ASSISTANT_MODE" = "runtime" ]; then
   echo "==> ensuring assistant runtime (llama-server only, no GGUF)…"
   "$PY" "$ASST_TOOL" ensure --root "$ROOT" --fetch --runtime-only || {
     echo "ERROR: assistant runtime required for mode 'runtime'." >&2
+    echo "       With network: python tools/fetch_assistant_pack.py --skip-model" >&2
     echo "       Offline builders: ./build.sh --assistant-pack lean" >&2
     exit 1
   }
@@ -266,8 +267,10 @@ elif [ "$ASSISTANT_MODE" = "post" ]; then
   "$PY" "$ASST_TOOL" stage-post --root "$ROOT"
 elif [ "$ASSISTANT_MODE" = "lean" ]; then
   echo "==> assistant pack: lean mode (not staged). To add later:"
-  echo "    python tools/fetch_assistant_pack.py --model 4b"
+  echo "    python tools/fetch_assistant_pack.py --skip-model   # runtime"
+  echo "    python tools/fetch_assistant_pack.py --model 4b    # GGUF"
   echo "    then copy ./assistant next to dist/SamQL-AppWindow/"
+  echo "    and/or drop a .gguf into dist/SamQL-AppWindow/Model/"
 else
   echo "==> assistant pack: embedded in PyInstaller payload (mode embed)"
 fi
@@ -306,6 +309,8 @@ if [ -n "$ASSISTANT_ZIP" ] && [ -f "$ASSISTANT_ZIP" ]; then
   if [ "$ASSISTANT_MODE" = "runtime" ]; then
     echo "    (llama-server; no GGUF). Add a model later with:"
     echo "      python tools/fetch_assistant_pack.py --model 4b|7b"
+    echo "      then drop the .gguf into the install's Model/ folder"
+    echo "      (or copy into assistant/models/)"
   fi
 fi
 ls -la dist/ 2>/dev/null || true

@@ -28,13 +28,23 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Default model id shown in UI / pack docs.
+# Default model id shown in UI / pack docs (pack-default preference only).
+# User-selected / sole GGUFs (incl. Phi-4-mini Q3_K_M) always win over this.
 DEFAULT_MODEL_NAME = "Qwen3-4B-Instruct-2507"
 DEFAULT_QUANT = "Q4_K_M"
+# Discovery preference when no Settings preferred path is set:
+# Qwen3-4B → Phi-4-mini → other 4B instruct → any *.gguf (7B, etc.).
 DEFAULT_GGUF_GLOBS = (
     "Qwen3-4B-Instruct-2507*q4*.gguf",
     "Qwen3-4B*q4*.gguf",
+    "Phi-4-mini*Instruct*Q3_K_M*.gguf",
+    "Phi-4-mini*Q3_K_M*.gguf",
+    "Phi-4-mini*.gguf",
+    "phi-4-mini*q3*.gguf",
+    "phi-4-mini*.gguf",
+    "*phi*4*mini*q3*.gguf",
     "*4b*instruct*q4*.gguf",
+    "*Q3_K_M*.gguf",
     "*.gguf",
 )
 
@@ -471,9 +481,9 @@ def _display_model_name(model_path, using_default=False):
 def _discover_gguf(search_dirs):
     """Pick a pack GGUF under search_dirs.
 
-    Preference order (via DEFAULT_GGUF_GLOBS): 4B patterns first, then any
-    ``*.gguf``. So when both 4B and 7B are present and no preferred model is
-    set, discovery stays on 4B; when only one GGUF exists, that file is used.
+    Preference order (via DEFAULT_GGUF_GLOBS): Qwen3-4B, then Phi-4-mini,
+    then other instruct patterns, then any ``*.gguf``. A sole Phi (or any
+    single GGUF) is always selected; Settings preferred path bypasses this.
     """
     for d in search_dirs:
         for pattern in DEFAULT_GGUF_GLOBS:
@@ -485,6 +495,59 @@ def _discover_gguf(search_dirs):
                 if hit.is_file() and hit.suffix.lower() == ".gguf":
                     return hit
     return None
+
+
+def _user_model_dirs(pack_base=None):
+    """Install-root ``Model/`` folders for user-dropped GGUFs.
+
+    Packaged AppWindow layouts that omit a bundled GGUF ship an empty
+    ``Model/`` next to ``_internal`` / ``frontend_dist`` (sibling of
+    ``assistant/``). Repo-dev fetch still writes ``assistant/models/``;
+    lean/runtime recipients drop a ``.gguf`` into ``Model/``.
+    """
+    dirs = []
+    if pack_base is not None:
+        try:
+            base = Path(pack_base)
+            # assistant/ -> sibling Model/; also accept Model inside a
+            # mis-copied tree next to the pack root.
+            dirs.append(base.parent / "Model")
+            dirs.append(base / "Model")
+        except Exception:
+            pass
+    try:
+        me = Path(sys.executable).resolve().parent
+        dirs.append(me / "Model")
+    except Exception:
+        pass
+    try:
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            # onedir: _MEIPASS is .../_internal; Model sits beside it.
+            dirs.append(Path(meipass).parent / "Model")
+    except Exception:
+        pass
+    try:
+        here = Path(__file__).resolve()
+        # backend/samql_core/assistant.py → repo root
+        dirs.append(here.parents[2] / "Model")
+    except Exception:
+        pass
+    try:
+        dirs.append(Path.cwd() / "Model")
+    except Exception:
+        pass
+    out, seen = [], set()
+    for d in dirs:
+        try:
+            key = str(d.resolve())
+        except Exception:
+            key = str(d)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
 
 
 def _candidate_roots():
@@ -572,9 +635,18 @@ def find_pack(root=None, preferred_model=None):
             if alt.is_file():
                 binary = alt
         models_dir = base / "models"
+        # Resolution order for pack-default discovery (preferred path wins
+        # separately via Settings): assistant/models/ (bundled) → install
+        # Model/ (user drop-in) → flat files under the pack root.
         search_dirs = []
         if models_dir.is_dir():
             search_dirs.append(models_dir)
+        for ud in _user_model_dirs(base):
+            try:
+                if ud.is_dir() and ud not in search_dirs:
+                    search_dirs.append(ud)
+            except Exception:
+                continue
         search_dirs.append(base)
         default_model = _discover_gguf(search_dirs)
         # Preferred GGUF wins when present; otherwise pack default discovery.
@@ -616,8 +688,10 @@ def find_pack(root=None, preferred_model=None):
                 ),
                 "preferred_missing": preferred_missing,
                 "hint": (
-                    "Place a Qwen3-4B-Instruct-2507 Q4_K_M .gguf under "
-                    "assistant/models/ (or run tools/fetch_assistant_pack.py)."
+                    "Place a .gguf (Qwen3-4B Instruct Q4_K_M or "
+                    "Phi-4-mini Instruct Q3_K_M) under assistant/models/ "
+                    "or the install-root Model/ folder "
+                    "(or run tools/fetch_assistant_pack.py)."
                 ),
             }
         if model is not None and (binary is None or not binary.is_file()):
@@ -730,13 +804,27 @@ def schema_prompt(tables, dialect="native"):
             % (_quote_ident(name), ", ".join(col_bits) or "/* no columns */", eng)
         )
     schema_block = "\n".join(lines) if lines else "(no local tables loaded)"
+    if dialect == "spark":
+        dialect_rules = (
+            "Write Spark SQL only (not MySQL/Postgres/T-SQL). Prefer "
+            "Spark-compatible functions; avoid DuckDB-only helpers."
+        )
+    else:
+        dialect_rules = (
+            "Write DuckDB SQL only (not MySQL, Postgres, SQLite, or T-SQL). "
+            "Prefer DuckDB functions and idioms: json_extract / "
+            "json_extract_string, UNNEST, list_extract, struct_extract, "
+            "read_json_auto / read_csv_auto when relevant, TRY_CAST, "
+            "QUALIFY, EXCLUDE / REPLACE in SELECT. Do not invent "
+            "Postgres operators (e.g. #>, jsonb_*) or MySQL-only functions."
+        )
     system = (
         "You are SamQL's SQL assistant. Convert English requests into "
-        "%s only. Use only the provided tables/columns. Prefer simple, "
-        "runnable queries. For nested JSON columns, use the query hints when "
-        "present (json_extract / UNNEST / ->>). Do not invent tables. "
+        "%s. %s Use only the provided tables/columns. Prefer simple, "
+        "runnable queries. For nested JSON columns, follow the query hints "
+        "when present. Do not invent tables. "
         "Reply with a short explanation, then a single fenced sql code block."
-        % dialect_label
+        % (dialect_label, dialect_rules)
     )
     return {
         "system": system,
@@ -937,6 +1025,9 @@ def ensure_server(pack=None):
                 ctx = 1024
         except Exception:
             pass
+        # Chat template: leave unset so llama-server uses the template
+        # embedded in the GGUF (Qwen, Phi-4-mini, etc.). Do NOT pass
+        # --chat-template / --jinja overrides that assume one family.
         cmd = [
             pack["binary"],
             "-m", pack["model"],

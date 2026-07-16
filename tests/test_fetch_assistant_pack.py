@@ -14,6 +14,7 @@ from fetch_assistant_pack import (  # noqa: E402
     GGUF_NAME,
     GGUF_URL,
     MODELS,
+    main as fetch_main,
     normalize_model_key,
     resolve_model,
 )
@@ -64,6 +65,13 @@ class ModelMappingTests(unittest.TestCase):
             )
         self.assertTrue(resolve_model("4b")["label"].startswith("Qwen3-4B-"))
         self.assertTrue(resolve_model("7b")["label"].startswith("Qwen2.5-Coder-"))
+
+
+class SkipModelCliTests(unittest.TestCase):
+    def test_skip_model_and_skip_llama_rejected(self):
+        with self.assertRaises(SystemExit) as ctx:
+            fetch_main(["--skip-model", "--skip-llama"])
+        self.assertEqual(ctx.exception.code, 1)
 
 
 if __name__ == "__main__":

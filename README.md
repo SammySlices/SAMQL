@@ -296,8 +296,11 @@ is **not** the promoted browser-tab distribution artifact. See
 
 Default SQL assistant packaging is **runtime-only** (llama.cpp
 `llama-server` + DLLs under `assistant/runtime/`, **no GGUF**). Recipients
-download a model later with `.\Fetch-SamQL-Assistant.ps1 -Model 4b|7b`.
-Use `-AssistantPack lean` for offline/CI builds that must not fetch the
+download a model later with `.\Fetch-SamQL-Assistant.ps1 -Model 4b|7b` and
+drop the `.gguf` into the install-root `Model/` folder (or
+`assistant/models/`). To fetch only the runtime (same as the default build
+ensure step): `.\Fetch-SamQL-Assistant.ps1 -SkipModel`. Use
+`-AssistantPack lean` for offline/CI builds that must not fetch the
 runtime, or `post` / `embed` to ship a full pack with a GGUF.
 
 To build manually:

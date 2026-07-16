@@ -111,6 +111,7 @@ export interface Health {
   concurrent_reads?: boolean; // DuckDB light-read concurrency (async reads)
   flatten_json?: boolean; // when true, JSON loads shred into relational tables (default off)
   frontend_built: boolean;
+  warming?: boolean; // HTTP up, Session() still constructing (launcher-ready)
   restoring?: boolean; // session restore is replaying the load manifest
   restored?: number; // tables rebuilt by the last restore
 }
