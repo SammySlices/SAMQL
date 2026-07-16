@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, copyText } from "../lib/api";
+import { isCancelledError } from "../lib/runController";
 import type { AssistantStatus } from "../lib/types";
 import { Icon } from "./Icon";
 import { useWinDrag } from "./ActivityShared";
@@ -96,8 +97,11 @@ export const SqlAssistant: React.FC<{
       text: allowInsert ? WELCOME_INSERT : WELCOME_COPY,
     },
   ]);
-  // Bumped on Clear so a late assistantChat reply cannot repopulate the thread.
+  // Bumped on Clear/Stop so a late assistantChat reply cannot repopulate the
+  // thread. The AbortController frees the in-flight fetch (and its browser
+  // connection slot) the moment the user stops or clears.
   const chatGen = useRef(0);
+  const chatCtrl = useRef<AbortController | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const { pos, setPos, startDrag, dragging, settled, winRef } = useWinDrag({
     x: Math.max(20, window.innerWidth - 420),
@@ -158,11 +162,13 @@ export const SqlAssistant: React.FC<{
     const q = input.trim();
     if (!q || busy) return;
     const gen = chatGen.current;
+    const ctrl = new AbortController();
+    chatCtrl.current = ctrl;
     setInput("");
     setMsgs((m) => [...m, { id: uid(), role: "user", text: q }]);
     setBusy(true);
     try {
-      const res = await api.assistantChat(q, dialect);
+      const res = await api.assistantChat(q, dialect, { signal: ctrl.signal });
       if (gen !== chatGen.current) return;
       if (!res.ok) {
         setMsgs((m) => [
@@ -188,7 +194,7 @@ export const SqlAssistant: React.FC<{
       ]);
       if (res.status) setStatus(res.status);
     } catch (e: any) {
-      if (gen !== chatGen.current) return;
+      if (gen !== chatGen.current || isCancelledError(e)) return;
       setMsgs((m) => [
         ...m,
         {
@@ -199,28 +205,49 @@ export const SqlAssistant: React.FC<{
         },
       ]);
     } finally {
+      if (chatCtrl.current === ctrl) chatCtrl.current = null;
       if (gen === chatGen.current) setBusy(false);
       void refreshStatus();
     }
   };
 
-  const cancel = async () => {
+  /** Abort the in-flight chat fetch (frees the browser connection slot). */
+  const abortInflightChat = (): boolean => {
+    const ctrl = chatCtrl.current;
+    chatCtrl.current = null;
+    if (!ctrl) return false;
     try {
-      await api.assistantCancel();
+      ctrl.abort();
     } catch {
       /* ignore */
     }
+    return true;
   };
 
-  /** Reset local chat UI only — does not stop llama-server or change Settings. */
+  /** Stop generation: drop the pending reply, abort the fetch, interrupt the
+   *  backend (llama-server / API). Keeps the conversation. */
+  const cancel = () => {
+    chatGen.current += 1;
+    abortInflightChat();
+    setBusy(false);
+    void api.assistantCancel().catch(() => {});
+  };
+
+  /** Clear the conversation AND fully stop any work it started — abort the
+   *  in-flight fetch, interrupt the backend generation, then reset local UI. */
   const clearConversation = () => {
     chatGen.current += 1;
+    const hadInflight = abortInflightChat();
     const wasBusy = busy;
     setBusy(false);
     setInput("");
     setCopiedId(null);
+    if (copiedTimer.current != null) {
+      window.clearTimeout(copiedTimer.current);
+      copiedTimer.current = null;
+    }
     setMsgs([welcomeMsg()]);
-    if (wasBusy) void cancel();
+    if (wasBusy || hadInflight) void api.assistantCancel().catch(() => {});
   };
 
   const canClearConversation =
@@ -228,17 +255,32 @@ export const SqlAssistant: React.FC<{
     input.trim().length > 0 ||
     msgs.some((m) => m.id !== "welcome");
 
+  // Flash the "Copied!" affordance on a given target key. Keyed (not a plain
+  // boolean) so a per-message copy and its code-block Copy SQL never light up
+  // together — bubble copies use a "body:"-prefixed key.
+  const flashCopied = (key: string) => {
+    setCopiedId(key);
+    if (copiedTimer.current != null) window.clearTimeout(copiedTimer.current);
+    copiedTimer.current = window.setTimeout(() => {
+      setCopiedId(null);
+      copiedTimer.current = null;
+    }, 900);
+  };
+
   const copySql = (msgId: string, sql: string) => {
     void copyText(sql)
       .then(() => {
         onToast?.("ok", "Copied", "SQL copied to clipboard");
-        setCopiedId(msgId);
-        if (copiedTimer.current != null)
-          window.clearTimeout(copiedTimer.current);
-        copiedTimer.current = window.setTimeout(() => {
-          setCopiedId(null);
-          copiedTimer.current = null;
-        }, 900);
+        flashCopied(msgId);
+      })
+      .catch(() => onToast?.("error", "Copy failed"));
+  };
+
+  const copyMessage = (msgId: string, text: string) => {
+    void copyText(text)
+      .then(() => {
+        onToast?.("ok", "Copied", "Message copied to clipboard");
+        flashCopied("body:" + msgId);
       })
       .catch(() => onToast?.("error", "Copy failed"));
   };
@@ -341,6 +383,22 @@ export const SqlAssistant: React.FC<{
               "sql-asst-msg " + msg.role + (msg.error ? " error" : "")
             }
           >
+            <button
+              type="button"
+              className="btn xs ghost sql-asst-msg-copy"
+              title="Copy message"
+              aria-label="Copy message"
+              data-testid="sql-assistant-copy-msg"
+              data-copied={copiedId === "body:" + msg.id ? "1" : undefined}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => copyMessage(msg.id, msg.text)}
+            >
+              {copiedId === "body:" + msg.id ? (
+                <Icon.Check size={12} />
+              ) : (
+                <Icon.Copy size={12} />
+              )}
+            </button>
             <div className="sql-asst-msg-body">{msg.text}</div>
             {msg.sql ? (
               <div className="sql-asst-sql">
@@ -395,8 +453,19 @@ export const SqlAssistant: React.FC<{
         ))}
         {busy && (
           <div className="sql-asst-msg assistant">
-            <div className="sql-asst-msg-body">
+            <div className="sql-asst-msg-body sql-asst-thinking">
               <span className="spin" /> Thinking…
+              <button
+                type="button"
+                className="btn xs ghost sql-asst-stop"
+                title="Stop generating"
+                aria-label="Stop generating"
+                data-testid="sql-assistant-stop"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={() => void cancel()}
+              >
+                <Icon.X size={12} />
+              </button>
             </div>
           </div>
         )}
@@ -418,21 +487,15 @@ export const SqlAssistant: React.FC<{
             }
           }}
         />
-        {busy ? (
-          <button className="btn" type="button" onClick={() => void cancel()}>
-            Stop
-          </button>
-        ) : (
-          <button
-            className="btn primary"
-            type="button"
-            disabled={!input.trim()}
-            data-testid="sql-assistant-send"
-            onClick={() => void send()}
-          >
-            Ask
-          </button>
-        )}
+        <button
+          className="btn primary"
+          type="button"
+          disabled={busy || !input.trim()}
+          data-testid="sql-assistant-send"
+          onClick={() => void send()}
+        >
+          Ask
+        </button>
       </div>
     </div>
   );

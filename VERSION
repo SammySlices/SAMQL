@@ -2,12 +2,23 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-16.626
+Current build:   2026-07-16.627
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-16.627  (v2.16.4)
+
+ASSISTANT CLEAR/STOP CANCELS + COPY CHAT BUBBLE. SQL assistant
+Clear/Stop now aborts the in-flight chat fetch and closes the in-flight
+model HTTP response so backend generation is interrupted promptly
+instead of only wiping messages. A new per-bubble copy button lets
+users copy any chat message's full text, reusing the existing
+copy/"Copied!" feedback. Bump identity and refresh samql_txt
+full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-16.626  (v2.16.4)

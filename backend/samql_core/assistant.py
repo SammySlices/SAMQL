@@ -80,6 +80,37 @@ _api_model = None  # type: ignore[var-annotated]
 _api_key = None  # type: ignore[var-annotated]
 _cancel = threading.Event()
 _generating = False
+# In-flight model HTTP responses (local llama-server / configured API) that a
+# cancel may close so a long generation stops promptly instead of running to
+# completion after the user presses Stop/Clear. Guarded by ``_lock``.
+_active_responses = set()  # type: ignore[var-annotated]
+
+
+def _track_response(resp):
+    with _lock:
+        _active_responses.add(resp)
+
+
+def _untrack_response(resp):
+    with _lock:
+        _active_responses.discard(resp)
+
+
+def _abort_active_responses():
+    """Close every in-flight model response so its read() unblocks at once.
+
+    Closing the client socket makes llama-server (and OpenAI-compatible
+    endpoints that honour disconnects) stop the running generation rather
+    than finishing it and discarding the result.
+    """
+    with _lock:
+        resps = list(_active_responses)
+        _active_responses.clear()
+    for resp in resps:
+        try:
+            resp.close()
+        except Exception:
+            pass
 
 
 def _is_windows():
@@ -1042,7 +1073,7 @@ def _urlopen(req, timeout):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def _http_json(url, payload, timeout=120.0, headers=None):
+def _http_json(url, payload, timeout=120.0, headers=None, cancellable=False):
     data = json.dumps(payload).encode("utf-8")
     hdrs = {
         "Content-Type": "application/json",
@@ -1056,8 +1087,20 @@ def _http_json(url, payload, timeout=120.0, headers=None):
         headers=hdrs,
         method="POST",
     )
-    with _urlopen(req, timeout=timeout) as resp:
+    resp = _urlopen(req, timeout=timeout)
+    # Register cancellable model calls so cancel() can close the socket and
+    # halt an in-flight generation (read() unblocks with an error).
+    if cancellable:
+        _track_response(resp)
+    try:
         body = resp.read().decode("utf-8", errors="replace")
+    finally:
+        if cancellable:
+            _untrack_response(resp)
+        try:
+            resp.close()
+        except Exception:
+            pass
     return json.loads(body) if body else {}
 
 
@@ -1334,8 +1377,14 @@ def status(session=None):
 
 
 def cancel():
-    """Cooperative cancel for an in-flight chat generation."""
+    """Cancel an in-flight chat generation.
+
+    Sets the cooperative flag *and* closes any in-flight model HTTP response
+    so a long local/remote generation is interrupted promptly instead of
+    running to completion after the user pressed Stop/Clear.
+    """
     _cancel.set()
+    _abort_active_responses()
     return {"ok": True}
 
 
@@ -1462,6 +1511,7 @@ def chat(session, question, dialect="native", timeout_s=180.0):
                     payload,
                     timeout=float(timeout_s),
                     headers=_api_auth_headers(),
+                    cancellable=True,
                 )
             except Exception as e:
                 if _cancel.is_set():
@@ -1493,7 +1543,9 @@ def chat(session, question, dialect="native", timeout_s=180.0):
         )
         url = base.rstrip("/") + "/v1/chat/completions"
         try:
-            data = _http_json(url, payload, timeout=float(timeout_s))
+            data = _http_json(
+                url, payload, timeout=float(timeout_s), cancellable=True
+            )
         except urllib.error.HTTPError as e:
             # Fallback for older llama.cpp completion endpoint.
             try:
@@ -1510,6 +1562,7 @@ def chat(session, question, dialect="native", timeout_s=180.0):
                         "stop": ["</s>", "<|im_end|>", "User:"],
                     },
                     timeout=float(timeout_s),
+                    cancellable=True,
                 )
                 text = str(data.get("content") or data.get("completion") or "")
                 sql = extract_sql(text)
