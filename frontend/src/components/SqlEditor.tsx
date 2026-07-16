@@ -190,7 +190,7 @@ export const SqlEditor: React.FC<Props> = ({
     const sc = scrollRef.current;
     const ta = taRef.current;
     // If the textarea scrolled internally (should not, with overflow:hidden),
-    // fold that into .scroll so the highlight transform stays aligned.
+    // fold that into .scroll so content-sized highlight stays aligned.
     if (sc && ta && (ta.scrollLeft || ta.scrollTop)) {
       sc.scrollLeft += ta.scrollLeft;
       sc.scrollTop += ta.scrollTop;
@@ -199,14 +199,14 @@ export const SqlEditor: React.FC<Props> = ({
     }
     const g = gutterRef.current;
     if (sc && g) g.scrollTop = sc.scrollTop;
+    // Highlight / flash layers are content-sized inside .scroll, so they
+    // scroll naturally with the textarea. Do not apply a translate — that
+    // used to double-shift and, with inset:0 clipping, hid lines past the
+    // first viewport (~12 lines).
     const pre = preRef.current;
-    const tf = sc
-      ? `translate(${-sc.scrollLeft}px, ${-sc.scrollTop}px)`
-      : "";
-    if (sc && pre) pre.style.transform = tf;
-    // .459: the flash layer rides the exact same transform.
+    if (pre) pre.style.transform = "";
     const fp = flashPreRef.current;
-    if (sc && fp) fp.style.transform = tf;
+    if (fp) fp.style.transform = "";
   }, []);
 
   /** Caret offset inside a soft-wrapped textarea (mirror technique). */
@@ -263,21 +263,30 @@ export const SqlEditor: React.FC<Props> = ({
   };
 
   useLayoutEffect(() => {
-    // Soft-wrap mode: fill the pane width and grow height to the wrapped
-    // content so .scroll can reach every visual line. Mega one-line SQL
-    // (100+ statements) used to need multi-million-px min-width and got
-    // clipped by the browser even with H-scroll.
+    // Soft-wrap + full content extent:
+    // - Width: fill the pane (no mega min-width; long lines wrap).
+    // - Height: grow to every logical line AND every soft-wrapped visual
+    //   line so .scroll can reach the entire query (1000+ lines / mega
+    //   one-liners). Measuring with height:0 forces a real content
+    //   scrollHeight; a logical-line floor covers jsdom / flaky measure.
     const ta = taRef.current;
     const sc = scrollRef.current;
     if (ta && sc) {
+      const cs = getComputedStyle(ta);
+      const lineH = parseFloat(cs.lineHeight) || 20;
+      const padY =
+        (parseFloat(cs.paddingTop) || 0) +
+        (parseFloat(cs.paddingBottom) || 0);
       ta.style.minWidth = "";
       ta.style.width = "100%";
-      ta.style.height = "auto";
+      ta.style.height = "0px";
       ta.style.minHeight = "0";
-      const contentH = ta.scrollHeight;
+      const wrappedH = ta.scrollHeight;
+      const logicalH = Math.ceil(lineCount * lineH + padY);
       const viewH = sc.clientHeight || 0;
-      ta.style.height = "";
-      ta.style.minHeight = Math.max(contentH, viewH) + "px";
+      const contentH = Math.max(wrappedH, logicalH, viewH);
+      ta.style.height = contentH + "px";
+      ta.style.minHeight = contentH + "px";
     }
     syncScroll();
   }, [value, lineCount, syncScroll]);
@@ -629,12 +638,6 @@ export const SqlEditor: React.FC<Props> = ({
               ref={flashPreRef}
               aria-hidden="true"
               key={flash.tick}
-              style={{
-                transform: scrollRef.current
-                  ? `translate(${-scrollRef.current.scrollLeft}px, ${-scrollRef
-                      .current.scrollTop}px)`
-                  : undefined,
-              }}
             >
               {value.slice(0, flash.start)}
               <span
@@ -655,12 +658,6 @@ export const SqlEditor: React.FC<Props> = ({
             className="hl flash-layer"
             aria-hidden="true"
             key={"b" + bkt.tick}
-            style={{
-              transform: scrollRef.current
-                ? `translate(${-scrollRef.current.scrollLeft}px, ${-scrollRef
-                    .current.scrollTop}px)`
-                : undefined,
-            }}
           >
             {value.slice(0, bkt.a)}
             <span className="bkt">{value[bkt.a]}</span>

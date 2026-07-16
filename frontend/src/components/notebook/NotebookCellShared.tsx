@@ -161,9 +161,16 @@ export const NotebookSqlEditor: React.FC<{
   onChangeCode: (value: string) => void;
   onRun: () => void;
 }> = ({ cell, tables, onChangeCode, onRun }) => {
-  const lines = Math.min(Math.max(cell.code.split("\n").length, 2), 16);
+  // Grow with every logical line — no 16-line ceiling (that clipped tall
+  // Journal SQL the same way the IDE soft-wrap regression did). Soft-wrap
+  // extent is handled inside SqlEditor; this shell must not cap height.
+  const lines = Math.max(cell.code.split("\n").length, 2);
   return (
-    <div className="nb-ed" style={{ minHeight: lines * 20 + 22 }}>
+    <div
+      className="nb-ed"
+      style={{ minHeight: lines * 20 + 22 }}
+      data-testid="notebook-sql-editor-shell"
+    >
       <SqlEditor
         value={cell.code}
         onChange={onChangeCode}

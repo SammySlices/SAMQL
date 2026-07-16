@@ -1,15 +1,19 @@
-"""Local SQL assistant (English → DuckDB / SparkSQL) via bundled llama.cpp.
+"""SQL assistant (English → DuckDB / SparkSQL).
+
+Default path: optional local llama.cpp pack (GGUF + llama-server).
+Alternative: OpenAI-compatible remote/local HTTP API
+(``POST {base}/v1/chat/completions``).
 
 Phase 1 design (beta):
-  * Model: Qwen2.5-Coder-1.5B-Instruct Q4_K_M GGUF (Apache 2.0)
-  * Runtime: llama-server binary next to SamQL (NOT in-process, NOT Ollama)
-  * Offline only: loopback HTTP; never call cloud APIs
+  * Local model: Qwen3-4B-Instruct-2507 Q4_K_M GGUF (default; optional 7B)
+  * Local runtime: llama-server binary next to SamQL (NOT in-process, NOT Ollama)
+  * API mode: user-configured base URL (+ optional key / model id)
   * Scheduling: refuse generation while DuckDB is busy (queries preempt chat)
   * Prompt: schema summary only — no nested JSON sample dumps
 
-The assistant pack is optional. When missing, status reports install
-instructions; chat returns a clear error. No load/join/flatten behaviour
-is changed by this module.
+The assistant pack is optional. When missing (and API mode is not selected),
+status reports install instructions; chat returns a clear error. No
+load/join/flatten behaviour is changed by this module.
 """
 from __future__ import annotations
 
@@ -25,13 +29,18 @@ import urllib.request
 from pathlib import Path
 
 # Default model id shown in UI / pack docs.
-DEFAULT_MODEL_NAME = "Qwen2.5-Coder-1.5B-Instruct"
+DEFAULT_MODEL_NAME = "Qwen3-4B-Instruct-2507"
 DEFAULT_QUANT = "Q4_K_M"
 DEFAULT_GGUF_GLOBS = (
-    "qwen2.5-coder-1.5b-instruct*q4*.gguf",
-    "qwen2.5-coder-1.5b*q4*.gguf",
+    "Qwen3-4B-Instruct-2507*q4*.gguf",
+    "Qwen3-4B*q4*.gguf",
+    "*4b*instruct*q4*.gguf",
     "*.gguf",
 )
+
+ASSISTANT_MODE_LOCAL = "local"
+ASSISTANT_MODE_API = "api"
+ASSISTANT_API_SECRET_KEY = "assistant_api_key"
 
 # Keep prompts small on ThinkPad-class machines.
 _MAX_TABLES = 40
@@ -41,12 +50,441 @@ _MAX_PROMPT_CHARS = 12000
 _lock = threading.RLock()
 _proc = None  # type: ignore[var-annotated]
 _proc_port = None  # type: ignore[var-annotated]
+_proc_model = None  # type: ignore[var-annotated]  # GGUF path loaded by sidecar
+_preferred_model_path = None  # type: ignore[var-annotated]  # None = pack default
+# DuckDB memory_limit (MB) before we shed budget for a local model load.
+_duckdb_mb_before_assist = None  # type: ignore[var-annotated]
+_duck_engine_for_restore = None  # type: ignore[var-annotated]
+# OpenAI-compatible API runtime (in-memory; key never logged).
+_api_mode = ASSISTANT_MODE_LOCAL  # type: ignore[var-annotated]
+_api_base_url = None  # type: ignore[var-annotated]
+_api_model = None  # type: ignore[var-annotated]
+_api_key = None  # type: ignore[var-annotated]
 _cancel = threading.Event()
 _generating = False
 
 
 def _is_windows():
     return os.name == "nt" or sys.platform.startswith("win")
+
+
+def _same_path(a, b):
+    """True when two filesystem paths refer to the same location."""
+    if not a or not b:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except Exception:
+        try:
+            return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(
+                os.path.abspath(str(b))
+            )
+        except Exception:
+            return str(a) == str(b)
+
+
+def _resolve_gguf(path):
+    """Return a Path to an existing .gguf file, or None."""
+    if not path:
+        return None
+    try:
+        p = Path(str(path)).expanduser()
+        if p.is_file() and p.suffix.lower() == ".gguf":
+            return p
+    except Exception:
+        return None
+    return None
+
+
+def estimate_gguf_ram_mb(model_path) -> int:
+    """Rough RSS for a Q4_K_M GGUF + llama-server + modest context.
+
+    Weights ≈ on-disk size; add runtime/KV overhead. Scales with the file so
+    4B (~2.5 GiB) and 7B (~4.7 GiB) get different budgets — not a flat size
+    free-RAM gate.
+    """
+    try:
+        size_b = int(Path(model_path).stat().st_size)
+    except Exception:
+        return 2048
+    if size_b < 1024:
+        return 2048
+    # Ceil to MiB so small fixtures still scale; no artificial 256 MiB floor.
+    size_mb = max(1, (size_b + 1024 * 1024 - 1) // (1024 * 1024))
+    # ~5% mapping slack + fixed sidecar/context overhead
+    return int(size_mb * 1.05 + 768)
+
+
+def _os_reserve_mb(total_mb: float) -> int:
+    """RAM to leave for OS + SamQL UI while a local model is loaded."""
+    if not total_mb:
+        return 2048
+    return max(2048, int(float(total_mb) * 0.08))
+
+
+def _duck_engine(session):
+    try:
+        db = getattr(session, "db", None)
+        return getattr(db, "duck", None) if db is not None else None
+    except Exception:
+        return None
+
+
+def plan_local_model_memory(session, model_path) -> dict:
+    """Decide whether a GGUF fits and how much DuckDB budget to shed.
+
+    Dynamically scales with machine RAM and the selected model size. When
+    free RAM is tight but DuckDB's ``memory_limit`` is large, we recommend
+    shrinking DuckDB temporarily so the assistant can load.
+    """
+    from . import resourcebudget
+
+    snap = resourcebudget.snapshot()
+    total_mb = float(snap.get("memory_total_mb") or 0)
+    avail_mb = float(snap.get("memory_available_mb") or 0)
+    need_mb = float(estimate_gguf_ram_mb(model_path))
+    reserve_mb = float(_os_reserve_mb(total_mb))
+    duck = _duck_engine(session)
+    duck_mb = float(getattr(duck, "_applied_resource_memory_mb", 0) or 0) if duck else 0.0
+    # Keep DuckDB usable for light work while the model is loaded.
+    duck_floor = max(1024.0, total_mb * 0.12) if total_mb else 1024.0
+    duck_target = None
+    if total_mb and need_mb:
+        # Leave model + OS reserve; remainder may stay with DuckDB.
+        room_for_duck = max(duck_floor, total_mb - need_mb - reserve_mb)
+        if duck_mb and room_for_duck + 64 < duck_mb:
+            duck_target = int(room_for_duck)
+    reclaimable = max(0.0, duck_mb - (duck_target or duck_mb)) if duck_target else 0.0
+    # Shrinking memory_limit does not free RSS instantly — count part of it.
+    effective_mb = avail_mb + reclaimable * 0.65
+    machine_fits = (not total_mb) or (total_mb >= need_mb + reserve_mb * 0.5)
+    # Accept if effective free covers most of the model, or machine is large
+    # enough and we can shed DuckDB budget.
+    can_run = bool(machine_fits) and (
+        effective_mb >= need_mb * 0.55
+        or (total_mb >= need_mb + reserve_mb and (duck_target is not None or avail_mb >= need_mb * 0.4))
+    )
+    # Very small free + no duck to shed + machine too small → refuse
+    if total_mb and total_mb < need_mb * 0.85:
+        can_run = False
+        machine_fits = False
+    return {
+        "need_mb": round(need_mb, 1),
+        "total_mb": round(total_mb, 1),
+        "available_mb": round(avail_mb, 1),
+        "effective_mb": round(effective_mb, 1),
+        "reserve_mb": round(reserve_mb, 1),
+        "duckdb_mb": round(duck_mb, 1),
+        "duckdb_target_mb": duck_target,
+        "machine_fits": machine_fits,
+        "can_run": can_run,
+        "model": str(model_path) if model_path else None,
+    }
+
+
+def _loaded_duckdb_table_names(session) -> list:
+    """Names of currently loaded DuckDB tables (catalog only — never mutated)."""
+    names = []
+    try:
+        tree = session.tables_tree() if session is not None else []
+    except Exception:
+        tree = []
+    for t in tree or []:
+        if not isinstance(t, dict):
+            continue
+        if t.get("remote"):
+            continue
+        eng = str(t.get("engine") or "").lower()
+        if eng and eng not in ("duckdb", "duck"):
+            continue
+        name = str(t.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def prepare_memory_for_model(session, model_path) -> dict:
+    """Lower DuckDB ``memory_limit`` when needed so a local GGUF can load.
+
+    **Never drops, unregisters, or truncates loaded tables.** The only engine
+    mutation is ``SET memory_limit = …`` via ``apply_resource_memory_mb``.
+    We do **not** call ``Session.free_memory``, ``drop_table``, ``clearAll``,
+    or any catalog wipe. Table names are snapshotted before/after as a
+    safety check.
+    """
+    global _duckdb_mb_before_assist, _duck_engine_for_restore
+    plan = plan_local_model_memory(session, model_path)
+    duck = _duck_engine(session)
+    target = plan.get("duckdb_target_mb")
+    tables_before = _loaded_duckdb_table_names(session)
+    # Shed whenever DuckDB is oversized relative to the model — even if the
+    # pre-shed plan said can_run (free RAM may still be fragmented).
+    if duck is not None and target:
+        before = int(getattr(duck, "_applied_resource_memory_mb", 0) or 0)
+        if before and target < before:
+            if _duckdb_mb_before_assist is None:
+                _duckdb_mb_before_assist = before
+            _duck_engine_for_restore = duck
+            try:
+                # Ceiling only — must not drop views/tables.
+                duck.apply_resource_memory_mb(
+                    int(target), allow_decrease=True, wait=False
+                )
+            except Exception:
+                pass
+            plan = plan_local_model_memory(session, model_path)
+            plan["duckdb_shed_mb"] = before - int(
+                getattr(duck, "_applied_resource_memory_mb", 0) or target
+            )
+    tables_after = _loaded_duckdb_table_names(session)
+    plan["tables_preserved"] = sorted(tables_before) == sorted(tables_after)
+    plan["tables_before"] = list(tables_before)
+    if tables_before and sorted(tables_before) != sorted(tables_after):
+        # Should be unreachable — refuse the assist path rather than continue
+        # if catalog membership somehow changed.
+        plan["can_run"] = False
+        plan["tables_lost"] = sorted(set(tables_before) - set(tables_after))
+        return plan
+    # Re-evaluate after shed: machine large enough + effective free.
+    if plan.get("machine_fits") and (
+        float(plan.get("effective_mb") or 0) >= float(plan.get("need_mb") or 0) * 0.5
+        or float(plan.get("available_mb") or 0) >= float(plan.get("need_mb") or 0) * 0.4
+        or (
+            float(plan.get("total_mb") or 0)
+            >= float(plan.get("need_mb") or 0) + float(plan.get("reserve_mb") or 0)
+        )
+    ):
+        plan["can_run"] = True
+    return plan
+
+
+def restore_duckdb_memory_after_assist(session=None) -> dict:
+    """Restore DuckDB memory_limit after the local model sidecar stops."""
+    global _duckdb_mb_before_assist, _duck_engine_for_restore
+    before = _duckdb_mb_before_assist
+    duck = _duck_engine(session) or _duck_engine_for_restore
+    _duckdb_mb_before_assist = None
+    _duck_engine_for_restore = None
+    if not before:
+        return {"restored": False, "reason": "no_prior"}
+    if duck is None:
+        return {"restored": False, "reason": "no_duck", "prior_mb": before}
+    try:
+        ok = duck.apply_resource_memory_mb(
+            int(before), allow_decrease=False, wait=False
+        )
+        return {"restored": bool(ok), "prior_mb": before}
+    except Exception as exc:
+        return {"restored": False, "reason": str(exc), "prior_mb": before}
+
+
+def set_preferred_model(path):
+    """Prefer this GGUF when starting llama-server (None = pack default)."""
+    global _preferred_model_path
+    resolved = _resolve_gguf(path)
+    # Keep the requested path even if missing so status can report it;
+    # find_pack falls back to pack discovery when the file is absent.
+    value = None
+    if path is not None and str(path).strip():
+        try:
+            value = str(Path(str(path).strip()).expanduser())
+            if resolved is not None:
+                value = str(resolved.resolve())
+        except Exception:
+            value = str(path).strip()
+    with _lock:
+        prev = _preferred_model_path
+        _preferred_model_path = value
+    return {
+        "preferred_model": _preferred_model_path,
+        "exists": resolved is not None,
+        "changed": prev != _preferred_model_path,
+    }
+
+
+def get_preferred_model():
+    with _lock:
+        return _preferred_model_path
+
+
+def normalize_api_base(url):
+    """Strip trailing slash and optional ``/v1`` so callers can append paths."""
+    u = str(url or "").strip()
+    if not u:
+        return ""
+    u = u.rstrip("/")
+    if u.lower().endswith("/v1"):
+        u = u[:-3].rstrip("/")
+    return u
+
+
+def set_api_runtime(mode=None, base_url=None, model=None, api_key=None,
+                    clear_api_key=False, update_key=False):
+    """Push Settings API config into module memory (key never logged)."""
+    global _api_mode, _api_base_url, _api_model, _api_key
+    with _lock:
+        if mode is not None:
+            m = str(mode or "").strip().lower()
+            if m not in (ASSISTANT_MODE_LOCAL, ASSISTANT_MODE_API):
+                m = ASSISTANT_MODE_LOCAL
+            _api_mode = m
+        if base_url is not None:
+            _api_base_url = normalize_api_base(base_url) or None
+        if model is not None:
+            mid = str(model or "").strip()
+            _api_model = mid or None
+        if clear_api_key:
+            _api_key = None
+        elif update_key:
+            key = str(api_key or "").strip()
+            _api_key = key or None
+    return get_api_runtime()
+
+
+def get_api_runtime():
+    """Redacted snapshot of in-memory API runtime (never includes the key)."""
+    with _lock:
+        return {
+            "mode": _api_mode or ASSISTANT_MODE_LOCAL,
+            "base_url": _api_base_url,
+            "model": _api_model,
+            "has_api_key": bool(_api_key),
+        }
+
+
+def api_mode_active():
+    with _lock:
+        return (_api_mode or ASSISTANT_MODE_LOCAL) == ASSISTANT_MODE_API
+
+
+def _api_chat_url(base=None):
+    root = normalize_api_base(base if base is not None else _api_base_url)
+    if not root:
+        return None
+    return root.rstrip("/") + "/v1/chat/completions"
+
+
+def _api_models_url(base=None):
+    root = normalize_api_base(base if base is not None else _api_base_url)
+    if not root:
+        return None
+    return root.rstrip("/") + "/v1/models"
+
+
+def _api_auth_headers(api_key=None):
+    key = api_key if api_key is not None else _api_key
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if key:
+        headers["Authorization"] = "Bearer %s" % key
+    return headers
+
+
+def probe_api(base_url=None, api_key=None, model=None, timeout=12.0):
+    """Test an OpenAI-compatible endpoint (models list, else tiny chat).
+
+    Does not log credentials. Returns ``{ok, …}`` for the Settings UI.
+    """
+    base = normalize_api_base(base_url if base_url is not None else _api_base_url)
+    if not base:
+        return {
+            "ok": False,
+            "error": "Base URL is required (OpenAI-compatible /v1 endpoint).",
+        }
+    key = api_key if api_key is not None else _api_key
+    mid = (model if model is not None else _api_model) or "samql"
+    headers = _api_auth_headers(key)
+    models_url = base.rstrip("/") + "/v1/models"
+    try:
+        req = urllib.request.Request(models_url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            status_code = getattr(resp, "status", 200)
+        if 200 <= status_code < 300:
+            data = json.loads(body) if body else {}
+            ids = []
+            for item in (data.get("data") or []):
+                if isinstance(item, dict) and item.get("id"):
+                    ids.append(str(item["id"]))
+            return {
+                "ok": True,
+                "probe": "models",
+                "base_url": base,
+                "model_ids": ids[:40],
+                "status_code": status_code,
+            }
+    except Exception as e:
+        models_err = err_str(e)
+    else:
+        models_err = "models endpoint returned non-success"
+
+    # Fallback: minimal chat completions (some gateways omit /v1/models).
+    chat_url = base.rstrip("/") + "/v1/chat/completions"
+    payload = {
+        "model": mid,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": False,
+    }
+    try:
+        data = _http_json(chat_url, payload, timeout=float(timeout), headers=headers)
+        return {
+            "ok": True,
+            "probe": "chat",
+            "base_url": base,
+            "model": mid,
+            "has_choices": bool(data.get("choices")),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": "API probe failed: %s (models: %s)" % (err_str(e), models_err),
+            "base_url": base,
+        }
+
+
+def _display_model_name(model_path, using_default=False):
+    """Human-facing model label derived from the GGUF actually chosen.
+
+    Always follows ``model_path`` when present so pack-default discovery of a
+    sole non-default file (e.g. a 7B GGUF) is never mislabeled as
+    ``DEFAULT_MODEL_NAME``. ``using_default`` is kept for call-site
+    compatibility and does not affect the label.
+    """
+    _ = using_default
+    if not model_path:
+        return DEFAULT_MODEL_NAME
+    try:
+        name = Path(str(model_path)).name
+    except Exception:
+        name = str(model_path).strip()
+    if not name:
+        return DEFAULT_MODEL_NAME
+    if name.lower().endswith(".gguf"):
+        name = name[:-5]
+    return name
+
+
+def _discover_gguf(search_dirs):
+    """Pick a pack GGUF under search_dirs.
+
+    Preference order (via DEFAULT_GGUF_GLOBS): 4B patterns first, then any
+    ``*.gguf``. So when both 4B and 7B are present and no preferred model is
+    set, discovery stays on 4B; when only one GGUF exists, that file is used.
+    """
+    for d in search_dirs:
+        for pattern in DEFAULT_GGUF_GLOBS:
+            try:
+                hits = sorted(d.glob(pattern))
+            except Exception:
+                hits = []
+            for hit in hits:
+                if hit.is_file() and hit.suffix.lower() == ".gguf":
+                    return hit
+    return None
 
 
 def _candidate_roots():
@@ -99,8 +537,19 @@ def _llama_binary_name():
     return "llama-server.exe" if _is_windows() else "llama-server"
 
 
-def find_pack(root=None):
-    """Locate llama-server + a GGUF model. Returns a status dict."""
+def find_pack(root=None, preferred_model=None):
+    """Locate llama-server + a GGUF model. Returns a status dict.
+
+    When ``preferred_model`` (or the module preferred path) points at an
+    existing ``.gguf``, that file is used instead of pack-default discovery.
+    Missing preferred paths fall back to DEFAULT_GGUF_GLOBS under the pack.
+    """
+    if preferred_model is None:
+        preferred_model = get_preferred_model()
+    pref = _resolve_gguf(preferred_model)
+    preferred_missing = bool(
+        preferred_model and str(preferred_model).strip() and pref is None
+    )
     roots = [Path(root)] if root else _candidate_roots()
     bin_name = _llama_binary_name()
     for base in roots:
@@ -123,34 +572,37 @@ def find_pack(root=None):
             if alt.is_file():
                 binary = alt
         models_dir = base / "models"
-        model = None
         search_dirs = []
         if models_dir.is_dir():
             search_dirs.append(models_dir)
         search_dirs.append(base)
-        for d in search_dirs:
-            for pattern in DEFAULT_GGUF_GLOBS:
-                try:
-                    hits = sorted(d.glob(pattern))
-                except Exception:
-                    hits = []
-                for hit in hits:
-                    if hit.is_file() and hit.suffix.lower() == ".gguf":
-                        model = hit
-                        break
-                if model is not None:
-                    break
-            if model is not None:
-                break
+        default_model = _discover_gguf(search_dirs)
+        # Preferred GGUF wins when present; otherwise pack default discovery.
+        if pref is not None:
+            model = pref
+            using_default = False
+        else:
+            model = default_model
+            using_default = True
+        model_name = _display_model_name(
+            str(model) if model is not None else None, using_default
+        )
         if binary is not None and binary.is_file() and model is not None:
-            return {
+            out = {
                 "ok": True,
                 "root": str(base),
                 "binary": str(binary),
                 "model": str(model),
-                "model_name": DEFAULT_MODEL_NAME,
-                "quant": DEFAULT_QUANT,
+                "model_name": model_name,
+                "quant": DEFAULT_QUANT if using_default else None,
+                "using_default": using_default,
+                "preferred_model": (
+                    str(preferred_model).strip() if preferred_model else None
+                ),
+                "preferred_missing": preferred_missing,
+                "default_model": str(default_model) if default_model else None,
             }
+            return out
         if binary is not None and binary.is_file() and model is None:
             return {
                 "ok": False,
@@ -158,18 +610,33 @@ def find_pack(root=None):
                 "binary": str(binary),
                 "model": None,
                 "reason": "model_missing",
+                "using_default": True,
+                "preferred_model": (
+                    str(preferred_model).strip() if preferred_model else None
+                ),
+                "preferred_missing": preferred_missing,
                 "hint": (
-                    "Place a Qwen2.5-Coder-1.5B-Instruct Q4_K_M .gguf under "
+                    "Place a Qwen3-4B-Instruct-2507 Q4_K_M .gguf under "
                     "assistant/models/ (or run tools/fetch_assistant_pack.py)."
                 ),
             }
         if model is not None and (binary is None or not binary.is_file()):
+            # Preferred GGUF may live outside this pack root — keep looking
+            # for llama-server under later candidate roots.
+            if pref is not None:
+                continue
             return {
                 "ok": False,
                 "root": str(base),
                 "binary": None,
                 "model": str(model),
+                "model_name": model_name,
                 "reason": "binary_missing",
+                "using_default": using_default,
+                "preferred_model": (
+                    str(preferred_model).strip() if preferred_model else None
+                ),
+                "preferred_missing": preferred_missing,
                 "hint": (
                     "Place llama-server%s under assistant/runtime/ "
                     "(or run tools/fetch_assistant_pack.py / "
@@ -177,12 +644,36 @@ def find_pack(root=None):
                     % (".exe" if _is_windows() else "")
                 ),
             }
+    # Preferred GGUF alone is not enough without llama-server binary.
+    if pref is not None:
+        return {
+            "ok": False,
+            "root": None,
+            "binary": None,
+            "model": str(pref),
+            "model_name": _display_model_name(str(pref), False),
+            "reason": "binary_missing",
+            "using_default": False,
+            "preferred_model": str(pref),
+            "preferred_missing": False,
+            "hint": (
+                "Place llama-server%s under assistant/runtime/ "
+                "(or run tools/fetch_assistant_pack.py / "
+                "Fetch-SamQL-Assistant.ps1)."
+                % (".exe" if _is_windows() else "")
+            ),
+        }
     return {
         "ok": False,
         "root": None,
         "binary": None,
         "model": None,
         "reason": "pack_missing",
+        "using_default": True,
+        "preferred_model": (
+            str(preferred_model).strip() if preferred_model else None
+        ),
+        "preferred_missing": preferred_missing,
         "hint": (
             "Run tools/fetch_assistant_pack.py (or Fetch-SamQL-Assistant.ps1) "
             "on a machine that can download, then copy ./assistant/ next to "
@@ -240,7 +731,7 @@ def schema_prompt(tables, dialect="native"):
         )
     schema_block = "\n".join(lines) if lines else "(no local tables loaded)"
     system = (
-        "You are SamQL's offline SQL assistant. Convert English requests into "
+        "You are SamQL's SQL assistant. Convert English requests into "
         "%s only. Use only the provided tables/columns. Prefer simple, "
         "runnable queries. For nested JSON columns, use the query hints when "
         "present (json_extract / UNNEST / ->>). Do not invent tables. "
@@ -351,12 +842,18 @@ def _llama_base_url():
     return None
 
 
-def _http_json(url, payload, timeout=120.0):
+def _http_json(url, payload, timeout=120.0, headers=None):
     data = json.dumps(payload).encode("utf-8")
+    hdrs = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if headers:
+        hdrs.update(headers)
     req = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=hdrs,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -390,24 +887,62 @@ def _wait_ready(base, timeout=45.0):
 
 
 def ensure_server(pack=None):
-    """Start bundled llama-server if needed. Returns base URL or raises."""
-    global _proc, _proc_port
-    existing = _llama_base_url()
-    if existing and (os.environ.get("SAMQL_LLAMA_URL") or "").strip():
-        return existing
+    """Start bundled llama-server if needed. Returns base URL or raises.
+
+    If the sidecar is already running a different GGUF than the current
+    preference / pack discovery, it is stopped and restarted with the
+    desired model. External ``SAMQL_LLAMA_URL`` servers are left alone.
+    """
+    global _proc, _proc_port, _proc_model
+    if (os.environ.get("SAMQL_LLAMA_URL") or "").strip():
+        existing = _llama_base_url()
+        if existing:
+            return existing
+    pack = pack or find_pack()
+    if not pack.get("ok"):
+        raise RuntimeError(pack.get("hint") or "Assistant pack not available.")
+    desired = pack.get("model")
     with _lock:
-        if _proc is not None and _proc.poll() is None and _proc_port:
+        if (
+            _proc is not None
+            and _proc.poll() is None
+            and _proc_port
+            and desired
+            and _proc_model
+            and _same_path(_proc_model, desired)
+        ):
             return "http://127.0.0.1:%d" % _proc_port
-        pack = pack or find_pack()
-        if not pack.get("ok"):
-            raise RuntimeError(pack.get("hint") or "Assistant pack not available.")
+    # Dead process, first start, or model mismatch — (re)start.
+    stop_server()
+    with _lock:
+        if (
+            _proc is not None
+            and _proc.poll() is None
+            and _proc_port
+            and desired
+            and _proc_model
+            and _same_path(_proc_model, desired)
+        ):
+            return "http://127.0.0.1:%d" % _proc_port
         port = _free_port()
+        # Scale context with free RAM so large GGUFs leave room for weights.
+        ctx = 4096
+        try:
+            from . import resourcebudget
+            avail = float(resourcebudget.snapshot().get("memory_available_mb") or 0)
+            need = float(estimate_gguf_ram_mb(pack.get("model")))
+            if avail and need and avail < need + 2048:
+                ctx = 2048
+            if avail and need and avail < need + 512:
+                ctx = 1024
+        except Exception:
+            pass
         cmd = [
             pack["binary"],
             "-m", pack["model"],
             "--host", "127.0.0.1",
             "--port", str(port),
-            "-c", "4096",
+            "-c", str(ctx),
             "-ngl", "0",  # CPU-only for ThinkPad / locked GPUs
         ]
         creationflags = 0
@@ -423,6 +958,7 @@ def ensure_server(pack=None):
             creationflags=creationflags,
         )
         _proc_port = port
+        _proc_model = desired
     base = "http://127.0.0.1:%d" % port
     if not _wait_ready(base):
         stop_server()
@@ -433,12 +969,14 @@ def ensure_server(pack=None):
     return base
 
 
-def stop_server():
-    global _proc, _proc_port
+def stop_server(session=None):
+    global _proc, _proc_port, _proc_model
     with _lock:
         proc, _proc = _proc, None
         _proc_port = None
+        _proc_model = None
     if proc is None:
+        restore_duckdb_memory_after_assist(session)
         return
     try:
         proc.terminate()
@@ -451,6 +989,33 @@ def stop_server():
             proc.kill()
         except Exception:
             pass
+    restore_duckdb_memory_after_assist(session)
+
+
+def sync_server_model():
+    """Stop llama-server when its loaded GGUF no longer matches preference.
+
+    Does not start the sidecar (next chat / ensure_server does). Safe while
+    DuckDB is busy — only touches the assistant process.
+    """
+    if (os.environ.get("SAMQL_LLAMA_URL") or "").strip():
+        return {"stopped": False, "reason": "external_url"}
+    pack = find_pack()
+    desired = pack.get("model") if pack.get("ok") else None
+    with _lock:
+        running = _proc is not None and _proc.poll() is None
+        current = _proc_model
+    if not running:
+        return {"stopped": False, "reason": "not_running"}
+    if desired and current and _same_path(current, desired):
+        return {"stopped": False, "reason": "already_matched"}
+    stop_server()
+    return {
+        "stopped": True,
+        "reason": "model_changed",
+        "desired": desired,
+        "previous": current,
+    }
 
 
 def status(session=None):
@@ -467,23 +1032,105 @@ def status(session=None):
         }
     except Exception:
         pass
-    avail_mb = mem.get("memory_available_mb") or 0
-    refuse_ram = bool(avail_mb and avail_mb < 1536)
+    using_default = bool(pack.get("using_default", True))
+    # Prefer the sidecar's loaded GGUF when it is running; otherwise the pack
+    # selection. Always derive the label from that path (never hardcode 4B).
+    loaded_model = None
+    with _lock:
+        if _proc is not None and _proc.poll() is None and _proc_model:
+            loaded_model = _proc_model
+    display_model = loaded_model or pack.get("model")
+    model_name = _display_model_name(display_model, using_default) if display_model else (
+        pack.get("model_name") or DEFAULT_MODEL_NAME
+    )
+    api = get_api_runtime()
+    mode = api.get("mode") or ASSISTANT_MODE_LOCAL
+    api_configured = bool(api.get("base_url"))
+    if mode == ASSISTANT_MODE_API:
+        available = api_configured
+        reason = None
+        hint = None
+        if not api_configured:
+            reason = "api_not_configured"
+            hint = (
+                "Configure an OpenAI-compatible base URL under "
+                "Settings → SQL assistant → API."
+            )
+        model_name = api.get("model") or "API model"
+        return {
+            "enabled": True,
+            "mode": ASSISTANT_MODE_API,
+            "available": available,
+            "pack_ok": bool(pack.get("ok")),
+            "reason": reason,
+            "hint": hint,
+            "root": pack.get("root"),
+            "model": api.get("model"),
+            "model_name": model_name,
+            "quant": None,
+            "using_default": False,
+            "preferred_model": pack.get("preferred_model") or get_preferred_model(),
+            "preferred_missing": bool(pack.get("preferred_missing")),
+            "default_model": pack.get("default_model"),
+            "duckdb_busy": busy,
+            "generating": bool(_generating),
+            "server_url": api.get("base_url"),
+            "memory": mem,
+            "refuse_low_memory": False,
+            "memory_plan": None,
+            "api": {
+                "base_url": api.get("base_url"),
+                "model": api.get("model"),
+                "has_api_key": bool(api.get("has_api_key")),
+                "configured": api_configured,
+            },
+        }
+    # Model-aware RAM plan (replaces the old flat 1.5 GiB free gate).
+    plan = None
+    refuse_ram = False
+    if pack.get("ok") and pack.get("model"):
+        try:
+            plan = plan_local_model_memory(session, pack.get("model"))
+            refuse_ram = not bool(plan.get("can_run"))
+            mem = {
+                **mem,
+                "model_need_mb": plan.get("need_mb"),
+                "effective_mb": plan.get("effective_mb"),
+                "duckdb_mb": plan.get("duckdb_mb"),
+                "duckdb_target_mb": plan.get("duckdb_target_mb"),
+            }
+        except Exception:
+            plan = None
+            refuse_ram = False
     return {
         "enabled": True,
+        "mode": ASSISTANT_MODE_LOCAL,
         "available": bool(pack.get("ok")) and not refuse_ram,
         "pack_ok": bool(pack.get("ok")),
         "reason": None if pack.get("ok") else pack.get("reason"),
         "hint": pack.get("hint"),
         "root": pack.get("root"),
-        "model": pack.get("model"),
-        "model_name": DEFAULT_MODEL_NAME,
-        "quant": DEFAULT_QUANT,
+        "model": display_model or pack.get("model"),
+        "model_name": model_name,
+        "quant": pack.get("quant") if pack.get("quant") is not None else (
+            DEFAULT_QUANT if using_default else None
+        ),
+        "using_default": using_default,
+        "preferred_model": pack.get("preferred_model") or get_preferred_model(),
+        "preferred_missing": bool(pack.get("preferred_missing")),
+        "default_model": pack.get("default_model"),
         "duckdb_busy": busy,
         "generating": bool(_generating),
         "server_url": _llama_base_url(),
         "memory": mem,
         "refuse_low_memory": refuse_ram,
+        "memory_plan": plan,
+        "api": {
+            "base_url": api.get("base_url"),
+            "model": api.get("model"),
+            "has_api_key": bool(api.get("has_api_key")),
+            "configured": api_configured,
+        },
     }
 
 
@@ -493,29 +1140,45 @@ def cancel():
     return {"ok": True}
 
 
+def _parse_chat_completion(data):
+    choices = data.get("choices") or []
+    text = ""
+    if choices and isinstance(choices[0], dict):
+        msg = choices[0].get("message") or {}
+        text = str(msg.get("content") or choices[0].get("text") or "")
+    if not text:
+        text = str(data.get("content") or "")
+    return text
+
+
 def chat(session, question, dialect="native", timeout_s=180.0):
-    """Generate SQL help. Refuses when DuckDB is busy or pack/RAM missing."""
+    """Generate SQL help. Refuses when DuckDB is busy or pack/RAM/API missing."""
     global _generating
     q = str(question or "").strip()
     if not q:
         return {"ok": False, "error": "Ask a question about your tables."}
 
     st = status(session)
-    if st.get("refuse_low_memory"):
-        return {
-            "ok": False,
-            "error": (
-                "Not enough free RAM for the local assistant "
-                "(need ~1.5 GiB free while DuckDB is idle)."
-            ),
-            "status": st,
-        }
-    if not st.get("pack_ok"):
-        return {
-            "ok": False,
-            "error": st.get("hint") or "Assistant pack not installed.",
-            "status": st,
-        }
+    use_api = (st.get("mode") or ASSISTANT_MODE_LOCAL) == ASSISTANT_MODE_API
+
+    if use_api:
+        if not (st.get("api") or {}).get("configured") and not get_api_runtime().get(
+            "base_url"
+        ):
+            return {
+                "ok": False,
+                "error": st.get("hint") or (
+                    "API mode selected but no base URL is configured."
+                ),
+                "status": st,
+            }
+    else:
+        if not st.get("pack_ok"):
+            return {
+                "ok": False,
+                "error": st.get("hint") or "Assistant pack not installed.",
+                "status": st,
+            }
     if duckdb_busy(session):
         return {
             "ok": False,
@@ -526,6 +1189,40 @@ def chat(session, question, dialect="native", timeout_s=180.0):
             "status": status(session),
             "queued_reason": "duckdb_busy",
         }
+
+    # Local models: shed DuckDB budget dynamically, then re-check (model-sized).
+    if not use_api:
+        model_path = st.get("model")
+        if not model_path:
+            pack_now = find_pack()
+            model_path = pack_now.get("model") if pack_now.get("ok") else None
+        plan = prepare_memory_for_model(session, model_path) if model_path else {
+            "can_run": False
+        }
+        st = status(session)
+        if not plan.get("can_run"):
+            need = plan.get("need_mb") or st.get("memory", {}).get("model_need_mb")
+            total = plan.get("total_mb") or st.get("memory", {}).get("memory_total_mb")
+            avail = plan.get("available_mb") or st.get("memory", {}).get(
+                "memory_available_mb"
+            )
+            return {
+                "ok": False,
+                "error": (
+                    "Not enough RAM for this local model right now "
+                    "(needs ~%.0f MiB; machine %.0f MiB total, %.0f MiB free). "
+                    "SamQL tried to shrink DuckDB's budget to make room. "
+                    "Close other apps, pick a smaller GGUF in Settings → SQL "
+                    "assistant, or free loaded tables."
+                    % (
+                        float(need or 0),
+                        float(total or 0),
+                        float(avail or 0),
+                    )
+                ),
+                "status": st,
+                "memory_plan": plan,
+            }
 
     tables = []
     try:
@@ -545,6 +1242,55 @@ def chat(session, question, dialect="native", timeout_s=180.0):
                 "queued_reason": "duckdb_busy",
                 "status": status(session),
             }
+        if _cancel.is_set():
+            return {"ok": False, "error": "Cancelled.", "cancelled": True}
+
+        if use_api:
+            api = get_api_runtime()
+            base = api.get("base_url")
+            url = _api_chat_url(base)
+            if not url:
+                return {
+                    "ok": False,
+                    "error": "API base URL is not configured.",
+                    "status": status(session),
+                }
+            model_id = api.get("model") or "samql"
+            payload = {
+                "model": model_id,
+                "messages": messages,
+                "temperature": 0.1,
+                "max_tokens": 800,
+                "stream": False,
+            }
+            try:
+                data = _http_json(
+                    url,
+                    payload,
+                    timeout=float(timeout_s),
+                    headers=_api_auth_headers(),
+                )
+            except Exception as e:
+                if _cancel.is_set():
+                    return {"ok": False, "error": "Cancelled.", "cancelled": True}
+                return {
+                    "ok": False,
+                    "error": "Assistant API request failed: %s" % err_str(e),
+                    "status": status(session),
+                }
+            if _cancel.is_set():
+                return {"ok": False, "error": "Cancelled.", "cancelled": True}
+            text = _parse_chat_completion(data)
+            sql = extract_sql(text)
+            return {
+                "ok": True,
+                "reply": text.strip(),
+                "sql": sql,
+                "dialect": meta["dialect"],
+                "mode": ASSISTANT_MODE_API,
+                "status": status(session),
+            }
+
         base = ensure_server()
         if _cancel.is_set():
             return {"ok": False, "error": "Cancelled.", "cancelled": True}
@@ -583,12 +1329,13 @@ def chat(session, question, dialect="native", timeout_s=180.0):
                     "reply": text.strip(),
                     "sql": sql,
                     "dialect": meta["dialect"],
+                    "mode": ASSISTANT_MODE_LOCAL,
                     "status": status(session),
                 }
             except Exception:
                 return {
                     "ok": False,
-                    "error": "llama-server HTTP error: %s" % (e,),
+                    "error": "llama-server HTTP error: %s" % err_str(e),
                     "status": status(session),
                 }
         except Exception as e:
@@ -603,19 +1350,14 @@ def chat(session, question, dialect="native", timeout_s=180.0):
         if _cancel.is_set():
             return {"ok": False, "error": "Cancelled.", "cancelled": True}
 
-        choices = data.get("choices") or []
-        text = ""
-        if choices and isinstance(choices[0], dict):
-            msg = choices[0].get("message") or {}
-            text = str(msg.get("content") or choices[0].get("text") or "")
-        if not text:
-            text = str(data.get("content") or "")
+        text = _parse_chat_completion(data)
         sql = extract_sql(text)
         return {
             "ok": True,
             "reply": text.strip(),
             "sql": sql,
             "dialect": meta["dialect"],
+            "mode": ASSISTANT_MODE_LOCAL,
             "status": status(session),
         }
     finally:

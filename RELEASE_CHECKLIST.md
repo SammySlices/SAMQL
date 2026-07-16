@@ -5,8 +5,8 @@ A green development build is not enough: identity, saved-data compatibility,
 the exact source manifest, Microsoft Edge behavior, and both source transports
 must all be verified.
 
-Current release identity (must match everywhere): **v2.16.4 / build 2026-07-15.619**,
-**309** managed source files.
+Current release identity (must match everywhere): **v2.16.4 / build 2026-07-16.620**,
+**316** managed source files.
 
 ## 1. Confirm one release identity
 

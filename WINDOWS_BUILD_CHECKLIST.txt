@@ -36,9 +36,12 @@ EXPECT both commands to pass before any executable packaging begins.
      flatten..."), nothing else on stderr.
 
 ----------------------------------------------------------------------
-3. PYINSTALLER ONEFILE BUILD
+3. PYINSTALLER APPWINDOW ONEDIR BUILD (primary product)
 ----------------------------------------------------------------------
-3.1  PS> .\build.ps1   (or: .\build.ps1 -OneDir)
+3.1  PS> .\build.ps1
+     (default: AppWindow onedir + dual zip; assistant runtime without GGUF.
+      Opt-in: .\build.ps1 -OneFile   for self-extracting AppWindow.
+      Offline: .\build.ps1 -AssistantPack lean)
      EXPECT: frontend install uses normalize_npm_lock + install_frontend_deps
      (not a raw npm ci that dies on stderr warnings under Stop).
      EXPECT: npm run build succeeds and frontend\dist\index.html +
@@ -50,12 +53,18 @@ EXPECT both commands to pass before any executable packaging begins.
      EXPECT: "embedding application icon" IF backend\samql.ico is
      present, otherwise the "default PyInstaller icon" notice -- the
      build must SUCCEED in both cases.
-3.2  EXPECT dist\SamQL.exe to exist; size sanity: tens of MB, not
-     hundreds (a jump means a stray package rode into hiddenimports).
-     pandas + msal bump size vs older builds -- that is expected.
-3.3  PS> dist\SamQL.exe --help
+3.2  EXPECT dist\SamQL-AppWindow\SamQL-AppWindow.exe plus:
+       dist\SamQL-AppWindow.zip            (lean — no assistant/)
+       dist\SamQL-AppWindow-Assistant.zip  (AppWindow + SQL assistant runtime;
+                                            default runtime mode, no *.gguf)
+     Zips are written via tar/ZIP64 (not Compress-Archive). SamQL.exe may
+     ride along as a server sidecar inside the folder; do not promote it
+     as the browser-tab product. Size sanity: tens–hundreds of MB for the
+     lean zip; Assistant zip adds the llama-server runtime.
+3.3  PS> dist\SamQL-AppWindow\SamQL.exe --help
+     (or dist\SamQL.exe --help before the onedir copy)
      EXPECT: the argparse help with --port, --browser, --no-server;
-     exit code 0; no console window lingering.
+     exit code 0.
 
 ----------------------------------------------------------------------
 4. LAUNCHER BEHAVIOR (the .456 contracts, live)

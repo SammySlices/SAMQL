@@ -3,18 +3,24 @@
 
 Fetches:
   * llama-server from the latest ggml-org/llama.cpp GitHub release (CPU build)
-  * Qwen2.5-Coder-1.5B-Instruct Q4_K_M GGUF from Hugging Face
+  * A Qwen Instruct Q4_K_M GGUF from Hugging Face (4B / 7B)
 
 and places them under ``assistant/``:
 
   assistant/runtime/llama-server[.exe]   (+ companion libs/DLLs from the release)
-  assistant/models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
+  assistant/models/<chosen-qwen>.gguf
+
+Models coexist under assistant/models/ -- fetching 7B does not remove
+an existing 4B (or any other) GGUF, and does not delete the runtime unless
+--force re-downloads llama-server.
 
 Run this on a machine that CAN reach GitHub + Hugging Face, then copy the
 whole ``assistant/`` folder to a locked-down work PC. Runtime stays offline.
 
 Examples:
   python tools/fetch_assistant_pack.py
+  python tools/fetch_assistant_pack.py --model 4b
+  python tools/fetch_assistant_pack.py --model 7b
   python tools/fetch_assistant_pack.py --root . --force
   python tools/fetch_assistant_pack.py --platform win-cpu
 """
@@ -33,13 +39,38 @@ import zipfile
 from pathlib import Path
 
 LLAMA_REPO = "ggml-org/llama.cpp"
-GGUF_URL = (
-    "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/"
-    "resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
-)
-GGUF_NAME = "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
 
-# Prefer CPU builds — matches ThinkPad / no-GPU posture.
+# Instruct Q4_K_M GGUFs for the SQL assistant picker.
+# Keys are the CLI / PS1 --model values (case-insensitive).
+# 4B: Qwen2.5-Coder has no 4B; use Qwen3-4B-Instruct-2507 Q4_K_M
+#     (community GGUF of official Qwen weights; verified HTTP 200).
+# 7B: official Qwen2.5-Coder HF GGUF repo.
+DEFAULT_MODEL_KEY = "4b"
+MODELS: dict[str, dict[str, str]] = {
+    "4b": {
+        "key": "4b",
+        "label": "Qwen3-4B-Instruct-2507",
+        "filename": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+        "approx_size": "~2.5 GB",
+    },
+    "7b": {
+        "key": "7b",
+        "label": "Qwen2.5-Coder-7B-Instruct",
+        "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        "repo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+        "approx_size": "~4.7 GB",
+    },
+}
+
+# Aliases for the default pack model (used by docs / older callers).
+GGUF_NAME = MODELS[DEFAULT_MODEL_KEY]["filename"]
+GGUF_URL = (
+    f"https://huggingface.co/{MODELS[DEFAULT_MODEL_KEY]['repo']}/"
+    f"resolve/main/{GGUF_NAME}"
+)
+
+# Prefer CPU builds -- matches ThinkPad / no-GPU posture.
 PLATFORM_ASSETS = {
     "win-cpu": ("win-cpu-x64.zip", "llama-server.exe"),
     "linux-cpu": ("ubuntu-x64.tar.gz", "llama-server"),  # may vary; see resolver
@@ -53,6 +84,35 @@ USER_AGENT = "SamQL-fetch-assistant-pack/1.0"
 def _die(msg: str, code: int = 1) -> None:
     print(f"error: {msg}", file=sys.stderr)
     raise SystemExit(code)
+
+
+def normalize_model_key(value: str) -> str:
+    """Map user input to a MODELS key, or raise ValueError."""
+    raw = (value or "").strip().lower().replace(" ", "")
+    aliases = {
+        "4": "4b",
+        "4b": "4b",
+        "medium": "4b",
+        "small": "4b",
+        "7": "7b",
+        "7b": "7b",
+        "large": "7b",
+    }
+    key = aliases.get(raw)
+    if key is None or key not in MODELS:
+        choices = ", ".join(sorted(MODELS.keys()))
+        raise ValueError(f"unknown model {value!r}; choose one of: {choices}")
+    return key
+
+
+def resolve_model(key: str) -> dict[str, str]:
+    """Return a copy of the model spec including a download URL."""
+    norm = normalize_model_key(key)
+    spec = dict(MODELS[norm])
+    spec["url"] = (
+        f"https://huggingface.co/{spec['repo']}/resolve/main/{spec['filename']}"
+    )
+    return spec
 
 
 def _detect_platform() -> str:
@@ -81,7 +141,7 @@ def _download(url: str, dest: Path, *, label: str) -> None:
     tmp = dest.with_suffix(dest.suffix + ".partial")
     if tmp.exists():
         tmp.unlink()
-    print(f"Downloading {label}…")
+    print(f"Downloading {label}...")
     print(f"  {url}")
     req = urllib.request.Request(
         url,
@@ -136,7 +196,7 @@ def _pick_llama_asset(assets: list[dict], plat: str) -> tuple[str, str, str]:
                 return name, a["browser_download_url"], "llama-server.exe"
         _die(
             "no Windows CPU x64 zip in latest llama.cpp release; "
-            f"saw: {', '.join(names[:12])}…"
+            f"saw: {', '.join(names[:12])}..."
         )
     if plat == "linux-cpu":
         # Prefer plain Ubuntu x64 CPU build (not cuda/vulkan/rocm/sycl).
@@ -152,7 +212,7 @@ def _pick_llama_asset(assets: list[dict], plat: str) -> tuple[str, str, str]:
         if not candidates:
             _die(
                 "no Ubuntu x64 CPU archive in latest llama.cpp release; "
-                f"saw: {', '.join(names[:12])}…"
+                f"saw: {', '.join(names[:12])}..."
             )
         a = candidates[0]
         return a["name"], a["browser_download_url"], "llama-server"
@@ -179,7 +239,7 @@ def _extract_runtime(archive: Path, binary_name: str, runtime_dir: Path) -> Path
     companion libraries in the same folder. Copying only the exe breaks
     at launch, so we publish the whole runtime directory.
     """
-    print(f"Extracting runtime (including {binary_name}) from {archive.name}…")
+    print(f"Extracting runtime (including {binary_name}) from {archive.name}...")
     with tempfile.TemporaryDirectory(prefix="samql-llama-") as td:
         td_path = Path(td)
         if archive.suffix.lower() == ".zip" or archive.name.endswith(".zip"):
@@ -219,7 +279,7 @@ def _extract_runtime(archive: Path, binary_name: str, runtime_dir: Path) -> Path
         dest = runtime_dir / src_bin.name
         if not dest.is_file():
             _die(f"failed to install {binary_name} into {runtime_dir}")
-        print(f"  installed runtime → {runtime_dir}")
+        print(f"  installed runtime -> {runtime_dir}")
         print(f"  binary {dest}")
         return dest
 
@@ -237,7 +297,7 @@ def fetch_llama(out_dir: Path, plat: str, *, force: bool) -> Path:
         print(f"Keeping existing {legacy} (pass --force to refresh into runtime/)")
         return legacy
 
-    print("Resolving latest llama.cpp release…")
+    print("Resolving latest llama.cpp release...")
     meta = _http_json(f"https://api.github.com/repos/{LLAMA_REPO}/releases/latest")
     tag = meta.get("tag_name") or "?"
     assets = meta.get("assets") or []
@@ -250,18 +310,72 @@ def fetch_llama(out_dir: Path, plat: str, *, force: bool) -> Path:
         return _extract_runtime(archive, binary_name, runtime_dir)
 
 
-def fetch_model(models_dir: Path, *, force: bool) -> Path:
-    dest = models_dir / GGUF_NAME
+def fetch_model(models_dir: Path, model_key: str = DEFAULT_MODEL_KEY, *, force: bool) -> Path:
+    """Download one GGUF into models_dir; leave any other GGUFs untouched."""
+    spec = resolve_model(model_key)
+    dest = models_dir / spec["filename"]
     if dest.is_file() and not force:
         print(f"Keeping existing {dest} (pass --force to re-download)")
         return dest
-    _download(GGUF_URL, dest, label=GGUF_NAME)
+    _download(spec["url"], dest, label=f"{spec['label']} ({spec['filename']})")
     return dest
+
+
+def _prompt_model_key() -> str:
+    """Interactive model picker; Enter keeps the 4B default."""
+    print()
+    print("Choose Instruct Q4_K_M GGUF to download (4b / 7b):")
+    order = ("4b", "7b")
+    for i, key in enumerate(order, start=1):
+        spec = MODELS[key]
+        marker = " (default)" if key == DEFAULT_MODEL_KEY else ""
+        print(
+            f"  {i}) {key.upper():<4}  {spec['label']}  "
+            f"{spec['approx_size']}{marker}"
+        )
+        print(f"       -> assistant/models/{spec['filename']}")
+    print()
+    try:
+        raw = input(
+            f"Model [4b/7b] (default {DEFAULT_MODEL_KEY}): "
+        ).strip()
+    except EOFError:
+        return DEFAULT_MODEL_KEY
+    if not raw:
+        return DEFAULT_MODEL_KEY
+    # Allow picking by menu number.
+    if raw.isdigit() and 1 <= int(raw) <= len(order):
+        return order[int(raw) - 1]
+    try:
+        return normalize_model_key(raw)
+    except ValueError as exc:
+        print(f"  note: {exc}; using default {DEFAULT_MODEL_KEY}")
+        return DEFAULT_MODEL_KEY
+
+
+def _choose_model_key(explicit: str | None, *, no_prompt: bool) -> str:
+    if explicit:
+        try:
+            return normalize_model_key(explicit)
+        except ValueError as exc:
+            _die(str(exc))
+    if no_prompt or not sys.stdin.isatty():
+        return DEFAULT_MODEL_KEY
+    return _prompt_model_key()
+
+
+def _list_models(models_dir: Path) -> list[Path]:
+    if not models_dir.is_dir():
+        return []
+    return sorted(p for p in models_dir.glob("*.gguf") if p.is_file())
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Download SamQL offline SQL assistant pack (llama-server + 1.5B GGUF).",
+        description=(
+            "Download SamQL offline SQL assistant pack "
+            "(llama-server + Qwen Instruct Q4_K_M GGUF)."
+        ),
     )
     parser.add_argument(
         "--root",
@@ -273,6 +387,20 @@ def main(argv: list[str] | None = None) -> int:
         choices=sorted(PLATFORM_ASSETS.keys()),
         default=None,
         help="llama.cpp CPU build to fetch (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        metavar="SIZE",
+        help=(
+            "Qwen GGUF to download: 4b (default) or 7b. "
+            "If omitted on a TTY, prompts interactively."
+        ),
+    )
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="Never prompt for model; use --model or default 4b",
     )
     parser.add_argument(
         "--force",
@@ -295,30 +423,35 @@ def main(argv: list[str] | None = None) -> int:
     out = root / "assistant"
     models = out / "models"
     plat = args.platform or _detect_platform()
+    model_key = _choose_model_key(args.model, no_prompt=args.no_prompt)
+    spec = resolve_model(model_key)
+
     print(f"Assistant pack directory: {out}")
     print(f"Platform: {plat}")
+    print(f"Model: {spec['label']} ({spec['key']}, {spec['approx_size']})")
+    print(f"  file: {spec['filename']}")
 
     if not args.skip_llama:
         fetch_llama(out, plat, force=args.force)
     if not args.skip_model:
-        fetch_model(models, force=args.force)
+        fetch_model(models, model_key, force=args.force)
 
     print()
     print("Done. Pack layout:")
     runtime = out / "runtime"
     if runtime.is_dir():
         bins = list(runtime.glob("llama-server*"))
-        libs = [
-            p for p in runtime.iterdir()
-            if p.is_file() and p.suffix.lower() in (".so", ".dll", "") or ".so." in p.name
-        ]
         print(f"  assistant/runtime/  ({len(list(runtime.iterdir()))} files)")
         for b in bins:
             if b.is_file():
                 print(f"    {b.name}")
-    model = models / GGUF_NAME
-    if model.is_file():
-        print(f"  assistant/models/{GGUF_NAME}  ({model.stat().st_size / (1024 * 1024):.1f} MiB)")
+    present = _list_models(models)
+    if present:
+        print(f"  assistant/models/  ({len(present)} GGUF file(s); others kept if present)")
+        for p in present:
+            size_mib = p.stat().st_size / (1024 * 1024)
+            mark = "  [fetched]" if p.name == spec["filename"] else ""
+            print(f"    {p.name}  ({size_mib:.1f} MiB){mark}")
     print()
     print("Copy the whole assistant/ folder next to SamQL if this machine")
     print("is not the one that will run the app. Runtime needs no internet.")

@@ -971,20 +971,26 @@ textarea:focus {
   box-sizing: border-box;
 }
 .code pre.hl {
+  /* Content-sized overlay (not inset:0). inset:0 + overflow:hidden clipped
+     highlight to the first viewport (~12 lines); soft-wrapped / tall SQL
+     then looked truncated even when the textarea value was intact. */
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  min-height: 100%;
   pointer-events: none;
   color: var(--text);
-  overflow: hidden;
+  overflow: visible;
 }
 .code textarea.ta {
   position: relative;
   display: block;
   width: 100%;
   height: 100%;
-  /* Scroll must live on .scroll so the absolute highlight transform tracks.
-     Without this, long lines scroll inside the textarea and the visible
-     highlight stays clipped at the viewport edge. */
+  /* Scroll lives on .scroll. Textarea is sized to full (wrapped) content
+     so vertical reach covers every line; soft-wrap keeps long lines inside
+     the pane without a mega min-width. */
   overflow: hidden;
   background: transparent;
   color: transparent;
@@ -3254,13 +3260,20 @@ kbd {
   position: relative;
   display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
   border-radius: 0;
-  /* .424: was `visible` -- an enlarged editor spilled OVER the +SQL /
-     +Note toolbar below instead of pushing it down in flow, and the
-     inner scroller lost its box. Contain, and let flow do the layout. */
-  overflow: hidden;
+  /* Grow with SqlEditor content (1000+ lines / soft-wrapped one-liners).
+     Do not clip with a fixed viewport + overflow:hidden — that was the
+     Journal cousin of the IDE cutoff. Flow layout pushes +SQL/+Note down. */
+  overflow: visible;
+  min-height: 0;
 }
-.nb-ed .code { background: var(--bg); height: 100%; }
+.nb-ed .code {
+  background: var(--bg);
+  height: auto;
+  min-height: 100%;
+  flex: 1 1 auto;
+}
 .nb-ed .code .scroll { overflow: auto; }
 
 .nb-outbar {
@@ -4950,8 +4963,9 @@ kbd {
 }
 .nb2-canvas {
   position: relative;
-  width: 3200px;
-  height: 2000px;
+  /* Size set inline from canvasWorldSize() so nodes past 3200×2000 are not clipped. */
+  min-width: 3200px;
+  min-height: 2000px;
 }
 .nb2-wires {
   position: absolute;
@@ -6574,15 +6588,18 @@ kbd {
 .nb2-sql-area {
   font-family: var(--mono, ui-monospace, Menlo, Consolas, monospace);
   font-size: 11.5px;
-  white-space: pre;
+  /* Soft-wrap long one-liners; scroll for tall queries — no hard clip. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
   line-height: 1.4;
   min-height: 120px;
-  /* never wider than the panel: fill it, and grow only downward. (Long lines
-     scroll inside the box; the panel itself can be widened with its handle.) */
+  max-height: none;
   width: 100%;
   min-width: 0;
   max-width: 100%;
   resize: vertical;
+  field-sizing: content;
 }
 .nb2-hint-sm code {
   font-family: var(--mono, monospace);
@@ -9605,30 +9622,7 @@ button:hover .icon-trash svg {
 }
 
 /* ---------- Local SQL assistant (beta) ---------- */
-.sql-asst-fab {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 95;
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  border: 1px solid var(--border-strong);
-  background: var(--raised);
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-}
-.sql-asst-fab:hover {
-  background: var(--raised-2);
-}
-.sql-asst-fab.open {
-  border-color: var(--accent);
-  color: var(--accent);
-}
+/* Launcher is the IDE toolbar chat icon (data-testid=sql-assistant-fab). */
 .sql-asst-win {
   position: fixed;
   z-index: 96;

@@ -84,6 +84,10 @@ interface Props {
   // engine capability flags, used to gate the engine selector's DuckDB option
   // and export formats (parquet needs pyarrow) the same way the SQL editor does
   features?: { pyarrow?: boolean; openpyxl?: boolean; duckdb?: boolean } | null;
+  /** SQL assistant open state (shared panel owned by App). */
+  assistantOpen?: boolean;
+  /** Toggle / open assistant from Journal chrome (copy-only entry). */
+  onAssistantToggle?: () => void;
 }
 
 const LAZY_CHUNK = 1000;
@@ -214,6 +218,8 @@ export const Notebook: React.FC<Props> = ({
   onWorkflowsChanged,
   command,
   features,
+  assistantOpen = false,
+  onAssistantToggle,
 }) => {
   const boot = useRef<ReturnType<typeof ensureNotebookStore> | null>(null);
   if (boot.current === null) boot.current = ensureNotebookStore(seedDefs);
@@ -1953,6 +1959,19 @@ export const Notebook: React.FC<Props> = ({
         >
           <Icon.Grid size={13} /> New Group
         </button>
+        {onAssistantToggle && (
+          <button
+            type="button"
+            className={"btn sm" + (assistantOpen ? " primary" : "")}
+            data-testid="sql-assistant-journal-fab"
+            title="SQL assistant (copy SQL — paste into a cell)"
+            aria-label="Open SQL assistant"
+            aria-pressed={assistantOpen}
+            onClick={onAssistantToggle}
+          >
+            <Icon.MessageCircle size={14} />
+          </button>
+        )}
         <span className="nb-tb-sep" />
         <span className="spacer" />
         <span className="nb-save" data-state={saveState} title="Journal autosaves to this browser">

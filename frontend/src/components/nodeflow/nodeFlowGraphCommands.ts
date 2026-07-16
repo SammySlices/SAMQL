@@ -199,7 +199,7 @@ export function dissolveContainerGraph(
     (child, index): NbNode => ({
       id: child.id,
       type: child.type as NodeType,
-      x: Math.max(0, Math.min(container.x + index * step, 3200)),
+      x: Math.max(0, container.x + index * step),
       y: Math.max(0, container.y),
       config: child.config || {},
     }),

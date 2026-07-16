@@ -87,6 +87,8 @@ frontend/src/components/AboutModal.tsx
 frontend/src/components/ActivityModal.tsx
 frontend/src/components/ActivityShared.engineReset.component.test.tsx
 frontend/src/components/ActivityShared.tsx
+frontend/src/components/AssistantModelsPanel.component.test.tsx
+frontend/src/components/AssistantModelsPanel.tsx
 frontend/src/components/ChartPanel.abort.component.test.tsx
 frontend/src/components/ChartPanel.tsx
 frontend/src/components/ChartView.tsx
@@ -187,6 +189,7 @@ frontend/src/components/nodeflow/useNodeFlowViewport.ts
 frontend/src/components/notebook/NoteNotebookCell.tsx
 frontend/src/components/notebook/NotebookCellShared.tsx
 frontend/src/components/notebook/NotebookCellTypes.ts
+frontend/src/components/notebook/NotebookSqlEditor.component.test.tsx
 frontend/src/components/notebook/ReconcileNotebookCell.tsx
 frontend/src/components/notebook/SqlNotebookCell.tsx
 frontend/src/components/notebook/VisualizationNotebookCell.tsx
@@ -230,6 +233,7 @@ frontend/src/lib/loadForm.ts
 frontend/src/lib/menuPos.ts
 frontend/src/lib/migrations.ts
 frontend/src/lib/namedProfiles.ts
+frontend/src/lib/nodeFlowCanvasExtent.component.test.ts
 frontend/src/lib/nodeFlowDense.component.test.ts
 frontend/src/lib/nodeFlowDenseApp.component.test.tsx
 frontend/src/lib/nodeFlowFavorites.component.test.ts
@@ -291,6 +295,7 @@ tests/suites/frontend.py
 tests/suites/http_api.py
 tests/test_assistant.py
 tests/test_assistant_build_pack.py
+tests/test_fetch_assistant_pack.py
 tests/test_nodeflow_resources.py
 tests/test_optimizations_dual_engine.py
 tests/test_refactor_phase2.py

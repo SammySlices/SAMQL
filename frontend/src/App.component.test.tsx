@@ -35,8 +35,23 @@ vi.mock("./components/NodeFlow", () => ({
   NodeFlow: () => <div data-testid="nodeflow-view">NodeFlow</div>,
 }));
 vi.mock("./components/Notebook", () => ({
-  Notebook: () => (
-    <textarea data-testid="notebook-sql-editor" aria-label="Journal editor" />
+  Notebook: (props: {
+    assistantOpen?: boolean;
+    onAssistantToggle?: () => void;
+  }) => (
+    <>
+      <textarea data-testid="notebook-sql-editor" aria-label="Journal editor" />
+      {props.onAssistantToggle && (
+        <button
+          type="button"
+          data-testid="sql-assistant-journal-fab"
+          aria-pressed={!!props.assistantOpen}
+          onClick={props.onAssistantToggle}
+        >
+          SQL assistant
+        </button>
+      )}
+    </>
   ),
 }));
 vi.mock("./components/Sidebar", () => ({
@@ -53,6 +68,13 @@ vi.mock("./components/ActivityShared", () => ({
   useActivityStatus: () => ({ status: null }),
   useEngineReset: () => ({ reset: vi.fn(), resetting: false }),
   useTasks: () => ({ activeCount: 0, opsCount: 0, stalled: false }),
+  useWinDrag: () => ({
+    pos: { x: 40, y: 40 },
+    startDrag: vi.fn(),
+    dragging: false,
+    settled: false,
+    winRef: { current: null },
+  }),
   ActivityMonitor: () => null,
   TaskWatcher: () => null,
 }));
@@ -113,6 +135,28 @@ describe("App runtime behavior", () => {
     fireEvent.click(screen.getByTestId("view-journal"));
     expect(journal).toBeVisible();
     expect(screen.queryByTestId("ide-sql-editor")).not.toBeInTheDocument();
+  });
+
+  it("opens SQL assistant from Journal in copy-only mode", async () => {
+    apiMock.assistantStatus = vi.fn().mockResolvedValue({
+      available: false,
+      pack_ok: false,
+      hint: "Copy an offline assistant pack to ./assistant/",
+      duckdb_busy: false,
+    });
+    await renderFreshApp();
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute("data-ready", "true"),
+    );
+    fireEvent.click(screen.getByTestId("view-journal"));
+    fireEvent.click(screen.getByTestId("sql-assistant-journal-fab"));
+    await waitFor(() => {
+      expect(screen.getByTestId("sql-assistant-panel")).toBeTruthy();
+    });
+    expect(
+      screen.getByText(/copy it and paste into a Journal cell/i),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Insert into IDE" })).toBeNull();
   });
 
   it("recovers a stale saved active tab id to the first real editor tab", async () => {

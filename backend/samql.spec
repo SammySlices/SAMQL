@@ -1,17 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build spec for SamQL.
 
-Build a single self-contained executable that bundles the Python backend,
-the built React frontend, and whichever optional acceleration libraries
-happen to be installed in the build environment.
+Build self-contained AppWindow (+ server sidecar) binaries that bundle the
+Python backend, the built React frontend, and whichever optional acceleration
+libraries happen to be installed in the build environment.
 
 Usage (from the repository root, after building the frontend):
 
     cd frontend && npm install && npm run build && cd ..
+    # Preferred (matches build.ps1 / build.sh default):
+    set SAMQL_ONEDIR=1
     pyinstaller backend/samql.spec
 
-The resulting binary is written to ``dist/SamQL`` (or ``dist/SamQL.exe``
-on Windows). Running it starts the local server and opens the app.
+Primary product: ``dist/SamQL-AppWindow/`` (onedir) or
+``dist/SamQL-AppWindow.exe`` (onefile). ``dist/SamQL.exe`` remains a
+console/server sidecar from the same shared payload — not the promoted
+browser-tab distribution artifact.
 
 Nothing here is required at runtime beyond the Python standard library;
 DuckDB, pyarrow, sqlglot, pyodbc, openpyxl and pywebview are detected and
@@ -22,20 +26,21 @@ import os
 
 from PyInstaller.utils.hooks import collect_all
 
-# .549: ONEDIR packaging for the AppWindow. Set SAMQL_ONEDIR=1 in the
-# build environment to produce dist/SamQL-AppWindow/ (a FOLDER: the exe
-# plus a pre-extracted _internal/) instead of a single self-extracting
-# SamQL-AppWindow.exe. Onedir runs with NO per-launch _MEI extraction --
-# so the "failed to remove temporary directory" bootloader dialog is
-# structurally impossible, startup skips the re-unpack+AV-scan, and the
-# runtime layout stops shifting under a temp dir each launch. Distribute
-# the folder as a .zip; recipients extract it and run the exe inside.
-# The single-exe SamQL.exe server target is unchanged either way.
+# .549: ONEDIR packaging for the AppWindow. build.ps1 / build.sh default to
+# SAMQL_ONEDIR=1 so dist/SamQL-AppWindow/ is a FOLDER (exe + pre-extracted
+# _internal/) instead of a single self-extracting SamQL-AppWindow.exe.
+# Onedir runs with NO per-launch _MEI extraction -- so the "failed to remove
+# temporary directory" bootloader dialog is structurally impossible, startup
+# skips the re-unpack+AV-scan, and the runtime layout stops shifting under a
+# temp dir each launch. Distribute the folder as a .zip; recipients extract
+# it and run the exe inside. Pass -OneFile / --onefile to clear this flag.
+# The SamQL.exe server sidecar is unchanged either way.
 SAMQL_ONEDIR = os.environ.get("SAMQL_ONEDIR", "").strip() in (
     "1", "true", "yes", "on")
 
 # Optional SQL assistant pack (llama-server + GGUF). Set by build.ps1/build.sh
-# when the user chooses packaging mode 3 (embed). Modes 1/2 leave this off.
+# when the user chooses packaging mode embed. Default "runtime" mode stages
+# llama-server beside dist/ WITHOUT embedding (and WITHOUT a GGUF).
 SAMQL_ASSISTANT_EMBED = os.environ.get("SAMQL_ASSISTANT_EMBED", "").strip() in (
     "1", "true", "yes", "on")
 
@@ -67,10 +72,11 @@ if not (os.path.isdir(FRONTEND_DIST)
 datas.append((FRONTEND_DIST, "frontend_dist"))
 print("[samql.spec] bundling frontend_dist from %s" % FRONTEND_DIST)
 
-# ---- optional offline SQL assistant pack (mode 3 / embed) ----------------
-# Ships llama-server + companion libs + the ~1 GiB GGUF inside the frozen
-# payload (sys._MEIPASS/assistant). Modes 1 (lean) and 2 (post-build folder)
-# leave this off so the core exe stays small.
+# ---- optional offline SQL assistant pack (mode embed only) ---------------
+# Ships llama-server + companion libs + a GGUF inside the frozen payload
+# (sys._MEIPASS/assistant). Modes lean / runtime / post leave this off;
+# runtime and post stage assistant/ beside dist/ after PyInstaller instead
+# (runtime = no GGUF).
 if SAMQL_ASSISTANT_EMBED:
     _asst = os.path.join(REPO, "assistant")
     _bin_win = os.path.join(_asst, "runtime", "llama-server.exe")
@@ -92,7 +98,7 @@ if SAMQL_ASSISTANT_EMBED:
     datas.append((_asst, "assistant"))
     print("[samql.spec] EMBEDDING assistant pack from %s (~+1 GiB)" % _asst)
 else:
-    print("[samql.spec] assistant pack not embedded (lean / post-build mode)")
+    print("[samql.spec] assistant pack not embedded (lean / runtime / post mode)")
 
 # .519: the SERVER exe bundles samql.ico too -- SamQL.exe --window now sets
 # the Form icon exactly like the AppWindow launcher, so it needs the art.

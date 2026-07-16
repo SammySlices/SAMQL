@@ -18,6 +18,7 @@ import time
 import sqlite3
 import tempfile
 import uuid
+from pathlib import Path
 
 # .414: the reconcile summary as ONE full-outer-join aggregate. The
 # toggle exists for tests (parity vs the legacy statements) and as an
@@ -773,6 +774,15 @@ class Session:
             saved_lt = self.config.get("load_thresholds")
             if isinstance(saved_lt, dict) and saved_lt:
                 _LT.apply_overrides(saved_lt, replace=True)
+        except Exception:
+            pass
+        # Preferred SQL-assistant GGUF + optional API runtime (Settings).
+        try:
+            self._sync_assistant_preferred()
+        except Exception:
+            pass
+        try:
+            self._sync_assistant_api()
         except Exception:
             pass
         # The registry/accounting lives in a dedicated thread-safe cache
@@ -2222,6 +2232,373 @@ class Session:
             snap = LT.overrides_snapshot()
             self.config.set("load_thresholds", snap)
         return self.load_thresholds_info()
+
+    @staticmethod
+    def _assistant_model_id(path):
+        key = str(path or "")
+        try:
+            key = str(Path(path).expanduser().resolve())
+        except Exception:
+            try:
+                key = os.path.abspath(os.path.expanduser(str(path)))
+            except Exception:
+                key = str(path or "")
+        return hashlib.sha1(
+            key.encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+
+    def _assistant_models_prefs(self):
+        """Normalized assistant model library from ConfigStore."""
+        raw = self.config.get("assistant_models")
+        if not isinstance(raw, dict):
+            raw = {}
+        models = []
+        seen = set()
+        for m in raw.get("models") or []:
+            if not isinstance(m, dict):
+                continue
+            path = str(m.get("path") or "").strip()
+            if not path:
+                continue
+            mid = str(m.get("id") or "").strip() or self._assistant_model_id(path)
+            if mid in seen:
+                continue
+            seen.add(mid)
+            label = str(m.get("label") or "").strip() or Path(path).name
+            exists = False
+            try:
+                exists = Path(path).expanduser().is_file()
+            except Exception:
+                exists = False
+            models.append({
+                "id": mid,
+                "path": path,
+                "label": label,
+                "exists": exists,
+            })
+        selected_id = raw.get("selected_id")
+        if selected_id is not None:
+            selected_id = str(selected_id).strip() or None
+        ids = {m["id"] for m in models}
+        if selected_id and selected_id not in ids:
+            selected_id = None
+        return {"models": models, "selected_id": selected_id}
+
+    def _sync_assistant_preferred(self):
+        """Push ConfigStore selection into assistant module + retarget sidecar."""
+        from . import assistant as asst
+        prefs = self._assistant_models_prefs()
+        path = None
+        sid = prefs.get("selected_id")
+        if sid:
+            for m in prefs["models"]:
+                if m["id"] == sid:
+                    path = m["path"]
+                    break
+        asst.set_preferred_model(path)
+        return asst.sync_server_model()
+
+    def _assistant_api_prefs(self):
+        """Normalized assistant API settings from ConfigStore (+ secret flag)."""
+        from . import assistant as asst
+        raw = self.config.get("assistant_api")
+        if not isinstance(raw, dict):
+            raw = {}
+        mode = str(raw.get("mode") or asst.ASSISTANT_MODE_LOCAL).strip().lower()
+        if mode not in (asst.ASSISTANT_MODE_LOCAL, asst.ASSISTANT_MODE_API):
+            mode = asst.ASSISTANT_MODE_LOCAL
+        base_url = asst.normalize_api_base(raw.get("base_url") or "")
+        model = str(raw.get("model") or "").strip() or None
+        has_key = False
+        try:
+            has_key = bool(self.secrets.has(asst.ASSISTANT_API_SECRET_KEY))
+        except Exception:
+            has_key = False
+        if not has_key:
+            # Session-only key (e.g. DPAPI unavailable) still counts.
+            try:
+                has_key = bool(asst.get_api_runtime().get("has_api_key"))
+            except Exception:
+                has_key = False
+        secrets_available = False
+        try:
+            secrets_available = bool(self.secrets.available)
+        except Exception:
+            secrets_available = False
+        return {
+            "mode": mode,
+            "base_url": base_url or None,
+            "model": model,
+            "has_api_key": has_key,
+            "secrets_available": secrets_available,
+        }
+
+    def _sync_assistant_api(self, api_key=None, update_key=False,
+                            clear_api_key=False):
+        """Push ConfigStore API settings into assistant module memory."""
+        from . import assistant as asst
+        prefs = self._assistant_api_prefs()
+        key = None
+        do_update_key = bool(update_key) or bool(clear_api_key)
+        if clear_api_key:
+            key = None
+            do_update_key = True
+            try:
+                self.secrets.delete(asst.ASSISTANT_API_SECRET_KEY)
+            except Exception:
+                pass
+        elif update_key:
+            key = str(api_key or "").strip() or None
+            do_update_key = True
+            if key:
+                try:
+                    self.secrets.set(asst.ASSISTANT_API_SECRET_KEY, key)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.secrets.delete(asst.ASSISTANT_API_SECRET_KEY)
+                except Exception:
+                    pass
+        else:
+            # Load persisted key into memory when present.
+            try:
+                stored = self.secrets.get(asst.ASSISTANT_API_SECRET_KEY)
+            except Exception:
+                stored = None
+            if stored:
+                key = stored
+                do_update_key = True
+        return asst.set_api_runtime(
+            mode=prefs["mode"],
+            base_url=prefs.get("base_url") or "",
+            model=prefs.get("model") or "",
+            api_key=key,
+            clear_api_key=bool(clear_api_key),
+            update_key=do_update_key,
+        )
+
+    def assistant_models_info(self):
+        """Settings payload: registered GGUFs + API config + pack status."""
+        from . import assistant as asst
+        prefs = self._assistant_models_prefs()
+        # Keep module preference / API runtime aligned (e.g. after restart).
+        try:
+            self._sync_assistant_preferred()
+        except Exception:
+            pass
+        try:
+            self._sync_assistant_api()
+        except Exception:
+            pass
+        pack = asst.find_pack()
+        st = asst.status(self)
+        api = self._assistant_api_prefs()
+        active_name = st.get("model_name")
+        if (api.get("mode") == asst.ASSISTANT_MODE_API
+                and api.get("model")):
+            active_name = api.get("model")
+        elif pack.get("model_name"):
+            active_name = pack.get("model_name") or active_name
+        return {
+            "ok": True,
+            "mode": api.get("mode") or asst.ASSISTANT_MODE_LOCAL,
+            "models": prefs["models"],
+            "selected_id": prefs["selected_id"],
+            "use_default": prefs["selected_id"] is None,
+            "active_model": (
+                api.get("model") if api.get("mode") == asst.ASSISTANT_MODE_API
+                else pack.get("model")
+            ),
+            "active_model_name": active_name,
+            "using_default": bool(pack.get("using_default", True)),
+            "preferred_missing": bool(pack.get("preferred_missing")),
+            "default_model": pack.get("default_model"),
+            "pack_ok": bool(pack.get("ok")),
+            "pack_hint": pack.get("hint"),
+            "server_url": st.get("server_url"),
+            "api": {
+                "base_url": api.get("base_url"),
+                "model": api.get("model"),
+                "has_api_key": bool(api.get("has_api_key")),
+                "secrets_available": bool(api.get("secrets_available")),
+                "configured": bool(api.get("base_url")),
+            },
+            "status": st,
+        }
+
+    def configure_assistant_models(self, add=None, remove_id=None,
+                                   selected_id=None, use_default=False,
+                                   clear=False, update_selected=None,
+                                   mode=None, api=None, clear_api=False,
+                                   test_api=False):
+        """Add/remove registered GGUFs, change selection, or configure API mode.
+
+        Persists under ConfigStore keys ``assistant_models`` and
+        ``assistant_api``. API keys use SecretStore (DPAPI on Windows) under
+        ``assistant_api_key`` and are never returned to the client.
+
+        Changing the active local model stops llama-server when it was running
+        a different file so the next chat starts the selected GGUF
+        (DuckDB-idle gating on chat is unchanged).
+
+        Selection changes when ``use_default=True``, when ``selected_id`` is
+        passed explicitly, or when ``update_selected=True`` (API path for
+        ``selected_id: null``).
+        """
+        from . import assistant as asst
+
+        prefs = self._assistant_models_prefs()
+        models = list(prefs["models"])
+        cur_selected = prefs["selected_id"]
+        # Treat a non-None selected_id kwarg as an explicit selection update
+        # unless the HTTP layer passed update_selected=False with no id.
+        if update_selected is None:
+            update_selected = selected_id is not None or use_default
+
+        if clear:
+            models = []
+            cur_selected = None
+        if remove_id is not None:
+            rid = str(remove_id).strip()
+            models = [m for m in models if m["id"] != rid]
+            if cur_selected == rid:
+                cur_selected = None
+        if add is not None:
+            if isinstance(add, str):
+                add = {"path": add}
+            if not isinstance(add, dict):
+                raise ValueError("add must be a path string or {path, label?}.")
+            path = str(add.get("path") or "").strip()
+            if not path:
+                raise ValueError("add.path is required.")
+            try:
+                p = Path(path).expanduser()
+            except Exception as e:
+                raise ValueError("Invalid model path: %s" % e)
+            if not p.is_file():
+                raise ValueError("Model file not found: %s" % path)
+            if p.suffix.lower() != ".gguf":
+                raise ValueError("Only .gguf model files can be registered.")
+            try:
+                path = str(p.resolve())
+            except Exception:
+                path = str(p)
+            mid = self._assistant_model_id(path)
+            label = str(add.get("label") or "").strip() or Path(path).name
+            # Replace existing entry with same id/path.
+            models = [m for m in models if m["id"] != mid and m["path"] != path]
+            models.append({
+                "id": mid,
+                "path": path,
+                "label": label,
+                "exists": True,
+            })
+            # Adding does not auto-select; caller may also pass selected_id.
+        if use_default:
+            cur_selected = None
+        elif update_selected:
+            sid = None
+            if selected_id is not None and str(selected_id).strip():
+                sid = str(selected_id).strip()
+                ids = {m["id"] for m in models}
+                if sid not in ids:
+                    raise ValueError("selected_id is not in the model library.")
+            cur_selected = sid
+
+        payload = {
+            "models": [
+                {"id": m["id"], "path": m["path"], "label": m["label"]}
+                for m in models
+            ],
+            "selected_id": cur_selected,
+        }
+        self.config.set("assistant_models", payload)
+        retarget = self._sync_assistant_preferred()
+
+        # ---- OpenAI-compatible API settings ----------------------------
+        api_probe = None
+        api_prefs = self._assistant_api_prefs()
+        api_changed = False
+        update_key = False
+        clear_key = False
+        new_key = None
+
+        if clear_api:
+            api_prefs = {
+                "mode": asst.ASSISTANT_MODE_LOCAL,
+                "base_url": None,
+                "model": None,
+                "has_api_key": False,
+                "secrets_available": api_prefs.get("secrets_available"),
+            }
+            clear_key = True
+            update_key = True
+            api_changed = True
+        if mode is not None:
+            m = str(mode or "").strip().lower()
+            if m not in (asst.ASSISTANT_MODE_LOCAL, asst.ASSISTANT_MODE_API):
+                raise ValueError("mode must be 'local' or 'api'.")
+            api_prefs["mode"] = m
+            api_changed = True
+        if api is not None:
+            if not isinstance(api, dict):
+                raise ValueError("api must be an object with base_url/model/api_key.")
+            if "base_url" in api:
+                api_prefs["base_url"] = asst.normalize_api_base(
+                    api.get("base_url") or ""
+                ) or None
+                api_changed = True
+            if "model" in api:
+                mid = str(api.get("model") or "").strip() or None
+                api_prefs["model"] = mid
+                api_changed = True
+            if api.get("clear_api_key"):
+                clear_key = True
+                update_key = True
+                api_changed = True
+            elif "api_key" in api:
+                # Empty string means leave existing key unless clear_api_key.
+                raw_key = api.get("api_key")
+                if raw_key is not None and str(raw_key).strip():
+                    new_key = str(raw_key).strip()
+                    update_key = True
+                    api_changed = True
+
+        if api_changed or clear_api:
+            self.config.set("assistant_api", {
+                "mode": api_prefs.get("mode") or asst.ASSISTANT_MODE_LOCAL,
+                "base_url": api_prefs.get("base_url") or "",
+                "model": api_prefs.get("model") or "",
+            })
+            self._sync_assistant_api(
+                api_key=new_key,
+                update_key=update_key,
+                clear_api_key=clear_key,
+            )
+
+        if test_api:
+            # Prefer just-submitted values; otherwise use synced runtime
+            # (persisted DPAPI key already loaded into memory — never echoed).
+            probe_base = api_prefs.get("base_url")
+            probe_model = api_prefs.get("model")
+            if new_key is not None:
+                api_probe = asst.probe_api(
+                    base_url=probe_base,
+                    api_key=new_key,
+                    model=probe_model,
+                )
+            else:
+                api_probe = asst.probe_api(
+                    base_url=probe_base,
+                    model=probe_model,
+                )
+
+        info = self.assistant_models_info()
+        info["retarget"] = retarget
+        if api_probe is not None:
+            info["api_probe"] = api_probe
+        return info
 
     def configure_flow_cache(self, enabled=None, max_entries=None,
                              max_mb=None, clear=False, reset_stats=False,

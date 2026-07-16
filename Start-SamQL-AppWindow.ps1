@@ -282,7 +282,12 @@ if (-not (Test-SamQLHealth -P $Port)) {
 # when pywebview is importable. Only when no pywebview launcher exists do we
 # fall through to the Edge/Chrome --app window below.
 $nativeExe = $null
+# Prefer an already-shipped AppWindow beside the repo, then the default
+# onedir layout (dist\SamQL-AppWindow\...), then the opt-in onefile exe.
+# Missing the onedir path used to skip the packaged window and fall
+# through to python/Edge even when a fresh build was present.
 foreach ($cand in @((Join-Path $here "SamQL-AppWindow.exe"),
+                    (Join-Path $here "dist\SamQL-AppWindow\SamQL-AppWindow.exe"),
                     (Join-Path $here "dist\SamQL-AppWindow.exe"))) {
     if (Test-Path $cand) { $nativeExe = $cand; break }
 }

@@ -4,9 +4,11 @@ import re
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(PWD\s*=\s*)(\{[^}]*\}|[^\s;]+)"),
     re.compile(r"(?i)(Password\s*=\s*)(\{[^}]*\}|[^\s;]+)"),
-    re.compile(r"(?i)(pwd|password|passwd|secret|token|auth_pass)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"(?i)(pwd|password|passwd|secret|token|auth_pass|api[_-]?key)\s*[:=]\s*([^\s,;]+)"),
     re.compile(r"(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=]+)"),
+    re.compile(r"(?i)(Authorization:\s*Bearer\s+)(\S+)"),
 )
+_SK_TOKEN = re.compile(r"(?i)\bsk-[A-Za-z0-9_-]{8,}\b")
 
 
 def redact_secrets(text):
@@ -16,6 +18,7 @@ def redact_secrets(text):
     out = str(text)
     for pattern in _SECRET_PATTERNS:
         out = pattern.sub(lambda m: m.group(1) + "***", out)
+    out = _SK_TOKEN.sub("sk-***", out)
     return out
 
 

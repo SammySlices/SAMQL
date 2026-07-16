@@ -54,9 +54,10 @@ export interface Features {
   secrets: boolean;
 }
 
-/** Local SQL assistant (optional llama.cpp pack) status. */
+/** SQL assistant status (local llama.cpp pack and/or OpenAI-compatible API). */
 export interface AssistantStatus {
   enabled?: boolean;
+  mode?: "local" | "api";
   available?: boolean;
   pack_ok?: boolean;
   reason?: string | null;
@@ -64,7 +65,11 @@ export interface AssistantStatus {
   root?: string | null;
   model?: string | null;
   model_name?: string;
-  quant?: string;
+  quant?: string | null;
+  using_default?: boolean;
+  preferred_model?: string | null;
+  preferred_missing?: boolean;
+  default_model?: string | null;
   duckdb_busy?: boolean;
   generating?: boolean;
   server_url?: string | null;
@@ -72,6 +77,17 @@ export interface AssistantStatus {
   memory?: {
     memory_total_mb?: number;
     memory_available_mb?: number;
+    model_need_mb?: number;
+    effective_mb?: number;
+    duckdb_mb?: number;
+    duckdb_target_mb?: number | null;
+  };
+  memory_plan?: Record<string, unknown> | null;
+  api?: {
+    base_url?: string | null;
+    model?: string | null;
+    has_api_key?: boolean;
+    configured?: boolean;
   };
 }
 

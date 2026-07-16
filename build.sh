@@ -1,13 +1,30 @@
 #!/usr/bin/env bash
-# Build SamQL into a single distributable executable.
+# Build SamQL into a distributable AppWindow package.
 # Requires: node + npm (to build the frontend) and python3 + pip.
 #
+# Primary product: SamQL-AppWindow (onedir folder by default via SAMQL_ONEDIR=1).
+# The console/browser-tab SamQL binary is still built as a sidecar, not the
+# promoted distribution artifact.
+#
 # SQL assistant packaging (prompted interactively if omitted):
-#   ./build.sh --assistant-pack lean|post|embed
-#   SAMQL_ASSISTANT_PACK=lean|post|embed ./build.sh
-#   1 lean  = SamQL only (default)
-#   2 post  = copy assistant/ next to dist/ after build (~+1GB)
-#   3 embed = bake assistant/ into PyInstaller payload (~+1GB)
+#   ./build.sh --assistant-pack lean|runtime|post|embed
+#   SAMQL_ASSISTANT_PACK=lean|runtime|post|embed ./build.sh
+#   1 lean     = SamQL only
+#   2 runtime  = llama-server runtime only, no GGUF (default)
+#   3 post     = full assistant/ with GGUF (~+1GB+)
+#   4 embed    = bake full assistant/ into PyInstaller payload (~+1GB+)
+#
+# Layout:
+#   ./build.sh                 # default: AppWindow onedir + zip(s)
+#   ./build.sh --onefile       # opt-in self-extracting AppWindow
+#
+# Onedir zips (when SamQL-AppWindow/ exists after the build):
+#   dist/SamQL-AppWindow.zip            — lean AppWindow (no assistant/)
+#   dist/SamQL-AppWindow-Assistant.zip  — same + SQL assistant runtime
+#                                         (written when assistant/ was staged)
+#
+# Recipients download a GGUF later:
+#   python tools/fetch_assistant_pack.py --model 4b|7b
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +34,7 @@ PY="${PYTHON:-python3}"
 echo "    build Python: $($PY -c 'import sys; print(sys.executable)')"
 
 ASSISTANT_PACK_ARG=""
+ONEFILE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --assistant-pack)
@@ -25,6 +43,15 @@ while [ $# -gt 0 ]; do
       ;;
     --assistant-pack=*)
       ASSISTANT_PACK_ARG="${1#*=}"
+      shift
+      ;;
+    --onefile)
+      ONEFILE=1
+      shift
+      ;;
+    --onedir)
+      # back-compat: onedir is already the default
+      ONEFILE=0
       shift
       ;;
     *)
@@ -55,14 +82,22 @@ else
 fi
 echo "==> assistant pack mode: $ASSISTANT_MODE"
 case "$ASSISTANT_MODE" in
-  lean)  echo "    lean: SamQL only (copy assistant/ beside the binary later if needed)" ;;
-  post)  echo "    post: will stage assistant/ next to dist/ after PyInstaller (~+1 GB)" ;;
-  embed) echo "    embed: will bake assistant/ into the PyInstaller payload (~+1 GB)" ;;
+  lean)    echo "    lean: SamQL only (no assistant/ staged)" ;;
+  runtime) echo "    runtime: will stage llama-server + libs (no GGUF; fetch model later)" ;;
+  post)    echo "    post: will stage full assistant/ next to dist/ (~+1 GB+)" ;;
+  embed)   echo "    embed: will bake full assistant/ into the PyInstaller payload (~+1 GB+)" ;;
 esac
 if [ "$ASSISTANT_MODE" = "embed" ] || [ "$ASSISTANT_MODE" = "post" ]; then
   echo "==> ensuring assistant pack (runtime + GGUF)…"
   "$PY" "$ASST_TOOL" ensure --root "$ROOT" --fetch || {
     echo "ERROR: assistant pack required for mode '$ASSISTANT_MODE'" >&2
+    exit 1
+  }
+elif [ "$ASSISTANT_MODE" = "runtime" ]; then
+  echo "==> ensuring assistant runtime (llama-server only, no GGUF)…"
+  "$PY" "$ASST_TOOL" ensure --root "$ROOT" --fetch --runtime-only || {
+    echo "ERROR: assistant runtime required for mode 'runtime'." >&2
+    echo "       Offline builders: ./build.sh --assistant-pack lean" >&2
     exit 1
   }
 fi
@@ -176,17 +211,25 @@ if "$PY" -c "import duckdb" >/dev/null 2>&1; then
   echo "    OK: DuckDB is available -- the executable will use DuckDB by default."
 fi
 
-echo "==> 4/4  Packaging the executable"
+echo "==> 4/4  Packaging the AppWindow product"
 # Clean rebuild so a changed icon / splash / bundled asset is actually
 # re-embedded -- PyInstaller otherwise reuses its build cache. Only build/ and
 # dist/ are cleared; the spec writes backend/samql.ico every build (from the
 # user's root samql.ico if present, else _brand.py), overwriting any stale file,
 # so there is no need to delete it. (.498/.500: keep samql.ico.)
 rm -rf build dist
+if [ "$ONEFILE" -eq 1 ]; then
+  unset SAMQL_ONEDIR || true
+  echo "    ONEFILE mode: SamQL-AppWindow self-extracting binary"
+else
+  export SAMQL_ONEDIR=1
+  echo "    ONEDIR mode (default): SamQL-AppWindow folder under dist/"
+fi
 "$PY" -m PyInstaller --clean --noconfirm backend/samql.spec
 
 # Both targets come from the same shared payload in samql.spec. Refuse a
-# half-build so packaging never ships SamQL without AppWindow (or vice versa).
+# half-build so packaging never ships AppWindow without the server sidecar
+# (or vice versa). Primary distribute target is SamQL-AppWindow.
 SERVER_OUT="dist/SamQL"
 APP_OUT="dist/SamQL-AppWindow"
 if [ -f "${SERVER_OUT}.exe" ]; then SERVER_OUT="${SERVER_OUT}.exe"; fi
@@ -215,15 +258,18 @@ if [ -d dist/SamQL-AppWindow ]; then
   echo "    OK: staged dist/SamQL-AppWindow/frontend_dist"
 fi
 
-if [ "$ASSISTANT_MODE" = "post" ]; then
-  echo "==> staging assistant pack beside dist outputs (mode 2)…"
+if [ "$ASSISTANT_MODE" = "runtime" ]; then
+  echo "==> staging assistant runtime beside dist (no GGUF)…"
+  "$PY" "$ASST_TOOL" stage-post --root "$ROOT" --runtime-only
+elif [ "$ASSISTANT_MODE" = "post" ]; then
+  echo "==> staging full assistant pack beside dist outputs…"
   "$PY" "$ASST_TOOL" stage-post --root "$ROOT"
 elif [ "$ASSISTANT_MODE" = "lean" ]; then
   echo "==> assistant pack: lean mode (not staged). To add later:"
-  echo "    python tools/fetch_assistant_pack.py"
-  echo "    then copy ./assistant next to dist/SamQL"
+  echo "    python tools/fetch_assistant_pack.py --model 4b"
+  echo "    then copy ./assistant next to dist/SamQL-AppWindow/"
 else
-  echo "==> assistant pack: embedded in PyInstaller payload (mode 3)"
+  echo "==> assistant pack: embedded in PyInstaller payload (mode embed)"
 fi
 
 # .500: the app icon SOURCE is the user's own file in the repo ROOT (samql.ico),
@@ -239,9 +285,28 @@ else
     || echo "    WARN could not write dist/SamQL.ico"
 fi
 
+LEAN_ZIP=""
+ASSISTANT_ZIP=""
+if [ -d dist/SamQL-AppWindow ]; then
+  echo "==> Zipping the onedir folder for distribution..."
+  "$PY" "$ASST_TOOL" zip-onedir --root "$ROOT"
+  LEAN_ZIP="$ROOT/dist/SamQL-AppWindow.zip"
+  ASSISTANT_ZIP="$ROOT/dist/SamQL-AppWindow-Assistant.zip"
+fi
+
 echo
 echo "Done. Your build is in:  $ROOT/dist/"
 echo "Assistant packaging mode: $ASSISTANT_MODE"
+echo "PRIMARY: SamQL-AppWindow (distribute this). SamQL is a server sidecar."
+if [ -n "$LEAN_ZIP" ] && [ -f "$LEAN_ZIP" ]; then
+  echo "  SamQL-AppWindow.zip           — lean AppWindow (no assistant/)"
+fi
+if [ -n "$ASSISTANT_ZIP" ] && [ -f "$ASSISTANT_ZIP" ]; then
+  echo "  SamQL-AppWindow-Assistant.zip — AppWindow + SQL assistant runtime"
+  if [ "$ASSISTANT_MODE" = "runtime" ]; then
+    echo "    (llama-server; no GGUF). Add a model later with:"
+    echo "      python tools/fetch_assistant_pack.py --model 4b|7b"
+  fi
+fi
 ls -la dist/ 2>/dev/null || true
-echo "SamQL and SamQL-AppWindow both ship the same frontend + load stack."
-echo "Run either to launch SamQL."
+echo "SamQL-AppWindow is the windowed product; SamQL shares the same payload."
