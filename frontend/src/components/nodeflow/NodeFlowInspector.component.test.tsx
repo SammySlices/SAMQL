@@ -265,7 +265,7 @@ describe("NodeFlowInspector", () => {
     expect(doFetchApi).toHaveBeenCalled();
   });
 
-  it("shows residual stale column warning banner when refs remain (F2)", () => {
+  it("shows missing column warning banner when refs remain", () => {
     const node: NbNode = {
       id: "sort-1",
       type: "sort",
@@ -283,15 +283,15 @@ describe("NodeFlowInspector", () => {
       />,
     );
     expect(screen.getByTestId("stale-col-refs-warn")).toBeInTheDocument();
-    expect(screen.getByText(/Stale column references/i)).toBeInTheDocument();
+    expect(screen.getByText(/Missing column references/i)).toBeInTheDocument();
     expect(screen.getByTestId("stale-col-refs-warn")).toHaveTextContent(
-      /after auto-prune/i,
+      /successful workflow rerun/i,
     );
     expect(screen.getByTestId("stale-col-refs-warn")).toHaveTextContent("old_name");
     expect(patch).not.toHaveBeenCalled();
   });
 
-  it("Clear stale references patches only the stale entries (user-initiated)", () => {
+  it("Clear missing patches only the selected sort node (local-only)", () => {
     const node: NbNode = {
       id: "sort-1",
       type: "sort",
@@ -306,15 +306,18 @@ describe("NodeFlowInspector", () => {
       },
     };
     const patch = vi.fn();
+    const runAll = vi.fn();
     render(
       <NodeFlowInspector
         context={context(node, {
           patch,
+          runAll,
           staleColRefs: [{ area: "sort", columns: ["old_name"] }],
+          inspCols: { in: ["keep_me", "a"] },
         })}
       />,
     );
-    fireEvent.click(screen.getByTestId("stale-col-refs-clear"));
+    fireEvent.click(screen.getByTestId("clear-missing-fields"));
     expect(patch).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledWith(
       "sort-1",
@@ -322,6 +325,48 @@ describe("NodeFlowInspector", () => {
         sorts: [{ col: "keep_me", dir: "asc" }],
       }),
     );
+    expect(runAll).not.toHaveBeenCalled();
+  });
+
+  it("Clear missing on Select drops missing fields only (local-only)", () => {
+    const node: NbNode = {
+      id: "sel-1",
+      type: "select",
+      x: 0,
+      y: 0,
+      config: {
+        label: "select",
+        fields: [
+          { name: "a", keep: true },
+          { name: "gone", keep: true },
+          { name: "b", keep: true, rename: "bee" },
+        ],
+      },
+    };
+    const patch = vi.fn();
+    const runAll = vi.fn();
+    render(
+      <NodeFlowInspector
+        context={context(node, {
+          patch,
+          runAll,
+          inspCols: { in: ["a", "b"] },
+        })}
+      />,
+    );
+    expect(screen.getByTestId("clear-missing-fields")).toBeInTheDocument();
+    const goneRow = document.querySelector(".nb2-field[data-missing='1']");
+    expect(goneRow).toBeTruthy();
+    expect(goneRow).toHaveClass("missing");
+    fireEvent.click(screen.getByTestId("clear-missing-fields"));
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith("sel-1", {
+      fields: [
+        { name: "a", keep: true },
+        { name: "b", keep: true, rename: "bee" },
+      ],
+    });
+    expect(runAll).not.toHaveBeenCalled();
   });
 
   it("Clear blanks filter field + condition for dropped / spaced headers", () => {
@@ -349,7 +394,7 @@ describe("NodeFlowInspector", () => {
         })}
       />,
     );
-    fireEvent.click(screen.getByTestId("stale-col-refs-clear"));
+    fireEvent.click(screen.getByTestId("clear-missing-fields"));
     expect(patch).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledWith(
       "filt-1",

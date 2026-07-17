@@ -481,7 +481,7 @@ describe("useNodeFlowInspectorController auto-prune stale column refs (F2)", () 
     }
   });
 
-  it("prunes stale refs once when inspCols arrive and toasts the node label", async () => {
+  it("does not auto-prune stale refs when inspCols arrive (Clear missing / rerun only)", async () => {
     const nodes: NbNode[] = [
       { id: "in-1", type: "input", x: 0, y: 0, config: { table: "t" } },
       {
@@ -510,7 +510,7 @@ describe("useNodeFlowInspectorController auto-prune stale column refs (F2)", () 
       if (n) n.config = { ...n.config, ...config };
     });
 
-    const { result, rerender } = renderHook(
+    const { result } = renderHook(
       (props: { selectedId: string | null }) => {
         const sel =
           props.selectedId == null
@@ -538,27 +538,13 @@ describe("useNodeFlowInspectorController auto-prune stale column refs (F2)", () 
     });
 
     await waitFor(() => {
-      expect(patch).toHaveBeenCalledWith(
-        "sort-1",
-        expect.objectContaining({
-          sorts: [{ col: "a", dir: "asc" }],
-        }),
-      );
+      expect(result.current.staleColRefs.length).toBeGreaterThan(0);
     });
-    expect(onToast).toHaveBeenCalledTimes(1);
-    expect(onToast).toHaveBeenCalledWith(
-      "ok",
-      "Removed stale column refs on My Sort",
-    );
-
-    act(() => {
-      rerender({ selectedId: "sort-1" });
-    });
-    await waitFor(() => {
-      expect(result.current.staleColRefs).toEqual([]);
-    });
-    expect(onToast).toHaveBeenCalledTimes(1);
-    expect(patch.mock.calls.filter((c) => c[0] === "sort-1").length).toBe(1);
+    expect(onToast).not.toHaveBeenCalled();
+    expect(patch).not.toHaveBeenCalled();
+    expect(result.current.staleColRefs).toEqual([
+      { area: "sort", columns: ["gone"] },
+    ]);
   });
 
   it("does not toast when there are no stale refs", async () => {

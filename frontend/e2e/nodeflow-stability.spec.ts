@@ -100,6 +100,28 @@ async function runFlow(page: import("@playwright/test").Page): Promise<void> {
   expect(body.error, `NodeFlow returned an error: ${JSON.stringify(body)}`).toBeFalsy();
   expect(body.cancelled, `NodeFlow was unexpectedly cancelled: ${JSON.stringify(body)}`).toBeFalsy();
   await expect(page.getByTestId("nodeflow-run")).toBeVisible({ timeout: 30_000 });
+  // Run no longer auto-opens results; preview opens only via output click.
+  await expect(page.getByTestId("nodeflow-preview")).toHaveCount(0);
+}
+
+async function openPreviewViaOutput(
+  page: import("@playwright/test").Page,
+  nodeId = "formula",
+): Promise<void> {
+  const responsePromise = page.waitForResponse((response) => {
+    const path = new URL(response.url()).pathname;
+    return response.request().method() === "POST" && path === "/api/nodeflow/run";
+  });
+  await page
+    .locator(`[data-testid="nodeflow-node"][data-node-id="${nodeId}"] .nb2-port.out`)
+    .click();
+  const response = await responsePromise;
+  const body = (await readJsonOrText(response)) as Record<string, unknown>;
+  expect(
+    response.ok(),
+    `NodeFlow preview failed (${response.status()}): ${JSON.stringify(body)}`,
+  ).toBeTruthy();
+  expect(body.error, `NodeFlow preview returned an error: ${JSON.stringify(body)}`).toBeFalsy();
   const preview = page.getByTestId("nodeflow-preview");
   await expect(preview).toBeVisible();
   await expect(preview.getByTestId("result-grid")).toBeVisible();
@@ -115,6 +137,7 @@ test("NodeFlow reruns after an upstream edit and persists the changed graph", as
   await expect(page.getByTestId("nodeflow-node")).toHaveCount(3);
 
   await runFlow(page);
+  await openPreviewViaOutput(page);
   let grid = page.getByTestId("nodeflow-preview").getByTestId("result-grid");
   const initialValues = grid.locator('.gc-cell[data-column="double_amount"]');
   await expect(initialValues).toHaveCount(2);
@@ -138,6 +161,7 @@ test("NodeFlow reruns after an upstream edit and persists the changed graph", as
     .toContain('"condition":"[amount] >= 20"');
 
   await runFlow(page);
+  await openPreviewViaOutput(page);
   grid = page.getByTestId("nodeflow-preview").getByTestId("result-grid");
   await expect(grid.locator('.gc-cell[data-column="double_amount"]')).toHaveCount(1);
   await expect(grid.locator('.gc-cell[data-column="double_amount"]')).toHaveText("50");
@@ -152,6 +176,7 @@ test("NodeFlow reruns after an upstream edit and persists the changed graph", as
     .click();
   await expect(page.getByTestId("nodeflow-filter-value")).toHaveValue("20");
   await runFlow(page);
+  await openPreviewViaOutput(page);
   await expect(
     page
       .getByTestId("nodeflow-preview")

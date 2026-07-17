@@ -8,6 +8,11 @@ import {
   type NbEdge,
   type NbNode,
 } from "../../lib/nodeFlowModel";
+import {
+  ancestorNodeIds,
+  applyMissingRefPruneToNodes,
+  columnProbeReqsForNodes,
+} from "../../lib/pruneNodeflowMissingAfterRun";
 import { cancelAllRuns, cancelOne, isCancelledError, registerRun, unregisterRun } from "../../lib/runController";
 import type { ChartData } from "../../lib/types";
 import type { NodeFlowSnapshot } from "./useNodeFlowDocumentController";
@@ -506,8 +511,41 @@ export function useNodeFlowExecutionController({
     }
   };
 
-  // run a node's pipeline to completion (no Output node needed) and show the
-  // result in the drawer; returns an outcome so Run all can tally it.
+  // After a successful run/rerun, drop obsolete missing column refs from
+  // nodes in the successful terminals' ancestor closure. Schema refresh alone
+  // keeps tombstones; this is the automatic cleanup path.
+  const pruneMissingRefsAfterSuccessfulRun = async (
+    successfulTerminalIds: string[],
+  ) => {
+    if (!successfulTerminalIds.length) return;
+    const snapNodes = liveRef.current.nodes;
+    const snapEdges = liveRef.current.edges;
+    const targets = ancestorNodeIds(snapEdges, successfulTerminalIds);
+    const probes = columnProbeReqsForNodes(snapNodes, snapEdges, targets);
+    if (!probes.length) return;
+    try {
+      const r = await api.nodeflowColumnsBatch(
+        graphForRun(),
+        probes.map((q) => ({ node: q.fromNode, port: q.fromPort })),
+      );
+      const colsByNodeId: Record<string, Record<string, string[]>> = {};
+      (r.results || []).forEach((res, i) => {
+        const q = probes[i];
+        if (!q || !res?.columns?.length) return;
+        if (!colsByNodeId[q.nodeId]) colsByNodeId[q.nodeId] = {};
+        colsByNodeId[q.nodeId][q.port] = res.columns;
+      });
+      if (!Object.keys(colsByNodeId).length) return;
+      setNodes((prev) =>
+        applyMissingRefPruneToNodes(prev, targets, colsByNodeId),
+      );
+    } catch {
+      /* best-effort post-run cleanup */
+    }
+  };
+
+  // run a node's pipeline to completion (no Output node needed). Results stay
+  // out of the preview drawer until the user clicks an output port (doPreview).
   const runLeaf = async (node: NbNode): Promise<RunOutcome> => {
     const id = startRun(`Running ${node.config.label}…`, [node.id]);
     const cctx = childCtx(node.id);
@@ -538,16 +576,8 @@ export function useNodeFlowExecutionController({
         const { [node.id]: _drop, ...rest } = p;
         return rest;
       });
-      setPreview({
-        kind: "table",
-        title: `${node.config.label} · out`,
-        columns: r.columns || [],
-        rows: (r.rows || []).slice(0, 200),
-        total: r.total_rows || 0,
-        sourceNodeId: runNode,
-        sourcePort: "out",
-      });
       finishRun(id, r, `${(r.total_rows || 0).toLocaleString()} rows`);
+      await pruneMissingRefsAfterSuccessfulRun([node.id]);
       return { ok: true };
     } catch (e: any) {
       if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
@@ -594,7 +624,6 @@ export function useNodeFlowExecutionController({
         return leaves.map(() => ({ ok: false }));
       }
       const byId = new Map(r.results.map((x) => [x.node, x]));
-      let lastGood: (typeof r.results)[number] | undefined;
       const outcomes = leaves.map((n): RunOutcome => {
         const x = byId.get(n.id);
         if (!x || x.error) {
@@ -605,7 +634,6 @@ export function useNodeFlowExecutionController({
           return { ok: false };
         }
         if (x.cancelled) return { ok: false, cancelled: true };
-        lastGood = x;
         setNodeErrors((prev) => {
           if (!(n.id in prev)) return prev;
           const { [n.id]: _drop, ...rest } = prev;
@@ -613,22 +641,16 @@ export function useNodeFlowExecutionController({
         });
         return { ok: true };
       });
-      if (lastGood) {
-        const n = leaves.find((leaf) => leaf.id === lastGood?.node);
-        setPreview({
-          kind: "table",
-          title: `${n?.config.label || "NodeFlow"} · out`,
-          columns: lastGood.columns || [],
-          rows: (lastGood.rows || []).slice(0, 200),
-          total: lastGood.total_rows || 0,
-          sourceNodeId: lastGood.node || n?.id,
-          sourcePort: "out",
-        });
-      }
+      // Do not auto-open the preview drawer on run success; the user opens
+      // results by clicking a node's output port (doPreview).
       finishRun(id, 
         r,
         `${outcomes.filter((x) => x.ok).length} of ${leaves.length} branches ran`,
       );
+      const okIds = leaves
+        .filter((_, i) => outcomes[i]?.ok)
+        .map((n) => n.id);
+      await pruneMissingRefsAfterSuccessfulRun(okIds);
       return outcomes;
     } catch (e: any) {
       if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
@@ -1693,13 +1715,18 @@ export function useNodeFlowExecutionController({
     // keeps shared ancestors single and runs genuinely independent DuckDB
     // branches concurrently. Child nodes need their own truncated group graph.
     let batchOutcomes: RunOutcome[] = [];
+    const successfulTerminalIds: string[] = [];
     if (
       mode === "leaves" &&
       runList.length >= 2 &&
       runList.every((n) => !childCtx(n.id))
     ) {
+      const batched = [...runList];
       batchOutcomes = await runLeafBatch(runList);
       if (batchScope !== scopeVersionRef.current) return;
+      batched.forEach((n, i) => {
+        if (batchOutcomes[i]?.ok) successfulTerminalIds.push(n.id);
+      });
       runList = [];
       if (batchOutcomes.some((r) => r.cancelled)) {
         onToast("warn", "Run all cancelled", `0 of ${totalTerminals} done`);
@@ -1719,6 +1746,9 @@ export function useNodeFlowExecutionController({
         runList = runList.filter((n) => !batchIds.has(n.id));
         batchOutcomes = await doExportBatch(fileOuts);
         if (batchScope !== scopeVersionRef.current) return;
+        fileOuts.forEach((n, i) => {
+          if (batchOutcomes[i]?.ok) successfulTerminalIds.push(n.id);
+        });
         if (batchOutcomes.some((r) => r.cancelled)) {
           onToast("warn", "Run all cancelled", `0 of ${totalTerminals} done`);
           return;
@@ -1755,7 +1785,9 @@ export function useNodeFlowExecutionController({
         // interrupted by cancelRun).
         if (cancelRequested.current) break;
         const n = runList[next++];
-        results.push(await runOne(n));
+        const outcome = await runOne(n);
+        results.push(outcome);
+        if (outcome.ok) successfulTerminalIds.push(n.id);
       }
     };
     await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
@@ -1768,6 +1800,12 @@ export function useNodeFlowExecutionController({
     const ok = results.filter((r) => r.ok).length;
     const bad = results.filter((r) => !r.ok).length;
     warnUnconnectedOutputs();
+    // Post-run missing-ref prune for terminals that succeeded in this Run all.
+    // Leaf/batch already pruned inside runLeaf/runLeafBatch; export paths and
+    // a second pass here cover the rest (idempotent).
+    if (successfulTerminalIds.length) {
+      await pruneMissingRefsAfterSuccessfulRun(successfulTerminalIds);
+    }
     const bits = [`${ok} ran`];
     if (bad) bits.push(`${bad} failed`);
     if (isolated.length)

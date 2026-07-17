@@ -200,6 +200,112 @@ describe("Phase 8 NodeFlow controllers", () => {
 
     expect(result.current.running).toBe(false);
     expect(result.current.runningNodeIds.size).toBe(0);
+    // Product intent: Run all executes without opening the results drawer.
+    expect(result.current.preview).toBeNull();
+  });
+
+  it("opens the preview drawer only when doPreview is invoked (output click)", async () => {
+    const request = deferred<any>();
+    vi.spyOn(api, "nodeflowRun").mockImplementation(
+      () => request.promise as ReturnType<typeof api.nodeflowRun>,
+    );
+    const source = node("source-a");
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes: [source], edges: [] },
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-a",
+        nodes: [source],
+        edges: [],
+        liveRef,
+        graphSig: "graph-a",
+        graphForApi: () => ({ nodes: [], edges: [] }),
+        graphForRun: () => ({ nodes: [], edges: [] }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.doPreview(source, "out", "Source · out");
+    });
+    expect(result.current.preview).toBeNull();
+
+    await act(async () => {
+      request.resolve({
+        columns: ["id"],
+        rows: [[1]],
+        total_rows: 1,
+      });
+      await pending;
+    });
+
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        title: "Source · out",
+        columns: ["id"],
+        total: 1,
+        sourceNodeId: "source-a",
+        sourcePort: "out",
+      }),
+    );
+  });
+
+  it("does not open the preview drawer when a single leaf run succeeds", async () => {
+    const request = deferred<any>();
+    vi.spyOn(api, "nodeflowRun").mockImplementation(
+      () => request.promise as ReturnType<typeof api.nodeflowRun>,
+    );
+    const source = node("source-a");
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes: [source], edges: [] },
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-a",
+        nodes: [source],
+        edges: [],
+        liveRef,
+        graphSig: "graph-a",
+        graphForApi: () => ({ nodes: [], edges: [] }),
+        graphForRun: () => ({ nodes: [], edges: [] }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.runAll();
+    });
+
+    await act(async () => {
+      request.resolve({
+        columns: ["id"],
+        rows: [[1]],
+        total_rows: 1,
+      });
+      await pending;
+    });
+
+    expect(result.current.running).toBe(false);
+    expect(result.current.preview).toBeNull();
+    expect(result.current.status.kind).toBe("done");
   });
 
   it("keeps only the latest asynchronous workflow file open", async () => {

@@ -8,8 +8,10 @@ import {
 } from "./staleNodeflowColumnRefs";
 
 describe("staleNodeflowColumnRefs", () => {
-  it("lists freeform types that must never auto-prune", () => {
-    expect([...NO_AUTO_PRUNE_STALE_TYPES].sort()).toEqual(["filter", "formula"]);
+  it("lists every stale-ref type as never auto-prune on schema refresh", () => {
+    expect([...NO_AUTO_PRUNE_STALE_TYPES].sort()).toEqual(
+      [...STALE_REF_NODE_TYPES].sort(),
+    );
     for (const t of NO_AUTO_PRUNE_STALE_TYPES) {
       expect(STALE_REF_NODE_TYPES).toContain(t);
     }

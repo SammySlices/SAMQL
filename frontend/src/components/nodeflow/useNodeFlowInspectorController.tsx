@@ -7,7 +7,6 @@ import {
   listWiredSelectUpstreams,
   reconcileSelectFields,
 } from "../../lib/selectFields";
-import { reconcilePivotFields } from "../../lib/pivotFields";
 import {
   fingerprintColumnReqs,
   getNodeflowColsCache,
@@ -15,11 +14,7 @@ import {
   setNodeflowColsCache,
 } from "../../lib/nodeflowColumnsCache";
 import { runAfterPaint } from "../../lib/prettyStruct";
-import {
-  clearStaleNodeflowColumnRefs,
-  NO_AUTO_PRUNE_STALE_TYPES,
-  staleNodeflowColumnRefs,
-} from "../../lib/staleNodeflowColumnRefs";
+import { staleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
 import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import type { NodeFlowInspectorContext } from "./NodeFlowInspector";
 
@@ -354,10 +349,10 @@ export function useNodeFlowInspectorController({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, graphSig]);
 
-  // Also reconcile the currently selected Select from its inspector column
+  // Same soft reconcile for the selected Select from its inspector column
   // cache (covers group-child Selects and the moment columns first arrive).
   // Only runs once upstream columns are known, so a momentarily-disconnected
-  // node doesn't get its fields wiped.
+  // node doesn't get its fields wiped. Missing sources stay as tombstones.
   useEffect(() => {
     if (
       !sel ||
@@ -373,69 +368,18 @@ export function useNodeFlowInspectorController({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, inspCols, selId]);
 
-  // Same for a pivot node: drop rows/cols/values that reference columns no
-  // longer coming from upstream. Gated on inspCols.in having entries so a
-  // momentarily-disconnected node isn't wiped.
-  useEffect(() => {
-    if (!sel || sel.type !== "pivot" || !inspCols.in || !inspCols.in.length)
-      return;
-    const { patch: p, changed } = reconcilePivotFields(
-      inspCols.in,
-      sel.config || {},
-    );
-    if (changed) patch(sel.id, p);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey, inspCols, selId]);
+  // Pivot: do NOT auto-drop missing row/col/value refs on schema refresh.
+  // Missing refs stay until the user edits them or a successful rerun prunes
+  // via pruneNodeflowMissingAfterRun.
 
   const staleColRefs = useMemo(() => {
     if (!sel) return [];
     return staleNodeflowColumnRefs(sel.type, sel.config || {}, inspCols);
   }, [sel, inspCols]);
 
-  // F2: when upstream columns arrive and the selected node still has WARN
-  // stale refs, auto-apply the same prune as Clear once per distinct stale
-  // set, then toast. Banner stays only if anything remains after prune.
-  // Cross-cutting: same inspector reconcile path as select/pivot field sync;
-  // does not touch load/JSON/join execution — only node config refs.
-  //
-  // Trigger only on inspCols / selection identity — never on config edits.
-  // Filter/formula conditions are freeform text: bare identifiers mid-type
-  // look "stale" and clearStale would wipe the whole condition (typing broke).
-  // Those types keep the banner + manual Clear only.
-  const inspColsSig = useMemo(
-    () =>
-      Object.keys(inspCols)
-        .sort()
-        .map((p) => `${p}=${(inspCols[p] || []).join(",")}`)
-        .join("|"),
-    [inspCols],
-  );
-  const autoPrunedStaleSigRef = useRef("");
-  useEffect(() => {
-    if (!sel || !staleColRefs.length) return;
-    if (NO_AUTO_PRUNE_STALE_TYPES.has(sel.type)) return;
-    const sig = [
-      sel.id,
-      staleColRefs
-        .map((r) => `${r.area}:${[...r.columns].map((c) => c.toLowerCase()).sort().join(",")}`)
-        .sort()
-        .join(";"),
-      inspColsSig,
-    ].join("\0");
-    if (autoPrunedStaleSigRef.current === sig) return;
-    const next = clearStaleNodeflowColumnRefs(
-      sel.type,
-      sel.config || {},
-      staleColRefs,
-    );
-    if (!next) return;
-    autoPrunedStaleSigRef.current = sig;
-    patch(sel.id, next);
-    const nodeName = String(sel.config?.label || "").trim() || sel.type;
-    runtime.onToast("ok", `Removed stale column refs on ${nodeName}`);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey, selId, inspColsSig]);
-
+  // Schema refresh / inspCols settle must NOT auto-wipe column refs.
+  // Missing refs stay visible (banner + strikethrough); Clear is user-only;
+  // successful workflow rerun prunes via pruneNodeflowMissingAfterRun.
   const seedSelectFields = () => {
     if (sel && inspCols.in)
       patch(sel.id, {

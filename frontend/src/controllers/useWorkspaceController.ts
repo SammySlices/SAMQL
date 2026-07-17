@@ -15,7 +15,13 @@ export type JournalCommand = {
 
 export type NodeCommand = {
   id: number;
-  action: "save" | "saveAs" | "open" | "exportLineage" | "selectNode";
+  action:
+    | "save"
+    | "saveAs"
+    | "open"
+    | "exportLineage"
+    | "selectNode"
+    | "clearSelection";
   nodeId?: string;
 };
 

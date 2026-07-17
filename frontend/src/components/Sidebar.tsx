@@ -36,7 +36,8 @@ import {
   toggleWorkflowGroupCollapsed,
 } from "../lib/workflowGroups";
 
-type Tab = "tables" | "history" | "saved";
+export type SideTab = "tables" | "history" | "saved";
+type Tab = SideTab;
 
 // Pull the first concrete example expression out of a column query-hint string
 // (e.g. "list of records — one element: json[1].field · all rows: UNNEST(json)"
@@ -105,6 +106,11 @@ interface Props {
   onRefresh: () => void;
   onClearHistory: () => void;
   onOpenLoad: () => void;
+  /** Controlled tab (drawer chrome). Uncontrolled when omitted. */
+  activeTab?: Tab;
+  onActiveTabChange?: (tab: Tab) => void;
+  /** Fired when a side-tab is clicked (open drawer / switch content). */
+  onSideTabClick?: (tab: Tab) => void;
 }
 
 const engineClass = (e: EngineKind) =>
@@ -112,14 +118,25 @@ const engineClass = (e: EngineKind) =>
 
 const SidebarImpl: React.FC<Props> = (props) => {
   useRenderCount("Sidebar");
-  const [tab, setTab] = useState<Tab>("tables");
+  const [innerTab, setInnerTab] = useState<Tab>(
+    () => props.activeTab ?? "tables",
+  );
+  const controlled = props.activeTab !== undefined;
+  const tab = controlled ? (props.activeTab as Tab) : innerTab;
+  const setTab = (next: Tab) => {
+    if (!controlled) setInnerTab(next);
+    props.onActiveTabChange?.(next);
+    props.onSideTabClick?.(next);
+  };
   const [q, setQ] = useState("");
 
   return (
     <>
-      <div className="side-tabs">
+      <div className="side-tabs" data-testid="side-tabs">
         <button
+          type="button"
           className={"side-tab" + (tab === "tables" ? " active" : "")}
+          data-testid="side-tab-tables"
           onClick={() => setTab("tables")}
         >
           Tables{" "}
@@ -131,13 +148,17 @@ const SidebarImpl: React.FC<Props> = (props) => {
           })()}
         </button>
         <button
+          type="button"
           className={"side-tab" + (tab === "history" ? " active" : "")}
+          data-testid="side-tab-history"
           onClick={() => setTab("history")}
         >
           History
         </button>
         <button
+          type="button"
           className={"side-tab" + (tab === "saved" ? " active" : "")}
+          data-testid="side-tab-saved"
           onClick={() => setTab("saved")}
         >
           Workflows
@@ -1757,7 +1778,8 @@ function sidebarPropsEqual(a: Props, b: Props): boolean {
     a.history === b.history &&
     a.saved === b.saved &&
     a.workflows === b.workflows &&
-    a.activeView === b.activeView
+    a.activeView === b.activeView &&
+    a.activeTab === b.activeTab
   );
 }
 export const Sidebar = React.memo(SidebarImpl, sidebarPropsEqual);

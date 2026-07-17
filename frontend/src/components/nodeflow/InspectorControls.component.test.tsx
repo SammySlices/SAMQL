@@ -25,4 +25,19 @@ describe("ColumnPicker remove ×", () => {
     fireEvent.click(removeBtns[0]);
     expect(onChange).toHaveBeenCalledWith(["b"]);
   });
+
+  it("marks chosen columns missing from available with strikethrough class", () => {
+    render(
+      <ColumnPicker
+        chosen={["a", "gone"]}
+        available={["a", "b"]}
+        onChange={vi.fn()}
+        addLabel="+ Add field…"
+      />,
+    );
+    const gone = screen.getByText("gone");
+    expect(gone).toHaveClass("nb2-col-missing");
+    expect(gone).toHaveAttribute("data-missing", "1");
+    expect(screen.getByText("a")).not.toHaveClass("nb2-col-missing");
+  });
 });

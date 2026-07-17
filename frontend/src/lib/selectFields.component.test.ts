@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   applySelectColumnsReconcile,
+  clearMissingSelectFields,
   collectSelectFieldPatches,
   filterSelectFields,
+  isSelectFieldMissingUpstream,
   listWiredSelectUpstreams,
   reconcileSelectFields,
   setFieldsKept,
@@ -76,18 +78,22 @@ describe("reconcileSelectFields case-insensitive matching", () => {
     expect(next[0].type).toBe("text");
   });
 
-  it("still appends genuinely-new columns and drops removed ones", () => {
+  it("still appends genuinely-new columns and retains removed ones as missing", () => {
     const current: SelField[] = [
       { name: "Region", keep: true, rename: "geo" },
       { name: "gone", keep: true },
     ];
     const next = reconcileSelectFields(["region", "extra"], current);
     // "Region" matches "region" case-insensitively (kept, settings intact);
-    // "gone" dropped; "extra" appended new.
+    // "gone" retained as missing tombstone; "extra" appended new.
     expect(next).toEqual([
       { name: "Region", keep: true, rename: "geo" },
+      { name: "gone", keep: true },
       { name: "extra", keep: true },
     ]);
+    expect(isSelectFieldMissingUpstream(next[1], ["region", "extra"])).toBe(
+      true,
+    );
   });
 
   it("retains unchecked fields across a temporary upstream shrink/grow (run race)", () => {
@@ -114,7 +120,7 @@ describe("reconcileSelectFields case-insensitive matching", () => {
     expect(grown.find((f) => f.name === "b")?.keep).toBe(false);
   });
 
-  it("still drops kept fields that permanently leave upstream", () => {
+  it("retains kept fields that leave upstream as missing tombstones (no rename)", () => {
     const current: SelField[] = [
       { name: "a", keep: true },
       { name: "gone", keep: true },
@@ -123,7 +129,70 @@ describe("reconcileSelectFields case-insensitive matching", () => {
     const next = reconcileSelectFields(["a"], current);
     expect(next).toEqual([
       { name: "a", keep: true },
+      { name: "gone", keep: true },
       { name: "skip", keep: false },
+    ]);
+    expect(isSelectFieldMissingUpstream(next[1], ["a"])).toBe(true);
+  });
+
+  it("Clear missing drops only fields whose source is absent upstream", () => {
+    const current: SelField[] = [
+      { name: "a", keep: true },
+      { name: "gone", keep: true },
+      { name: "skip", keep: false },
+      { name: "renamed_gone", keep: true, rename: "was" },
+    ];
+    expect(clearMissingSelectFields(current, ["a"])).toEqual([
+      { name: "a", keep: true },
+    ]);
+  });
+
+  it("preserves renames when a join/upstream field is toggled off then on", () => {
+    // Reproduce: Select after a join renames id_2; upstream Select turns the
+    // duplicate-producing field off (id_2 leaves), then back on.
+    const renamed: SelField[] = [
+      { name: "id", keep: true, rename: "left_id" },
+      { name: "id_2", keep: true, rename: "right_id" },
+      { name: "amount", keep: true },
+    ];
+    const shrunk = reconcileSelectFields(["id", "amount"], renamed);
+    expect(shrunk).toEqual([
+      { name: "id", keep: true, rename: "left_id" },
+      { name: "id_2", keep: true, rename: "right_id" },
+      { name: "amount", keep: true },
+    ]);
+    expect(isSelectFieldMissingUpstream(shrunk[1], ["id", "amount"])).toBe(
+      true,
+    );
+    const restored = reconcileSelectFields(["id", "id_2", "amount"], shrunk);
+    expect(restored).toEqual(renamed);
+    expect(restored.find((f) => f.name === "id_2")?.rename).toBe("right_id");
+  });
+
+  it("keeps a rename tombstone when its source leaves permanently", () => {
+    const current: SelField[] = [
+      { name: "a", keep: true },
+      { name: "gone", keep: true, rename: "was_gone" },
+    ];
+    const next = reconcileSelectFields(["a"], current);
+    expect(next).toEqual([
+      { name: "a", keep: true },
+      { name: "gone", keep: true, rename: "was_gone" },
+    ]);
+    expect(isSelectFieldMissingUpstream(next[1], ["a"])).toBe(true);
+  });
+
+  it("does not treat blank rename as special — blank rename still retained until Clear missing", () => {
+    const current: SelField[] = [
+      { name: "a", keep: true },
+      { name: "gone", keep: true, rename: "   " },
+    ];
+    expect(reconcileSelectFields(["a"], current)).toEqual([
+      { name: "a", keep: true },
+      { name: "gone", keep: true, rename: "   " },
+    ]);
+    expect(clearMissingSelectFields(current, ["a"])).toEqual([
+      { name: "a", keep: true },
     ]);
   });
 });
@@ -201,7 +270,7 @@ describe("select fields follow upstream Input table changes", () => {
     ]);
   });
 
-  it("replaces Select fields when the upstream table schema changes", () => {
+  it("retains Select fields when the upstream table schema shrinks (missing tombstones)", () => {
     const nodes = [
       {
         id: "in1",
@@ -223,9 +292,9 @@ describe("select fields follow upstream Input table changes", () => {
       sel: ["customer_id", "name"],
     });
     expect(next).not.toBe(nodes);
-    // kept fields that left upstream are dropped; unchecked fields are
-    // retained (tombstones) so a later reappearance cannot re-select them.
+    // Prior fields stay as missing tombstones; new upstream cols append.
     expect(next[1].config.fields).toEqual([
+      { name: "order_id", keep: true },
       { name: "amount", keep: false },
       { name: "customer_id", keep: true },
       { name: "name", keep: true },
@@ -254,6 +323,7 @@ describe("select fields follow upstream Input table changes", () => {
       nested: ["a", "b"],
     });
     expect(next[0].config.children[0].config.fields).toEqual([
+      { name: "old", keep: true },
       { name: "a", keep: true },
       { name: "b", keep: true },
     ]);
@@ -261,6 +331,7 @@ describe("select fields follow upstream Input table changes", () => {
       {
         id: "nested",
         fields: [
+          { name: "old", keep: true },
           { name: "a", keep: true },
           { name: "b", keep: true },
         ],

@@ -31,6 +31,10 @@ import type {
 } from "./lib/types";
 import { Icon } from "./components/Icon";
 import { Sidebar } from "./components/Sidebar";
+import {
+  TablesSidebarDrawer,
+  type TablesSideTab,
+} from "./components/TablesSidebarDrawer";
 import { SqlEditor } from "./components/SqlEditor";
 import { DataGrid } from "./components/DataGrid";
 import {
@@ -751,10 +755,14 @@ export default function App() {
     typeof SAVED?.sidebarW === "number" ? SAVED.sidebarW : 290,
   );
   // whether the left tables panel is shown (toggle in Settings); hiding it
-  // gives the results the full width.
+  // gives the results the full width. When shown, a short folder-handle peeks
+  // closed by default and slides out on hamburger click (see tablesPanelOpen).
   const [showTables, setShowTables] = useState<boolean>(() =>
     typeof SAVED?.showTables === "boolean" ? SAVED.showTables : true,
   );
+  const [tablesPanelOpen, setTablesPanelOpen] = useState(false);
+  const [tablesSideTab, setTablesSideTab] =
+    useState<TablesSideTab>("tables");
   // when in the Node view with the tables panel shown, selecting a node swaps
   // the tables list for that node's config panel (and back, on deselect).
   const [nbSel, setNbSel] = useState(false);
@@ -3047,9 +3055,22 @@ export default function App() {
 
       {/* ---------- body ---------- */}
       <div className="body">
-        <div
-          className="sidebar"
-          style={showTables ? { width: sidebarW } : { display: "none" }}
+        <TablesSidebarDrawer
+          enabled={showTables}
+          open={tablesPanelOpen}
+          onOpenChange={(next) => {
+            setTablesPanelOpen(next);
+            // Match canvas outside-click: dismiss inspector by clearing selection
+            // so the drawer does not stay force-open with an empty/stale dock.
+            if (!next && view === "nodeflow" && nbSel) {
+              setNodeCmd({ id: Date.now(), action: "clearSelection" });
+            }
+          }}
+          width={sidebarW}
+          onResizePointerDown={dragSidebar}
+          inspectorMode={
+            (view === "nodeflow" && nbSel) || (view === "dashboard" && dashSel)
+          }
         >
           {((view === "nodeflow" && showTables && nbSel) ||
             (view === "dashboard" && showTables && dashSel)) ? (
@@ -3060,7 +3081,7 @@ export default function App() {
             />
           ) : (
             <Sidebar
-            onTableProps={(engine, name) => setTableProps({ engine, name })}
+              onTableProps={(engine, name) => setTableProps({ engine, name })}
               tables={tables}
               history={history}
               saved={saved}
@@ -3090,12 +3111,12 @@ export default function App() {
               onRefresh={refreshTables}
               onClearHistory={onClearHistory}
               onOpenLoad={() => setLoadOpen(true)}
+              activeTab={tablesSideTab}
+              onActiveTabChange={setTablesSideTab}
+              onSideTabClick={() => setTablesPanelOpen(true)}
             />
           )}
-        </div>
-        {showTables && (
-          <div className="gutter-v" onPointerDown={dragSidebar} />
-        )}
+        </TablesSidebarDrawer>
         {!showTables && (
           <button
             className="tables-reopen"

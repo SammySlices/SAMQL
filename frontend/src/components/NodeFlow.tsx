@@ -53,7 +53,13 @@ export const NodeFlow: React.FC<{
   // a one-shot command (from sidebar/settings) to run save / save-as / open
   command?: {
     id: number;
-    action: "save" | "saveAs" | "open" | "exportLineage" | "selectNode";
+    action:
+      | "save"
+      | "saveAs"
+      | "open"
+      | "exportLineage"
+      | "selectNode"
+      | "clearSelection";
     nodeId?: string;
   } | null;
   // node palette/toolbar visibility is owned by App (Settings → Toolbar Toggle)
@@ -237,6 +243,13 @@ export const NodeFlow: React.FC<{
   const lastSelectCmd = useRef(0);
   useEffect(() => {
     if (!command || command.id === lastSelectCmd.current) return;
+    if (command.action === "clearSelection") {
+      lastSelectCmd.current = command.id;
+      setSelId(null);
+      setSelIds([]);
+      setSelEdge(null);
+      return;
+    }
     if (command.action !== "selectNode" || !command.nodeId) return;
     lastSelectCmd.current = command.id;
     highlightNode(command.nodeId);

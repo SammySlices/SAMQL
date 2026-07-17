@@ -503,8 +503,12 @@ html.theme-light .gc-cell.rownum {
   color: var(--chrome-fg);
   border-right-color: var(--chrome-ink-hi);
 }
+/* Light-mode results zebra: grey / white / grey / white (readable vs black text). */
+html.theme-light .grow {
+  background: #e8e8e8;
+}
 html.theme-light .grow.odd {
-  background: rgba(0, 0, 0, 0.025);
+  background: #ffffff;
 }
 html.theme-light .grid.hscrolled .gc-cell.rownum,
 html.theme-light .grid.hscrolled .gh-cell.rownum {
@@ -1290,6 +1294,7 @@ textarea:focus {
   flex: 1;
   display: flex;
   min-height: 0;
+  position: relative;
 }
 .sidebar {
   flex: 0 0 auto;
@@ -1301,6 +1306,107 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* ---- Tables / History / Workflows slide-out drawer ---- */
+/* Overlay on the left of .body so Journal / NodeFlow / Dashboard keep full
+   width when the rail is peeked closed. Settings "Hide tables panel" still
+   removes this entirely (tables-reopen strip). */
+.tables-sidebar-drawer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 45;
+  pointer-events: none;
+}
+.tables-sidebar-panel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--tables-sidebar-w, 290px);
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  transform: translateX(-100%);
+  transition: transform 0.22s ease;
+  pointer-events: none;
+  will-change: transform;
+}
+.tables-sidebar-drawer.is-open .tables-sidebar-panel {
+  transform: translateX(0);
+  pointer-events: auto;
+  box-shadow: 6px 0 28px rgba(0, 0, 0, 0.28);
+}
+.tables-sidebar-inner.sidebar {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  height: 100%;
+  border-right: none;
+}
+.tables-sidebar-gutter {
+  flex: 0 0 5px;
+  pointer-events: auto;
+}
+/* Short folder-handle tab (hamburger only) — not a full-height rail. */
+.tables-sidebar-peek {
+  pointer-events: auto;
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 34px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+  box-shadow: 3px 0 12px rgba(0, 0, 0, 0.18);
+  z-index: 3;
+  transition: left 0.22s ease;
+}
+/* Open: same handle on the panel's right edge (toggle to close). */
+.tables-sidebar-drawer.is-open .tables-sidebar-peek {
+  left: var(--tables-sidebar-w, 290px);
+}
+.tables-sidebar-peek-menu {
+  border: none;
+  background: transparent;
+  color: var(--text-dim, #9aa3b2);
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 0 10px 10px 0;
+}
+.tables-sidebar-peek-menu:hover {
+  color: var(--text, #e6e9ef);
+  background: var(--raised);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tables-sidebar-panel,
+  .tables-sidebar-peek {
+    transition: none;
+  }
+}
+html.theme-light .tables-sidebar-peek,
+html[data-theme="light"] .tables-sidebar-peek {
+  border-color: var(--chrome-frame, var(--border));
+  border-left: none;
+}
+html.theme-light .tables-sidebar-drawer.is-open .tables-sidebar-panel,
+html[data-theme="light"] .tables-sidebar-drawer.is-open .tables-sidebar-panel {
+  box-shadow: 6px 0 24px rgba(0, 0, 0, 0.12);
 }
 .gutter-v {
   flex: 0 0 5px;
@@ -6590,7 +6696,8 @@ kbd {
   grid-template-columns: auto 1fr auto;
   grid-template-areas:
     "chk name type"
-    "chk rename rename";
+    "chk rename rename"
+    "chk missing missing";
   align-items: center;
   gap: 3px 6px;
   padding: 5px 6px;
@@ -6600,6 +6707,20 @@ kbd {
 }
 .nb2-field:hover {
   background: var(--raised);
+}
+.nb2-field.missing {
+  border-color: var(--warn-border, rgba(245, 158, 11, 0.45));
+  background: var(--warn-bg, rgba(245, 158, 11, 0.08));
+}
+.nb2-field.missing .nb2-field-name,
+.nb2-col-missing,
+.nb2-reorder-name.nb2-col-missing {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+select.nb2-col-missing {
+  opacity: 0.7;
+  text-decoration: line-through;
 }
 .nb2-field input[type="checkbox"] {
   grid-area: chk;
@@ -6624,6 +6745,13 @@ kbd {
   padding: 2px 5px;
   margin-top: 1px;
   color: var(--text-dim);
+}
+.nb2-field-missing {
+  grid-area: missing;
+  font-size: 10.5px;
+  color: var(--warn-fg, #92400e);
+  line-height: 1.25;
+  margin-top: 1px;
 }
 .nb2-keyrow {
   display: flex;
@@ -11473,9 +11601,14 @@ html.theme-light .nb-badge.ran {
   border-color: var(--accent) !important;
   color: var(--accent-hi) !important;
 }
+/* Light-mode DataGrid zebra (beats earlier theme mixes; dark mode untouched). */
+html.theme-light .grow,
+html[data-theme="light"] .grow {
+  background: #e8e8e8 !important;
+}
 html.theme-light .grow.odd,
 html[data-theme="light"] .grow.odd {
-  background: color-mix(in srgb, var(--bg) 92%, #000) !important;
+  background: #ffffff !important;
 }
 html.theme-light .gh-cell {
   background: var(--panel-2) !important;

@@ -61,6 +61,48 @@ export function ReorderList<T>(props: {
   );
 }
 
+/** True when `name` is absent from `available` (case-insensitive). */
+export function isColumnMissingUpstream(
+  name: string | null | undefined,
+  available: string[] | null | undefined,
+): boolean {
+  const n = String(name || "").trim();
+  if (!n) return false;
+  const up = new Set((available || []).map((c) => String(c).toLowerCase()));
+  return !up.has(n.toLowerCase());
+}
+
+/**
+ * Option list for a column `<select>`: keeps a missing current value visible
+ * (so the control is not blank) and marks it for strikethrough styling.
+ */
+export function ColumnOptions(props: {
+  available: string[];
+  value?: string | null;
+  emptyLabel?: string;
+}) {
+  const avail = props.available || [];
+  const v = String(props.value || "").trim();
+  const missing = isColumnMissingUpstream(v, avail);
+  return (
+    <>
+      {props.emptyLabel != null && (
+        <option value="">{props.emptyLabel}</option>
+      )}
+      {missing && (
+        <option value={v} data-missing="1">
+          {v}
+        </option>
+      )}
+      {avail.map((c) => (
+        <option key={c} value={c}>
+          {c}
+        </option>
+      ))}
+    </>
+  );
+}
+
 export function ColumnPicker(props: {
   chosen: string[];
   available: string[];
@@ -76,18 +118,33 @@ export function ColumnPicker(props: {
           items={chosen}
           keyOf={(c) => c}
           onChange={onChange}
-          renderItem={(c) => (
-            <>
-              <span className="nb2-reorder-name">{c}</span>
-              <button
-                className="btn ghost icon xbtn"
-                title="Remove"
-                onClick={() => onChange(chosen.filter((x) => x !== c))}
-              >
-                ×
-              </button>
-            </>
-          )}
+          renderItem={(c) => {
+            const missing = isColumnMissingUpstream(c, available);
+            return (
+              <>
+                <span
+                  className={
+                    "nb2-reorder-name" + (missing ? " nb2-col-missing" : "")
+                  }
+                  data-missing={missing ? "1" : undefined}
+                  title={
+                    missing
+                      ? "This field is no longer in the upstream output"
+                      : c
+                  }
+                >
+                  {c}
+                </span>
+                <button
+                  className="btn ghost icon xbtn"
+                  title="Remove"
+                  onClick={() => onChange(chosen.filter((x) => x !== c))}
+                >
+                  ×
+                </button>
+              </>
+            );
+          }}
         />
       )}
       {addable.length > 0 && (

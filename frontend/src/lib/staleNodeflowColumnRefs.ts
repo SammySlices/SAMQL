@@ -7,10 +7,6 @@ export type StaleColumnRef = {
 
 const SKIP_TYPES = new Set<NodeType>(["select", "pivot"]);
 
-/** Freeform expression nodes: never auto-prune (typing mid-identifier looks
- *  "stale" and would wipe the whole condition/expr). Banner + manual Clear only. */
-export const NO_AUTO_PRUNE_STALE_TYPES = new Set<NodeType>(["filter", "formula"]);
-
 /** Every node type with stale-ref detection (kept in sync with the switch below). */
 export const STALE_REF_NODE_TYPES: readonly NodeType[] = [
   "filter",
@@ -45,6 +41,16 @@ export const STALE_REF_NODE_TYPES: readonly NodeType[] = [
   "iterator",
   "while",
 ] as const;
+
+/**
+ * Never auto-prune on schema refresh / inspCols settle. Missing refs stay
+ * visible (strikethrough) until the user clears them or a successful workflow
+ * rerun prunes them. Freeform filter/formula were already in this set (typing
+ * mid-identifier looked "stale"); structured nodes now follow the same rule.
+ */
+export const NO_AUTO_PRUNE_STALE_TYPES = new Set<NodeType>([
+  ...STALE_REF_NODE_TYPES,
+]);
 
 const SQL_WORDS = new Set([
   "and",
@@ -208,7 +214,7 @@ function dropDeadNames(names: string[] | undefined, dead: Set<string>): string[]
   return (names || []).filter((n) => !isDead(n, dead));
 }
 
-/** Drop WARN-listed stale names from config (manual Clear or auto-prune + toast). */
+/** Drop WARN-listed stale names from config (manual Clear or post-run prune). */
 export function clearStaleNodeflowColumnRefs(
   nodeType: NodeType,
   config: Record<string, any>,

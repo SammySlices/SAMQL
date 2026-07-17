@@ -58,8 +58,8 @@ backend/samql_core/tmputil.py
 backend/samql_core/watchdog.py
 backend/samql_core/webscrape.py
 backend/server.py
-build.sh
 build.ps1
+build.sh
 frontend/.npmrc
 frontend/e2e/cancellation-recovery.spec.ts
 frontend/e2e/dashboard-smoke.spec.ts
@@ -151,6 +151,8 @@ frontend/src/components/SqlEditor.longline.component.test.tsx
 frontend/src/components/SqlEditor.tsx
 frontend/src/components/StorageMemoryModal.tsx
 frontend/src/components/TablePropsModal.tsx
+frontend/src/components/TablesSidebarDrawer.component.test.tsx
+frontend/src/components/TablesSidebarDrawer.tsx
 frontend/src/components/ToolsTablesPanel.tsx
 frontend/src/components/load/ApiLoadTab.tsx
 frontend/src/components/load/FileBrowser.tsx
@@ -275,6 +277,8 @@ frontend/src/lib/pivotFields.ts
 frontend/src/lib/pointerDrag.ts
 frontend/src/lib/prettyStruct.ts
 frontend/src/lib/profileExport.ts
+frontend/src/lib/pruneNodeflowMissingAfterRun.component.test.ts
+frontend/src/lib/pruneNodeflowMissingAfterRun.ts
 frontend/src/lib/reconDetailActions.ts
 frontend/src/lib/reconExport.ts
 frontend/src/lib/reconMapping.ts
@@ -321,9 +325,9 @@ tests/harness.py
 tests/node_harnesses.py
 tests/paths.py
 tests/run_benchmarks.ps1
+tests/run_tests.ps1
 tests/run_tests.py
 tests/run_tests.sh
-tests/run_tests.ps1
 tests/suites/__init__.py
 tests/suites/backend.py
 tests/suites/frontend.py

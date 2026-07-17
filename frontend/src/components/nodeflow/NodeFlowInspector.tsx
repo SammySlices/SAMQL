@@ -16,10 +16,16 @@ import {
   getNodeInspectorType,
   nodeInspectorIsResizable,
 } from "./nodeDefinitions";
-import { ColumnPicker, ReorderList } from "./InspectorControls";
+import {
+  ColumnOptions,
+  ColumnPicker,
+  isColumnMissingUpstream,
+  ReorderList,
+} from "./InspectorControls";
 import { InspectorShell } from "./InspectorShell";
 import {
   filterSelectFields,
+  isSelectFieldMissingUpstream,
   setFieldsKept,
   sortSelectFields,
   type SelField,
@@ -39,6 +45,8 @@ import {
   sanitizeProfileName,
 } from "../../lib/sqlProfiles";
 import { clearStaleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
+import { reconcilePivotFields } from "../../lib/pivotFields";
+import { pruneNodeConfigMissingRefs } from "../../lib/pruneNodeflowMissingAfterRun";
 
 /** Empty-upstream note vs in-flight column probe (never show “Connect…” while probing). */
 function InspColsHint({
@@ -420,49 +428,112 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                 </div>
               )}
 
-              {staleColRefs.length > 0 && (
-                <div className="nb2-warn-sm" data-testid="stale-col-refs-warn">
-                  <strong>Stale column references.</strong> Saved fields below are
-                  missing from upstream (rename/drop
-                  {sel?.type === "filter" || sel?.type === "formula"
-                    ? ", or unfinished custom text"
-                    : " — leftovers after auto-prune"}
-                  ). Update them before running, or clear the leftovers.
-                  <ul className="nb2-stale-list">
-                    {staleColRefs.map(({ area, columns }) => (
-                      <li key={area}>
-                        <span className="nb2-stale-area">{area}</span>:{" "}
-                        {columns.map((c) => (
-                          <code key={c} className="nb2-stale-col">
-                            {c}
-                          </code>
-                        )).reduce<React.ReactNode[]>(
-                          (acc, el, i) =>
-                            i === 0 ? [el] : [...acc, ", ", el],
-                          [],
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                  <button
-                    type="button"
-                    className="btn xs"
-                    data-testid="stale-col-refs-clear"
-                    style={{ marginTop: 6 }}
-                    onClick={() => {
-                      if (!sel) return;
-                      const next = clearStaleNodeflowColumnRefs(
-                        sel.type,
-                        sel.config || {},
-                        staleColRefs,
-                      );
-                      if (next) patch(sel.id, next);
-                    }}
-                  >
-                    Clear stale references
-                  </button>
-                </div>
-              )}
+              {(() => {
+                if (!sel) return null;
+                const selectMissing =
+                  sel.type === "select"
+                    ? ((sel.config.fields || []) as SelField[]).filter((f) =>
+                        isSelectFieldMissingUpstream(f, inspCols.in),
+                      )
+                    : [];
+                const pivotHasMissing =
+                  sel.type === "pivot" &&
+                  !!(inspCols.in || []).length &&
+                  reconcilePivotFields(inspCols.in || [], sel.config || {})
+                    .changed;
+                const showClearMissing =
+                  staleColRefs.length > 0 ||
+                  selectMissing.length > 0 ||
+                  pivotHasMissing;
+                if (!showClearMissing) return null;
+                const clearMissingLocal = () => {
+                  // Local config edit only — patch this node; do not run or
+                  // cascade schema updates to other nodes.
+                  if (sel.type === "select") {
+                    const next = pruneNodeConfigMissingRefs(
+                      sel.type,
+                      sel.config || {},
+                      inspCols,
+                    );
+                    if (next) patch(sel.id, { fields: next.fields });
+                    return;
+                  }
+                  if (sel.type === "pivot") {
+                    const { patch: p } = reconcilePivotFields(
+                      inspCols.in || [],
+                      sel.config || {},
+                    );
+                    if (Object.keys(p).length) patch(sel.id, p);
+                    return;
+                  }
+                  // Use banner stale refs so Clear works even if inspCols are
+                  // still settling (same set the warning already listed).
+                  const cleared = clearStaleNodeflowColumnRefs(
+                    sel.type,
+                    sel.config || {},
+                    staleColRefs,
+                  );
+                  if (cleared) patch(sel.id, cleared);
+                };
+                return (
+                  <div className="nb2-warn-sm" data-testid="stale-col-refs-warn">
+                    <strong>Missing column references.</strong> Fields below are
+                    missing from upstream (rename/drop
+                    {sel.type === "filter" || sel.type === "formula"
+                      ? ", or unfinished custom text"
+                      : ""}
+                    ). They stay until you clear them, edit them, or a successful
+                    workflow rerun prunes them.
+                    {staleColRefs.length > 0 && (
+                      <ul className="nb2-stale-list">
+                        {staleColRefs.map(({ area, columns }) => (
+                          <li key={area}>
+                            <span className="nb2-stale-area">{area}</span>:{" "}
+                            {columns
+                              .map((c) => (
+                                <code key={c} className="nb2-stale-col">
+                                  {c}
+                                </code>
+                              ))
+                              .reduce<React.ReactNode[]>(
+                                (acc, el, i) =>
+                                  i === 0 ? [el] : [...acc, ", ", el],
+                                [],
+                              )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {selectMissing.length > 0 && (
+                      <ul className="nb2-stale-list">
+                        <li>
+                          <span className="nb2-stale-area">fields</span>:{" "}
+                          {selectMissing
+                            .map((f) => (
+                              <code key={f.name} className="nb2-stale-col">
+                                {f.name}
+                              </code>
+                            ))
+                            .reduce<React.ReactNode[]>(
+                              (acc, el, i) =>
+                                i === 0 ? [el] : [...acc, ", ", el],
+                              [],
+                            )}
+                        </li>
+                      </ul>
+                    )}
+                    <button
+                      type="button"
+                      className="btn xs"
+                      data-testid="clear-missing-fields"
+                      style={{ marginTop: 6 }}
+                      onClick={clearMissingLocal}
+                    >
+                      Clear missing
+                    </button>
+                  </div>
+                );
+              })()}
 
               {inspectorType === "group" && (
                 <>
@@ -835,45 +906,74 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                         selectFieldSearch,
                       );
                       const filtering = !!selectFieldSearch.trim();
-                      const renderField = (f: SelField, i: number) => (
-                        <div className="nb2-field" key={f.name}>
-                          <input
-                            type="checkbox"
-                            checked={f.keep !== false}
-                            onChange={(e) =>
-                              updateField(i, { keep: e.target.checked })
+                      const upstreamNames = inspCols.in || [];
+                      const renderField = (f: SelField, i: number) => {
+                        const missing = isSelectFieldMissingUpstream(
+                          f,
+                          upstreamNames,
+                        );
+                        return (
+                          <div
+                            className={
+                              "nb2-field" + (missing ? " missing" : "")
                             }
-                            title="Keep this field"
-                          />
-                          <span className="nb2-field-name" title={f.name}>
-                            {f.name}
-                          </span>
-                          <select
-                            className="nb2-field-type"
-                            value={f.type || ""}
-                            onChange={(e) =>
-                              updateField(i, { type: e.target.value })
-                            }
-                            title="Change data type"
+                            key={f.name}
+                            data-missing={missing ? "1" : undefined}
                           >
-                            <option value="">(keep)</option>
-                            <option value="text">Text</option>
-                            <option value="integer">Integer</option>
-                            <option value="decimal">Decimal</option>
-                            <option value="date">Date</option>
-                            <option value="boolean">Boolean</option>
-                          </select>
-                          <input
-                            className="nb2-field-rename"
-                            placeholder="rename…"
-                            value={f.rename || ""}
-                            onChange={(e) =>
-                              updateField(i, { rename: e.target.value })
-                            }
-                            title="Rename this field (header) — moves with the field when reordered"
-                          />
-                        </div>
-                      );
+                            <input
+                              type="checkbox"
+                              checked={f.keep !== false}
+                              onChange={(e) =>
+                                updateField(i, { keep: e.target.checked })
+                              }
+                              title="Keep this field"
+                            />
+                            <span
+                              className="nb2-field-name"
+                              title={
+                                missing
+                                  ? "This field is no longer in the upstream output"
+                                  : f.name
+                              }
+                            >
+                              {f.name}
+                            </span>
+                            <select
+                              className="nb2-field-type"
+                              value={f.type || ""}
+                              onChange={(e) =>
+                                updateField(i, { type: e.target.value })
+                              }
+                              title="Change data type"
+                            >
+                              <option value="">(keep)</option>
+                              <option value="text">Text</option>
+                              <option value="integer">Integer</option>
+                              <option value="decimal">Decimal</option>
+                              <option value="date">Date</option>
+                              <option value="boolean">Boolean</option>
+                            </select>
+                            <input
+                              className="nb2-field-rename"
+                              placeholder="rename…"
+                              value={f.rename || ""}
+                              onChange={(e) =>
+                                updateField(i, { rename: e.target.value })
+                              }
+                              title="Rename this field (header) — moves with the field when reordered"
+                            />
+                            {missing && (
+                              <span
+                                className="nb2-field-missing"
+                                data-testid="select-field-missing-warn"
+                                title="This field is no longer in the upstream output. Use Clear missing, or restore the source upstream."
+                              >
+                                Field removed from upstream
+                              </span>
+                            )}
+                          </div>
+                        );
+                      };
                       if (filtering) {
                         if (!visible.length) {
                           return (
@@ -940,18 +1040,22 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   <>
                     <label className="nb2-lbl">Field</label>
                     <select
-                      className="nb2-in"
+                      className={
+                        "nb2-in" +
+                        (isColumnMissingUpstream(fld, cols)
+                          ? " nb2-col-missing"
+                          : "")
+                      }
                       data-testid="nodeflow-filter-field"
                       value={fld}
                       disabled={fmode === "custom"}
                       onChange={(e) => applySimple({ field: e.target.value })}
                     >
-                      <option value="">(choose a field)</option>
-                      {cols.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
+                      <ColumnOptions
+                        available={cols}
+                        value={fld}
+                        emptyLabel="(choose a field)"
+                      />
                     </select>
                     <label className="nb2-lbl">Filter</label>
                     <select
@@ -1788,7 +1892,15 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     renderItem={(srt: any, i: number) => (
                       <>
                         <select
-                          className="nb2-agg-col"
+                          className={
+                            "nb2-agg-col" +
+                            (isColumnMissingUpstream(
+                              srt.col,
+                              inspCols.in || [],
+                            )
+                              ? " nb2-col-missing"
+                              : "")
+                          }
                           value={srt.col || ""}
                           onChange={(e) =>
                             setSorts(
@@ -1798,12 +1910,11 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             )
                           }
                         >
-                          <option value="">field…</option>
-                          {(inspCols.in || []).map((c) => (
-                            <option key={c} value={c}>
-                              {c}
-                            </option>
-                          ))}
+                          <ColumnOptions
+                            available={inspCols.in || []}
+                            value={srt.col}
+                            emptyLabel="field…"
+                          />
                         </select>
                         <select
                           className="nb2-agg-func"

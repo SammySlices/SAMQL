@@ -9,6 +9,28 @@ export type SelField = {
   type?: string;
 };
 
+/** Non-empty rename the user typed for a Select field (trimmed). */
+export function selectFieldRename(f: SelField | null | undefined): string {
+  return String(f?.rename || "").trim();
+}
+
+/**
+ * True when this Select field's source column is not in the current upstream
+ * column list (case-insensitive). Used for inspector strikethrough / missing
+ * styling on kept, unchecked, and renamed tombstones.
+ */
+export function isSelectFieldMissingUpstream(
+  f: SelField,
+  upstreamCols: string[] | null | undefined,
+): boolean {
+  const name = String(f?.name || "").trim();
+  if (!name) return true;
+  const up = new Set(
+    (upstreamCols || []).map((c) => String(c).toLowerCase()),
+  );
+  return !up.has(name.toLowerCase());
+}
+
 /**
  * Rebuild a Select node's field list against the columns it now receives,
  * WITHOUT disturbing the order the user put them in.
@@ -19,16 +41,14 @@ export type SelField = {
  *   - a newly-available column (a formula's new column, or a column an upstream
  *     Select just renamed into existence) is appended at the end, kept by
  *     default,
- *   - a column that no longer exists upstream is dropped -- EXCEPT when the
- *     user explicitly unchecked it (`keep: false`). Those are retained as
- *     tombstones so a temporary upstream shrink (projection / probe race
- *     around a workflow run) cannot drop them and then re-append them as
- *     `keep: true` on the next full column list ("deselected fields come
- *     back selected after a few runs").
+ *   - a column that no longer exists upstream is RETAINED as a missing
+ *     tombstone (kept, unchecked, or renamed). The inspector shows these with
+ *     strikethrough; the user clears them via "Clear missing" or a successful
+ *     workflow rerun — never by schema-refresh alone.
  *
  * Keeping surviving columns in the user's order is what lets a drag-reorder
- * stick; still appending new columns and dropping gone ones is what lets a
- * downstream node read every change made upstream.
+ * stick; appending new columns (without auto-dropping gone ones) is what lets
+ * a downstream node see upstream adds while preserving user settings.
  */
 export function reconcileSelectFields(
   upstreamCols: string[],
@@ -39,19 +59,14 @@ export function reconcileSelectFields(
   // case-insensitively, so a case-only upstream rename (Name -> name) must
   // keep the user's field (its keep / rename / type / order), not be treated
   // as a remove + re-add that discards those settings.
-  const upByLower = new Set(cols.map((c) => c.toLowerCase()));
   const seen = new Set<string>();
   const out: SelField[] = [];
-  // keep the user's existing fields, in their current order, for columns that
-  // still exist upstream (case-insensitive) -- and retain explicit unchecks
-  // even when the column is momentarily absent from the probe.
+  // Keep every existing field in user order (including missing sources).
   for (const f of current || []) {
     const key = String(f.name).toLowerCase();
     if (seen.has(key)) continue;
-    if (upByLower.has(key) || f.keep === false) {
-      out.push(f);
-      seen.add(key);
-    }
+    out.push(f);
+    seen.add(key);
   }
   // append columns that are genuinely new upstream (not already matched
   // case-insensitively above), in upstream order
@@ -63,6 +78,21 @@ export function reconcileSelectFields(
     }
   }
   return out;
+}
+
+/**
+ * Drop Select fields whose source column is absent from upstream.
+ * Used by the inspector "Clear missing" button and by post-run prune —
+ * never by schema-refresh reconcile alone.
+ */
+export function clearMissingSelectFields(
+  fields: SelField[],
+  upstreamCols: string[] | null | undefined,
+): SelField[] {
+  const list = fields || [];
+  // Without a known upstream schema, do not wipe the list.
+  if (!upstreamCols || !upstreamCols.length) return list;
+  return list.filter((f) => !isSelectFieldMissingUpstream(f, upstreamCols));
 }
 
 /** True when two field lists differ in their column names or order (a cheap

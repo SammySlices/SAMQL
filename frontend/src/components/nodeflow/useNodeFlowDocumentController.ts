@@ -67,7 +67,13 @@ interface UseNodeFlowDocumentControllerOptions {
   onWorkflowsChanged?: () => void;
   command?: {
     id: number;
-    action: "save" | "saveAs" | "open" | "exportLineage" | "selectNode";
+    action:
+      | "save"
+      | "saveAs"
+      | "open"
+      | "exportLineage"
+      | "selectNode"
+      | "clearSelection";
     nodeId?: string;
   } | null;
   onDocumentStatus?: (text: string) => void;
@@ -919,7 +925,7 @@ export function useNodeFlowDocumentController({
     else if (command.action === "saveAs") setNodeFileModal({ mode: "save" });
     else if (command.action === "open") setNodeFileModal({ mode: "open" });
     else if (command.action === "exportLineage") void exportLineage();
-    // selectNode is handled by NodeFlow (selection + pan live there)
+    // selectNode / clearSelection are handled by NodeFlow (selection lives there)
   }, [command, exportLineage, saveWorkflow]);
 
   return {
