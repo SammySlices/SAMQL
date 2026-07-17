@@ -18,6 +18,7 @@ import tempfile
 
 from .flatten import JSONFlattener, stream_json_records
 from .nodeflow import sanitize_ident
+from .sqlutil import sanitize_column_header
 
 # Per-table row buffer kept in memory before the JSON flattener spills it
 # to disk. Small/medium files never reach this, so they stay fully in-memory;
@@ -220,7 +221,9 @@ def load_csv(db, path, base_name=None, sep=None, source=None, progress=None):
             # get _2/_3..., and EVERY source index is read.
             seen, columns = {}, []
             for i, rf in enumerate(raw_fields):
-                nm = _sanitize(rf) or ("col%d" % (i + 1))
+                # Collapse whitespace first (Order Date → Order_Date, foo  bar
+                # → foo_bar), then the flattener sanitizer for other non-alnum.
+                nm = _sanitize(sanitize_column_header(rf)) or ("col%d" % (i + 1))
                 if nm in seen:
                     seen[nm] += 1
                     nm = "%s_%d" % (nm, seen[nm])
@@ -393,7 +396,11 @@ def load_parquet(duck, path, base_name=None, source=None):
 def _excel_headers(header):
     cols, seen = [], {}
     for i, h in enumerate(header or []):
-        name = (str(h).strip() if h is not None else "") or ("col%d" % (i + 1))
+        raw = (str(h).strip() if h is not None else "")
+        # Whitespace → _ only (match DuckDB load headers). Do not strip
+        # punctuation here — Excel previously preserved it, and CSV already
+        # applies the stronger flattener sanitizer on its own path.
+        name = sanitize_column_header(raw) or ("col%d" % (i + 1))
         if name in seen:
             seen[name] += 1
             name = "%s_%d" % (name, seen[name])

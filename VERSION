@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-17.631
+Current build:   2026-07-17.632
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-17.632  (v2.16.4)
+
+STALE CLEAR + LOAD HEADER WHITESPACE SANITIZE. Filter Clear blanks the
+simple-mode field picker; stale detection covers filter field. Bracketed /
+quoted expr refs stay whole so spaced headers are not false-stale. Load
+path collapses header whitespace runs to underscore (Order Date ->
+Order_Date) via sanitize_column_header on DuckDB CSV/JSON/Parquet and
+Excel. Refresh samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-17.631  (v2.16.4)

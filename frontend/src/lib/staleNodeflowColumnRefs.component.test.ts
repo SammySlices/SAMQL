@@ -64,8 +64,61 @@ describe("staleNodeflowColumnRefs", () => {
       "status",
     ]);
   });
-});
 
+  it("keeps spaced bracketed headers as one ref (no Order/Date split)", () => {
+    expect(exprColumnRefs("[Order Date] > 5")).toEqual(["Order Date"]);
+    expect(
+      staleNodeflowColumnRefs(
+        "filter",
+        { condition: "[Order Date] > 5", field: "Order Date" },
+        { in: ["Order Date", "Amount"] },
+      ),
+    ).toEqual([]);
+  });
+
+  it("flags real drops of spaced headers and Clear blanks field+condition", () => {
+    const cfg = {
+      condition: "[Order Date] > 5",
+      field: "Order Date",
+      filterMode: "simple",
+    };
+    const stale = staleNodeflowColumnRefs("filter", cfg, { in: ["Amount"] });
+    expect(stale).toEqual([
+      { area: "condition", columns: ["Order Date"] },
+      { area: "field", columns: ["Order Date"] },
+    ]);
+    expect(clearStaleNodeflowColumnRefs("filter", cfg, stale)).toEqual({
+      condition: "",
+      field: "",
+      filterMode: "simple",
+    });
+  });
+
+  it("Clear removes stale sort cols after upstream select shrinks fields", () => {
+    const cfg = {
+      sorts: [
+        { col: "keep_me", dir: "asc" },
+        { col: "dropped_field", dir: "desc" },
+      ],
+    };
+    const stale = staleNodeflowColumnRefs("sort", cfg, {
+      in: ["keep_me", "other"],
+    });
+    expect(stale).toEqual([
+      { area: "sort", columns: ["dropped_field"] },
+    ]);
+    expect(clearStaleNodeflowColumnRefs("sort", cfg, stale)).toEqual({
+      sorts: [{ col: "keep_me", dir: "asc" }],
+    });
+    expect(
+      staleNodeflowColumnRefs(
+        "sort",
+        clearStaleNodeflowColumnRefs("sort", cfg, stale)!,
+        { in: ["keep_me", "other"] },
+      ),
+    ).toEqual([]);
+  });
+});
 describe("clearStaleNodeflowColumnRefs", () => {
   it("removes only stale sort columns on explicit clear", () => {
     const next = clearStaleNodeflowColumnRefs(

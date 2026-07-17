@@ -568,14 +568,17 @@ def _columnarize(rows, columns, text_cols):
 
 
 def _dedupe_columns(columns):
-    """Return a positional copy of ``columns`` with empty names filled in and
-    duplicates disambiguated, so CREATE TABLE never fails on a repeated or
-    blank column name (common from joined SQL Server queries or messy CSV
-    headers). Names are otherwise preserved."""
+    """Return a positional copy of ``columns`` with empty names filled in,
+    whitespace in headers turned into ``_`` (see
+    :func:`sqlutil.sanitize_column_header`), and duplicates disambiguated, so
+    CREATE TABLE never fails on a repeated or blank column name (common from
+    joined SQL Server queries or messy CSV headers). Non-whitespace characters
+    are otherwise preserved."""
     out, seen = [], set()
     for i, c in enumerate(columns):
-        base = (str(c) if (c is not None and str(c).strip() != "")
-                else "col_%d" % (i + 1))
+        base = sqlutil.sanitize_column_header(c) if c is not None else ""
+        if not base:
+            base = "col_%d" % (i + 1)
         name, k = base, 2
         while name in seen:
             name = "%s_%d" % (base, k)
@@ -583,6 +586,67 @@ def _dedupe_columns(columns):
         seen.add(name)
         out.append(name)
     return out
+
+
+def _rewrite_columns_sanitized(exec_conn, table_name, cols, *,
+                               as_view=False, view_source_sql=None):
+    """Physically rewrite ``table_name`` so its headers match
+    :func:`_dedupe_columns` sanitization. No-op when names already match.
+    Returns the final column list. For views, ``view_source_sql`` is the
+    underlying reader expression (e.g. ``read_csv_auto(...)``).
+
+    Prefer in-place ``ALTER … RENAME COLUMN`` when the new names do not collide
+    with other current headers (cheap metadata rename). Fall back to a
+    ``CREATE TABLE AS SELECT`` rewrite only when collisions force it — so a
+    multi-GB load that only had spaces in headers does not get a full copy.
+    """
+    raw = list(cols or [])
+    new_cols = _dedupe_columns(raw)
+    if new_cols == raw:
+        return raw
+    selects = ", ".join(
+        "%s AS %s" % (_quote_ident(old), _quote_ident(new))
+        for old, new in zip(raw, new_cols)
+    )
+    if as_view:
+        if not view_source_sql:
+            return raw
+        exec_conn.execute('DROP VIEW IF EXISTS %s' % _quote_ident(table_name))
+        exec_conn.execute(
+            'CREATE VIEW %s AS SELECT %s FROM %s AS _hdr'
+            % (_quote_ident(table_name), selects, view_source_sql))
+        return new_cols
+    old_set = set(raw)
+    conflict = any(
+        old != new and new in old_set
+        for old, new in zip(raw, new_cols)
+    )
+    if not conflict:
+        for old, new in zip(raw, new_cols):
+            if old == new:
+                continue
+            exec_conn.execute(
+                'ALTER TABLE %s RENAME COLUMN %s TO %s'
+                % (_quote_ident(table_name), _quote_ident(old),
+                   _quote_ident(new)))
+        return new_cols
+    tmp = "%s__hdrfix" % table_name
+    n = 0
+    while True:
+        try:
+            exec_conn.execute('DROP TABLE IF EXISTS %s' % _quote_ident(tmp))
+            break
+        except Exception:
+            n += 1
+            tmp = "%s__hdrfix_%d" % (table_name, n)
+    exec_conn.execute(
+        'CREATE TABLE %s AS SELECT %s FROM %s'
+        % (_quote_ident(tmp), selects, _quote_ident(table_name)))
+    exec_conn.execute('DROP TABLE %s' % _quote_ident(table_name))
+    exec_conn.execute(
+        'ALTER TABLE %s RENAME TO %s'
+        % (_quote_ident(tmp), _quote_ident(table_name)))
+    return new_cols
 
 
 class DBManager:
@@ -2984,16 +3048,18 @@ class DuckDBManager:
                                 f'SELECT * FROM "{final}" LIMIT 0')
                             cols = ([d[0] for d in cur.description]
                                     if cur.description else [])
-                            self.table_columns[final] = cols
-                            self._types_cache_drop(final)
                             if kind == "json":
                                 # Expand a single STRUCT / STRUCT[] column so
                                 # JSON keys become headers -- for both full
                                 # nested loads and shallow flatten-off CTAS.
                                 # No-op when the table already has real columns.
-                                cols = self._maybe_expand_json_struct(final)
                                 self.table_columns[final] = cols
                                 self._types_cache_drop(final)
+                                cols = self._maybe_expand_json_struct(final)
+                            cols = _rewrite_columns_sanitized(
+                                exec_conn, final, cols)
+                            self.table_columns[final] = cols
+                            self._types_cache_drop(final)
                             self.table_sources[final] = path
                             return final
                         except Exception as e:
@@ -3068,6 +3134,9 @@ class DuckDBManager:
                         f'SELECT * FROM "{final}" LIMIT 0')
                     cols = ([d[0] for d in cur.description]
                             if cur.description else [])
+                    cols = _rewrite_columns_sanitized(
+                        self.conn, final, cols,
+                        as_view=True, view_source_sql=rdr)
                     self.table_columns[final] = cols
                     self._types_cache_drop(final)
                     self.table_sources[final] = path

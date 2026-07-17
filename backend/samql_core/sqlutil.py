@@ -24,6 +24,25 @@ def quote_ident(ident):
     return '"' + str(ident).replace('"', '""') + '"'
 
 
+def sanitize_column_header(name):
+    """Normalize a loaded field header: trim edges, turn each whitespace run
+    into a single ``_``.
+
+    Applied on the load path when columns become table schema (DuckDB native
+    CSV/JSON/Parquet reads; also via ``_dedupe_columns`` for streaming
+    inserts). Does **not** strip punctuation — only whitespace — so headers
+    like ``a"b`` stay intact. Multiple spaces / tabs collapse to one ``_``
+    (``\"Order  Date\"`` → ``Order_Date``) without turning an already-clean
+    ``a__b`` into ``a_b``. Empty / all-whitespace names become ``\"\"`` so
+    callers can substitute ``col_N``.
+    """
+    s = "" if name is None else str(name)
+    s = s.strip()
+    if not s:
+        return ""
+    return re.sub(r"\s+", "_", s)
+
+
 # Backwards-compatible private alias used elsewhere in the codebase.
 _q = quote_ident
 

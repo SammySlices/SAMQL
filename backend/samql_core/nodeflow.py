@@ -144,14 +144,19 @@ def _ident_cols(text):
     """Pull the column-ish identifiers out of a free-form expression (a filter
     condition, etc). Single-quoted string literals are stripped first so their
     contents aren't mistaken for columns. Returns bare words plus bracketed
-    [name] and double-quoted "name" identifiers. Over-inclusion is harmless --
-    the source intersects this against its real columns before pruning -- but
-    we never want to miss a real reference, so we cast wide."""
+    [name] and double-quoted "name" identifiers.
+
+    Bracketed / quoted names are kept whole (``[Order Date]`` is one name).
+    Bare-word scanning runs only on the leftover text so spaced headers do
+    not also contribute false ``Order`` / ``Date`` tokens.
+    """
     s = str(text or "")
     s = re.sub(r"'(?:[^']|'')*'", " ", s)            # drop '...' literals
     names = set(re.findall(r"\[([^\]]+)\]", s))      # [bracketed name]
     names |= set(re.findall(r'"((?:[^"]|"")*)"', s)) # "quoted name"
-    names |= set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", s))  # bare words
+    bare = re.sub(r"\[[^\]]*\]", " ", s)
+    bare = re.sub(r'"(?:[^"]|"")*"', " ", bare)
+    names |= set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", bare))  # bare words
     return {n.strip() for n in names if n and n.strip()}
 
 

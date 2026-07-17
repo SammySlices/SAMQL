@@ -22581,6 +22581,58 @@ def backend_tests(datadir, csv_path, json_path):
         need(not re.search(r'sub\(r"\[\^0-9A-Za-z_\]\+", "_"', src),
              "no inline table-name sanitization should remain in session.py")
 
+    def t_load_header_spaces_to_underscore():
+        # On load, whitespace in field headers becomes ``_`` so NodeFlow /
+        # Journal never see spaced identifiers. DuckDB native reads used to
+        # preserve ``Order Date`` while the SQLite CSV path already sanitized.
+        from samql_core.sqlutil import sanitize_column_header
+        eq(sanitize_column_header("Order Date"), "Order_Date", "space -> _")
+        eq(sanitize_column_header("  foo   bar  "), "foo_bar",
+           "trim + collapse whitespace runs")
+        eq(sanitize_column_header("a__b"), "a__b",
+           "existing underscores are not collapsed")
+        eq(sanitize_column_header('a"b'), 'a"b',
+           "punctuation is left alone (whitespace-only sanitizer)")
+        eq(sanitize_column_header("   "), "", "all-whitespace -> empty")
+
+        import tempfile
+        path = None
+        s = _fresh_session()
+        try:
+            fd, path = tempfile.mkstemp(suffix=".csv")
+            os.close(fd)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("Order Date,foo  bar,Amount\n2020-01-01,x,10\n")
+            loaded_sql = s.load_file(path, destination="sqlite",
+                                     base_name="hdr_sql")
+            cols_sql = loaded_sql[0]["columns"]
+            need("Order_Date" in cols_sql, "sqlite spaced header: %r" % cols_sql)
+            need("foo_bar" in cols_sql, "sqlite multi-space header: %r" % cols_sql)
+            need("Order Date" not in cols_sql, "sqlite kept spaced name: %r" % cols_sql)
+
+            from samql_core.engines import HAS_DUCKDB
+            if not HAS_DUCKDB:
+                return
+            loaded = s.load_file(path, destination="duckdb",
+                                 base_name="hdr_duck")
+            cols = loaded[0]["columns"]
+            need("Order_Date" in cols, "duckdb spaced header: %r" % cols)
+            need("foo_bar" in cols, "duckdb multi-space header: %r" % cols)
+            need("Order Date" not in cols, "duckdb kept spaced name: %r" % cols)
+            r = s.run_query(
+                'SELECT a."Order_Date", b."Amount" FROM "hdr_duck" a '
+                'JOIN "hdr_duck" b ON a."Order_Date" = b."Order_Date"',
+                target="__duckdb__")
+            need(not r.get("error"), "join on sanitized headers failed: %r" % r)
+            eq(len(r.get("rows") or []), 1, "join row count")
+        finally:
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
+            s.shutdown()
+
     def t_iterator_unquoted_var_and_missing_accum():
         # Build .205 — two iterator-ergonomics fixes from a real screenshot:
         # (1) a formula using a BARE ${col1} substitutes the row's *text* value
@@ -37621,6 +37673,7 @@ def backend_tests(datadir, csv_path, json_path):
         ("all run loops report done/total progress (iterator/while)",
          t_run_loops_report_progress_wiring),
         ("table-name sanitization is one shared helper", t_sanitize_ident_shared),
+        ("load headers: spaces become underscores", t_load_header_spaces_to_underscore),
         ("fetch/spool retry share one generic loop", t_retry_loops_unified),
         ("LIMIT-0 column introspection is one shared helper", t_col_names_shared),
         ("exception->string is one shared err_str helper", t_err_str_shared),

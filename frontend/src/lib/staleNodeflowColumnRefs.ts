@@ -130,13 +130,22 @@ function pushStale(out: StaleColumnRef[], area: string, columns: string[]) {
   out.push({ area, columns: [...columns] });
 }
 
-/** Pull column-ish identifiers from a free-form expression (filter / formula). */
+/** Pull column-ish identifiers from a free-form expression (filter / formula).
+ *  Bracketed / double-quoted names are taken as whole identifiers (so
+ *  ``[Order Date]`` is one ref, not bare ``Order`` + ``Date``). Bare-word
+ *  scanning runs only on the leftover text after those spans are removed. */
 export function exprColumnRefs(text: string): string[] {
   const stripped = String(text || "").replace(/'(?:[^']|'')*'/g, " ");
   const names = new Set<string>();
   for (const m of stripped.matchAll(/\[([^\]]+)\]/g)) names.add(m[1].trim());
-  for (const m of stripped.matchAll(/"((?:[^"]|"")*)"/g)) names.add(m[1].trim());
-  for (const m of stripped.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+  for (const m of stripped.matchAll(/"((?:[^"]|"")*)"/g))
+    names.add(m[1].replace(/""/g, '"').trim());
+  // Do not re-tokenize insides of [..] / ".." — spaced headers would otherwise
+  // look like missing bare columns while the real quoted/bracketed name exists.
+  const bareSrc = stripped
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/"(?:[^"]|"")*"/g, " ");
+  for (const m of bareSrc.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
     const w = m[0];
     if (!SQL_WORDS.has(w.toLowerCase())) names.add(w);
   }
@@ -232,6 +241,9 @@ export function clearStaleNodeflowColumnRefs(
         cfg.condition = "";
         changed = true;
       }
+      // Simple-mode field picker is independent of condition text; Clear must
+      // blank it too or the banner / next simple rebuild keeps the dead ref.
+      clearFieldIfDead("field");
       break;
     case "formula":
       cfg.formulas = (cfg.formulas || []).map((f: any) => {
@@ -482,6 +494,7 @@ export function staleNodeflowColumnRefs(
   switch (nodeType) {
     case "filter":
       staleExprs("condition", [cfg.condition], inLive, out);
+      pushStale(out, "field", missingMany([cfg.field].filter(Boolean), inLive));
       break;
     case "formula":
       staleExprs(

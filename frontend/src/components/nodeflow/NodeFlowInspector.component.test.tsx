@@ -324,6 +324,42 @@ describe("NodeFlowInspector", () => {
     );
   });
 
+  it("Clear blanks filter field + condition for dropped / spaced headers", () => {
+    const node: NbNode = {
+      id: "filt-1",
+      type: "filter",
+      x: 0,
+      y: 0,
+      config: {
+        filterMode: "simple",
+        field: "Order Date",
+        condition: "[Order Date] > 5",
+        label: "filter",
+      },
+    };
+    const patch = vi.fn();
+    render(
+      <NodeFlowInspector
+        context={context(node, {
+          patch,
+          staleColRefs: [
+            { area: "condition", columns: ["Order Date"] },
+            { area: "field", columns: ["Order Date"] },
+          ],
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("stale-col-refs-clear"));
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith(
+      "filt-1",
+      expect.objectContaining({
+        condition: "",
+        field: "",
+      }),
+    );
+  });
+
   it("shows Loading fields while column probe is in flight, not Connect an input", () => {
     const node: NbNode = {
       id: "sel-1",
