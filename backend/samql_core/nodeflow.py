@@ -573,12 +573,23 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
         up = need("in")
         fields = cfg.get("fields") or []
         want = None if needed is None else {str(x).lower() for x in needed}
+        # Live upstream names only. Kept config fields whose source is gone
+        # stay in the Select UI as missing tombstones, but must not appear in
+        # output SQL/schema — otherwise columns probes fail and downstream
+        # nodes (Summarize, Sort, …) never get inspCols for stale detection.
+        try:
+            up_live = {str(c).lower() for c in (cols_of(
+                "SELECT * FROM %s" % up) or [])}
+        except Exception:
+            up_live = None
         sel = []
         for f in fields:
             if f.get("keep") is False:
                 continue
             col = (f.get("name") or "").strip()
             if not col:
+                continue
+            if up_live is not None and col.lower() not in up_live:
                 continue
             alias = (f.get("rename") or col).strip() or col
             # A downstream projection may make configured fields dead. Omitting

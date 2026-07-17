@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-17.633
+Current build:   2026-07-17.634
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-17.634  (v2.16.4)
+
+NODE DRAG DEFERS INSPECTOR; MISSING COLS PROPAGATE TO SUMMARIZE; NO
+SETTINGS HIDE-TABLES TOGGLE. NodeFlow opens the tables/inspector drawer
+only on quick click (not pointerdown/drag); folder-handle ignored during
+node press. Select output schema omits missing tombstones so Summarize
+and peers get live inspCols and strikethrough. Settings Toolbar Toggle
+no longer hides the tables rail. Refresh samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-17.633  (v2.16.4)

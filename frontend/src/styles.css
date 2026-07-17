@@ -1310,8 +1310,8 @@ textarea:focus {
 
 /* ---- Tables / History / Workflows slide-out drawer ---- */
 /* Overlay on the left of .body so Journal / NodeFlow / Dashboard keep full
-   width when the rail is peeked closed. Settings "Hide tables panel" still
-   removes this entirely (tables-reopen strip). */
+   width when the rail is peeked closed. The folder-handle hamburger always
+   remains available (no Settings hide-rail toggle). */
 .tables-sidebar-drawer {
   position: absolute;
   left: 0;
@@ -1393,6 +1393,12 @@ textarea:focus {
   color: var(--text, #e6e9ef);
   background: var(--raised);
 }
+
+/* NodeFlow node press/drag: folder-handle must not steal the gesture. */
+html[data-samql-nf-drag="1"] .tables-sidebar-peek {
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .tables-sidebar-panel,
   .tables-sidebar-peek {

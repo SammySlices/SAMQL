@@ -1449,8 +1449,13 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           <option value="count">Count</option>
                           <option value="countd">Count distinct</option>
                         </select>
-                        <select
-                          className="nb2-agg-col"
+                                                <select
+                          className={
+                            "nb2-agg-col" +
+                            (isColumnMissingUpstream(a.col, inspCols.in || [])
+                              ? " nb2-col-missing"
+                              : "")
+                          }
                           value={a.col || ""}
                           onChange={(e) =>
                             setAggs(
@@ -1460,12 +1465,11 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             )
                           }
                         >
-                          <option value="">field…</option>
-                          {(inspCols.in || []).map((c) => (
-                            <option key={c} value={c}>
-                              {c}
-                            </option>
-                          ))}
+                          <ColumnOptions
+                            available={inspCols.in || []}
+                            value={a.col}
+                            emptyLabel="field…"
+                          />
                         </select>
                         <button
                           className="btn ghost icon xbtn"

@@ -51,6 +51,10 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
       ) {
         return;
       }
+      // NodeFlow node press/drag must not close (or re-open via selection race)
+      // the drawer — empty-canvas clicks still dismiss.
+      if (document.documentElement.dataset.samqlNfDrag === "1") return;
+      if (el?.closest?.(".nb2-node")) return;
       onOpenChange(false);
     };
     const onKey = (event: KeyboardEvent) => {

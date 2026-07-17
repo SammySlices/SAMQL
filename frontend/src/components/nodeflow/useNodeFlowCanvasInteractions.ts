@@ -42,6 +42,8 @@ type NodeDrag = {
   origins: Record<string, { x: number; y: number }>;
   startX: number;
   startY: number;
+  /** True once pointer moved past click/drag threshold. */
+  moved?: boolean;
 };
 type WireDrag = {
   mode: "wire";
@@ -90,6 +92,10 @@ interface UseNodeFlowCanvasInteractionsOptions {
   ) => void;
   /** Canvas grid snap while dragging (App Settings → Visual). Default ON. */
   snap?: boolean;
+  /** Quick click (pointerup under drag threshold) opens the inspector drawer. */
+  onInspectorOpen?: () => void;
+  /** Confirmed drag: keep the tables/inspector panel closed. */
+  onInspectorClose?: () => void;
 }
 
 export function useNodeFlowCanvasInteractions(
@@ -225,8 +231,16 @@ export function useNodeFlowCanvasInteractions(
 
       if (drag.mode === "node") {
         const zoom = current.zoomRef.current || 1;
-        const dx = (lastX - drag.startX) / zoom;
-        const dy = (lastY - drag.startY) / zoom;
+        const rawDx = lastX - drag.startX;
+        const rawDy = lastY - drag.startY;
+        if (!drag.moved) {
+          if (Math.abs(rawDx) < 5 && Math.abs(rawDy) < 5) return;
+          drag.moved = true;
+          // Confirmed drag — never open/keep the side panel expanded.
+          current.onInspectorClose?.();
+        }
+        const dx = rawDx / zoom;
+        const dy = rawDy / zoom;
         const grid = 16;
         const snapValue = snapRef.current
           ? (value: number) => Math.round(value / grid) * grid
@@ -383,6 +397,11 @@ export function useNodeFlowCanvasInteractions(
           }
         }
       } else if (drag?.mode === "node") {
+        const wasDrag = !!drag.moved;
+        delete document.documentElement.dataset.samqlNfDrag;
+        if (!wasDrag) {
+          current.onInspectorOpen?.();
+        }
         if (drag.ids.length === 1) {
           const node = current.nodesRef.current?.find(
             (item) => item.id === drag.nodeId,
@@ -411,6 +430,7 @@ export function useNodeFlowCanvasInteractions(
         setMarquee(null);
       }
 
+      delete document.documentElement.dataset.samqlNfDrag;
       dragRef.current = null;
       setWireEnd(null);
       setGroupHover(null);
@@ -442,6 +462,8 @@ export function useNodeFlowCanvasInteractions(
         const selected = current.nodesRef.current?.find((item) => item.id === id);
         if (selected) origins[id] = { x: selected.x, y: selected.y };
       }
+      // Block folder-handle / drawer chrome for the whole press (click or drag).
+      document.documentElement.dataset.samqlNfDrag = "1";
       dragRef.current = {
         mode: "node",
         nodeId: node.id,
@@ -449,6 +471,7 @@ export function useNodeFlowCanvasInteractions(
         origins,
         startX: event.clientX,
         startY: event.clientY,
+        moved: false,
       };
     },
     [],

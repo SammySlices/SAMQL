@@ -184,6 +184,7 @@ frontend/src/components/nodeflow/NodeFlowTabBar.tsx
 frontend/src/components/nodeflow/Phase10Remediation.component.test.tsx
 frontend/src/components/nodeflow/nodeDefinitions.component.test.ts
 frontend/src/components/nodeflow/nodeDefinitions.ts
+frontend/src/components/nodeflow/nodeDragInspector.component.test.ts
 frontend/src/components/nodeflow/nodeFlowGraphCommands.component.test.ts
 frontend/src/components/nodeflow/nodeFlowGraphCommands.ts
 frontend/src/components/nodeflow/nodeFlowRenderModel.component.test.ts
@@ -257,6 +258,7 @@ frontend/src/lib/ids.ts
 frontend/src/lib/loadForm.ts
 frontend/src/lib/menuPos.ts
 frontend/src/lib/migrations.ts
+frontend/src/lib/missingColPropagate.component.test.ts
 frontend/src/lib/namedProfiles.ts
 frontend/src/lib/nodeFlowCanvasExtent.component.test.ts
 frontend/src/lib/nodeFlowDense.component.test.ts
@@ -339,6 +341,7 @@ tests/test_nodeflow_resources.py
 tests/test_optimizations_dual_engine.py
 tests/test_refactor_phase2.py
 tests/test_release_hardening.py
+tests/test_select_omits_missing_output.py
 tests/test_wave3_stabilization.py
 tools/aphex_transport.py
 tools/assistant_build_pack.py

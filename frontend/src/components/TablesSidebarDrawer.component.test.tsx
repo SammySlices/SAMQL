@@ -218,4 +218,45 @@ describe("TablesSidebarDrawer", () => {
     fireEvent.pointerDown(screen.getByTestId("modal"));
     expect(onOpenChange).not.toHaveBeenCalled();
   });
+
+  it("does not close on NodeFlow node pointerdown", () => {
+    const onOpenChange = vi.fn();
+    render(
+      <TablesSidebarDrawer
+        enabled
+        open
+        onOpenChange={onOpenChange}
+        width={280}
+        onResizePointerDown={() => {}}
+      >
+        <div>tables</div>
+      </TablesSidebarDrawer>,
+    );
+    const node = document.createElement("div");
+    node.className = "nb2-node";
+    document.body.appendChild(node);
+    fireEvent.pointerDown(node);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    node.remove();
+  });
+
+  it("does not close while samqlNfDrag is set", () => {
+    const onOpenChange = vi.fn();
+    document.documentElement.dataset.samqlNfDrag = "1";
+    render(
+      <TablesSidebarDrawer
+        enabled
+        open
+        onOpenChange={onOpenChange}
+        width={280}
+        onResizePointerDown={() => {}}
+      >
+        <div>tables</div>
+      </TablesSidebarDrawer>,
+    );
+    fireEvent.pointerDown(document.body);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    delete document.documentElement.dataset.samqlNfDrag;
+  });
+
 });

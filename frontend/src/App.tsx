@@ -754,12 +754,9 @@ export default function App() {
   const [sidebarW, setSidebarW] = useState(() =>
     typeof SAVED?.sidebarW === "number" ? SAVED.sidebarW : 290,
   );
-  // whether the left tables panel is shown (toggle in Settings); hiding it
-  // gives the results the full width. When shown, a short folder-handle peeks
-  // closed by default and slides out on hamburger click (see tablesPanelOpen).
-  const [showTables, setShowTables] = useState<boolean>(() =>
-    typeof SAVED?.showTables === "boolean" ? SAVED.showTables : true,
-  );
+  // Tables / History / Workflows always use the slide-out drawer (folder-handle
+  // hamburger). There is no Settings path to hide the rail entirely.
+  const showTables = true;
   const [tablesPanelOpen, setTablesPanelOpen] = useState(false);
   const [tablesSideTab, setTablesSideTab] =
     useState<TablesSideTab>("tables");
@@ -1736,12 +1733,6 @@ export default function App() {
         run: () => {
           void refreshTables();
         },
-      },
-      {
-        id: "toggle-tables",
-        label: showTables ? "Hide tables panel" : "Show tables panel",
-        group: "View",
-        run: () => setShowTables((v) => !v),
       },
       {
         id: "toggle-node-toolbar",
@@ -2913,14 +2904,6 @@ export default function App() {
                 >
                   <button
                     role="menuitemcheckbox"
-                    data-testid="settings-toolbar-tables-panel"
-                    aria-checked={showTables}
-                    onClick={() => setShowTables((v) => !v)}
-                  >
-                    {showTables ? "Hide tables panel" : "Show tables panel"}
-                  </button>
-                  <button
-                    role="menuitemcheckbox"
                     data-testid="settings-toolbar-node-search"
                     aria-checked={showNodeSearch}
                     onClick={() => setShowNodeSearch((v) => !v)}
@@ -3117,15 +3100,6 @@ export default function App() {
             />
           )}
         </TablesSidebarDrawer>
-        {!showTables && (
-          <button
-            className="tables-reopen"
-            title="Show tables panel"
-            onClick={() => setShowTables(true)}
-          >
-            <Icon.Chevron size={14} />
-          </button>
-        )}
 
         <div className="main">
           {/* Journal stays MOUNTED across view switches (display:none, not an

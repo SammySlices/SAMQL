@@ -110,17 +110,11 @@ describe("Settings View consolidations", () => {
     expect(screen.getByTestId("settings-json-field-explorer")).toBeTruthy();
 
     fireEvent.click(screen.getByTestId("settings-toolbar-toggle"));
-    const tables = screen.getByTestId("settings-toolbar-tables-panel");
+    expect(screen.queryByTestId("settings-toolbar-tables-panel")).toBeNull();
     const search = screen.getByTestId("settings-toolbar-node-search");
     const nodeTb = screen.getByTestId("settings-toolbar-node-toolbar");
-    expect(tables).toHaveAttribute("aria-checked", "true");
     expect(search).toHaveAttribute("aria-checked", "true");
     expect(nodeTb).toHaveAttribute("aria-checked", "true");
-
-    fireEvent.click(tables);
-    await waitFor(() =>
-      expect(tables).toHaveAttribute("aria-checked", "false"),
-    );
 
     fireEvent.click(nodeTb);
     await waitFor(() => {

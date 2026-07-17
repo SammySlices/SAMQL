@@ -100,6 +100,7 @@ interface NodeFlowSceneProps {
   groupReorder: (groupId: string, from: number, to: number) => void;
   extractChildToCanvas: (groupId: string, childId: string) => void;
   startNodeDrag: (event: React.PointerEvent, node: NbNode) => void;
+  onInspectorOpen?: () => void;
   startNodeResize: (event: React.PointerEvent, node: NbNode) => void;
   startWire: (event: React.PointerEvent, node: NbNode, port: string) => void;
   setHoveredInput: (nodeId: string, port: string | null) => void;
@@ -155,6 +156,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   groupReorder,
   extractChildToCanvas,
   startNodeDrag,
+  onInspectorOpen,
   startNodeResize,
   startWire,
   setHoveredInput,
@@ -344,10 +346,9 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             chartVersion={chartVersionByNode[node.id] ?? null}
             childSelection={childSelection}
             onPointerDown={(event, currentNode) => {
-              event.stopPropagation();
-              if (event.button === 2) return;
-              setSelectedId(currentNode.id);
-              setSelectedIds([currentNode.id]);
+              // Whole-node press: drag if moved past threshold; quick click
+              // opens inspector (via startNodeDrag → onInspectorOpen).
+              startNodeDrag(event, currentNode);
             }}
             onContextMenu={(event, currentNode) => {
               event.preventDefault();
@@ -360,6 +361,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
                 setSelectedId(currentNode.id);
                 setSelectedIds([currentNode.id]);
               }
+              onInspectorOpen?.();
               setNodeMenu({
                 x: event.clientX,
                 y: event.clientY,
