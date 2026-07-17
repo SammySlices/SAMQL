@@ -561,15 +561,13 @@ describe("Dashboard", () => {
   it("adds another dashboard board via the select", async () => {
     const prompt = vi.spyOn(window, "prompt").mockReturnValue("Ops");
     render(<Dashboard onToast={() => undefined} />);
-    fireEvent.change(screen.getByTestId("dashboard-select"), {
-      target: { value: "__new__" },
-    });
+    fireEvent.click(screen.getByTestId("dashboard-select"));
+    fireEvent.click(screen.getByTestId("dashboard-select-add"));
     await waitFor(() => {
-      const select = screen.getByTestId("dashboard-select") as HTMLSelectElement;
-      expect(
-        Array.from(select.options).some((o) => o.textContent === "Ops"),
-      ).toBe(true);
+      expect(screen.getByTestId("dashboard-select")).toHaveTextContent("Ops");
     });
+    fireEvent.click(screen.getByTestId("dashboard-select"));
+    expect(screen.getByRole("option", { name: "Ops" })).toBeTruthy();
     prompt.mockRestore();
   });
 
@@ -583,9 +581,8 @@ describe("Dashboard", () => {
     ).toBe(true);
     fireEvent.mouseDown(screen.getByTestId("dashboard-more-backdrop"));
 
-    fireEvent.change(screen.getByTestId("dashboard-select"), {
-      target: { value: "__new__" },
-    });
+    fireEvent.click(screen.getByTestId("dashboard-select"));
+    fireEvent.click(screen.getByTestId("dashboard-select-add"));
     await waitFor(() => {
       openDashboardMore();
       expect(
@@ -599,11 +596,12 @@ describe("Dashboard", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /^Delete$/i }));
     await waitFor(() => {
-      const select = screen.getByTestId("dashboard-select") as HTMLSelectElement;
-      expect(
-        Array.from(select.options).some((o) => o.textContent === "Ops"),
-      ).toBe(false);
+      expect(screen.getByTestId("dashboard-select")).not.toHaveTextContent(
+        "Ops",
+      );
     });
+    fireEvent.click(screen.getByTestId("dashboard-select"));
+    expect(screen.queryByRole("option", { name: "Ops" })).toBeNull();
     expect(toast).toHaveBeenCalledWith(
       "ok",
       "Dashboard deleted",
@@ -720,14 +718,15 @@ describe("Dashboard", () => {
     expect(el.textContent).toMatch(/2026|Jul/);
   });
 
-  it("configures header color, widget background, and liquid glass", async () => {
+  it("configures header color and widget background", async () => {
     seedWorkspace();
     render(<Dashboard onToast={() => undefined} />);
     openWidgetConfig("w1");
     const config = screen.getByTestId("dashboard-config");
     expect(within(config).getByText("Header color")).toBeTruthy();
     expect(within(config).getByText("Widget background")).toBeTruthy();
-    expect(within(config).getByText("Liquid glass")).toBeTruthy();
+    expect(within(config).queryByText("Liquid glass")).toBeNull();
+    expect(screen.queryByTestId("dashboard-liquid-glass")).toBeNull();
 
     fireEvent.change(screen.getByTestId("dashboard-header-color"), {
       target: { value: "#ff0000" },
@@ -735,12 +734,11 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByTestId("dashboard-widget-bg"), {
       target: { value: "#00ff00" },
     });
-    fireEvent.click(screen.getByTestId("dashboard-liquid-glass"));
 
     await waitFor(() => {
       const widget = screen.getByTestId("dashboard-widget-w1");
-      expect(widget.className).toMatch(/dash-widget-glass/);
-      expect(widget.style.background).toMatch(/#00ff00|rgb\(0,\s*255,\s*0\)|color-mix/);
+      expect(widget.className).not.toMatch(/dash-widget-glass/);
+      expect(widget.style.background).toMatch(/#00ff00|rgb\(0,\s*255,\s*0\)/);
       const head = widget.querySelector(".dash-widget-head") as HTMLElement;
       expect(head.style.background).toMatch(/#ff0000|rgb\(255,\s*0,\s*0\)/);
     });
@@ -819,7 +817,6 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByTestId("dashboard-widget-bg"), {
       target: { value: "#123456" },
     });
-    fireEvent.click(screen.getByTestId("dashboard-liquid-glass"));
     await waitFor(() => {
       const raw = window.localStorage.getItem(DASHBOARD_WORKSPACE_KEY);
       expect(raw).toBeTruthy();
@@ -830,7 +827,7 @@ describe("Dashboard", () => {
       expect(text.headerColor).toBe("#abcdef");
       expect(text.fontFamily).toMatch(/Calibri/);
       expect(text.backgroundColor).toBe("#123456");
-      expect(text.liquidGlass).toBe(true);
+      expect(text.liquidGlass).toBeUndefined();
     });
   });
 

@@ -21,7 +21,7 @@ import type { useNodeFlowPalette } from "./nodeflow/NodeFlowPalette";
 
 export const TOOLS_TABLES_STORE_KEY = "samql.nodeflow.toolsTables.v1";
 
-type ToolsTab = "tables" | "nodes" | "fields";
+type ToolsTab = "tables" | "nodes";
 type NodeSection = "favorites" | "created" | (typeof NODE_GROUPS)[number]["id"];
 
 type StoredChrome = {
@@ -64,8 +64,6 @@ interface Props {
   tables: TableInfo[];
   onRefreshTables?: () => void;
   onOpenLoad?: () => void;
-  /** Opens the App-level floating JSON Field Explorer panel. */
-  onOpenJsonFieldExplorer?: () => void;
   palette: ReturnType<typeof useNodeFlowPalette>;
 }
 
@@ -75,17 +73,12 @@ export const ToolsTablesPanel: React.FC<Props> = ({
   tables,
   onRefreshTables,
   onOpenLoad,
-  onOpenJsonFieldExplorer,
   palette,
 }) => {
   const saved = useMemo(() => loadChrome(), []);
   const [minimized, setMinimized] = useState(() => !!saved.minimized);
   const [tab, setTab] = useState<ToolsTab>(() =>
-    saved.tab === "nodes"
-      ? "nodes"
-      : saved.tab === "fields"
-        ? "fields"
-        : "tables",
+    saved.tab === "nodes" ? "nodes" : "tables",
   );
   const [nodeSection, setNodeSection] = useState<NodeSection>(() => {
     const s = saved.nodeSection;
@@ -387,19 +380,6 @@ export const ToolsTablesPanel: React.FC<Props> = ({
         >
           Nodes
         </button>
-        <button
-          type="button"
-          className={"tt-tab" + (tab === "fields" ? " active" : "")}
-          data-testid="tools-tables-tab-fields"
-          aria-label="JSON Field Explorer"
-          title="JSON Field Explorer"
-          onClick={() => {
-            setTab("fields");
-            onOpenJsonFieldExplorer?.();
-          }}
-        >
-          JSON Field Explorer
-        </button>
       </div>
 
       {tab === "tables" ? (
@@ -491,7 +471,7 @@ export const ToolsTablesPanel: React.FC<Props> = ({
             )}
           </div>
         </div>
-      ) : tab === "nodes" ? (
+      ) : (
         <div className="tt-body tt-nodes-body">
           <div className="tt-node-sections" role="tablist">
             {sectionButtons.map((s) => {
@@ -554,28 +534,6 @@ export const ToolsTablesPanel: React.FC<Props> = ({
           <div className="tt-hint">
             Drag a node onto the canvas. Drop onto Favorites (section or
             toolbar) to pin it.
-          </div>
-        </div>
-      ) : (
-        <div className="tt-body" data-testid="tools-tables-section-fields">
-          <div className="tt-tool-card">
-            <div className="tt-tool-card-head">
-              <Icon.ListTree size={16} />
-              <strong>JSON Field Explorer</strong>
-            </div>
-            <p className="tt-tool-card-desc">
-              Browse nested JSON and struct fields on loaded tables, copy
-              access SQL, and run shred or flatten when eligible.
-            </p>
-            <button
-              type="button"
-              className="btn sm"
-              data-testid="tools-tables-open-json-field-explorer"
-              aria-label="Open JSON Field Explorer"
-              onClick={() => onOpenJsonFieldExplorer?.()}
-            >
-              Open JSON Field Explorer
-            </button>
           </div>
         </div>
       )}

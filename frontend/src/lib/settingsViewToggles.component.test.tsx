@@ -100,7 +100,7 @@ describe("Settings View consolidations", () => {
     expect(screen.queryByTestId("settings-toolbar-tables-panel")).toBeNull();
     // Tools & Tables opens via Ctrl/Cmd+K command palette, not Settings.
     expect(screen.queryByText("Tools & Tables…")).toBeNull();
-    // JSON Field Explorer stays under Settings → Tools (and Tools & Tables).
+    // JSON Field Explorer stays under Settings → Tools.
     expect(
       within(document.querySelector(".settings-menu") as HTMLElement).getByRole(
         "button",
@@ -178,7 +178,7 @@ describe("Settings View consolidations", () => {
     ).toBeTruthy();
   });
 
-  it("nests theme, Eye Care, Reduce motion, and Condensed NodeFlow under Visual Toggles", async () => {
+  it("nests theme, Eye Care, Reduce motion, Condensed NodeFlow, and Node Snap under Visual Toggles", async () => {
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -192,6 +192,7 @@ describe("Settings View consolidations", () => {
     expect(screen.queryByTestId("settings-theme-toggle")).toBeNull();
     expect(screen.queryByTestId("eye-care-toggle")).toBeNull();
     expect(screen.queryByTestId("nodeflow-dense-toggle")).toBeNull();
+    expect(screen.queryByTestId("node-snap-toggle")).toBeNull();
     expect(screen.queryByTestId("settings-reduce-motion-toggle")).toBeNull();
 
     fireEvent.click(screen.getByTestId("settings-visual-toggles"));
@@ -199,10 +200,14 @@ describe("Settings View consolidations", () => {
     const eye = screen.getByTestId("eye-care-toggle");
     const motion = screen.getByTestId("settings-reduce-motion-toggle");
     const dense = screen.getByTestId("nodeflow-dense-toggle");
+    const snap = screen.getByTestId("node-snap-toggle");
     expect(theme).toHaveTextContent("Toggle Light Mode");
     expect(eye).toHaveTextContent("Eye Care");
     expect(motion).toHaveTextContent("Reduce motion");
     expect(dense).toHaveTextContent("Condensed NodeFlow");
+    expect(snap).toHaveTextContent("Node Snap");
+    expect(snap).toHaveAttribute("aria-pressed", "true");
+    expect(localStorage.getItem("samql.nodeSnap")).toBe("1");
 
     fireEvent.click(theme);
     await waitFor(() => {
@@ -233,6 +238,13 @@ describe("Settings View consolidations", () => {
       expect(motion).toHaveAttribute("aria-pressed", "true");
       expect(localStorage.getItem("samql.reduceMotion")).toBe("1");
       expect(document.body.classList.contains("motion-reduced")).toBe(true);
+    });
+
+    fireEvent.click(snap);
+    await waitFor(() => {
+      expect(snap).toHaveAttribute("aria-pressed", "false");
+      expect(snap).toHaveTextContent("Node Snap");
+      expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
     });
   });
 

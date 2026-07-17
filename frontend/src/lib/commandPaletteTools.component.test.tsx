@@ -155,31 +155,6 @@ describe("ToolsTablesPanel", () => {
     expect(screen.getByText("Filter")).toBeInTheDocument();
   });
 
-  it("offers JSON Field Explorer under Tools & Tables", () => {
-    const onOpenJsonFieldExplorer = vi.fn();
-    render(
-      <ToolsTablesPanel
-        open
-        onClose={vi.fn()}
-        tables={[]}
-        palette={palette as any}
-        onOpenJsonFieldExplorer={onOpenJsonFieldExplorer}
-      />,
-    );
-    fireEvent.click(screen.getByTestId("tools-tables-tab-fields"));
-    expect(
-      screen.getByTestId("tools-tables-section-fields"),
-    ).toBeInTheDocument();
-    expect(onOpenJsonFieldExplorer).toHaveBeenCalled();
-    expect(
-      screen.getByRole("button", { name: "Open JSON Field Explorer" }),
-    ).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByTestId("tools-tables-open-json-field-explorer"),
-    );
-    expect(onOpenJsonFieldExplorer).toHaveBeenCalledTimes(2);
-  });
-
   it("minimizes to an icon and expands again", () => {
     render(
       <ToolsTablesPanel

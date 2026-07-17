@@ -688,6 +688,23 @@ export default function App() {
       /* ignore */
     }
   }, [nodeFlowDense]);
+  // NodeFlow canvas grid snap while dragging. Default ON; Settings → Visual.
+  const [nodeSnap, setNodeSnap] = useState(() => {
+    try {
+      const saved = window.localStorage?.getItem("samql.nodeSnap");
+      if (saved != null) return saved === "1";
+      return true;
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem("samql.nodeSnap", nodeSnap ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [nodeSnap]);
   // optional ivory background for the SQL editor (paired with canvas under
   // Visual Toggles → light mode)
   const [ivoryEditor, setIvoryEditor] = useState(() => {
@@ -749,8 +766,8 @@ export default function App() {
   const [showNodeSearch, setShowNodeSearch] = useState<boolean>(() =>
     typeof SAVED?.showNodeSearch === "boolean" ? SAVED.showNodeSearch : true,
   );
-  // node palette/toolbar visibility lives here so both the in-canvas button and
-  // the Settings > View toggle share one source of truth (persisted; the key is
+  // node palette/toolbar visibility lives here so Settings → Toolbar Toggle
+  // (and the command palette) share one source of truth (persisted; the key is
   // the one the NodeFlow used before, so an existing preference carries over).
   const [nodeToolbarHidden, setNodeToolbarHidden] = useState<boolean>(() => {
     try {
@@ -2685,7 +2702,7 @@ export default function App() {
                   data-testid="settings-visual-toggles"
                   aria-expanded={settingsFlyout?.kind === "visual"}
                   aria-haspopup="menu"
-                  title="Light/Dark mode, Eye Care, reduce motion, and Condensed NodeFlow"
+                  title="Light/Dark mode, Eye Care, reduce motion, Condensed NodeFlow, and Node Snap"
                   onMouseEnter={(e) =>
                     showSettingsFlyout("visual", e.currentTarget)
                   }
@@ -2986,6 +3003,16 @@ export default function App() {
                       ? "Condensed NodeFlow: on"
                       : "Condensed NodeFlow"}
                   </button>
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="node-snap-toggle"
+                    aria-checked={nodeSnap}
+                    aria-pressed={nodeSnap}
+                    title="Snap NodeFlow nodes to a grid while dragging"
+                    onClick={() => setNodeSnap((v) => !v)}
+                  >
+                    {nodeSnap ? "Node Snap: on" : "Node Snap"}
+                  </button>
                 </div>
               )}
             </>
@@ -3123,7 +3150,7 @@ export default function App() {
                 <div className="view-loading">Loading NodeFlow…</div>
               }
             >
-              <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} onTogglePalette={() => setNodeToolbarHidden((v) => !v)} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} onOpenJsonFieldExplorer={() => setFieldExplorerOpen(true)} denseMode={nodeFlowDense} />
+              <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} snap={nodeSnap} />
             </Suspense>
           ) : view === "dashboard" ? (
             <Suspense

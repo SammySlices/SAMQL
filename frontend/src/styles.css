@@ -17,6 +17,7 @@
   --text: #e8eaef;
   --text-dim: #9aa3b2;
   --text-faint: #6b7480;
+  --muted: #9aa3b2;
 
   --accent: #54b949;
   --accent-hi: #6ed061;
@@ -71,20 +72,23 @@
 }
 
 /* Light theme (Settings → Visual Toggles → Toggle Light Mode).
-   Cool green-tinted neutrals + SamQL accent — not purple/cream defaults.
+   White canvases + black chrome accents (buttons, cell frames, gutters).
    Applied on <html> so every var(--*) surface flips together. */
 html.theme-light,
 html[data-theme="light"] {
-  --bg: #f2f5f1;
-  --panel: #ffffff;
-  --panel-2: #e9eee8;
-  --raised: #e2e8e0;
-  --raised-2: #d5ddd2;
-  --border: #c9d2c6;
-  --border-strong: #aeb9aa;
-  --text: #1a211c;
-  --text-dim: #4a554e;
-  --text-faint: #6a746c;
+  /* Cool gray light theme (no warm eggshell) */
+  --bg: #d8d8d8;
+  --white: #f2f2f2;
+  --panel: #d8d8d8;
+  --panel-2: #cecece;
+  --raised: #c4c4c4;
+  --raised-2: #b8b8b8;
+  --border: #b0b0b0;
+  --border-strong: #9a9a9a;
+  --text: #111111;
+  --text-dim: #444444;
+  --text-faint: #6a6a6a;
+  --muted: #6a6a6a;
 
   --accent: #3f9a36;
   --accent-hi: #2f7a2a;
@@ -93,6 +97,26 @@ html[data-theme="light"] {
   --accent-line: rgba(63, 154, 54, 0.4);
   --menu-hl: rgba(84, 185, 73, 0.28);
   --menu-hl-text: var(--text);
+  /* Shared transparent TD-green hover for buttons / chips */
+  --btn-hover-bg: color-mix(in srgb, var(--accent) 18%, transparent);
+  --btn-hover-border: var(--accent);
+  --btn-hover-fg: var(--accent-hi);
+
+  /* Black chrome used by buttons / cell frames / number gutters */
+  --chrome-ink: #111111;
+  --chrome-ink-hi: #2a2a2a;
+  /* Text on black chrome stays true white for contrast */
+  --chrome-fg: #ffffff;
+  /* Green tabs across the app; hover/active use a deeper green */
+  --chrome-tab: var(--accent);
+  --chrome-tab-hi: var(--accent-hi);
+  /* Light gray strips / workspaces */
+  --chrome-strip: #d8d8d8;
+  --chrome-strip-hi: #c4c4c4;
+  --chrome-frame: #b8b8b8;
+  /* App splash / main-tab row */
+  --chrome-topbar: #000000;
+  --chrome-topbar-edge: #111111;
 
   color-scheme: light;
 
@@ -106,12 +130,798 @@ html[data-theme="light"] {
   --warn: #b07a1a;
   --info: #2f6fbf;
 
-  --shadow: 0 8px 28px rgba(26, 33, 28, 0.12);
+  --shadow: 0 8px 28px rgba(17, 17, 17, 0.08);
 }
 
 html.theme-light select,
 html[data-theme="light"] select {
   color-scheme: light;
+}
+
+/* ---- Light theme surface overrides (Journal / Dashboard / IDE) ----
+   Hardcoded dark editor chrome (#14161a) and soft green neutrals do not
+   flip with CSS variables alone. Keep dark mode untouched; only html.theme-light
+   / html[data-theme="light"]. */
+
+/* Wordmark: "Sam" black (beat any accent inheritance), "QL" stays accent */
+html.theme-light .brand,
+html.theme-light .brand .brand-name,
+html[data-theme="light"] .brand,
+html[data-theme="light"] .brand .brand-name {
+  color: #000000;
+}
+html.theme-light .brand .ql,
+html.theme-light .brand-name .ql,
+html[data-theme="light"] .brand .ql,
+html[data-theme="light"] .brand-name .ql {
+  color: var(--accent);
+}
+
+/* Main view tabs: green pills + white text; active gets a deeper green + underline */
+html.theme-light .view-toggle,
+html[data-theme="light"] .view-toggle {
+  border-color: var(--chrome-tab);
+  background: var(--chrome-tab);
+}
+html.theme-light .vt-seg,
+html.theme-light .vt-seg:hover,
+html.theme-light .vt-seg.on,
+html[data-theme="light"] .vt-seg,
+html[data-theme="light"] .vt-seg:hover,
+html[data-theme="light"] .vt-seg.on {
+  background: var(--chrome-tab);
+  color: var(--chrome-fg);
+}
+html.theme-light .vt-seg.on,
+html[data-theme="light"] .vt-seg.on {
+  background: var(--chrome-tab-hi);
+  box-shadow: none;
+  position: relative;
+}
+html.theme-light .vt-seg.on::after,
+html[data-theme="light"] .vt-seg.on::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    0 0 3px rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+html.theme-light .vt-seg:hover,
+html[data-theme="light"] .vt-seg:hover {
+  background: var(--chrome-tab-hi);
+}
+
+/* Consistent tab chrome (IDE editor tabs, Journal tabs, NodeFlow doc tabs, sidebar) */
+html.theme-light .tab,
+html.theme-light .side-tab,
+html.theme-light .tt-tab,
+html.theme-light .nb2-tab,
+html[data-theme="light"] .tab,
+html[data-theme="light"] .side-tab,
+html[data-theme="light"] .tt-tab,
+html[data-theme="light"] .nb2-tab {
+  background: var(--chrome-tab);
+  color: var(--chrome-fg);
+  border-color: var(--chrome-tab);
+}
+html.theme-light .tab:hover,
+html.theme-light .side-tab:hover,
+html.theme-light .tt-tab:hover,
+html.theme-light .nb2-tab:hover,
+html.theme-light .tab.active,
+html.theme-light .side-tab.active,
+html.theme-light .tt-tab.active,
+html.theme-light .nb2-tab.active,
+html[data-theme="light"] .tab:hover,
+html[data-theme="light"] .side-tab:hover,
+html[data-theme="light"] .tt-tab:hover,
+html[data-theme="light"] .nb2-tab:hover,
+html[data-theme="light"] .tab.active,
+html[data-theme="light"] .side-tab.active,
+html[data-theme="light"] .tt-tab.active,
+html[data-theme="light"] .nb2-tab.active {
+  background: var(--chrome-tab-hi);
+  color: var(--chrome-fg);
+  border-color: var(--chrome-tab-hi);
+}
+html.theme-light .tab.active,
+html.theme-light .side-tab.active,
+html.theme-light .tt-tab.active,
+html.theme-light .nb2-tab.active,
+html[data-theme="light"] .tab.active,
+html[data-theme="light"] .side-tab.active,
+html[data-theme="light"] .tt-tab.active,
+html[data-theme="light"] .nb2-tab.active {
+  box-shadow: none;
+  border-bottom-color: transparent;
+  position: relative;
+}
+/* White active-tab underline with a slight shadow so it reads on green pills */
+html.theme-light .tab.active::after,
+html.theme-light .side-tab.active::after,
+html.theme-light .tt-tab.active::after,
+html.theme-light .nb2-tab.active::after,
+html[data-theme="light"] .tab.active::after,
+html[data-theme="light"] .side-tab.active::after,
+html[data-theme="light"] .tt-tab.active::after,
+html[data-theme="light"] .nb2-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.28),
+    0 0 3px rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+html.theme-light .nb2-tab.active .nb2-tab-x,
+html.theme-light .nb2-tab .nb2-tab-x,
+html[data-theme="light"] .nb2-tab .nb2-tab-x {
+  color: rgba(255, 255, 255, 0.82);
+}
+html.theme-light .nb2-tab-add,
+html[data-theme="light"] .nb2-tab-add {
+  background: #ffffff;
+  border-color: var(--border-strong);
+  color: #111111;
+}
+html.theme-light .nb2-tab-add:hover,
+html[data-theme="light"] .nb2-tab-add:hover {
+  background: #ffffff;
+  color: #111111;
+}
+
+/* NodeFlow Snap / zoom: always black chrome (ghost must not wash out) */
+html.theme-light .nb2-zoom .btn,
+html.theme-light .nb2-zoom .btn.sm,
+html.theme-light .nb2-zoom .btn.ghost,
+html.theme-light .nb2-zoom .btn.primary,
+html.theme-light .nb2-zoom .btn:hover,
+html.theme-light .nb2-zoom .btn.ghost:hover,
+html.theme-light .nb2-zoom .btn.primary:hover,
+html[data-theme="light"] .nb2-zoom .btn,
+html[data-theme="light"] .nb2-zoom .btn.ghost,
+html[data-theme="light"] .nb2-zoom .btn.primary {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb2-zoom .btn:hover,
+html.theme-light .nb2-zoom .btn.ghost:hover,
+html.theme-light .nb2-zoom .btn.primary:hover,
+html[data-theme="light"] .nb2-zoom .btn:hover {
+  background: var(--btn-hover-bg);
+  border-color: var(--btn-hover-border);
+  color: var(--btn-hover-fg);
+}
+
+/* Default buttons: black bg / white text (ghost / danger / × stay special) */
+html.theme-light .btn {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .btn:hover:not(:disabled):not(.danger):not(.xbtn) {
+  background: var(--btn-hover-bg);
+  border-color: var(--btn-hover-border);
+  color: var(--btn-hover-fg);
+}
+html.theme-light .btn.primary {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .btn.primary:hover:not(:disabled) {
+  background: var(--btn-hover-bg);
+  border-color: var(--btn-hover-border);
+  color: var(--btn-hover-fg);
+}
+html.theme-light .btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+html.theme-light .btn.ghost:hover:not(:disabled):not(.xbtn) {
+  background: var(--btn-hover-bg);
+  border-color: var(--btn-hover-border);
+  color: var(--btn-hover-fg);
+}
+/* Ghost / icon controls on black cell/widget chrome need light glyphs */
+html.theme-light .nb-cardhead .btn.ghost,
+html.theme-light .nb-outbar .btn.ghost,
+html.theme-light .dash-widget-head .btn.ghost,
+html.theme-light .dash-widget-actions .btn.ghost,
+html.theme-light .nb2-dash-bar .btn.ghost,
+html.theme-light .nb-cardhead .iconbtn,
+html.theme-light .dash-widget-head .iconbtn,
+html.theme-light .dash-widget-actions .iconbtn {
+  color: rgba(255, 255, 255, 0.78);
+}
+html.theme-light .nb-cardhead .btn.ghost:hover,
+html.theme-light .nb-outbar .btn.ghost:hover,
+html.theme-light .dash-widget-head .btn.ghost:hover,
+html.theme-light .dash-widget-actions .btn.ghost:hover,
+html.theme-light .nb2-dash-bar .btn.ghost:hover,
+html.theme-light .nb-cardhead .iconbtn:hover:not(:disabled),
+html.theme-light .dash-widget-head .iconbtn:hover:not(:disabled),
+html.theme-light .dash-widget-actions .iconbtn:hover:not(:disabled) {
+  background: var(--btn-hover-bg);
+  color: var(--btn-hover-fg);
+  border-color: var(--btn-hover-border);
+}
+html.theme-light .btn.danger {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .btn.danger:hover {
+  background: var(--error);
+  border-color: var(--error);
+  color: #fff;
+}
+html.theme-light .btn.xbtn,
+html.theme-light .btn.ghost.xbtn,
+html.theme-light .iconbtn.xbtn {
+  color: #e5484d;
+  border-color: rgba(229, 72, 77, 0.45);
+  background: rgba(229, 72, 77, 0.12);
+}
+html.theme-light .btn.xbtn:hover,
+html.theme-light .btn.ghost.xbtn:hover,
+html.theme-light .iconbtn.xbtn:hover:not(:disabled) {
+  background: #e5484d;
+  border-color: #e5484d;
+  color: #fff;
+}
+html.theme-light .dash-toolbar-right .btn.active {
+  background: var(--chrome-ink-hi);
+  border-color: var(--chrome-ink-hi);
+  color: var(--chrome-fg);
+}
+
+/* Settings modals / menus: force readable dark text on light panels */
+html.theme-light .modal,
+html.theme-light .modal-head,
+html.theme-light .modal-body,
+html.theme-light .modal-foot,
+html.theme-light .about-body,
+html.theme-light .props-body,
+html.theme-light .ctx-menu,
+html.theme-light .settings-menu,
+html[data-theme="light"] .modal,
+html[data-theme="light"] .modal-body,
+html[data-theme="light"] .ctx-menu {
+  color: #111111;
+}
+/* Modal / settings section headers: near-black (beat base opacity: 0.6) */
+html.theme-light .modal-head h2,
+html.theme-light .about-name,
+html.theme-light .about-sec,
+html.theme-light .act-section-label,
+html.theme-light .fx-title,
+html.theme-light .rc-map-title,
+html.theme-light .settings-grid label,
+html.theme-light .settings-grid .threshold-field-head,
+html.theme-light .flow-cache-cards b,
+html.theme-light .storage-row > span:first-child,
+html.theme-light .act-ops th,
+html[data-theme="light"] .modal-head h2,
+html[data-theme="light"] .about-sec,
+html[data-theme="light"] .act-section-label {
+  color: #111111;
+  opacity: 1;
+}
+html.theme-light .about-row,
+html.theme-light .form-row label,
+html.theme-light .modal .label,
+html.theme-light .ctx-menu button,
+html[data-theme="light"] .modal .label {
+  color: #111111;
+}
+/* Secondary copy inside modals / settings menus */
+html.theme-light .modal .dim,
+html.theme-light .modal .faint,
+html.theme-light .modal .hint,
+html.theme-light .modal .muted,
+html.theme-light .ctx-menu .label,
+html.theme-light .about-ver,
+html[data-theme="light"] .modal .dim,
+html[data-theme="light"] .modal .faint,
+html[data-theme="light"] .modal .hint,
+html[data-theme="light"] .modal .muted {
+  color: #444444;
+  opacity: 1;
+}
+html.theme-light .modal input,
+html.theme-light .modal select,
+html.theme-light .modal textarea,
+html.theme-light .ctx-menu input,
+html.theme-light .ctx-menu select,
+html.theme-light .ctx-menu textarea,
+html[data-theme="light"] .modal input,
+html[data-theme="light"] .modal select,
+html[data-theme="light"] .modal textarea {
+  color: #111111;
+  background: var(--bg);
+  color-scheme: light;
+  border-color: var(--border-strong);
+}
+/* Keep modal action buttons on black chrome (don't inherit body ink) */
+html.theme-light .modal .btn:not(.ghost):not(.xbtn),
+html.theme-light .modal .btn.primary {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .modal .btn.ghost {
+  color: #111111;
+}
+
+/* IDE / Journal SQL editor: light text box + black number gutter.
+   Beat body.editor-ivory (paired with light mode) and .nb-ed .code. */
+html.theme-light .code,
+html.theme-light body.editor-ivory .code,
+html.theme-light .nb-ed .code {
+  background: var(--bg);
+  color: var(--text);
+}
+html.theme-light .code pre.hl,
+html.theme-light body.editor-ivory .code pre.hl {
+  color: var(--text);
+}
+html.theme-light .code .gutter,
+html.theme-light body.editor-ivory .code .gutter {
+  background: var(--chrome-ink);
+  color: var(--chrome-fg);
+  border-right-color: var(--chrome-ink-hi);
+}
+html.theme-light .code .gutter .ln.active,
+html.theme-light body.editor-ivory .code .ln.active {
+  color: var(--accent-dim);
+}
+html.theme-light .code textarea.ta,
+html.theme-light body.editor-ivory .code textarea.ta {
+  caret-color: var(--accent);
+  color: var(--text);
+}
+
+/* Results / Dashboard grid row numbers: black rail, white digits */
+html.theme-light .gh-cell.rownum,
+html.theme-light .gc-cell.rownum {
+  background: var(--chrome-ink);
+  color: var(--chrome-fg);
+  border-right-color: var(--chrome-ink-hi);
+}
+html.theme-light .grow.odd {
+  background: rgba(0, 0, 0, 0.025);
+}
+html.theme-light .grid.hscrolled .gc-cell.rownum,
+html.theme-light .grid.hscrolled .gh-cell.rownum {
+  box-shadow: 4px 0 8px -4px rgba(0, 0, 0, 0.12);
+}
+
+/* IDE chrome: thin frame around tables panel / results (not the old thick black bar) */
+html.theme-light .sidebar,
+html.theme-light .nb2-inspector.docked {
+  border-right: 1px solid var(--chrome-frame);
+  box-shadow: none;
+}
+html.theme-light .results {
+  border-top: 1px solid var(--chrome-frame);
+  box-shadow: none;
+}
+html.theme-light .editor-wrap,
+html.theme-light .main,
+html.theme-light .result-pane,
+html.theme-light .grid-shell {
+  box-shadow: none;
+  outline: none;
+}
+html.theme-light .topbar,
+html[data-theme="light"] .topbar {
+  background: var(--chrome-topbar);
+  border-bottom: 1px solid var(--chrome-topbar-edge);
+  color: var(--chrome-fg);
+}
+/* Wordmark on the dark splash row: Sam light, QL accent */
+html.theme-light .topbar .brand,
+html.theme-light .topbar .brand .brand-name,
+html[data-theme="light"] .topbar .brand,
+html[data-theme="light"] .topbar .brand .brand-name {
+  color: #f2f2f2;
+}
+html.theme-light .topbar .brand .ql,
+html.theme-light .topbar .brand-name .ql,
+html[data-theme="light"] .topbar .brand .ql,
+html[data-theme="light"] .topbar .brand-name .ql {
+  color: var(--accent-dim);
+}
+html.theme-light .topbar .btn.ghost,
+html[data-theme="light"] .topbar .btn.ghost {
+  color: rgba(255, 255, 255, 0.88);
+}
+html.theme-light .topbar .btn.ghost:hover,
+html[data-theme="light"] .topbar .btn.ghost:hover {
+  background: var(--btn-hover-bg);
+  border-color: var(--btn-hover-border);
+  color: var(--accent-dim);
+}
+/* Settings: hover = green text only (no wash / glow) */
+.settings-wrap > .btn.ghost:hover,
+[data-testid="settings-button"]:hover,
+html.theme-light .settings-wrap > .btn.ghost:hover,
+html.theme-light [data-testid="settings-button"]:hover,
+html[data-theme="light"] .settings-wrap > .btn.ghost:hover,
+html[data-theme="light"] [data-testid="settings-button"]:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--accent-dim);
+  box-shadow: none;
+}
+/* Light-gray strip behind Run / toolbars / Journal + NodeFlow tab rows */
+html.theme-light .toolbar,
+html.theme-light .nb-toolbar,
+html.theme-light .nb-jtab-row,
+html.theme-light .nb-jtabs,
+html.theme-light .nb2-toolbar,
+html.theme-light .nb2-tabbar,
+html.theme-light .nb2-tabbar-scroll,
+html.theme-light .nb2-tabbar-actions,
+html.theme-light .nb2-cat-row,
+html.theme-light .nb2-cat-sub,
+html.theme-light .result-status,
+html.theme-light .tabs,
+html[data-theme="light"] .toolbar,
+html[data-theme="light"] .nb-toolbar,
+html[data-theme="light"] .nb-jtab-row,
+html[data-theme="light"] .nb2-toolbar,
+html[data-theme="light"] .nb2-tabbar,
+html[data-theme="light"] .nb2-cat-row,
+html[data-theme="light"] .nb2-cat-sub {
+  background: var(--chrome-strip);
+  border-bottom-color: var(--chrome-frame);
+}
+html.theme-light .gutter-v,
+html.theme-light .gutter-h {
+  background: transparent;
+}
+html.theme-light .tables-reopen {
+  border-right-color: var(--chrome-frame);
+}
+/* History / saved list rows highlight in TD green */
+html.theme-light .list-item:hover,
+html[data-theme="light"] .list-item:hover {
+  background: var(--menu-hl);
+}
+/* Loaded-table entries: thin dark frame around each family block */
+html.theme-light .fam-block,
+html[data-theme="light"] .fam-block {
+  border: 1px solid #1a1a1a;
+  border-radius: 6px;
+  margin: 4px 6px;
+  overflow: hidden;
+}
+html.theme-light .fam-block .fam-kids,
+html[data-theme="light"] .fam-block .fam-kids {
+  border-left-color: var(--chrome-frame);
+}
+
+/* IDE / Journal / Notebook workspaces share toolbar gray */
+html.theme-light .body,
+html.theme-light .main,
+html.theme-light .nb,
+html.theme-light .nb-scroll,
+html.theme-light .nb-groups,
+html.theme-light .nb-group,
+html.theme-light .results,
+html.theme-light .editor-wrap,
+html.theme-light .result-pane,
+html.theme-light .grid-shell,
+html[data-theme="light"] .nb,
+html[data-theme="light"] .nb-scroll,
+html[data-theme="light"] .results {
+  background: var(--chrome-strip);
+}
+/* Loaded-tables rail matches toolbar / tab strip gray */
+html.theme-light .sidebar,
+html.theme-light .side-body,
+html.theme-light .side-head,
+html.theme-light .tables-reopen,
+html.theme-light .tt-panel,
+html.theme-light .wf-actions,
+html.theme-light .wf-section-head,
+html.theme-light .wf-group,
+html.theme-light .wf-group-head,
+html[data-theme="light"] .sidebar,
+html[data-theme="light"] .tt-panel,
+html[data-theme="light"] .wf-actions,
+html[data-theme="light"] .wf-section-head {
+  background: var(--chrome-strip);
+}
+html.theme-light .nb-group {
+  border-color: var(--chrome-frame);
+  background: #ffffff;
+}
+html.theme-light .nb-group-head,
+html.theme-light .nb-group-empty {
+  background: #ffffff;
+}
+html.theme-light .nb-group-name,
+html.theme-light .nb-group-name:hover,
+html.theme-light .nb-group-name:focus {
+  background: #ffffff;
+  color: var(--text);
+  border-color: transparent;
+}
+html.theme-light .nb-group-name:focus {
+  border-color: var(--chrome-frame);
+}
+html.theme-light .nb-group-head .btn.ghost,
+html.theme-light .nb-group-head .btn.sm.ghost {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-group-head .btn.ghost:hover,
+html.theme-light .nb-group-head .btn.sm.ghost:hover {
+  background: var(--btn-hover-bg);
+  border-color: var(--btn-hover-border);
+  color: var(--btn-hover-fg);
+}
+html.theme-light .nb-card {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-cardhead {
+  border-bottom-color: var(--chrome-ink-hi);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-handle {
+  color: var(--chrome-fg);
+  border-color: rgba(255, 255, 255, 0.28);
+  background: var(--chrome-ink);
+}
+html.theme-light .nb-handle:hover {
+  color: var(--chrome-fg);
+  border-color: rgba(255, 255, 255, 0.55);
+  background: var(--chrome-ink-hi);
+}
+html.theme-light .nb-handle-edit {
+  background: var(--chrome-ink-hi);
+  border-color: rgba(255, 255, 255, 0.45);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-grip {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-grip:hover {
+  background: var(--chrome-ink-hi);
+  border-color: var(--chrome-ink-hi);
+  color: var(--chrome-fg);
+}
+/* Cell controls: black chips + light icons (not white squares) */
+html.theme-light .nb-cell-actions .iconbtn,
+html.theme-light .nb-gutter .nb-badge,
+html.theme-light .nb-cardhead .iconbtn,
+html.theme-light .nb-cell-actions .iconbtn[title="Move up"],
+html.theme-light .nb-cell-actions .iconbtn[title="Move down"] {
+  background: var(--chrome-ink);
+  border-color: rgba(255, 255, 255, 0.28);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-cell-actions .iconbtn:hover:not(:disabled),
+html.theme-light .nb-cardhead .iconbtn:hover:not(:disabled),
+html.theme-light .nb-cell-actions .iconbtn[title="Move up"]:hover:not(:disabled),
+html.theme-light .nb-cell-actions .iconbtn[title="Move down"]:hover:not(:disabled) {
+  background: var(--btn-hover-bg);
+  color: var(--btn-hover-fg);
+  border-color: var(--btn-hover-border);
+}
+html.theme-light .nb-badge {
+  background: var(--chrome-ink);
+  border-color: rgba(255, 255, 255, 0.28);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-badge.ran {
+  background: color-mix(in srgb, var(--accent) 55%, #d8d8d8);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+html.theme-light .nb-badge.run {
+  background: var(--chrome-ink);
+  color: var(--chrome-fg);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+html.theme-light .nb-badge.note,
+html.theme-light .nb-badge.viz,
+html.theme-light .nb-badge.recon {
+  background: var(--chrome-ink);
+  color: var(--chrome-fg);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+html.theme-light .nb-toolbar select {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-outbar {
+  border-top-color: var(--chrome-ink-hi);
+  color: rgba(255, 255, 255, 0.72);
+}
+html.theme-light .nb-status {
+  color: rgba(255, 255, 255, 0.55);
+}
+html.theme-light .nb-status.ok {
+  color: var(--accent-dim);
+}
+html.theme-light .nb-tabchip {
+  color: rgba(255, 255, 255, 0.7);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+html.theme-light .nb-tabchip:hover {
+  color: var(--chrome-fg);
+}
+html.theme-light .nb-tabchip.on {
+  color: var(--accent-dim);
+  border-color: var(--accent-dim);
+}
+html.theme-light .nb-out,
+html.theme-light .nb-err,
+html.theme-light .nb-note-edit,
+html.theme-light .nb-out-chart,
+html.theme-light .nb-out-pivot {
+  background: var(--bg);
+  color: var(--text);
+}
+html.theme-light .nb-note {
+  border-left-color: var(--border);
+  color: var(--text);
+}
+
+/* Dashboard / NodeFlow: gray board; widgets match Journal cell treatment */
+html.theme-light .dash-root {
+  background: var(--bg);
+}
+html.theme-light body.canvas-ivory .nb2-canvas-wrap,
+html.theme-light .nb2-canvas-wrap {
+  background-color: var(--bg);
+  background-image: radial-gradient(rgba(0, 0, 0, 0.08) 1px, transparent 1px);
+}
+html.theme-light body.canvas-ivory .nb2-canvas.snap,
+html.theme-light .nb2-canvas.snap {
+  background-image: radial-gradient(rgba(0, 0, 0, 0.1) 1px, transparent 1px);
+}
+html.theme-light body.canvas-ivory .nb2-empty,
+html.theme-light .nb2-empty {
+  color: var(--text-faint);
+}
+html.theme-light .dash-widget {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+  box-shadow: 0 10px 28px rgba(17, 17, 17, 0.1);
+}
+html.theme-light .dash-widget.selected {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 12px 30px rgba(17, 17, 17, 0.12);
+}
+html.theme-light .dash-widget-head {
+  color: var(--chrome-fg);
+  border-bottom-color: var(--chrome-ink-hi);
+}
+html.theme-light .dash-widget-title {
+  color: var(--chrome-fg);
+}
+html.theme-light .dash-widget-body {
+  background: var(--bg);
+  color: var(--text);
+}
+html.theme-light .dash-widget-text {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+html.theme-light .dash-board-select {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .dash-board-select-menu {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink-hi);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+html.theme-light .dash-board-select-item {
+  color: var(--chrome-fg);
+}
+html.theme-light .dash-board-select-sep {
+  background: var(--chrome-ink-hi);
+}
+html.theme-light .nb2-dash-pane {
+  background: var(--chrome-ink);
+  border-color: var(--chrome-ink);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb2-dash-bar {
+  border-bottom-color: var(--chrome-ink-hi);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb2-dash-body {
+  background: var(--bg);
+  color: var(--text);
+}
+html.theme-light .nb2-dash-sel {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+/* Node config / inspector field headers: black (not gray) */
+html.theme-light .nb2-lbl,
+html.theme-light .nb2-insp-head,
+html.theme-light .nb2-insp-title,
+html[data-theme="light"] .nb2-lbl,
+html[data-theme="light"] .nb2-insp-head,
+html[data-theme="light"] .nb2-insp-title {
+  color: #111111;
+}
+html.theme-light .nb2-insp-help,
+html[data-theme="light"] .nb2-insp-help {
+  color: #444444;
+}
+
+/* NodeFlow node headers: black bar + white text */
+html.theme-light .nb2-node-head,
+html[data-theme="light"] .nb2-node-head {
+  background: var(--chrome-ink);
+  border-bottom-color: var(--chrome-ink-hi);
+  color: var(--chrome-fg);
+}
+html.theme-light .nb2-node-type,
+html.theme-light .nb2-node-label,
+html.theme-light .nb2-node-head .nb2-node-type,
+html.theme-light .nb2-node-head .nb2-node-label,
+html[data-theme="light"] .nb2-node-type,
+html[data-theme="light"] .nb2-node-label {
+  color: var(--chrome-fg);
+}
+html.theme-light .nb2-node-type {
+  opacity: 0.78;
+}
+html.theme-light .nb2-node.text .nb2-node-head,
+html[data-theme="light"] .nb2-node.text .nb2-node-head {
+  background: var(--chrome-ink);
+  border-bottom: 1px solid var(--chrome-ink-hi);
+}
+html.theme-light .nb2-node.text .nb2-node-type,
+html.theme-light .nb2-node.text .nb2-node-label,
+html[data-theme="light"] .nb2-node.text .nb2-node-type {
+  color: var(--chrome-fg);
+}
+
+/* Minimap: thin black outline in light mode */
+html.theme-light .nb2-minimap,
+html[data-theme="light"] .nb2-minimap {
+  border: 1px solid #111111;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+}
+html.theme-light .nb2-mm-toggle,
+html[data-theme="light"] .nb2-mm-toggle {
+  border-color: #111111;
 }
 
 /* Eye Care enlarges the whole surface together so buttons, nodes, panels,
@@ -543,6 +1353,10 @@ textarea:focus {
   border-bottom: 2px solid transparent;
   white-space: nowrap;
   position: relative;
+  cursor: pointer;
+}
+.tab .tab-rename {
+  cursor: text;
 }
 .tab:hover {
   color: var(--text);
@@ -1127,7 +1941,7 @@ textarea:focus {
 
 /* optional ivory SQL editor (Settings > SQL editor: ivory) */
 body.editor-ivory .code {
-  background: #f7f4ec;
+  background: #d8d8d8;
 }
 body.editor-ivory .code .gutter {
   color: #9a927f;
@@ -2215,6 +3029,10 @@ body.editor-ivory .code textarea.ta::placeholder {
   font-weight: 600;
   margin-bottom: 2px;
 }
+html.theme-light .toast .tt,
+html[data-theme="light"] .toast .tt {
+  color: #111111;
+}
 @keyframes slidein {
   from {
     opacity: 0;
@@ -2248,6 +3066,9 @@ body.editor-ivory .code textarea.ta::placeholder {
 }
 .faint {
   color: var(--text-faint);
+}
+.muted {
+  color: var(--muted, var(--text-dim));
 }
 .hint {
   font-size: 11.5px;
@@ -3192,6 +4013,8 @@ kbd {
   flex: 0 0 auto;
   width: 24px;
   padding: 2px 0;
+  position: relative;
+  z-index: 1;
 }
 .nb-group-count {
   flex: 0 0 auto;
@@ -3241,11 +4064,19 @@ kbd {
   position: absolute;
   top: 0;
   bottom: -8px;
+  left: 50%;
   width: 1px;
+  margin-left: -0.5px;
   background: var(--border);
+  z-index: 0;
+  pointer-events: none;
+}
+.nb-gutter > .nb-grip,
+.nb-gutter > .nb-badge {
+  position: relative;
+  z-index: 1;
 }
 .nb-badge {
-  z-index: 1;
   width: 26px;
   height: 26px;
   border-radius: 7px;
@@ -4068,6 +4899,8 @@ kbd {
 /* notebook cell drag-and-drop reordering */
 .nb-cell { position: relative; }
 .nb-grip {
+  position: relative;
+  z-index: 1;
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--text-dim);
@@ -5244,7 +6077,7 @@ kbd {
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  background: #fff;
+  background: #d8d8d8;
   transform: translateX(0);
   transition: transform var(--dur-fast) var(--ease-out);
 }
@@ -6070,7 +6903,7 @@ kbd {
   min-width: 240px;
   max-height: 320px;
   overflow: auto;
-  background: var(--bg, #fff);
+  background: var(--bg, #d8d8d8);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
@@ -6122,6 +6955,7 @@ kbd {
   padding: 5px 12px;
   border-top: 1px solid var(--border);
   background: var(--bg-subtle, rgba(127, 127, 127, 0.06));
+  color: var(--text);
   font-size: 12px;
   min-height: 30px;
   box-sizing: border-box;
@@ -6153,6 +6987,7 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: inherit;
 }
 .nb2-statusbar.error .nb2-status-text {
   color: #d05656;
@@ -6166,8 +7001,23 @@ kbd {
 }
 .nb2-status-right {
   margin-left: auto;
-  opacity: 0.6;
+  opacity: 0.75;
+  color: inherit;
   font-variant-numeric: tabular-nums;
+}
+
+/* Light mode: status bar sits on gray strip — keep labels black */
+html.theme-light .nb2-statusbar,
+html.theme-light .nb2-statusbar .nb2-status-text,
+html.theme-light .nb2-statusbar .nb2-status-right,
+html[data-theme="light"] .nb2-statusbar,
+html[data-theme="light"] .nb2-statusbar .nb2-status-text,
+html[data-theme="light"] .nb2-statusbar .nb2-status-right {
+  color: #111111 !important;
+}
+html.theme-light .nb2-statusbar.error .nb2-status-text,
+html[data-theme="light"] .nb2-statusbar.error .nb2-status-text {
+  color: #d05656 !important;
 }
 
 /* Sidebar: collapsible groups for SQL Server catalog tables */
@@ -6302,7 +7152,7 @@ kbd {
 /* the Run/Stop Workflow item turns red while a workflow is running */
 .nb2-node-menu .nb2-cm-stop { color: var(--error); }
 .nb2-node-menu {
-  background: var(--bg, #fff);
+  background: var(--bg, #d8d8d8);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
@@ -6348,7 +7198,7 @@ kbd {
   max-width: min(188px, calc(100vw - 16px));
   box-sizing: border-box;
   overflow-x: hidden;
-  background: var(--bg, #fff);
+  background: var(--bg, #d8d8d8);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
@@ -6821,7 +7671,7 @@ kbd {
   right: 14px;
   bottom: 14px;
   z-index: 30;
-  background: var(--bg, #fff);
+  background: var(--bg, #d8d8d8);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
@@ -7071,16 +7921,16 @@ kbd {
   background-image: radial-gradient(rgba(127, 127, 127, 0.28) 1px, transparent 1px);
   background-size: 16px 16px;
 }
-/* optional warm ivory canvas (Settings > NodeFlow canvas: ivory) */
+/* optional light canvas (Settings > NodeFlow canvas: ivory toggle) */
 body.canvas-ivory .nb2-canvas-wrap {
-  background-color: #f7f4ec;
-  background-image: radial-gradient(rgba(60, 50, 30, 0.16) 1px, transparent 1px);
+  background-color: #d8d8d8;
+  background-image: radial-gradient(rgba(0, 0, 0, 0.12) 1px, transparent 1px);
 }
 body.canvas-ivory .nb2-canvas.snap {
-  background-image: radial-gradient(rgba(60, 50, 30, 0.22) 1px, transparent 1px);
+  background-image: radial-gradient(rgba(0, 0, 0, 0.18) 1px, transparent 1px);
 }
 body.canvas-ivory .nb2-empty {
-  color: #6b6456;
+  color: #6a6a6a;
 }
 
 /* REST API load tab: two-pane (request config left, JSON sample right) */
@@ -9509,7 +10359,13 @@ body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
   text-overflow: ellipsis;
   text-align: center;
 }
+.dash-board-select-wrap {
+  position: relative;
+}
 .dash-board-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 160px;
   max-width: 240px;
   height: 32px;
@@ -9519,8 +10375,74 @@ body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
   background: var(--panel);
   color: var(--text);
   font-size: 13px;
-  accent-color: var(--accent);
-  color-scheme: dark;
+  font-weight: 500;
+  cursor: pointer;
+  appearance: none;
+  text-align: left;
+}
+.dash-board-select:hover,
+.dash-board-select.open {
+  border-color: var(--accent-line);
+}
+.dash-board-select-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dash-board-select-caret {
+  flex: 0 0 auto;
+  opacity: 0.75;
+}
+.dash-board-select-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 70;
+  min-width: 100%;
+  max-width: min(320px, 70vw);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+.dash-board-select-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dash-board-select-item:hover,
+.dash-board-select-item.selected {
+  /* Solid TD green — custom list, not native OS select highlight */
+  background: var(--accent);
+  color: #ffffff;
+}
+.dash-board-select-item.selected {
+  font-weight: 600;
+}
+.dash-board-select-add {
+  font-weight: 600;
+}
+.dash-board-select-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }
 .dash-board {
   position: relative;
@@ -9562,27 +10484,6 @@ body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
     border-color var(--dur-base) ease,
     transform var(--dur-base) ease,
     background var(--dur-base) ease;
-}
-.dash-widget.dash-widget-glass {
-  background: color-mix(in srgb, var(--panel) 42%, transparent);
-  border-color: color-mix(in srgb, var(--border) 55%, transparent);
-  /* 10px (was 18px): keeps glass read without saturating the compositor on dense boards. */
-  backdrop-filter: blur(10px) saturate(1.35);
-  -webkit-backdrop-filter: blur(10px) saturate(1.35);
-  box-shadow:
-    0 10px 28px rgba(0, 0, 0, 0.16),
-    inset 0 1px 0 color-mix(in srgb, #fff 22%, transparent);
-}
-/* Suppress live blur while transform animations run (avoids per-frame re-blur). */
-.dash-anim-add,
-.dash-anim-drag,
-.dash-anim-remove,
-.dash-widget.dragging {
-  backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
-}
-.dash-widget.dash-widget-glass.dash-widget-text {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .dash-widget.selected {
   border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
@@ -9975,6 +10876,14 @@ body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
   color: var(--text);
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+/* Light mode: clearer transparent TD-green hover on Add NodeFlow */
+html.theme-light .dash-add:hover,
+html[data-theme="light"] .dash-add:hover {
+  color: var(--btn-hover-fg);
+  border-color: var(--btn-hover-border);
+  background: var(--btn-hover-bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .dash-placeholder,
 .dash-error {
@@ -10418,4 +11327,485 @@ body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
 .sql-asst-input:focus {
   outline: none;
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+/* ---- Light theme surfaces (late overrides) ----
+   Workspaces and floating panels share chrome-strip gray. */
+html.theme-light,
+html.theme-light body,
+html.theme-light #root,
+html.theme-light .app {
+  background-color: var(--chrome-strip) !important;
+  background: var(--chrome-strip);
+}
+html.theme-light .body,
+html.theme-light .main,
+html.theme-light .editor-wrap,
+html.theme-light .results,
+html.theme-light .result-pane,
+html.theme-light .grid-shell,
+html.theme-light .nb,
+html.theme-light .nb-scroll,
+html.theme-light .nb-groups,
+html.theme-light .code,
+html.theme-light body.editor-ivory .code,
+html.theme-light .nb-ed .code,
+html.theme-light .nb-out,
+html.theme-light .nb-err,
+html.theme-light .nb-note-edit,
+html.theme-light .nodeflow,
+html.theme-light .nb2-stage,
+html.theme-light .nb2-canvas-wrap,
+html.theme-light body.canvas-ivory .nb2-canvas-wrap,
+html.theme-light .dash-root,
+html.theme-light .nb2-inspector,
+html.theme-light .nb2-inspector.docked,
+html.theme-light .modal,
+html.theme-light .modal-body,
+html[data-theme="light"] body,
+html[data-theme="light"] .body,
+html[data-theme="light"] .main,
+html[data-theme="light"] .nb,
+html[data-theme="light"] .nb-scroll,
+html[data-theme="light"] .nodeflow,
+html[data-theme="light"] .nb2-canvas-wrap,
+html[data-theme="light"] body.canvas-ivory .nb2-canvas-wrap {
+  background-color: var(--chrome-strip) !important;
+  background: var(--chrome-strip);
+}
+html.theme-light .nb2-node {
+  background-color: var(--chrome-strip) !important;
+  background: var(--chrome-strip);
+}
+html.theme-light .nb2-canvas-wrap,
+html.theme-light body.canvas-ivory .nb2-canvas-wrap,
+html[data-theme="light"] .nb2-canvas-wrap,
+html[data-theme="light"] body.canvas-ivory .nb2-canvas-wrap {
+  background-image: radial-gradient(rgba(0, 0, 0, 0.12) 1px, transparent 1px) !important;
+  background-size: 22px 22px;
+}
+html.theme-light .nb2-canvas.snap,
+html.theme-light body.canvas-ivory .nb2-canvas.snap {
+  background-image: radial-gradient(rgba(0, 0, 0, 0.18) 1px, transparent 1px) !important;
+  background-size: 16px 16px;
+}
+/* NodeFlow canvas: white like the Journal group container */
+html.theme-light .nb2-canvas-wrap,
+html.theme-light body.canvas-ivory .nb2-canvas-wrap,
+html[data-theme="light"] .nb2-canvas-wrap,
+html[data-theme="light"] body.canvas-ivory .nb2-canvas-wrap {
+  background-color: #ffffff !important;
+  background: #ffffff;
+}
+/* Keep chrome strips / topbar / black cell frames from inheriting workspace gray */
+html.theme-light .topbar,
+html.theme-light .toolbar,
+html.theme-light .nb-toolbar,
+html.theme-light .nb-jtab-row,
+html.theme-light .nb2-toolbar,
+html.theme-light .nb2-tabbar,
+html.theme-light .nb2-tabbar-scroll,
+html.theme-light .nb2-tabbar-actions,
+html.theme-light .nb2-cat-row,
+html.theme-light .nb2-cat-sub,
+html.theme-light .result-status,
+html.theme-light .tabs,
+html.theme-light .sidebar,
+html.theme-light .side-body,
+html.theme-light .side-head,
+html.theme-light .tables-reopen,
+html.theme-light .tt-panel,
+html.theme-light .wf-actions,
+html.theme-light .wf-section-head,
+html.theme-light .wf-group,
+html.theme-light .wf-group-head {
+  background: var(--chrome-strip) !important;
+}
+html.theme-light .nb-group,
+html.theme-light .nb-group-head,
+html.theme-light .nb-group-empty {
+  background: #ffffff !important;
+}
+html.theme-light .topbar {
+  background: var(--chrome-topbar) !important;
+}
+html.theme-light .nb-card,
+html.theme-light .nb-cardhead,
+html.theme-light .nb2-node-head,
+html.theme-light .dash-widget {
+  background: var(--chrome-ink) !important;
+}
+html.theme-light .code .gutter,
+html.theme-light body.editor-ivory .code .gutter {
+  background: var(--chrome-ink) !important;
+}
+html.theme-light .code textarea.ta,
+html.theme-light body.editor-ivory .code textarea.ta {
+  background: transparent !important;
+}
+
+/* Journal group name: match white group container */
+html.theme-light .nb-group-name,
+html.theme-light .nb-group-name:focus,
+html[data-theme="light"] .nb-group-name {
+  background: #ffffff !important;
+  color: var(--text) !important;
+}
+html.theme-light .nb-toolbar select,
+html[data-theme="light"] .nb-toolbar select {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .nb-grip,
+html.theme-light .nb-handle,
+html.theme-light .nb-badge,
+html.theme-light .nb-badge.note,
+html.theme-light .nb-badge.viz,
+html.theme-light .nb-badge.recon,
+html.theme-light .nb-badge.run {
+  background: var(--chrome-ink) !important;
+  color: var(--chrome-fg) !important;
+  border-color: rgba(255, 255, 255, 0.28) !important;
+}
+html.theme-light .nb-badge.ran {
+  background: color-mix(in srgb, var(--accent) 55%, #d8d8d8) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent-hi) !important;
+}
+html.theme-light .grow.odd,
+html[data-theme="light"] .grow.odd {
+  background: color-mix(in srgb, var(--bg) 92%, #000) !important;
+}
+html.theme-light .gh-cell {
+  background: var(--panel-2) !important;
+}
+html.theme-light .result-status,
+html.theme-light .seg,
+html[data-theme="light"] .result-status,
+html[data-theme="light"] .seg {
+  background: var(--chrome-strip-hi) !important;
+  background-color: var(--chrome-strip-hi) !important;
+  color: #111111 !important;
+}
+html.theme-light .result-status .stat,
+html.theme-light .result-status .stat b,
+html.theme-light .result-status .chip,
+html[data-theme="light"] .result-status .stat,
+html[data-theme="light"] .result-status .stat b {
+  color: #111111 !important;
+}
+html.theme-light .chip.duckdb,
+html[data-theme="light"] .chip.duckdb {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink) !important;
+  color: #ffffff !important;
+}
+html.theme-light .chip.duckdb .dot,
+html[data-theme="light"] .chip.duckdb .dot {
+  background: var(--duck) !important;
+}
+html.theme-light .seg-btn:not(.on),
+html[data-theme="light"] .seg-btn:not(.on) {
+  background: var(--chrome-strip-hi) !important;
+  color: #111111 !important;
+}
+html.theme-light .seg-btn:not(.on):hover,
+html[data-theme="light"] .seg-btn:not(.on):hover {
+  background: var(--btn-hover-bg) !important;
+  color: var(--btn-hover-fg) !important;
+}
+html.theme-light .seg-btn.on,
+html[data-theme="light"] .seg-btn.on {
+  background: var(--accent) !important;
+  color: #ffffff !important;
+}
+html.theme-light .gh-cell.rownum,
+html.theme-light .gc-cell.rownum {
+  background: var(--chrome-ink) !important;
+  color: var(--chrome-fg) !important;
+}
+/* Result column headers: slightly darker gray than bg, black text */
+html.theme-light .grid-head,
+html.theme-light .gh-cell:not(.rownum),
+html.theme-light .pv-grid thead th,
+html.theme-light .rr-grid thead th,
+html.theme-light .dash-pivot .gh-cell:not(.rownum),
+html[data-theme="light"] .grid-head,
+html[data-theme="light"] .gh-cell:not(.rownum),
+html[data-theme="light"] .pv-grid thead th,
+html[data-theme="light"] .rr-grid thead th {
+  background: var(--chrome-strip-hi) !important;
+  background-color: var(--chrome-strip-hi) !important;
+  color: #111111 !important;
+  border-color: var(--chrome-frame) !important;
+}
+html.theme-light .gh-cell:not(.rownum):hover,
+html.theme-light .pv-grid thead th:hover,
+html[data-theme="light"] .gh-cell:not(.rownum):hover {
+  background: var(--raised-2) !important;
+  color: #111111 !important;
+}
+html.theme-light .gh-cell .sort,
+html[data-theme="light"] .gh-cell .sort {
+  color: #111111 !important;
+}
+html.theme-light .pv-grid thead th.pv-sorted,
+html[data-theme="light"] .pv-grid thead th.pv-sorted {
+  color: #111111 !important;
+}
+html.theme-light .gc-cell.num:not(.rownum),
+html[data-theme="light"] .gc-cell.num:not(.rownum) {
+  color: #111111 !important;
+}
+html.theme-light .btn:not(.ghost):not(.xbtn),
+html.theme-light .btn.primary,
+html.theme-light .btn.danger {
+  background: var(--chrome-ink) !important;
+  color: var(--chrome-fg) !important;
+}
+/* Shared transparent TD-green button hover (beats black-chrome !important).
+   Keep danger / × on their red path. */
+html.theme-light .btn:hover:not(:disabled):not(.danger):not(.xbtn),
+html.theme-light .btn.primary:hover:not(:disabled),
+html.theme-light .btn.ghost:hover:not(:disabled):not(.xbtn),
+html.theme-light .iconbtn:hover:not(:disabled):not(.xbtn),
+html.theme-light .nb2-zoom .btn:hover,
+html.theme-light .nb2-zoom .btn.ghost:hover,
+html.theme-light .nb2-zoom .btn.primary:hover,
+html.theme-light .tt-toolbar .btn:hover,
+html.theme-light .tt-toolbar .btn.ghost:hover,
+html.theme-light .tt-node-section:hover,
+html.theme-light .tt-head .btn.ghost:hover,
+html[data-theme="light"] .btn:hover:not(:disabled):not(.danger):not(.xbtn),
+html[data-theme="light"] .btn.ghost:hover:not(:disabled):not(.xbtn),
+html[data-theme="light"] .iconbtn:hover:not(:disabled):not(.xbtn) {
+  background: var(--btn-hover-bg) !important;
+  border-color: var(--btn-hover-border) !important;
+  color: var(--btn-hover-fg) !important;
+}
+/* Light mode: every modal / floating-dialog header uses black chrome. */
+html.theme-light .modal-head,
+html.theme-light .errlog-head,
+html.theme-light .about-head,
+html.theme-light .cmd-palette-head,
+html.theme-light .docs-float-head,
+html.theme-light .sql-asst-head,
+html.theme-light .col-lineage-head,
+html.theme-light .col-lineage-values-head,
+html.theme-light .col-lineage-value-prior-head,
+html.theme-light .col-lineage-detail-head,
+html.theme-light .dash-modal-head,
+html.theme-light .dash-expand-head,
+html.theme-light .dash-config-head,
+html.theme-light .dash-config-panel-head,
+html.theme-light .fx-head,
+html.theme-light .rr-head,
+html[data-theme="light"] .modal-head,
+html[data-theme="light"] .errlog-head,
+html[data-theme="light"] .about-head,
+html[data-theme="light"] .cmd-palette-head,
+html[data-theme="light"] .docs-float-head,
+html[data-theme="light"] .sql-asst-head,
+html[data-theme="light"] .col-lineage-head,
+html[data-theme="light"] .dash-modal-head,
+html[data-theme="light"] .dash-expand-head {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink-hi) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .tt-head,
+html[data-theme="light"] .tt-head {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink-hi) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .tt-head *,
+html[data-theme="light"] .tt-head * {
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .tt-head .btn.ghost,
+html.theme-light .tt-head .btn.sm.ghost,
+html[data-theme="light"] .tt-head .btn.ghost {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .tt-head .btn.ghost:hover,
+html[data-theme="light"] .tt-head .btn.ghost:hover {
+  background: var(--btn-hover-bg) !important;
+  border-color: var(--btn-hover-border) !important;
+  color: var(--btn-hover-fg) !important;
+}
+/* Tools & Tables Nodes section pills: black + white */
+html.theme-light .tt-node-section,
+html[data-theme="light"] .tt-node-section {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink-hi) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .tt-node-section.active,
+html[data-theme="light"] .tt-node-section.active {
+  background: var(--chrome-ink) !important;
+  border-color: var(--accent) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .tt-toolbar .btn,
+html.theme-light .tt-toolbar .btn.ghost,
+html.theme-light .tt-toolbar .btn.sm,
+html[data-theme="light"] .tt-toolbar .btn {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .modal-head *,
+html.theme-light .errlog-head *,
+html.theme-light .about-head *,
+html.theme-light .cmd-palette-head *,
+html.theme-light .docs-float-head *,
+html.theme-light .sql-asst-head *,
+html.theme-light .col-lineage-head *,
+html.theme-light .dash-modal-head *,
+html.theme-light .dash-expand-head *,
+html.theme-light .dash-config-head *,
+html.theme-light .dash-config-panel-head *,
+html.theme-light .fx-head *,
+html.theme-light .rr-head *,
+html.theme-light .tt-head * {
+  color: var(--chrome-fg) !important;
+}
+/* Activity modal: black status card and engine pills with white copy.
+   State remains visible through the green / amber / gray indicator dots. */
+html.theme-light .act-monitor,
+html.theme-light .act-monitor.idle,
+html.theme-light .act-monitor.busy,
+html.theme-light .act-monitor.error,
+html[data-theme="light"] .act-monitor,
+html[data-theme="light"] .act-monitor.idle,
+html[data-theme="light"] .act-monitor.busy,
+html[data-theme="light"] .act-monitor.error {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink-hi) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .act-monitor-state,
+html.theme-light .act-monitor-activity,
+html.theme-light .act-live,
+html[data-theme="light"] .act-monitor-state,
+html[data-theme="light"] .act-monitor-activity,
+html[data-theme="light"] .act-live {
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .act-engine,
+html.theme-light .act-engine.idle,
+html.theme-light .act-engine.busy,
+html.theme-light .act-engine.off,
+html.theme-light .act-engine.restoring,
+html[data-theme="light"] .act-engine,
+html[data-theme="light"] .act-engine.idle,
+html[data-theme="light"] .act-engine.busy,
+html[data-theme="light"] .act-engine.off,
+html[data-theme="light"] .act-engine.restoring {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink-hi) !important;
+  color: var(--chrome-fg) !important;
+  opacity: 1;
+}
+html.theme-light .act-engine-state,
+html[data-theme="light"] .act-engine-state {
+  color: var(--chrome-fg) !important;
+}
+/* Light mode Pivot: gray workspace, black field/droppable headers. */
+html.theme-light .res-tabs,
+html.theme-light .pivot-panel,
+html.theme-light .pv-body,
+html.theme-light .pv-main,
+html.theme-light .pv-bar,
+html.theme-light .pv-tiles,
+html.theme-light .pv-result,
+html.theme-light .pv-empty,
+html.theme-light .pv-grid-wrap,
+html[data-theme="light"] .res-tabs,
+html[data-theme="light"] .pivot-panel,
+html[data-theme="light"] .pv-body,
+html[data-theme="light"] .pv-main,
+html[data-theme="light"] .pv-bar,
+html[data-theme="light"] .pv-tiles,
+html[data-theme="light"] .pv-result {
+  background: var(--chrome-strip) !important;
+  background-color: var(--chrome-strip) !important;
+}
+html.theme-light .pv-drawer,
+html.theme-light .pv-field-list,
+html.theme-light .pv-role-filters,
+html[data-theme="light"] .pv-drawer,
+html[data-theme="light"] .pv-field-list,
+html[data-theme="light"] .pv-role-filters {
+  background: var(--chrome-ink) !important;
+  background-color: var(--chrome-ink) !important;
+  color: var(--chrome-fg) !important;
+  border-color: var(--chrome-ink-hi) !important;
+}
+html.theme-light .pv-drawer-head,
+html.theme-light .pv-field-section,
+html.theme-light .pv-tile-head,
+html[data-theme="light"] .pv-drawer-head,
+html[data-theme="light"] .pv-field-section,
+html[data-theme="light"] .pv-tile-head {
+  background: var(--chrome-ink) !important;
+  background-color: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink-hi) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .pv-tile,
+html[data-theme="light"] .pv-tile {
+  background: var(--chrome-strip) !important;
+  background-color: var(--chrome-strip) !important;
+  border-color: var(--chrome-frame) !important;
+}
+html.theme-light .pv-tile-hint,
+html[data-theme="light"] .pv-tile-hint {
+  color: var(--text-dim) !important;
+}
+html.theme-light .pv-field-search,
+html[data-theme="light"] .pv-field-search {
+  background: var(--chrome-fg) !important;
+  border-color: var(--chrome-ink-hi) !important;
+  color: var(--text) !important;
+}
+html.theme-light .pv-field,
+html.theme-light .pv-role-chip,
+html[data-theme="light"] .pv-field,
+html[data-theme="light"] .pv-role-chip {
+  background: var(--chrome-ink-hi) !important;
+  border-color: rgba(255, 255, 255, 0.22) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .pv-field:hover,
+html.theme-light .pv-role-chip:hover,
+html.theme-light .pv-role-chip.on,
+html[data-theme="light"] .pv-field:hover,
+html[data-theme="light"] .pv-role-chip:hover,
+html[data-theme="light"] .pv-role-chip.on {
+  background: var(--btn-hover-bg) !important;
+  border-color: var(--btn-hover-border) !important;
+  color: var(--btn-hover-fg) !important;
+}
+html.theme-light .pv-ftype,
+html[data-theme="light"] .pv-ftype {
+  background: var(--chrome-ink) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .nb2-zoom .btn,
+html.theme-light .nb2-zoom .btn.ghost,
+html.theme-light .nb2-zoom .btn.primary {
+  background: var(--chrome-ink) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .nb2-zoom .btn:hover,
+html.theme-light .nb2-zoom .btn.ghost:hover,
+html.theme-light .nb2-zoom .btn.primary:hover {
+  background: var(--btn-hover-bg) !important;
+  border-color: var(--btn-hover-border) !important;
+  color: var(--btn-hover-fg) !important;
 }

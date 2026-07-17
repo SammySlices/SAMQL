@@ -7,6 +7,45 @@ export type StaleColumnRef = {
 
 const SKIP_TYPES = new Set<NodeType>(["select", "pivot"]);
 
+/** Freeform expression nodes: never auto-prune (typing mid-identifier looks
+ *  "stale" and would wipe the whole condition/expr). Banner + manual Clear only. */
+export const NO_AUTO_PRUNE_STALE_TYPES = new Set<NodeType>(["filter", "formula"]);
+
+/** Every node type with stale-ref detection (kept in sync with the switch below). */
+export const STALE_REF_NODE_TYPES: readonly NodeType[] = [
+  "filter",
+  "formula",
+  "summarize",
+  "sort",
+  "unique",
+  "unpivot",
+  "window",
+  "perioddelta",
+  "bin",
+  "rank",
+  "fill",
+  "dedupe",
+  "split",
+  "jsonextract",
+  "explode",
+  "textclean",
+  "maprecode",
+  "parse",
+  "topn",
+  "coalesce",
+  "renamecols",
+  "validate",
+  "chart",
+  "join",
+  "multijoin",
+  "antijoin",
+  "reconcile",
+  "groupconcat",
+  "date",
+  "iterator",
+  "while",
+] as const;
+
 const SQL_WORDS = new Set([
   "and",
   "or",

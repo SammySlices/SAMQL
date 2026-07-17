@@ -28,7 +28,7 @@ type ThemeColors = {
 
 const THEMES: Record<"dark" | "light", ThemeColors> = {
   dark:  { axis: "#9aa3b2", grid: "#2b2f37", bg: "#1b1e23", text: "#e6e9ef", border: "#3a404b" },
-  light: { axis: "#5b6470", grid: "#e3e7ee", bg: "#ffffff", text: "#1b1e23", border: "#cfd6e0" },
+  light: { axis: "#5b6470", grid: "#b8b8b8", bg: "#d8d8d8", text: "#1b1e23", border: "#9a9a9a" },
 };
 
 export function paletteColors(p?: ChartPalette): string[] {

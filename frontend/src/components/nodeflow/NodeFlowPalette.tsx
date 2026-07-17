@@ -180,8 +180,6 @@ export function useNodeFlowPalette(showNodeSearch?: boolean) {
 interface NodeFlowPaletteProps {
   paletteHidden?: boolean;
   showNodeSearch?: boolean;
-  snap: boolean;
-  setSnap: React.Dispatch<React.SetStateAction<boolean>>;
   zoom: number;
   zoomBy: (multiplier: number) => void;
   resetZoom: () => void;
@@ -191,8 +189,6 @@ interface NodeFlowPaletteProps {
 export const NodeFlowPalette = React.memo(function NodeFlowPalette({
   paletteHidden,
   showNodeSearch,
-  snap,
-  setSnap,
   zoom,
   zoomBy,
   resetZoom,
@@ -322,13 +318,6 @@ export const NodeFlowPalette = React.memo(function NodeFlowPalette({
           </div>
         )}
         <div className="nb2-zoom">
-          <button
-            className={"btn sm" + (snap ? " primary" : " ghost")}
-            onClick={() => setSnap((value) => !value)}
-            title="Snap nodes to a grid while dragging"
-          >
-            Snap
-          </button>
           <button
             className="btn sm icon"
             onClick={() => zoomBy(1 / 1.2)}

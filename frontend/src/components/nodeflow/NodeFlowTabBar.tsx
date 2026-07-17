@@ -31,8 +31,6 @@ interface NodeFlowTabBarProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
-  paletteHidden?: boolean;
-  onTogglePalette?: () => void;
 }
 
 export const NodeFlowTabBar = React.memo(function NodeFlowTabBar({
@@ -54,8 +52,6 @@ export const NodeFlowTabBar = React.memo(function NodeFlowTabBar({
   canRedo,
   onUndo,
   onRedo,
-  paletteHidden,
-  onTogglePalette,
 }: NodeFlowTabBarProps) {
   return (
     <div className="nb2-tabbar" role="tablist">
@@ -145,14 +141,6 @@ export const NodeFlowTabBar = React.memo(function NodeFlowTabBar({
           title="Redo (Ctrl+Y)"
         >
           ↻
-        </button>
-        <span className="nb2-wf-sep" />
-        <button
-          className={"btn sm icon" + (paletteHidden ? "" : " active")}
-          onClick={onTogglePalette}
-          title={paletteHidden ? "Show the node toolbar" : "Hide the node toolbar"}
-        >
-          <Icon.Grid size={13} />
         </button>
       </div>
     </div>

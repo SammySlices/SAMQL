@@ -447,6 +447,7 @@ export const Dashboard: React.FC<{
   const [eligible, setEligible] = useState<{ name: string }[]>([]);
   const [loadingEligible, setLoadingEligible] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [boardSelectOpen, setBoardSelectOpen] = useState(false);
   const [fileModal, setFileModal] = useState<{
     mode: "save" | "open";
   } | null>(null);
@@ -1559,17 +1560,6 @@ export const Dashboard: React.FC<{
           </button>
         ) : null}
       </div>
-      <label className="nb2-check">
-        <input
-          type="checkbox"
-          data-testid="dashboard-liquid-glass"
-          checked={!!selected.liquidGlass}
-          onChange={(e) =>
-            updateWidget(selected.id, { liquidGlass: e.target.checked })
-          }
-        />{" "}
-        Liquid glass
-      </label>
       {selected.kind === "text" ? (
         <>
           <label className="nb2-lbl">Text</label>
@@ -1857,26 +1847,72 @@ export const Dashboard: React.FC<{
           </div>
         </div>
         <div className="dash-toolbar-right">
-          <select
-            className="dash-board-select"
-            data-testid="dashboard-select"
-            value={workspace.activeId}
-            onChange={(e) => {
-              if (e.target.value === "__new__") {
-                addDashboardBoard();
-                return;
+          <div className="dash-board-select-wrap">
+            <button
+              type="button"
+              className={
+                "dash-board-select" + (boardSelectOpen ? " open" : "")
               }
-              switchBoard(e.target.value);
-            }}
-            title="Switch or add dashboards"
-          >
-            {workspace.dashboards.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-            <option value="__new__">+ Add dashboard…</option>
-          </select>
+              data-testid="dashboard-select"
+              aria-expanded={boardSelectOpen}
+              aria-haspopup="listbox"
+              title="Switch or add dashboards"
+              onClick={() => {
+                setMoreMenuOpen(false);
+                setBoardSelectOpen((v) => !v);
+              }}
+            >
+              <span className="dash-board-select-label">{doc.name}</span>
+              <Icon.Chevron size={14} className="dash-board-select-caret" />
+            </button>
+            {boardSelectOpen ? (
+              <>
+                <div
+                  className="rc-backdrop"
+                  data-testid="dashboard-select-backdrop"
+                  onMouseDown={() => setBoardSelectOpen(false)}
+                />
+                <div
+                  className="dash-board-select-menu"
+                  role="listbox"
+                  data-testid="dashboard-select-menu"
+                  aria-label="Dashboards"
+                >
+                  {workspace.dashboards.map((d) => (
+                    <button
+                      key={d.id}
+                      type="button"
+                      role="option"
+                      aria-selected={d.id === workspace.activeId}
+                      className={
+                        "dash-board-select-item" +
+                        (d.id === workspace.activeId ? " selected" : "")
+                      }
+                      data-testid={`dashboard-select-option-${d.id}`}
+                      onClick={() => {
+                        setBoardSelectOpen(false);
+                        if (d.id !== workspace.activeId) switchBoard(d.id);
+                      }}
+                    >
+                      {d.name}
+                    </button>
+                  ))}
+                  <div className="dash-board-select-sep" role="separator" />
+                  <button
+                    type="button"
+                    className="dash-board-select-item dash-board-select-add"
+                    data-testid="dashboard-select-add"
+                    onClick={() => {
+                      setBoardSelectOpen(false);
+                      addDashboardBoard();
+                    }}
+                  >
+                    + Add dashboard…
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </div>
           <div className="dash-more-wrap">
             <button
               type="button"
@@ -1892,7 +1928,10 @@ export const Dashboard: React.FC<{
                   ? "More actions (widgets locked)"
                   : "More actions"
               }
-              onClick={() => setMoreMenuOpen((v) => !v)}
+              onClick={() => {
+                setBoardSelectOpen(false);
+                setMoreMenuOpen((v) => !v);
+              }}
             >
               <Icon.MoreHorizontal size={14} />
               More
@@ -2130,9 +2169,7 @@ export const Dashboard: React.FC<{
             height: widget.h * DASH_ROW_PX + (widget.h - 1) * DASH_GAP,
           };
           if (widget.backgroundColor) {
-            widgetStyle.background = widget.liquidGlass
-              ? `color-mix(in srgb, ${widget.backgroundColor} 45%, transparent)`
-              : widget.backgroundColor;
+            widgetStyle.background = widget.backgroundColor;
           }
           return (
             <div
@@ -2140,7 +2177,6 @@ export const Dashboard: React.FC<{
               className={
                 "dash-widget" +
                 (isText ? " dash-widget-text" : "") +
-                (widget.liquidGlass ? " dash-widget-glass" : "") +
                 (selectedId === widget.id ? " selected" : "") +
                 (widgetsLocked ? " dash-widget-locked" : "") +
                 (anim ? " " + anim : "")

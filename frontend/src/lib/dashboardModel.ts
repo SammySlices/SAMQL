@@ -31,8 +31,6 @@ export interface DashboardWidget {
   headerColor?: string;
   /** Widget surface background (CSS color). Empty/undefined = theme default. */
   backgroundColor?: string;
-  /** Frosted / liquid-glass transparency on the widget surface. */
-  liquidGlass?: boolean;
   /** Saved NodeFlow workflow name (kind=node) with a SamQL Dashboard sink. */
   workflowName?: string;
   title?: string;
@@ -427,9 +425,6 @@ export function normalizeWidget(raw: any): DashboardWidget | null {
   }
   if (typeof raw.backgroundColor === "string" && raw.backgroundColor.trim()) {
     base.backgroundColor = raw.backgroundColor.trim();
-  }
-  if (raw.liquidGlass === true) {
-    base.liquidGlass = true;
   }
   return base;
 }

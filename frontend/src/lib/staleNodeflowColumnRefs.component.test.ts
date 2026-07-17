@@ -2,10 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   clearStaleNodeflowColumnRefs,
   exprColumnRefs,
+  NO_AUTO_PRUNE_STALE_TYPES,
+  STALE_REF_NODE_TYPES,
   staleNodeflowColumnRefs,
 } from "./staleNodeflowColumnRefs";
 
 describe("staleNodeflowColumnRefs", () => {
+  it("lists freeform types that must never auto-prune", () => {
+    expect([...NO_AUTO_PRUNE_STALE_TYPES].sort()).toEqual(["filter", "formula"]);
+    for (const t of NO_AUTO_PRUNE_STALE_TYPES) {
+      expect(STALE_REF_NODE_TYPES).toContain(t);
+    }
+  });
   it("returns no stale refs for select/pivot (auto-reconciled)", () => {
     expect(
       staleNodeflowColumnRefs(

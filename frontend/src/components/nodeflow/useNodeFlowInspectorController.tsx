@@ -17,6 +17,7 @@ import {
 import { runAfterPaint } from "../../lib/prettyStruct";
 import {
   clearStaleNodeflowColumnRefs,
+  NO_AUTO_PRUNE_STALE_TYPES,
   staleNodeflowColumnRefs,
 } from "../../lib/staleNodeflowColumnRefs";
 import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
@@ -396,19 +397,30 @@ export function useNodeFlowInspectorController({
   // set, then toast. Banner stays only if anything remains after prune.
   // Cross-cutting: same inspector reconcile path as select/pivot field sync;
   // does not touch load/JSON/join execution — only node config refs.
+  //
+  // Trigger only on inspCols / selection identity — never on config edits.
+  // Filter/formula conditions are freeform text: bare identifiers mid-type
+  // look "stale" and clearStale would wipe the whole condition (typing broke).
+  // Those types keep the banner + manual Clear only.
+  const inspColsSig = useMemo(
+    () =>
+      Object.keys(inspCols)
+        .sort()
+        .map((p) => `${p}=${(inspCols[p] || []).join(",")}`)
+        .join("|"),
+    [inspCols],
+  );
   const autoPrunedStaleSigRef = useRef("");
   useEffect(() => {
     if (!sel || !staleColRefs.length) return;
+    if (NO_AUTO_PRUNE_STALE_TYPES.has(sel.type)) return;
     const sig = [
       sel.id,
       staleColRefs
         .map((r) => `${r.area}:${[...r.columns].map((c) => c.toLowerCase()).sort().join(",")}`)
         .sort()
         .join(";"),
-      Object.keys(inspCols)
-        .sort()
-        .map((p) => `${p}=${(inspCols[p] || []).join(",")}`)
-        .join("|"),
+      inspColsSig,
     ].join("\0");
     if (autoPrunedStaleSigRef.current === sig) return;
     const next = clearStaleNodeflowColumnRefs(
@@ -422,7 +434,7 @@ export function useNodeFlowInspectorController({
     const nodeName = String(sel.config?.label || "").trim() || sel.type;
     runtime.onToast("ok", `Removed stale column refs on ${nodeName}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey, selId, inspCols, staleColRefs]);
+  }, [scopeKey, selId, inspColsSig]);
 
   const seedSelectFields = () => {
     if (sel && inspCols.in)

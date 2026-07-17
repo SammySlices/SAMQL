@@ -58,7 +58,7 @@ test("configure opens only via chrome; float minimizes and closes", async ({
   await expect(page.getByTestId("dashboard-config-panel")).toBeVisible();
   await expect(page.getByTestId("dashboard-config")).toBeVisible();
   await expect(page.getByText("Header color")).toBeVisible();
-  await expect(page.getByText("Liquid glass")).toBeVisible();
+  await expect(page.getByText("Liquid glass")).toHaveCount(0);
   await expect(page.getByTestId("dashboard-config-panel")).toHaveClass(
     /win-float/,
   );

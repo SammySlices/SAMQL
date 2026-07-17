@@ -56,18 +56,16 @@ export const NodeFlow: React.FC<{
     action: "save" | "saveAs" | "open" | "exportLineage" | "selectNode";
     nodeId?: string;
   } | null;
-  // node palette/toolbar visibility is owned by App so the Settings toggle and
-  // the in-canvas button stay in sync
+  // node palette/toolbar visibility is owned by App (Settings → Toolbar Toggle)
   paletteHidden?: boolean;
-  onTogglePalette?: () => void;
   /** Tools & Tables floating window (App-owned open flag; NodeFlow-only UI). */
   toolsTablesOpen?: boolean;
   onToolsTablesOpenChange?: (open: boolean) => void;
   onOpenLoad?: () => void;
-  /** Open App-level JSON Field Explorer from Tools & Tables. */
-  onOpenJsonFieldExplorer?: () => void;
   /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
   denseMode?: boolean;
+  /** Canvas grid snap while dragging (owned by App Settings → Visual). Default ON. */
+  snap?: boolean;
 }> = ({
   tables,
   onToast,
@@ -81,12 +79,11 @@ export const NodeFlow: React.FC<{
   onWorkflowsChanged,
   command,
   paletteHidden,
-  onTogglePalette,
   toolsTablesOpen,
   onToolsTablesOpenChange,
   onOpenLoad,
-  onOpenJsonFieldExplorer,
   denseMode = false,
+  snap = true,
 }) => {
   // Keep densify() aligned with App Settings before Scene paints (also syncs
   // a lazy-chunk module copy if Rollup ever duplicates nodeFlowModel).
@@ -425,8 +422,6 @@ export const NodeFlow: React.FC<{
     groupHover,
     marquee,
     pendingWire,
-    snap,
-    setSnap,
     snapId,
     toContent,
     groupAtContentPoint,
@@ -451,6 +446,7 @@ export const NodeFlow: React.FC<{
     moveNodeIntoGroup,
     patchNode: patch,
     onToast,
+    snap,
   });
 
   useNodeFlowKeyboardShortcuts({
@@ -536,14 +532,10 @@ export const NodeFlow: React.FC<{
         canRedo={hist.canRedo}
         onUndo={undo}
         onRedo={redo}
-        paletteHidden={paletteHidden}
-        onTogglePalette={onTogglePalette}
       />
       <NodeFlowPalette
         paletteHidden={paletteHidden}
         showNodeSearch={showNodeSearch}
-        snap={snap}
-        setSnap={setSnap}
         zoom={zoom}
         zoomBy={zoomBy}
         resetZoom={resetZoom}
@@ -555,7 +547,6 @@ export const NodeFlow: React.FC<{
         tables={tables}
         onRefreshTables={onTablesChanged}
         onOpenLoad={onOpenLoad}
-        onOpenJsonFieldExplorer={onOpenJsonFieldExplorer}
         palette={paletteModel}
       />
 

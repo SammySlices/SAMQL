@@ -1,3 +1,4 @@
+
 .gitattributes
 .github/workflows/windows-browser.yml
 ARCHITECTURE.md
@@ -164,6 +165,7 @@ frontend/src/components/nodeflow/InspectorControls.component.test.tsx
 frontend/src/components/nodeflow/InspectorControls.tsx
 frontend/src/components/nodeflow/InspectorShell.tsx
 frontend/src/components/nodeflow/NodeFlowCanvasShell.tsx
+frontend/src/components/nodeflow/NodeFlowChrome.component.test.tsx
 frontend/src/components/nodeflow/NodeFlowControllerHooks.component.test.tsx
 frontend/src/components/nodeflow/NodeFlowInspector.component.test.tsx
 frontend/src/components/nodeflow/NodeFlowInspector.tsx
@@ -262,6 +264,7 @@ frontend/src/lib/nodeFlowModel.ts
 frontend/src/lib/nodeFlowPersistence.component.test.ts
 frontend/src/lib/nodeFlowPersistence.ts
 frontend/src/lib/nodeHelp.ts
+frontend/src/lib/nodeSnap.component.test.tsx
 frontend/src/lib/nodeflowColumnsCache.component.test.ts
 frontend/src/lib/nodeflowColumnsCache.ts
 frontend/src/lib/nodegraph.ts

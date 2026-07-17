@@ -131,7 +131,7 @@ describe("dashboardModel", () => {
     expect(ws.pageTitleColor).toBe("#abcdef");
   });
 
-  it("normalizes widget header color, background, and liquid glass", () => {
+  it("normalizes widget header color and background", () => {
     const w = normalizeWidget({
       id: "styled",
       x: 0,
@@ -145,8 +145,8 @@ describe("dashboardModel", () => {
     expect(w).toMatchObject({
       headerColor: "#334455",
       backgroundColor: "#112233",
-      liquidGlass: true,
     });
+    expect((w as { liquidGlass?: boolean } | null)?.liquidGlass).toBeUndefined();
     const plain = normalizeWidget({
       id: "plain",
       x: 0,
@@ -157,7 +157,7 @@ describe("dashboardModel", () => {
       headerColor: "   ",
     });
     expect(plain?.headerColor).toBeUndefined();
-    expect(plain?.liquidGlass).toBeUndefined();
+    expect((plain as { liquidGlass?: boolean } | null)?.liquidGlass).toBeUndefined();
   });
 
   it("ignores legacy board backgroundColor on load (theme background only)", () => {
@@ -455,8 +455,8 @@ describe("dashboardModel", () => {
       textItalic: true,
       headerColor: "#aabbcc",
       backgroundColor: "#010203",
-      liquidGlass: true,
     });
+    expect((t as { liquidGlass?: boolean } | null)?.liquidGlass).toBeUndefined();
     expect(t?.workflowName).toBeUndefined();
     // Fitted height should be well under a full empty data row.
     expect(t!.h).toBeLessThan(1.2);
