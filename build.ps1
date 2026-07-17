@@ -385,7 +385,18 @@ if ($UseOneDir) {
   Remove-Item Env:\\SAMQL_ONEDIR -ErrorAction SilentlyContinue
   Write-Host "    ONEFILE mode: SamQL-AppWindow.exe (self-extracting; not the recommended ship)"
 }
+# PyInstaller writes progress to stderr. With $ErrorActionPreference=Stop,
+# PowerShell turns those NativeCommandError records into a terminating stop
+# even when the process exit code is 0. Soften EAP for this call only.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $py -m PyInstaller --clean --noconfirm backend/samql.spec
+$pyiCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($pyiCode -ne 0) {
+  Write-Error "PyInstaller failed with exit code $pyiCode."
+  exit $pyiCode
+}
 
 # .500: the app icon SOURCE is now the user's own file in the repo ROOT
 # (samql.ico), which the spec reads and embeds into the exe. The build must NOT
