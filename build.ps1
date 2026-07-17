@@ -437,6 +437,23 @@ if ($UseOneDir) {
 }
 Write-Host "==> 4/4  Both targets present (SamQL.exe + SamQL-AppWindow)"
 
+# .637: refuse to ship an AppWindow onedir that is missing Tcl/Tk data.
+# Stock PyInstaller aborts at pyi_rth__tkinter when _tcl_data/_tk_data are
+# absent; we also ship a lenient rthook, but the splash still needs these
+# files for a real UI. Hard-fail here so a bad collect never becomes a zip.
+if ($UseOneDir) {
+  $tclInit = Join-Path $Root "dist\SamQL-AppWindow\_internal\_tcl_data\init.tcl"
+  $tkTcl = Join-Path $Root "dist\SamQL-AppWindow\_internal\_tk_data\tk.tcl"
+  $tkinterPyd = Join-Path $Root "dist\SamQL-AppWindow\_internal\_tkinter.pyd"
+  foreach ($need in @($tclInit, $tkTcl, $tkinterPyd)) {
+    if (-not (Test-Path $need)) {
+      Write-Error "Build incomplete: AppWindow Tcl/Tk payload missing: $need. Ensure the packaging Python can import tkinter and its tcl/tk8.6 trees exist, then rebuild."
+      exit 1
+    }
+  }
+  Write-Host "    OK: AppWindow Tcl/Tk data present (_tcl_data + _tk_data + _tkinter.pyd)"
+}
+
 # Always ship a real UI folder next to the exe as well as inside the frozen
 # bundle. Frozen apps resolve sys._MEIPASS/frontend_dist; the adjacent copy is
 # the .467 hot-swap path and a safety net when MEIPASS extraction is incomplete.

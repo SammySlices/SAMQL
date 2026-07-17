@@ -1,3 +1,4 @@
+
 .gitattributes
 .github/workflows/windows-browser.yml
 ARCHITECTURE.md
@@ -20,6 +21,8 @@ VERSION
 WINDOWS_BUILD_CHECKLIST.txt
 assistant/README.txt
 backend/launcher_app.py
+backend/packaging_hooks/rthooks.dat
+backend/packaging_hooks/rthooks/pyi_rth__tkinter.py
 backend/requirements.txt
 backend/samql.spec
 backend/samql_core/__init__.py

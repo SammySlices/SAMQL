@@ -25,6 +25,7 @@ import importlib.util
 import os
 
 from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks.tcl_tk import tcltk_info
 
 # .549: ONEDIR packaging for the AppWindow. build.ps1 / build.sh default to
 # SAMQL_ONEDIR=1 so dist/SamQL-AppWindow/ is a FOLDER (exe + pre-extracted
@@ -49,6 +50,28 @@ SAMQL_ASSISTANT_EMBED = os.environ.get("SAMQL_ASSISTANT_EMBED", "").strip() in (
 HERE = os.path.abspath(SPECPATH)            # noqa: F821  (injected)
 REPO = os.path.dirname(HERE)
 FRONTEND_DIST = os.path.join(REPO, "frontend", "dist")
+
+# Custom hook dir: lenient pyi_rth__tkinter (do not abort when Tcl/Tk data
+# dirs are missing; AppWindow splash already degrades via make_splash()).
+# User hook dirs merge before built-ins, so our rthooks.dat replaces the
+# stock fatal FileNotFoundError hook that surfaces as
+# "failed to execute script 'pyi_rth__tkinter'".
+PACKAGING_HOOKS = os.path.join(HERE, "packaging_hooks")
+
+# Ensure PyInstaller's TclTkInfo discovers the real install trees (venv /
+# Python 3.13+ / stale env TCL_LIBRARY pointing at a prior frozen build
+# can otherwise yield an empty data_files list -- see pyinstaller#8856).
+if tcltk_info.available:
+    if not os.environ.get("TCL_LIBRARY") and tcltk_info.tcl_data_dir:
+        os.environ["TCL_LIBRARY"] = tcltk_info.tcl_data_dir
+    if not os.environ.get("TK_LIBRARY") and tcltk_info.tk_data_dir:
+        os.environ["TK_LIBRARY"] = tcltk_info.tk_data_dir
+    print("[samql.spec] Tcl/Tk available: tcl=%s tk=%s (%d data files)"
+          % (tcltk_info.tcl_data_dir, tcltk_info.tk_data_dir,
+             len(tcltk_info.data_files or [])))
+else:
+    print("[samql.spec] WARN: Tcl/Tk unavailable at build time; "
+          "AppWindow splash will degrade to log-only")
 
 datas = []
 binaries = []
@@ -242,7 +265,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[PACKAGING_HOOKS],
     hooksconfig={},
     runtime_hooks=[],
     excludes=["matplotlib", "PyQt5", "PySide2", "pytest"],
@@ -304,8 +327,28 @@ la_hidden = ["tkinter", "tkinter.ttk",
 la_hidden = list(dict.fromkeys(la_hidden + hiddenimports + ["server"]))
 la_binaries = list(binaries)
 la_datas = list(datas)
+# Belt-and-suspenders: explicitly fold Tcl/Tk data + DLLs into the AppWindow
+# graph. hook-_tkinter normally collects these when tkinter is analyzed; an
+# empty/mis-discovered TclTkInfo (venv, stale TCL_LIBRARY) used to ship an
+# AppWindow that hit pyi_rth__tkinter FileNotFoundError on launch.
+if tcltk_info.available:
+    for _toc in (tcltk_info.data_files or []):
+        # data_files are 3-tuples (dest, src, type); Analysis datas want
+        # (src, dest_dir) 2-tuples. Convert carefully.
+        if len(_toc) >= 2:
+            _dest, _src = _toc[0], _toc[1]
+            _dest_dir = os.path.dirname(_dest.replace("\\", "/")) or "."
+            la_datas.append((_src, _dest_dir))
+    for _lib in (tcltk_info.tcl_shared_library, tcltk_info.tk_shared_library):
+        if _lib and os.path.isfile(_lib):
+            la_binaries.append((_lib, "."))
+    _tk_ext = getattr(tcltk_info, "tkinter_extension_file", None)
+    if _tk_ext and os.path.isfile(_tk_ext):
+        la_binaries.append((_tk_ext, "."))
+    print("[samql.spec] AppWindow: explicit Tcl/Tk collect "
+          "(%d data entries + shared libs)" % len(tcltk_info.data_files or []))
 print("[samql.spec] AppWindow payload = SamQL payload "
-      "(shared datas/binaries/hiddenimports + server + splash assets)")
+      "(shared datas/binaries/hiddenimports + server + splash assets + Tcl/Tk)")
 
 # .500: bundle brand assets INTO the launcher exe so the native window and the
 # startup splash carry the user's art with no dependence on the server being up
@@ -339,7 +382,7 @@ la = Analysis(
     binaries=la_binaries,
     datas=la_datas,
     hiddenimports=la_hidden,
-    hookspath=[],
+    hookspath=[PACKAGING_HOOKS],
     hooksconfig={},
     runtime_hooks=[],
     excludes=["matplotlib", "PyQt5", "PySide2", "pytest"],  # .535: the

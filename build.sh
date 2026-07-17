@@ -245,6 +245,25 @@ if [ ! -e "$APP_OUT" ] && [ ! -d "dist/SamQL-AppWindow" ]; then
 fi
 echo "    OK: both targets present (SamQL + SamQL-AppWindow), shared payload"
 
+# .637: refuse to ship an AppWindow onedir missing Tcl/Tk data (Windows
+# packaging Python). Soft-skip when _tkinter.pyd is absent (non-Windows).
+if [ -d dist/SamQL-AppWindow/_internal ]; then
+  if [ -f dist/SamQL-AppWindow/_internal/_tkinter.pyd ] \
+     || [ -f dist/SamQL-AppWindow/_internal/_tkinter.so ] \
+     || ls dist/SamQL-AppWindow/_internal/_tkinter*.so >/dev/null 2>&1; then
+    for need in \
+      dist/SamQL-AppWindow/_internal/_tcl_data/init.tcl \
+      dist/SamQL-AppWindow/_internal/_tk_data/tk.tcl; do
+      if [ ! -f "$need" ]; then
+        echo "ERROR: AppWindow Tcl/Tk payload missing: $need" >&2
+        echo "       Ensure the packaging Python can import tkinter." >&2
+        exit 1
+      fi
+    done
+    echo "    OK: AppWindow Tcl/Tk data present (_tcl_data + _tk_data)"
+  fi
+fi
+
 # Stage an exe-adjacent frontend_dist copy (frozen MEIPASS + .467 hot-swap).
 rm -rf dist/frontend_dist
 cp -R frontend/dist dist/frontend_dist

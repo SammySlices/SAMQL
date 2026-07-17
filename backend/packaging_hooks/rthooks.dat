@@ -1,0 +1,7 @@
+{
+    # Lenient override of PyInstaller's stock pyi_rth__tkinter: missing
+    # _tcl_data/_tk_data must not abort AppWindow boot (splash already
+    # degrades to log-only via make_splash()). User hook dirs are merged
+    # before built-ins, so this replaces the fatal stock rthook.
+    '_tkinter': ['pyi_rth__tkinter.py'],
+}
