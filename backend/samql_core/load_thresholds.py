@@ -95,6 +95,36 @@ FIELDS = {
                 "memory budget.",
         "zero_means": None,
     },
+    "json_max_depth": {
+        "env": "SAMQL_JSON_MAX_DEPTH",
+        "default": 2,
+        "kind": "int",
+        "min": 0,
+        "max": 32,
+        "unit": "levels",
+        "label": "JSON load depth (flatten-off)",
+        "help": "DuckDB ``maximum_depth`` for flatten-off nested JSON loads. "
+                "2 (default) keeps top-level scalars typed (BIGINT/VARCHAR/"
+                "BOOLEAN) and leaves deeper objects/arrays as JSON so multi-GB "
+                "files don't OOM. Higher = deeper STRUCT expansion (more "
+                "memory). 0 = one opaque JSON column per row.",
+        "zero_means": "single JSON column per row",
+    },
+    "flatten_max_depth": {
+        "env": "SAMQL_FLATTEN_MAX_DEPTH",
+        "default": 64,
+        "kind": "int",
+        "min": 1,
+        "max": 256,
+        "unit": "levels",
+        "label": "Flatten nesting depth",
+        "help": "How deep the streaming flattener explodes nested objects and "
+                "arrays into child tables before keeping a still-nested value "
+                "verbatim (stringified). Default 64 is well above real data "
+                "and guards against runaway recursion on pathological "
+                "documents. Lower to cap fan-out; higher costs more memory.",
+        "zero_means": None,
+    },
     "upload_mb": {
         "env": "SAMQL_UPLOAD_MB",
         "default": 16384,
@@ -104,7 +134,7 @@ FIELDS = {
         "unit": "MB",
         "label": "Drag-drop upload ceiling",
         "help": "Largest multipart upload accepted. Larger files should use "
-                "Load Data → File (path). 0 disables the ceiling.",
+                "Load a Table → File (path). 0 disables the ceiling.",
         "zero_means": "unlimited uploads",
     },
     "filecache_gb": {

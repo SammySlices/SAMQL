@@ -84,6 +84,7 @@ test("Eye Care enlarges text, buttons, and restores on toggle off", async ({
   expect(chromeBefore, "settings button before Eye Care").toBeTruthy();
 
   await settingsBtn.click();
+  await page.getByTestId("settings-visual-toggles").click();
   const toggle = page.getByTestId("eye-care-toggle");
   await expect(toggle).toBeVisible();
   await expect(toggle).toHaveAttribute("aria-pressed", "false");
@@ -144,6 +145,7 @@ test("Eye Care enlarges NodeFlow nodes and run control together", async ({
   expect(runBefore).toBeTruthy();
 
   await page.getByTestId("settings-button").click();
+  await page.getByTestId("settings-visual-toggles").click();
   await page.getByTestId("eye-care-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-eye-care", "on");
 
@@ -174,6 +176,7 @@ test("Eye Care preference persists across reload", async ({ page }) => {
   expect(stored).toBe("1");
 
   await page.getByTestId("settings-button").click();
+  await page.getByTestId("settings-visual-toggles").click();
   await expect(page.getByTestId("eye-care-toggle")).toHaveAttribute(
     "aria-pressed",
     "true",

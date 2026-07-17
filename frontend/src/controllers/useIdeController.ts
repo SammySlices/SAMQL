@@ -37,6 +37,12 @@ export function useIdeController({
           id: typeof tab?.id === "string" ? tab.id : uid(),
           title: typeof tab?.title === "string" ? tab.title : "Query",
           sql: typeof tab?.sql === "string" ? tab.sql : "",
+          savedWorkflowName:
+            typeof tab?.savedWorkflowName === "string"
+              ? tab.savedWorkflowName
+              : undefined,
+          savedFilePath:
+            typeof tab?.savedFilePath === "string" ? tab.savedFilePath : undefined,
         }))
       : [{ id: uid(), title: "Query 1", sql: sampleSql }],
   );

@@ -16,7 +16,7 @@ import { startPointerDrag } from "../lib/pointerDrag";
 import { usePagedResult, type PagedResultOperation } from "../lib/usePagedResult";
 import type { TableInfo, ReconBucket } from "../lib/types";
 import { FileBrowser } from "./LoadDataModal";
-import { wfEnvelope, parseWfFile, wfFileName } from "../lib/workflowFile";
+import { wfEnvelope, parseWfFile, wfFileName, wfKindSurface } from "../lib/workflowFile";
 import type { ReconSpec } from "./ReconcileModal";
 import { buildReconcileRequest } from "../lib/reconcileRequest";
 import {
@@ -42,6 +42,7 @@ import {
   loadNotebookDoc,
   createNotebook,
   renameNotebook,
+  setNotebookSaveIdentity,
   deleteNotebook,
   setCurrentNotebookId,
   currentNotebookId,
@@ -73,7 +74,13 @@ interface Props {
   onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
   onTablesMaybeChanged?: () => void;
   // a one-shot request from the sidebar to open a saved (kind=journal) workflow
-  loadRequest?: { id: number; name: string; doc: string } | null;
+  loadRequest?: {
+    id: number;
+    name: string;
+    doc: string;
+    savedWorkflowName?: string;
+    savedFilePath?: string;
+  } | null;
   onLoadConsumed?: () => void;
   onWorkflowsChanged?: () => void;
   // a one-shot command (from sidebar/settings) to run save / save-as / open
@@ -281,7 +288,12 @@ export const Notebook: React.FC<Props> = ({
   const [savedAt, setSavedAt] = useState<number | null>(Date.now());
   // name this journal was last saved/loaded under in Saved Workflows (so a
   // re-save updates in place instead of re-prompting)
-  const [jwfName, setJwfName] = useState<string>("");
+  const [jwfName, setJwfName] = useState<string>(
+    () => boot.current!.meta.savedWorkflowName || "",
+  );
+  const [jwfFilePath, setJwfFilePath] = useState<string>(
+    () => boot.current!.meta.savedFilePath || "",
+  );
   // a ticking clock so the "saved Xm ago" label stays current
   const [nowTick, setNowTick] = useState(Date.now());
   useEffect(() => {
@@ -492,6 +504,8 @@ export const Notebook: React.FC<Props> = ({
     firstGroupSave.current = true; // a load is not an edit
     setNbId(meta.id);
     setNbName(meta.name);
+    setJwfName(meta.savedWorkflowName || "");
+    setJwfFilePath(meta.savedFilePath || "");
     setCurrentNotebookId(meta.id);
     refreshTabs();
     firstSave.current = true; // a load is not an edit
@@ -1671,6 +1685,20 @@ export const Notebook: React.FC<Props> = ({
   // Save the current journal into Saved Workflows (kind = journal). Prompts for
   // a name the first time; silent update afterwards.
   const saveAsWorkflow = async () => {
+    const doc = serializeNotebook(cellsRef.current as NbCellDef[], groupsRef.current);
+    if (jwfFilePath) {
+      try {
+        const r = await api.saveFile(
+          jwfFilePath,
+          wfEnvelope("journal", nbNameRef.current || "journal", { doc }),
+        );
+        if (r.error) onToast("error", "Save failed", r.error);
+        else onToast("ok", "Saved", r.name || jwfFilePath);
+      } catch (e: any) {
+        onToast("error", "Save failed", e?.message || String(e));
+      }
+      return;
+    }
     let name = jwfName;
     if (!name) {
       const entered = window.prompt("Save journal as:", nbNameRef.current || "");
@@ -1678,13 +1706,17 @@ export const Notebook: React.FC<Props> = ({
       if (!name) return;
     }
     try {
-      const doc = serializeNotebook(cellsRef.current as NbCellDef[], groupsRef.current);
       const r = await api.workflowSave(name, { doc }, "journal");
       if (r.error) {
         onToast("error", "Save failed", r.error);
         return;
       }
       setJwfName(name);
+      setJwfFilePath("");
+      setNotebookSaveIdentity(nbIdRef.current, {
+        savedWorkflowName: r.name || name,
+      });
+      refreshTabs();
       onToast("ok", "Saved to Workflows", name);
       onWorkflowsChanged?.();
     } catch (e: any) {
@@ -1697,7 +1729,10 @@ export const Notebook: React.FC<Props> = ({
   useEffect(() => {
     if (!loadRequest || loadRequest.id === lastJournalReq.current) return;
     lastJournalReq.current = loadRequest.id;
-    loadJournalDoc(loadRequest.doc, loadRequest.name);
+    loadJournalDoc(loadRequest.doc, loadRequest.name, {
+      savedWorkflowName: loadRequest.savedWorkflowName,
+      savedFilePath: loadRequest.savedFilePath,
+    });
     // Clear the one-shot request so switching views (which unmounts this
     // component) can't replay a stale load on the way back.
     onLoadConsumed?.();
@@ -1705,7 +1740,11 @@ export const Notebook: React.FC<Props> = ({
   }, [loadRequest]);
 
   // turn a serialized journal document into a fresh open notebook
-  function loadJournalDoc(doc: string, name: string) {
+  function loadJournalDoc(
+    doc: string,
+    name: string,
+    identity?: { savedWorkflowName?: string; savedFilePath?: string },
+  ) {
     try {
       const defs = parseNotebookFile(doc);
       const cellsForNb = defs.map((d) => ({ ...d, id: uid() }));
@@ -1724,7 +1763,10 @@ export const Notebook: React.FC<Props> = ({
       const meta = createNotebook(name, cellsForNb);
       saveGroups(meta.id, openGroups); // so loadInto picks these up
       loadInto(meta);
-      setJwfName(name);
+      setJwfName(identity?.savedWorkflowName || "");
+      setJwfFilePath(identity?.savedFilePath || "");
+      setNotebookSaveIdentity(meta.id, identity || {});
+      refreshTabs();
       onToast(
         "ok",
         "Journal opened",
@@ -1750,7 +1792,16 @@ export const Notebook: React.FC<Props> = ({
         });
         const r = await api.saveFile(path, content);
         if (r.error) onToast("error", "Save failed", r.error);
-        else onToast("ok", "Saved", r.name || path);
+        else {
+          const savedPath = r.path || path;
+          setJwfName("");
+          setJwfFilePath(savedPath);
+          setNotebookSaveIdentity(nbIdRef.current, {
+            savedFilePath: savedPath,
+          });
+          refreshTabs();
+          onToast("ok", "Saved", r.name || path);
+        }
       } else {
         const r = await api.openFile(path);
         if (r.error || typeof r.content !== "string") {
@@ -1760,16 +1811,20 @@ export const Notebook: React.FC<Props> = ({
         const env = parseWfFile(r.content);
         const baseName = (r.name || "Journal").replace(/\.samql\.json$|\.json$/i, "");
         if (env && env.kind === "journal" && typeof env.payload?.doc === "string") {
-          loadJournalDoc(env.payload.doc, env.name || baseName);
+          loadJournalDoc(env.payload.doc, env.name || baseName, {
+            savedFilePath: r.path || path,
+          });
         } else if (env && env.kind !== "journal") {
           onToast(
             "warn",
             "Not a journal file",
-            `That looks like a ${env.kind} workflow — open it from the ${env.kind === "ide" ? "SQL editor" : "Node"}.`,
+            `That looks like a ${env.kind} workflow — open it from the ${wfKindSurface(env.kind)}.`,
           );
         } else {
           // a legacy raw journal file (saved before envelopes existed)
-          loadJournalDoc(r.content, baseName);
+          loadJournalDoc(r.content, baseName, {
+            savedFilePath: r.path || path,
+          });
         }
       }
     } catch (e: any) {
@@ -2174,6 +2229,7 @@ export const Notebook: React.FC<Props> = ({
                         name: s.name as string,
                         resultId: s.resultId ?? null,
                         columns: s.page?.columns || [],
+                        sampleRows: s.page?.rows,
                       }))
                   : undefined
               }

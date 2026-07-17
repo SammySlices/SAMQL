@@ -1,15 +1,23 @@
 import React, { useEffect, useState } from "react";
 import { Modal } from "./Modal";
+import { DiagnosticsPanel } from "./DiagnosticsModal";
 import { api, saveToDownloads } from "../lib/api";
-import type { ErrorLogEntry } from "../lib/types";
+import type { ErrorLogEntry, TableInfo } from "../lib/types";
 
-// A debuggable history of recent server-side failures. Unexpected errors carry
-// a full Python traceback; handled (validation) errors and soft application
-// failures (query / load / flatten returning {error}) carry status, kind, and
-// request detail. The whole log can be exported to a text file.
-export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
-  onClose,
-}) => {
+// A debuggable history of recent server-side failures, plus a Diagnostics tab
+// for the /api/diagnostics runners. Unexpected errors carry a full Python
+// traceback; handled (validation) errors and soft application failures
+// (query / load / flatten returning {error}) carry status, kind, and request
+// detail. The whole log can be exported to a text file.
+
+type ErrorLogTab = "errors" | "diagnostics";
+
+export const ErrorLogModal: React.FC<{
+  onClose: () => void;
+  tables: TableInfo[];
+  initialTab?: ErrorLogTab;
+}> = ({ onClose, tables, initialTab = "errors" }) => {
+  const [tab, setTab] = useState<ErrorLogTab>(initialTab);
   const [entries, setEntries] = useState<ErrorLogEntry[]>([]);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [fileTail, setFileTail] = useState<{
@@ -78,40 +86,77 @@ export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
       title="Error log"
       wide
       onClose={onClose}
+      testId="error-log-modal"
       footer={
-        <>
-          <span className="dim" style={{ fontSize: 12 }}>
-            {entries.length} recent error
-            {entries.length === 1 ? "" : "s"} (query, load, flatten, NodeFlow,
-            and server failures)
-          </span>
-          <span className="spacer" />
-          <button className="btn sm" onClick={load}>
-            Refresh
+        tab === "diagnostics" ? (
+          <button className="btn" onClick={onClose}>
+            Close
           </button>
-          <button
-            className="btn sm"
-            onClick={exportLog}
-            disabled={!entries.length}
-          >
-            Export…
-          </button>
-          {savedPath && (
-            <span className="faint" style={{ fontSize: 11 }}>
-              {savedPath}
+        ) : (
+          <>
+            <span className="dim" style={{ fontSize: 12 }}>
+              {entries.length} recent error
+              {entries.length === 1 ? "" : "s"} (query, load, flatten, NodeFlow,
+              and server failures)
             </span>
-          )}
-          <button
-            className="btn sm danger"
-            onClick={clear}
-            disabled={!entries.length}
-          >
-            Clear
-          </button>
-        </>
+            <span className="spacer" />
+            <button className="btn sm" onClick={load}>
+              Refresh
+            </button>
+            <button
+              className="btn sm"
+              onClick={exportLog}
+              disabled={!entries.length}
+            >
+              Export…
+            </button>
+            {savedPath && (
+              <span className="faint" style={{ fontSize: 11 }}>
+                {savedPath}
+              </span>
+            )}
+            <button
+              className="btn sm danger"
+              onClick={clear}
+              disabled={!entries.length}
+            >
+              Clear
+            </button>
+          </>
+        )
       }
     >
-      {loading ? (
+      <div
+        className="tabs"
+        role="tablist"
+        aria-label="Error log sections"
+        style={{ borderRadius: 7, marginBottom: 12 }}
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "errors"}
+          data-testid="error-log-errors-tab"
+          className={"tab" + (tab === "errors" ? " active" : "")}
+          onClick={() => setTab("errors")}
+        >
+          Errors
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "diagnostics"}
+          data-testid="error-log-diagnostics-tab"
+          className={"tab" + (tab === "diagnostics" ? " active" : "")}
+          onClick={() => setTab("diagnostics")}
+        >
+          Diagnostics
+        </button>
+      </div>
+
+      {tab === "diagnostics" ? (
+        <DiagnosticsPanel tables={tables} />
+      ) : loading ? (
         <div className="faint">
           <span className="spin" /> loading…
         </div>
@@ -171,26 +216,26 @@ export const ErrorLogModal: React.FC<{ onClose: () => void }> = ({
               </div>
             );
           })}
-        {(fileTail?.text || launcherTail?.text) && (
-          <div style={{ marginTop: 12 }}>
-            {fileTail?.text ? (
-              <details>
-                <summary>
-                  On-disk log (survives restarts) — {fileTail.path}
-                </summary>
-                <pre className="errlog-file">{fileTail.text}</pre>
-              </details>
-            ) : null}
-            {launcherTail?.text ? (
-              <details>
-                <summary>
-                  App-window launcher log — {launcherTail.path}
-                </summary>
-                <pre className="errlog-file">{launcherTail.text}</pre>
-              </details>
-            ) : null}
-          </div>
-        )}
+          {(fileTail?.text || launcherTail?.text) && (
+            <div style={{ marginTop: 12 }}>
+              {fileTail?.text ? (
+                <details>
+                  <summary>
+                    On-disk log (survives restarts) — {fileTail.path}
+                  </summary>
+                  <pre className="errlog-file">{fileTail.text}</pre>
+                </details>
+              ) : null}
+              {launcherTail?.text ? (
+                <details>
+                  <summary>
+                    App-window launcher log — {launcherTail.path}
+                  </summary>
+                  <pre className="errlog-file">{launcherTail.text}</pre>
+                </details>
+              ) : null}
+            </div>
+          )}
         </div>
       )}
     </Modal>

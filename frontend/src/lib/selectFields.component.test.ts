@@ -59,6 +59,75 @@ describe("selectFields search + sort", () => {
   });
 });
 
+describe("reconcileSelectFields case-insensitive matching", () => {
+  it("preserves keep/rename/type on a case-only upstream rename (Name -> name)", () => {
+    const current: SelField[] = [
+      { name: "Name", keep: false, rename: "label", type: "text" },
+      { name: "amount", keep: true },
+    ];
+    // upstream renamed "Name" -> "name" (case only); the backend Select
+    // matches names case-insensitively, so the user's field must survive.
+    const next = reconcileSelectFields(["name", "amount"], current);
+    expect(next).toEqual(current);
+    // no reset: keep/rename/type kept, and no duplicate "name" appended
+    expect(next.map((f) => f.name)).toEqual(["Name", "amount"]);
+    expect(next[0].keep).toBe(false);
+    expect(next[0].rename).toBe("label");
+    expect(next[0].type).toBe("text");
+  });
+
+  it("still appends genuinely-new columns and drops removed ones", () => {
+    const current: SelField[] = [
+      { name: "Region", keep: true, rename: "geo" },
+      { name: "gone", keep: true },
+    ];
+    const next = reconcileSelectFields(["region", "extra"], current);
+    // "Region" matches "region" case-insensitively (kept, settings intact);
+    // "gone" dropped; "extra" appended new.
+    expect(next).toEqual([
+      { name: "Region", keep: true, rename: "geo" },
+      { name: "extra", keep: true },
+    ]);
+  });
+
+  it("retains unchecked fields across a temporary upstream shrink/grow (run race)", () => {
+    // Reproduce: deselect b, probe briefly returns only a+c (projection /
+    // mid-run), then full columns return -- b must stay keep:false, not be
+    // re-appended as keep:true.
+    const selected: SelField[] = [
+      { name: "a", keep: true },
+      { name: "b", keep: false },
+      { name: "c", keep: true },
+    ];
+    const shrunk = reconcileSelectFields(["a", "c"], selected);
+    expect(shrunk).toEqual([
+      { name: "a", keep: true },
+      { name: "b", keep: false },
+      { name: "c", keep: true },
+    ]);
+    const grown = reconcileSelectFields(["a", "b", "c"], shrunk);
+    expect(grown).toEqual([
+      { name: "a", keep: true },
+      { name: "b", keep: false },
+      { name: "c", keep: true },
+    ]);
+    expect(grown.find((f) => f.name === "b")?.keep).toBe(false);
+  });
+
+  it("still drops kept fields that permanently leave upstream", () => {
+    const current: SelField[] = [
+      { name: "a", keep: true },
+      { name: "gone", keep: true },
+      { name: "skip", keep: false },
+    ];
+    const next = reconcileSelectFields(["a"], current);
+    expect(next).toEqual([
+      { name: "a", keep: true },
+      { name: "skip", keep: false },
+    ]);
+  });
+});
+
 describe("select fields follow upstream Input table changes", () => {
   it("lists only Selects wired on in", () => {
     expect(
@@ -154,7 +223,10 @@ describe("select fields follow upstream Input table changes", () => {
       sel: ["customer_id", "name"],
     });
     expect(next).not.toBe(nodes);
+    // kept fields that left upstream are dropped; unchecked fields are
+    // retained (tombstones) so a later reappearance cannot re-select them.
     expect(next[1].config.fields).toEqual([
+      { name: "amount", keep: false },
       { name: "customer_id", keep: true },
       { name: "name", keep: true },
     ]);

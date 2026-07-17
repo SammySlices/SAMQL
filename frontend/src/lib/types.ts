@@ -71,6 +71,13 @@ export interface AssistantStatus {
   preferred_missing?: boolean;
   default_model?: string | null;
   duckdb_busy?: boolean;
+  /** When duckdb_busy, best-effort description of the blocking Activity op. */
+  duckdb_busy_op?: {
+    kind?: string;
+    target?: string | null;
+    label?: string | null;
+    summary?: string;
+  } | null;
   generating?: boolean;
   server_url?: string | null;
   refuse_low_memory?: boolean;
@@ -558,7 +565,7 @@ export interface EngineResetResult {
   rebuilding: boolean;
 }
 
-// --- diagnostics (Settings -> Diagnostics) ---
+// --- diagnostics (Error log -> Diagnostics tab) ---
 export interface DiagnosticParam {
   name: string;
   label: string;

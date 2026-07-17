@@ -1,7 +1,9 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { startPointerDrag } from "../../lib/pointerDrag";
 import type { Cell, ResultPage } from "../../lib/types";
+import type { ColumnLineageOpenArgs } from "../../lib/columnLineage";
 import { ChartView } from "../ChartView";
+import { ColumnLineageModal } from "../ColumnLineageModal";
 import { DataGrid } from "../DataGrid";
 import type { NodeFlowPreview } from "./useNodeFlowExecutionController";
 
@@ -15,6 +17,9 @@ interface NodeFlowPreviewDrawerProps {
   height: number;
   setHeight: React.Dispatch<React.SetStateAction<number>>;
   onClose: () => void;
+  /** Live graph snapshot for column lineage (same source as Excel export). */
+  getLineageGraph?: () => unknown;
+  onHighlightNode?: (nodeId: string) => void;
 }
 
 export const NodeFlowPreviewDrawer = React.memo(
@@ -23,7 +28,13 @@ export const NodeFlowPreviewDrawer = React.memo(
     height,
     setHeight,
     onClose,
+    getLineageGraph,
+    onHighlightNode,
   }: NodeFlowPreviewDrawerProps) {
+    const [lineageOpen, setLineageOpen] = useState<ColumnLineageOpenArgs | null>(
+      null,
+    );
+
     const page = useMemo<ResultPage | null>(
       () =>
         preview?.kind === "table"
@@ -87,6 +98,20 @@ export const NodeFlowPreviewDrawer = React.memo(
             sortCol={null}
             descending={false}
             onSort={NOOP_SORT}
+            onShowLineage={(col, cell) => {
+              setLineageOpen({
+                column: col,
+                graph: getLineageGraph?.() || null,
+                nodeId:
+                  preview.kind === "table" ? preview.sourceNodeId : null,
+                port:
+                  preview.kind === "table"
+                    ? preview.sourcePort || "out"
+                    : null,
+                rowIndex: cell?.rowIndex,
+                cellValue: cell?.value ?? null,
+              });
+            }}
           />
         )}
         {preview.kind === "chart" && (
@@ -193,6 +218,11 @@ export const NodeFlowPreviewDrawer = React.memo(
             )}
           </div>
         )}
+        <ColumnLineageModal
+          open={lineageOpen}
+          onClose={() => setLineageOpen(null)}
+          onHighlightNode={onHighlightNode}
+        />
       </div>
     );
   },

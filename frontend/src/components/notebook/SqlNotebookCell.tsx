@@ -1,8 +1,12 @@
 import React, { useState } from "react";
 import { ChartPanel } from "../ChartPanel";
+import { ColumnLineageModal } from "../ColumnLineageModal";
 import { DataGrid } from "../DataGrid";
+import { ExportResultsButton } from "../ExportResultsMenu";
 import { Icon } from "../Icon";
 import { PivotPanel } from "../PivotPanel";
+import type { ColumnLineageOpenArgs } from "../../lib/columnLineage";
+import { backendResultExportFormats } from "../../lib/resultExportFormats";
 import type { NotebookCellProps } from "./NotebookCellTypes";
 import {
   NotebookMoveDeleteActions,
@@ -14,8 +18,10 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
   const { cell } = props;
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
-  const [exportOpen, setExportOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
+  const [lineageOpen, setLineageOpen] = useState<ColumnLineageOpenArgs | null>(
+    null,
+  );
 
   const loaded = cell.page?.rows?.length ?? 0;
   const total = cell.page?.total_rows ?? 0;
@@ -201,45 +207,13 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
             >
               Pivot
             </button>
-            <div className="nb-export">
-              <button
-                className="nb-tabchip"
-                onClick={() => setExportOpen((value) => !value)}
-              >
-                Export ▾
-              </button>
-              {exportOpen && (
-                <>
-                  <div
-                    className="rc-backdrop"
-                    onMouseDown={() => setExportOpen(false)}
-                  />
-                  <div
-                    className="nb-export-menu"
-                    onMouseDown={(event) => event.stopPropagation()}
-                  >
-                    {[
-                      "csv",
-                      "tsv",
-                      "json",
-                      "ndjson",
-                      ...(props.features?.openpyxl ? ["xlsx"] : []),
-                      ...(props.features?.pyarrow ? ["parquet"] : []),
-                    ].map((format) => (
-                      <button
-                        key={format}
-                        onClick={() => {
-                          setExportOpen(false);
-                          props.onExport(format);
-                        }}
-                      >
-                        {format.toUpperCase()}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
+            <ExportResultsButton
+              className="nb-export"
+              triggerClassName="nb-tabchip"
+              testId="notebook-export-results"
+              formats={backendResultExportFormats(props.features)}
+              onExport={props.onExport}
+            />
           </>
         )}
 
@@ -260,13 +234,21 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
       ) : cell.ranOnce && !cell.collapsed && cell.resultId && cell.page ? (
         cell.outView === "chart" ? (
           <div className="nb-out-chart">
-            <ChartPanel resultId={cell.resultId} columns={cell.page.columns} />
+            <ChartPanel
+              resultId={cell.resultId}
+              columns={cell.page.columns}
+              sampleRows={cell.page.rows}
+            />
           </div>
         ) : cell.outView === "pivot" ? (
           <div className="nb-out-pivot">
             <PivotPanel
               tables={props.tables}
-              result={{ id: cell.resultId, columns: cell.page.columns }}
+              result={{
+                id: cell.resultId,
+                columns: cell.page.columns,
+                sampleRows: cell.page.rows,
+              }}
               onToast={props.onToast}
             />
           </div>
@@ -284,6 +266,17 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
                 resultId: cell.resultId ?? null,
                 filters: (cell as RunCellWithFilters).filters,
               }}
+              onShowLineage={(col, ctx) =>
+                setLineageOpen({
+                  column: col,
+                  rowIndex: ctx?.rowIndex,
+                  cellValue: ctx?.value ?? null,
+                })
+              }
+            />
+            <ColumnLineageModal
+              open={lineageOpen}
+              onClose={() => setLineageOpen(null)}
             />
           </div>
         )

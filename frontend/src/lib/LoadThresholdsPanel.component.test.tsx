@@ -84,6 +84,32 @@ const thresholdsFixture = {
       kind: "int",
       zero_means: null,
     },
+    json_max_depth: {
+      value: 2,
+      source: "default",
+      default: 2,
+      env: "SAMQL_JSON_MAX_DEPTH",
+      unit: "levels",
+      label: "JSON load depth (flatten-off)",
+      help: "help",
+      min: 0,
+      max: 32,
+      kind: "int",
+      zero_means: "single JSON column per row",
+    },
+    flatten_max_depth: {
+      value: 64,
+      source: "default",
+      default: 64,
+      env: "SAMQL_FLATTEN_MAX_DEPTH",
+      unit: "levels",
+      label: "Flatten nesting depth",
+      help: "help",
+      min: 1,
+      max: 256,
+      kind: "int",
+      zero_means: null,
+    },
     upload_mb: {
       value: 16384,
       source: "default",
@@ -123,6 +149,7 @@ vi.mock("../lib/api", () => ({
     freeMemory: vi.fn(),
     sweepTemp: vi.fn(),
     flowCacheInfo: vi.fn(),
+    engineTuning: vi.fn(),
   },
 }));
 
@@ -187,6 +214,165 @@ describe("StorageMemoryModal load thresholds tab", () => {
     expect(screen.getByTestId("load-thresholds-tab")).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByTestId("load-thresholds-panel")).toBeInTheDocument(),
+    );
+  });
+});
+
+describe("StorageMemoryModal JSON & flatten tab", () => {
+  beforeEach(() => {
+    vi.mocked(api.loadThresholdsInfo).mockResolvedValue(thresholdsFixture as any);
+    vi.mocked(api.loadThresholdsConfigure).mockImplementation(async (opts) => {
+      if (opts.reset) return thresholdsFixture as any;
+      const next = structuredClone(thresholdsFixture) as typeof thresholdsFixture;
+      for (const [k, v] of Object.entries(opts.thresholds || {})) {
+        const field = next.thresholds[k as keyof typeof next.thresholds];
+        if (field) {
+          field.value = v as number;
+          field.source = "override";
+        }
+      }
+      return next as any;
+    });
+  });
+
+  it("renders both depth controls at their defaults", async () => {
+    render(
+      <StorageMemoryModal
+        busy={false}
+        report={null}
+        mem={null}
+        initialTab="jsonflatten"
+        onClose={() => {}}
+        onToast={() => {}}
+        onRefreshReport={() => {}}
+        onMemFreed={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("json-flatten-tab")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("json-flatten-panel")).toBeInTheDocument(),
+    );
+    const depth = (await screen.findByTestId(
+      "load-threshold-json_max_depth",
+    )) as HTMLInputElement;
+    expect(depth.value).toBe("2");
+    const flat = screen.getByTestId(
+      "load-threshold-flatten_max_depth",
+    ) as HTMLInputElement;
+    expect(flat.value).toBe("64");
+  });
+
+  it("saves an edited JSON load depth via the settings API", async () => {
+    render(
+      <StorageMemoryModal
+        busy={false}
+        report={null}
+        mem={null}
+        initialTab="jsonflatten"
+        onClose={() => {}}
+        onToast={() => {}}
+        onRefreshReport={() => {}}
+        onMemFreed={() => {}}
+      />,
+    );
+    const depth = (await screen.findByTestId(
+      "load-threshold-json_max_depth",
+    )) as HTMLInputElement;
+    fireEvent.change(depth, { target: { value: "4" } });
+    fireEvent.click(screen.getByTestId("json-flatten-apply"));
+    await waitFor(() =>
+      expect(api.loadThresholdsConfigure).toHaveBeenCalledWith(
+        expect.objectContaining({
+          thresholds: expect.objectContaining({ json_max_depth: 4 }),
+        }),
+      ),
+    );
+  });
+});
+
+describe("StorageMemoryModal Engine tab", () => {
+  beforeEach(() => {
+    vi.mocked(api.engineTuning).mockResolvedValue({
+      ok: true,
+      memory_limit: "8.0 GiB",
+      threads: 6,
+      note: "Applies to this session; set SAMQL_DUCKDB_MEMORY_GB to persist across restarts.",
+    });
+  });
+
+  it("shows the Engine tab and loads current tuning", async () => {
+    render(
+      <StorageMemoryModal
+        busy={false}
+        report={null}
+        mem={null}
+        initialTab="engine"
+        onClose={() => {}}
+        onToast={() => {}}
+        onRefreshReport={() => {}}
+        onMemFreed={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("engine-tuning-tab")).toBeInTheDocument();
+    expect(screen.getByText("Storage & Engine")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("engine-tuning-panel")).toBeInTheDocument(),
+    );
+    const mem = (await screen.findByTestId(
+      "engine-tuning-memory-gb",
+    )) as HTMLInputElement;
+    expect(mem.value).toBe("8");
+    const th = screen.getByTestId("engine-tuning-threads") as HTMLInputElement;
+    expect(th.value).toBe("6");
+  });
+
+  it("applies memory and threads via /api/engine/tuning", async () => {
+    const toast = vi.fn();
+    vi.mocked(api.engineTuning).mockImplementation(async (opts) => {
+      if (opts.memory_gb != null || opts.threads != null) {
+        return {
+          ok: true,
+          memory_limit: `${opts.memory_gb || 8}.0 GiB`,
+          threads: opts.threads ?? 6,
+          applied: opts,
+        };
+      }
+      return {
+        ok: true,
+        memory_limit: "8.0 GiB",
+        threads: 6,
+      };
+    });
+    render(
+      <StorageMemoryModal
+        busy={false}
+        report={null}
+        mem={null}
+        initialTab="engine"
+        onClose={() => {}}
+        onToast={toast}
+        onRefreshReport={() => {}}
+        onMemFreed={() => {}}
+      />,
+    );
+    const mem = (await screen.findByTestId(
+      "engine-tuning-memory-gb",
+    )) as HTMLInputElement;
+    fireEvent.change(mem, { target: { value: "12" } });
+    fireEvent.change(screen.getByTestId("engine-tuning-threads"), {
+      target: { value: "8" },
+    });
+    fireEvent.click(screen.getByTestId("engine-tuning-apply"));
+    await waitFor(() =>
+      expect(api.engineTuning).toHaveBeenCalledWith({
+        memory_gb: 12,
+        threads: 8,
+      }),
+    );
+    expect(toast).toHaveBeenCalledWith(
+      "ok",
+      "Engine tuned",
+      expect.any(String),
     );
   });
 });

@@ -18,6 +18,8 @@ export function useNodeFlowAnimations() {
     () => new Set(),
   );
   const [bornId, setBornId] = useState<string | null>(null);
+  /** Lineage-modal highlight — white glow, distinct from green selection / born. */
+  const [lineageFlashId, setLineageFlashId] = useState<string | null>(null);
 
   const mountedRef = useRef(false);
   const rippleTimer = useRef<number | null>(null);
@@ -25,6 +27,9 @@ export function useNodeFlowAnimations() {
   const bornTimer = useRef<number | null>(null);
   const bornFrame = useRef<number | null>(null);
   const bornIdRef = useRef<string | null>(null);
+  const lineageFlashTimer = useRef<number | null>(null);
+  const lineageFlashFrame = useRef<number | null>(null);
+  const lineageFlashIdRef = useRef<string | null>(null);
   const dyingCounts = useRef<Map<string, number>>(new Map());
   const implosions = useRef<Map<string, ImplosionOperation>>(new Map());
   const edgeRetracts = useRef<Map<string, number>>(new Map());
@@ -79,6 +84,37 @@ export function useNodeFlowAnimations() {
       bornIdRef.current = null;
       if (mountedRef.current) setBornId(null);
     }, 320);
+  }, []);
+
+  const fireLineageFlash = useCallback((id: string) => {
+    if (lineageFlashTimer.current != null) {
+      window.clearTimeout(lineageFlashTimer.current);
+      lineageFlashTimer.current = null;
+    }
+    if (lineageFlashFrame.current != null) {
+      window.cancelAnimationFrame(lineageFlashFrame.current);
+      lineageFlashFrame.current = null;
+    }
+
+    if (lineageFlashIdRef.current !== id) {
+      lineageFlashIdRef.current = id;
+      setLineageFlashId(id);
+    } else {
+      lineageFlashIdRef.current = null;
+      setLineageFlashId(null);
+      lineageFlashFrame.current = window.requestAnimationFrame(() => {
+        lineageFlashFrame.current = null;
+        if (!mountedRef.current) return;
+        lineageFlashIdRef.current = id;
+        setLineageFlashId(id);
+      });
+    }
+
+    lineageFlashTimer.current = window.setTimeout(() => {
+      lineageFlashTimer.current = null;
+      lineageFlashIdRef.current = null;
+      if (mountedRef.current) setLineageFlashId(null);
+    }, 900);
   }, []);
 
   const withImplosion = useCallback((ids: string[], commit: () => void) => {
@@ -206,6 +242,14 @@ export function useNodeFlowAnimations() {
         window.cancelAnimationFrame(bornFrame.current);
         bornFrame.current = null;
       }
+      if (lineageFlashTimer.current != null) {
+        window.clearTimeout(lineageFlashTimer.current);
+        lineageFlashTimer.current = null;
+      }
+      if (lineageFlashFrame.current != null) {
+        window.cancelAnimationFrame(lineageFlashFrame.current);
+        lineageFlashFrame.current = null;
+      }
       for (const operation of activeImplosions.values()) {
         window.clearTimeout(operation.timer);
       }
@@ -231,8 +275,10 @@ export function useNodeFlowAnimations() {
     dyingIds,
     dyingEdgeIds,
     bornId,
+    lineageFlashId,
     fireRipple,
     fireBorn,
+    fireLineageFlash,
     withImplosion,
     withEdgeRetract,
   };

@@ -58,6 +58,13 @@ vi.mock("../components/ActivityShared", () => ({
   useActivityStatus: () => ({ status: null }),
   useEngineReset: () => ({ reset: vi.fn(), resetting: false }),
   useTasks: () => ({ activeCount: 0, opsCount: 0, stalled: false }),
+  useWinDrag: () => ({
+    pos: { x: 40, y: 40 },
+    startDrag: vi.fn(),
+    dragging: false,
+    settled: false,
+    winRef: { current: null },
+  }),
   ActivityMonitor: () => null,
   TaskWatcher: () => null,
 }));
@@ -83,6 +90,7 @@ describe("Eye Care view setting", () => {
     );
 
     fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
     const toggle = screen.getByTestId("eye-care-toggle");
     expect(toggle).toHaveAttribute("aria-pressed", "false");
     expect(document.documentElement.classList.contains("eye-care")).toBe(false);
@@ -116,6 +124,7 @@ describe("Eye Care view setting", () => {
       ),
     );
     fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
     expect(screen.getByTestId("eye-care-toggle")).toHaveAttribute(
       "aria-pressed",
       "true",

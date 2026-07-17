@@ -49,6 +49,7 @@ interface NodeFlowSceneProps {
   nodes: NbNode[];
   edges: NbEdge[];
   running: boolean;
+  runningNodeIds: Set<string>;
   wrapRef: React.RefObject<HTMLDivElement | null>;
   contentRef: React.RefObject<HTMLDivElement | null>;
   onScroll: () => void;
@@ -87,6 +88,7 @@ interface NodeFlowSceneProps {
   ripple: boolean;
   snapId: string | null;
   bornId: string | null;
+  lineageFlashId: string | null;
   chartData: Record<
     string,
     { data?: ChartData; loading?: boolean; error?: string }
@@ -110,6 +112,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   nodes,
   edges,
   running,
+  runningNodeIds,
   wrapRef,
   contentRef,
   onScroll,
@@ -143,6 +146,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   ripple,
   snapId,
   bornId,
+  lineageFlashId,
   chartData,
   patchNode,
   ensureChartFor,
@@ -178,10 +182,11 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
     if (groupHover) ids.add(groupHover);
     if (snapId) ids.add(snapId);
     if (bornId) ids.add(bornId);
+    if (lineageFlashId) ids.add(lineageFlashId);
     if (pendingWire?.node) ids.add(pendingWire.node);
     for (const id of dyingIds) ids.add(id);
     return ids;
-  }, [bornId, dyingIds, groupHover, pendingWire?.node, selectedId, selectedIds, snapId]);
+  }, [bornId, lineageFlashId, dyingIds, groupHover, pendingWire?.node, selectedId, selectedIds, snapId]);
 
   const visibleNodes = useMemo(
     () =>
@@ -239,6 +244,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   return (
     <NodeFlowCanvasShell
       running={running}
+      runningNodeIds={runningNodeIds}
       isWiring={!!pendingWire}
       wrapRef={wrapRef}
       contentRef={contentRef}
@@ -332,6 +338,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             snapped={snapId === node.id}
             dying={dyingIds.has(node.id)}
             born={bornId === node.id}
+            lineageFlash={lineageFlashId === node.id}
             denseMode={denseMode}
             renderVersion={renderModel.renderVersionByNode[node.id] || "-"}
             chartVersion={chartVersionByNode[node.id] ?? null}

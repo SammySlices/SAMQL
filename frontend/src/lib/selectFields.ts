@@ -19,8 +19,12 @@ export type SelField = {
  *   - a newly-available column (a formula's new column, or a column an upstream
  *     Select just renamed into existence) is appended at the end, kept by
  *     default,
- *   - a column that no longer exists upstream is dropped (its old settings
- *     would only produce a "no such column" error downstream).
+ *   - a column that no longer exists upstream is dropped -- EXCEPT when the
+ *     user explicitly unchecked it (`keep: false`). Those are retained as
+ *     tombstones so a temporary upstream shrink (projection / probe race
+ *     around a workflow run) cannot drop them and then re-append them as
+ *     `keep: true` on the next full column list ("deselected fields come
+ *     back selected after a few runs").
  *
  * Keeping surviving columns in the user's order is what lets a drag-reorder
  * stick; still appending new columns and dropping gone ones is what lets a
@@ -30,22 +34,32 @@ export function reconcileSelectFields(
   upstreamCols: string[],
   current: SelField[],
 ): SelField[] {
-  const up = new Set(upstreamCols || []);
+  const cols = upstreamCols || [];
+  // match names case-insensitively -- the backend Select resolves columns
+  // case-insensitively, so a case-only upstream rename (Name -> name) must
+  // keep the user's field (its keep / rename / type / order), not be treated
+  // as a remove + re-add that discards those settings.
+  const upByLower = new Set(cols.map((c) => c.toLowerCase()));
   const seen = new Set<string>();
   const out: SelField[] = [];
   // keep the user's existing fields, in their current order, for columns that
-  // still exist upstream
+  // still exist upstream (case-insensitive) -- and retain explicit unchecks
+  // even when the column is momentarily absent from the probe.
   for (const f of current || []) {
-    if (up.has(f.name) && !seen.has(f.name)) {
+    const key = String(f.name).toLowerCase();
+    if (seen.has(key)) continue;
+    if (upByLower.has(key) || f.keep === false) {
       out.push(f);
-      seen.add(f.name);
+      seen.add(key);
     }
   }
-  // append columns that are newly available upstream, in upstream order
-  for (const c of upstreamCols || []) {
-    if (!seen.has(c)) {
+  // append columns that are genuinely new upstream (not already matched
+  // case-insensitively above), in upstream order
+  for (const c of cols) {
+    const key = c.toLowerCase();
+    if (!seen.has(key)) {
       out.push({ name: c, keep: true });
-      seen.add(c);
+      seen.add(key);
     }
   }
   return out;

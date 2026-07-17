@@ -33,6 +33,13 @@ import { Icon } from "./components/Icon";
 import { Sidebar } from "./components/Sidebar";
 import { SqlEditor } from "./components/SqlEditor";
 import { DataGrid } from "./components/DataGrid";
+import {
+  ExportResultsCtxItem,
+  ExportResultsMenuItems,
+} from "./components/ExportResultsMenu";
+import { exportFormatsForResultTab } from "./lib/resultExportFormats";
+import { ColumnLineageModal } from "./components/ColumnLineageModal";
+import type { ColumnLineageOpenArgs } from "./lib/columnLineage";
 import { Profiler } from "./components/Profiler";
 import { ChartPanel } from "./components/ChartPanel";
 import { PivotPanel } from "./components/PivotPanel";
@@ -47,7 +54,6 @@ const Dashboard = lazy(() =>
 );
 import { Modal } from "./components/Modal";
 import { ErrorLogModal } from "./components/ErrorLogModal";
-import { DiagnosticsModal } from "./components/DiagnosticsModal";
 import { SqlAssistant } from "./components/SqlAssistant";
 import {
   AssistantModelsModal,
@@ -86,6 +92,7 @@ import { useCatalogController } from "./controllers/useCatalogController";
 import { useResultController } from "./controllers/useResultController";
 import { useIdeController } from "./controllers/useIdeController";
 import { useWorkspaceController } from "./controllers/useWorkspaceController";
+import { useSaveShortcut } from "./lib/useSaveShortcut";
 import { FloatingPanel } from "./components/FloatingPanel";
 import {
   moveFloat as moveFloatById,
@@ -359,6 +366,69 @@ export default function App() {
     setReconcileOpen(true);
   };
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Settings > View flyouts: Toolbar Toggle + Visual Toggles (mutually exclusive).
+  // Leave-to-close uses a short grace so the pointer can cross into the flyout.
+  const [settingsFlyout, setSettingsFlyout] = useState<null | {
+    kind: "toolbar" | "visual";
+    x: number;
+    y: number;
+  }>(null);
+  const settingsFlyoutLeaveTimer = useRef<number | null>(null);
+  const clearSettingsFlyoutLeave = useCallback(() => {
+    if (settingsFlyoutLeaveTimer.current != null) {
+      window.clearTimeout(settingsFlyoutLeaveTimer.current);
+      settingsFlyoutLeaveTimer.current = null;
+    }
+  }, []);
+  const closeSettingsFlyout = useCallback(() => {
+    clearSettingsFlyoutLeave();
+    setSettingsFlyout(null);
+  }, [clearSettingsFlyoutLeave]);
+  const scheduleCloseSettingsFlyout = useCallback(() => {
+    clearSettingsFlyoutLeave();
+    settingsFlyoutLeaveTimer.current = window.setTimeout(() => {
+      settingsFlyoutLeaveTimer.current = null;
+      setSettingsFlyout(null);
+    }, 120);
+  }, [clearSettingsFlyoutLeave]);
+  useEffect(() => {
+    if (!settingsOpen) closeSettingsFlyout();
+  }, [settingsOpen, closeSettingsFlyout]);
+  useEffect(
+    () => () => {
+      clearSettingsFlyoutLeave();
+    },
+    [clearSettingsFlyoutLeave],
+  );
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (settingsFlyout) closeSettingsFlyout();
+      else setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [settingsOpen, settingsFlyout, closeSettingsFlyout]);
+  const openSettingsFlyout = (
+    kind: "toolbar" | "visual",
+    el: HTMLElement,
+  ) => {
+    clearSettingsFlyoutLeave();
+    const r = el.getBoundingClientRect();
+    setSettingsFlyout((cur) =>
+      cur?.kind === kind ? null : { kind, x: r.right - 3, y: r.top },
+    );
+  };
+  const showSettingsFlyout = (
+    kind: "toolbar" | "visual",
+    el: HTMLElement,
+  ) => {
+    clearSettingsFlyoutLeave();
+    const r = el.getBoundingClientRect();
+    setSettingsFlyout({ kind, x: r.right - 3, y: r.top });
+  };
   // floating field-access explorer; stays open across IDE / Journal / Node
   const [fieldExplorerOpen, setFieldExplorerOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
@@ -366,8 +436,9 @@ export default function App() {
   // and it reappears when returning to NodeFlow (hidden in IDE/Journal).
   const [toolsTablesOpen, setToolsTablesOpen] = useState(false);
   const [errorLogOpen, setErrorLogOpen] = useState(false);
-  const [diagOpen, setDiagOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [lineageOpen, setLineageOpen] =
+    useState<ColumnLineageOpenArgs | null>(null);
   const [storage, setStorage] = useState<{
     open: boolean;
     busy: boolean;
@@ -530,6 +601,9 @@ export default function App() {
   // applied as a body class so the NodeFlow canvas CSS can pick it up
   const [ivoryCanvas, setIvoryCanvas] = useState(() => {
     try {
+      const theme = window.localStorage?.getItem("samql.theme");
+      if (theme === "light") return true;
+      if (theme === "dark") return false;
       return window.localStorage?.getItem("samql.canvasIvory") === "1";
     } catch {
       return false;
@@ -614,9 +688,13 @@ export default function App() {
       /* ignore */
     }
   }, [nodeFlowDense]);
-  // optional ivory background for the SQL editor (separate toggle in Settings)
+  // optional ivory background for the SQL editor (paired with canvas under
+  // Visual Toggles → light mode)
   const [ivoryEditor, setIvoryEditor] = useState(() => {
     try {
+      const theme = window.localStorage?.getItem("samql.theme");
+      if (theme === "light") return true;
+      if (theme === "dark") return false;
       return window.localStorage?.getItem("samql.editorIvory") === "1";
     } catch {
       return false;
@@ -630,6 +708,22 @@ export default function App() {
       /* ignore */
     }
   }, [ivoryEditor]);
+  // Full app light/dark theme (CSS variables on <html>). Synced with the
+  // Visual Toggles light switch (ivory canvas + editor + theme-light).
+  const lightTheme = !!(ivoryCanvas && ivoryEditor);
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("theme-light", lightTheme);
+    root.setAttribute("data-theme", lightTheme ? "light" : "dark");
+    try {
+      window.localStorage?.setItem(
+        "samql.theme",
+        lightTheme ? "light" : "dark",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [lightTheme]);
   const [exiting, setExiting] = useState<null | "kept" | "stopped">(null);
   // While true, the browser shows a native "leave site?" prompt on tab
   // close / reload. We flip it off only for an intentional exit.
@@ -794,6 +888,7 @@ export default function App() {
     askConfirm,
     refreshWorkflows,
     edTabsRef,
+    setEdTabs,
     activeIdRef,
     loadSqlIntoEditor,
   });
@@ -1517,6 +1612,10 @@ export default function App() {
               id: t.id,
               title: t.title,
               sql: t.sql,
+              ...(t.savedWorkflowName
+                ? { savedWorkflowName: t.savedWorkflowName }
+                : {}),
+              ...(t.savedFilePath ? { savedFilePath: t.savedFilePath } : {}),
             })),
             activeId,
             target,
@@ -1551,6 +1650,10 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Ctrl/Cmd+S saves the active surface via the same handler as the Save
+  // button, routing by current view and overwriting any existing identity.
+  useSaveShortcut(activeSave);
 
   const openToolsTables = useCallback(() => {
     switchView("nodeflow");
@@ -1597,7 +1700,7 @@ export default function App() {
       },
       {
         id: "load-data",
-        label: "Load data…",
+        label: "Load a Table",
         group: "Data",
         run: () => setLoadOpen(true),
       },
@@ -1625,8 +1728,9 @@ export default function App() {
       },
       {
         id: "field-explorer",
-        label: "Open Field explorer",
+        label: "Open JSON Field Explorer",
         group: "Tools",
+        keywords: "json nested fields shred flatten",
         run: () => setFieldExplorerOpen(true),
       },
       {
@@ -1808,27 +1912,8 @@ export default function App() {
         : r.kind === "profile"
           ? !!r.profile
           : false);
-  // recon + profile are formatted client-side, so only CSV / JSON apply there;
-  // result tabs can use every backend format.
-  const exportFormatsFor = (
-    r: ResultTab | null | undefined,
-  ): [string, string][] =>
-    r && r.kind === "result"
-      ? ([
-          ["csv", "CSV"],
-          ["tsv", "TSV"],
-          ["json", "JSON"],
-          ["ndjson", "NDJSON"],
-          ...(feats?.openpyxl ? [["xlsx", "Excel (xlsx)"]] : []),
-          // Parquet is typed + columnar and opens directly in Tableau and
-          // Power BI, so a dedicated option for each isn't needed. Needs
-          // pyarrow.
-          ...(feats?.pyarrow ? [["parquet", "Parquet"]] : []),
-        ] as [string, string][])
-      : ([
-          ["csv", "CSV"],
-          ["json", "JSON"],
-        ] as [string, string][]);
+  const exportFormatsFor = (r: ResultTab | null | undefined) =>
+    exportFormatsForResultTab(r?.kind, feats);
   const doExport = (fmt: string) => exportResultTab(activeRes, fmt);
 
   // ---- table ops ----
@@ -2437,6 +2522,22 @@ export default function App() {
 
   const feats = health?.features;
 
+  const openColumnLineage = (
+    col: string,
+    tab?: typeof activeResultTab,
+    cell?: { rowIndex: number; value: unknown },
+  ) => {
+    const t = tab ?? activeResultTab;
+    setLineageOpen({
+      column: col,
+      graph: t?.lineageGraph,
+      nodeId: t?.lineageNodeId,
+      port: t?.lineagePort,
+      rowIndex: cell?.rowIndex,
+      cellValue: cell?.value ?? null,
+    });
+  };
+
   // a DataGrid bound to a specific result id (used by the compare split, where
   // each side sorts/pages independently).
   const renderGridForRes = (resId: string) => {
@@ -2459,7 +2560,18 @@ export default function App() {
         hasMore={(r.page.rows?.length ?? 0) < (r.page.total_rows ?? 0)}
         loadingMore={!!r.loadingMore}
         onExportResults={(fmt) => exportResultTab(r, fmt)}
+        exportFormats={exportFormatsFor(r)}
         cellFetch={{ resultId: r.page.result_id ?? null, filters: (r as any).filters }}
+        onColumnContextMenu={(col, x, y) => {
+          const ex = (r.filters || []).find((f) => f.column === col);
+          setFilterDraft({
+            op: ex?.op ?? "contains",
+            value: ex?.value ?? "",
+          });
+          setColMenu({ col, x, y });
+          setActiveResId(r.id);
+        }}
+        onShowLineage={(col, cell) => openColumnLineage(col, r, cell)}
       />
     );
   };
@@ -2549,141 +2661,61 @@ export default function App() {
               >
                 <div className="label">View</div>
                 <button
-                  onClick={() => {
-                    setShowTables((v) => !v);
-                    setSettingsOpen(false);
-                  }}
-                >
-                  {showTables ? "Hide tables panel" : "Show tables panel"}
-                </button>
-                <button
-                  onClick={() => {
-                    setShowNodeSearch((v) => !v);
-                    setSettingsOpen(false);
-                  }}
-                >
-                  {showNodeSearch
-                    ? "Hide node search bar"
-                    : "Show node search bar"}
-                </button>
-                <button
-                  disabled={view !== "nodeflow"}
-                  title={
-                    view === "nodeflow"
-                      ? "Floating tables list and node palette"
-                      : "Available only in NodeFlow"
+                  className="has-sub"
+                  data-testid="settings-toolbar-toggle"
+                  aria-expanded={settingsFlyout?.kind === "toolbar"}
+                  aria-haspopup="menu"
+                  title="Show or hide toolbars and related chrome"
+                  onMouseEnter={(e) =>
+                    showSettingsFlyout("toolbar", e.currentTarget)
                   }
-                  onClick={() => {
-                    setToolsTablesOpen(true);
-                    setSettingsOpen(false);
+                  onMouseLeave={scheduleCloseSettingsFlyout}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    openSettingsFlyout("toolbar", e.currentTarget);
                   }}
                 >
-                  Tools &amp; Tables…
+                  <span>Toolbar Toggle</span>
+                  <span className="chev" aria-hidden>
+                    ▸
+                  </span>
                 </button>
                 <button
-                  onClick={() => {
-                    setNodeToolbarHidden((v) => !v);
-                    setSettingsOpen(false);
-                  }}
-                >
-                  {nodeToolbarHidden
-                    ? "Show node toolbar"
-                    : "Hide node toolbar"}
-                </button>
-                <button
-                  onClick={() => {
-                    // one switch for the whole app: light = ivory canvas +
-                    // ivory editor; dark = both dark. Flip them together.
-                    const goLight = !(ivoryCanvas && ivoryEditor);
-                    setIvoryCanvas(goLight);
-                    setIvoryEditor(goLight);
-                    setSettingsOpen(false);
-                  }}
-                >
-                  {ivoryCanvas && ivoryEditor
-                    ? "Toggle Dark Mode"
-                    : "Toggle Light Mode"}
-                </button>
-                <button
-                  onClick={() => {
-                    setReduceMotion((v) => !v);
-                    setSettingsOpen(false);
-                  }}
-                >
-                  {reduceMotion ? "Enable animations" : "Reduce motion"}
-                </button>
-                <button
-                  data-testid="eye-care-toggle"
-                  aria-pressed={eyeCare}
-                  title="Enlarge text, buttons, nodes, and panels for easier reading"
-                  onClick={() => setEyeCare((v) => !v)}
-                >
-                  {eyeCare ? "Eye Care: on" : "Eye Care"}
-                </button>
-                <button
-                  data-testid="nodeflow-dense-toggle"
-                  aria-pressed={nodeFlowDense}
-                  title="Shrink NodeFlow node geometry so more of the graph fits on screen (works with Eye Care)"
-                  onClick={() =>
-                    setNodeFlowDense((v) => {
-                      const next = !v;
-                      setNodeFlowDenseMode(next);
-                      return next;
-                    })
+                  className="has-sub"
+                  data-testid="settings-visual-toggles"
+                  aria-expanded={settingsFlyout?.kind === "visual"}
+                  aria-haspopup="menu"
+                  title="Light/Dark mode, Eye Care, reduce motion, and Condensed NodeFlow"
+                  onMouseEnter={(e) =>
+                    showSettingsFlyout("visual", e.currentTarget)
                   }
+                  onMouseLeave={scheduleCloseSettingsFlyout}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    openSettingsFlyout("visual", e.currentTarget);
+                  }}
                 >
-                  {nodeFlowDense ? "Dense NodeFlow: on" : "Dense NodeFlow"}
+                  <span>Visual Toggles</span>
+                  <span className="chev" aria-hidden>
+                    ▸
+                  </span>
                 </button>
                 <div className="sep" />
-                <div className="label">Engine</div>
-                <button
-                  disabled={!health?.features?.duckdb}
-                  title={
-                    health?.features?.duckdb
-                      ? "Adjust DuckDB's memory limit and thread count live (this session)"
-                      : "Requires the DuckDB engine"
-                  }
-                  onClick={async () => {
-                    setSettingsOpen(false);
-                    try {
-                      const cur = await api.engineTuning({});
-                      if (cur.busy || cur.error) {
-                        toast("warn", "Engine tuning", cur.error);
-                        return;
-                      }
-                      const mem = window.prompt(
-                        "DuckDB memory limit (GB):",
-                        String(parseFloat(cur.memory_limit || "") || ""),
-                      );
-                      if (mem === null) return;
-                      const th = window.prompt(
-                        "DuckDB threads:",
-                        String(cur.threads ?? ""),
-                      );
-                      if (th === null) return;
-                      const r = await api.engineTuning({
-                        memory_gb: parseFloat(mem) || undefined,
-                        threads: parseInt(th, 10) || undefined,
-                      });
-                      if (r.error) toast("error", "Engine tuning failed", r.error);
-                      else
-                        toast(
-                          "ok",
-                          "Engine tuned",
-                          `memory_limit ${r.memory_limit} · ${r.threads} threads (this session; SAMQL_DUCKDB_MEMORY_GB persists)`,
-                        );
-                    } catch (e: any) {
-                      toast("error", "Engine tuning failed", e?.message);
-                    }
-                  }}
-                >
-                  Engine tuning (memory / threads)…
-                </button>
                 {createdNodesUi.menu(() => setSettingsOpen(false))}
                 {dashboardUi.menu(() => setSettingsOpen(false))}
                 <div className="sep" />
-                <div className="label">Workflow</div>
+                <div className="label">Open / Save</div>
                 <button
+                  data-testid="settings-open"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    activeOpen();
+                  }}
+                >
+                  <Icon.Folder size={13} /> Open
+                </button>
+                <button
+                  data-testid="settings-save"
                   onClick={() => {
                     setSettingsOpen(false);
                     activeSave();
@@ -2692,20 +2724,13 @@ export default function App() {
                   <Icon.Save size={13} /> Save
                 </button>
                 <button
+                  data-testid="settings-save-as"
                   onClick={() => {
                     setSettingsOpen(false);
                     activeSaveAs();
                   }}
                 >
-                  Save As…
-                </button>
-                <button
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    activeOpen();
-                  }}
-                >
-                  <Icon.Folder size={13} /> Open…
+                  Save As
                 </button>
                 <div className="sep" />
                 <div className="label">Data</div>
@@ -2716,35 +2741,17 @@ export default function App() {
                     setSettingsOpen(false);
                   }}
                 >
-                  Load data…
+                  Load a Table
                 </button>
-                <button
-                  onClick={() => {
-                    setFieldExplorerOpen(true);
-                    setSettingsOpen(false);
-                  }}
-                  title="Floating panel: pick a JSON source, click a field, get the query to access it"
-                >
-                  <Icon.ListTree size={13} /> Field explorer…
-                </button>
-                <button
+                <ExportResultsCtxItem
+                  testId="settings-export-results"
+                  formats={exportFormatsFor(activeRes)}
                   disabled={!canExport(activeRes)}
-                  onClick={() => {
+                  onExport={(fmt) => {
                     setSettingsOpen(false);
-                    void doExport("csv");
+                    void doExport(fmt);
                   }}
-                >
-                  <Icon.Download size={13} /> Export results (CSV)
-                </button>
-                <button
-                  disabled={!canExport(activeRes)}
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    void doExport("json");
-                  }}
-                >
-                  <Icon.Download size={13} /> Export results (JSON)
-                </button>
+                />
                 {view === "nodeflow" ? (
                   <button
                     onClick={() => {
@@ -2768,6 +2775,16 @@ export default function App() {
                 )}
                 <div className="sep" />
                 <div className="label">Tools</div>
+                <button
+                  data-testid="settings-json-field-explorer"
+                  title="Browse nested JSON fields and build SELECT snippets"
+                  onClick={() => {
+                    setFieldExplorerOpen(true);
+                    setSettingsOpen(false);
+                  }}
+                >
+                  JSON Field Explorer
+                </button>
                 <button
                   data-testid="sql-assistant-settings-menu"
                   title="Local GGUF models or OpenAI-compatible API for the SQL assistant"
@@ -2832,26 +2849,18 @@ export default function App() {
                   Error log…
                 </button>
                 <button
+                  data-testid="storage-memory-menu"
+                  onClick={() => void openStorage()}
+                >
+                  Storage &amp; Engine…
+                </button>
+                <button
                   onClick={() => {
                     setAboutOpen(true);
                     setSettingsOpen(false);
                   }}
                 >
                   About SamQL…
-                </button>
-                <button
-                  onClick={() => {
-                    setDiagOpen(true);
-                    setSettingsOpen(false);
-                  }}
-                >
-                  Diagnostics…
-                </button>
-                <button
-                  data-testid="storage-memory-menu"
-                  onClick={() => void openStorage()}
-                >
-                  Storage &amp; memory…
                 </button>
                 <button
                   className="danger"
@@ -2863,6 +2872,122 @@ export default function App() {
                   Clear workspace…
                 </button>
               </div>
+              {settingsFlyout?.kind === "toolbar" && (
+                <div
+                  className="ctx-menu settings-toolbar-sub"
+                  data-testid="settings-toolbar-toggle-menu"
+                  role="menu"
+                  aria-label="Toolbar Toggle"
+                  style={{
+                    ...menuPos(settingsFlyout.x, settingsFlyout.y, 240),
+                    zIndex: 132,
+                  }}
+                  onMouseEnter={clearSettingsFlyoutLeave}
+                  onMouseLeave={scheduleCloseSettingsFlyout}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="settings-toolbar-tables-panel"
+                    aria-checked={showTables}
+                    onClick={() => setShowTables((v) => !v)}
+                  >
+                    {showTables ? "Hide tables panel" : "Show tables panel"}
+                  </button>
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="settings-toolbar-node-search"
+                    aria-checked={showNodeSearch}
+                    onClick={() => setShowNodeSearch((v) => !v)}
+                  >
+                    {showNodeSearch
+                      ? "Hide node search bar"
+                      : "Show node search bar"}
+                  </button>
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="settings-toolbar-node-toolbar"
+                    aria-checked={!nodeToolbarHidden}
+                    onClick={() => setNodeToolbarHidden((v) => !v)}
+                  >
+                    {nodeToolbarHidden
+                      ? "Show node toolbar"
+                      : "Hide node toolbar"}
+                  </button>
+                </div>
+              )}
+              {settingsFlyout?.kind === "visual" && (
+                <div
+                  className="ctx-menu settings-visual-sub"
+                  data-testid="settings-visual-toggles-menu"
+                  role="menu"
+                  aria-label="Visual Toggles"
+                  style={{
+                    ...menuPos(settingsFlyout.x, settingsFlyout.y, 240),
+                    zIndex: 132,
+                  }}
+                  onMouseEnter={clearSettingsFlyoutLeave}
+                  onMouseLeave={scheduleCloseSettingsFlyout}
+                  onMouseDown={(e) => e.stopPropagation()}
+                >
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="settings-theme-toggle"
+                    aria-checked={!!(ivoryCanvas && ivoryEditor)}
+                    aria-pressed={!!(ivoryCanvas && ivoryEditor)}
+                    title="Switch the whole app between light and dark (chrome, menus, canvas, editor)"
+                    onClick={() => {
+                      // one switch for the whole app: light = CSS theme-light
+                      // + ivory canvas/editor; dark = both dark.
+                      const goLight = !(ivoryCanvas && ivoryEditor);
+                      setIvoryCanvas(goLight);
+                      setIvoryEditor(goLight);
+                    }}
+                  >
+                    {ivoryCanvas && ivoryEditor
+                      ? "Toggle Dark Mode"
+                      : "Toggle Light Mode"}
+                  </button>
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="eye-care-toggle"
+                    aria-checked={eyeCare}
+                    aria-pressed={eyeCare}
+                    title="Enlarge text, buttons, nodes, and panels for easier reading"
+                    onClick={() => setEyeCare((v) => !v)}
+                  >
+                    {eyeCare ? "Eye Care: on" : "Eye Care"}
+                  </button>
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="settings-reduce-motion-toggle"
+                    aria-checked={reduceMotion}
+                    aria-pressed={reduceMotion}
+                    title="Reduce or restore UI motion and animations"
+                    onClick={() => setReduceMotion((v) => !v)}
+                  >
+                    {reduceMotion ? "Enable animations" : "Reduce motion"}
+                  </button>
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="nodeflow-dense-toggle"
+                    aria-checked={nodeFlowDense}
+                    aria-pressed={nodeFlowDense}
+                    title="Shrink NodeFlow node geometry so more of the graph fits on screen (works with Eye Care)"
+                    onClick={() =>
+                      setNodeFlowDense((v) => {
+                        const next = !v;
+                        setNodeFlowDenseMode(next);
+                        return next;
+                      })
+                    }
+                  >
+                    {nodeFlowDense
+                      ? "Condensed NodeFlow: on"
+                      : "Condensed NodeFlow"}
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -2998,7 +3123,7 @@ export default function App() {
                 <div className="view-loading">Loading NodeFlow…</div>
               }
             >
-              <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} onTogglePalette={() => setNodeToolbarHidden((v) => !v)} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} />
+              <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} onTogglePalette={() => setNodeToolbarHidden((v) => !v)} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} onOpenJsonFieldExplorer={() => setFieldExplorerOpen(true)} denseMode={nodeFlowDense} />
             </Suspense>
           ) : view === "dashboard" ? (
             <Suspense
@@ -3284,25 +3409,11 @@ export default function App() {
                         >
                           Export
                         </div>
-                        {exportFormatsFor(activeRes).map(([fmt, label]) => (
-                          <button
-                            key={fmt}
-                            className="btn ghost"
-                            data-testid={`export-${fmt}`}
-                            style={{
-                              display: "block",
-                              width: "100%",
-                              textAlign: "left",
-                              borderRadius: 0,
-                            }}
-                            onClick={() => {
-                              void doExport(fmt);
-                              setOutputOpen(false);
-                            }}
-                          >
-                            {label}
-                          </button>
-                        ))}
+                        <ExportResultsMenuItems
+                          formats={exportFormatsFor(activeRes)}
+                          onExport={(fmt) => void doExport(fmt)}
+                          onDone={() => setOutputOpen(false)}
+                        />
                       </>
                     )}
                     {activeResultTab?.resultId && (
@@ -3753,6 +3864,14 @@ export default function App() {
                     <ChartPanel
                       resultId={activeResultTab.resultId ?? null}
                       columns={activeResultTab.page?.columns || []}
+                      sampleRows={activeResultTab.page?.rows}
+                      onExpired={() =>
+                        toast(
+                          "warn",
+                          "Result expired",
+                          "Re-run the query to chart it again.",
+                        )
+                      }
                       onPopOut={() => floatView(activeResultTab.id, "chart")}
                     />
                   )
@@ -3767,10 +3886,18 @@ export default function App() {
                           ? {
                               id: activeResultTab.resultId,
                               columns: activeResultTab.page?.columns || [],
+                              sampleRows: activeResultTab.page?.rows,
                             }
                           : null
                       }
                       onToast={toast}
+                      onExpired={() =>
+                        toast(
+                          "warn",
+                          "Result expired",
+                          "Re-run the query to pivot it again.",
+                        )
+                      }
                       onPopOut={() => floatView(activeResultTab.id, "pivot")}
                     />
                   )
@@ -3796,6 +3923,7 @@ export default function App() {
                       onExportResults={(fmt) =>
                         exportResultTab(activeResultTab, fmt)
                       }
+                      exportFormats={exportFormatsFor(activeResultTab)}
                       cellFetch={{
                         resultId: activeResultTab.page.result_id ?? null,
                         filters: activeResultTab.filters,
@@ -3813,6 +3941,7 @@ export default function App() {
                         });
                         setColMenu({ col, x, y });
                       }}
+                      onShowLineage={(col, cell) => openColumnLineage(col, undefined, cell)}
                       />
                     </>
                   )
@@ -3878,25 +4007,17 @@ export default function App() {
                           <Icon.PopOut size={13} /> Open in new window
                         </button>
                       )}
-                      {r.kind === "result" && r.resultId && (
+                      {canExport(r) && (
                         <>
                           <div className="sep" />
-                          <button
-                            onClick={() => {
-                              void exportResultTab(r, "csv");
+                          <ExportResultsCtxItem
+                            testId="result-tab-export-results"
+                            formats={exportFormatsFor(r)}
+                            onExport={(fmt) => {
+                              void exportResultTab(r, fmt);
                               setResMenu(null);
                             }}
-                          >
-                            <Icon.Download size={13} /> Export results (CSV)
-                          </button>
-                          <button
-                            onClick={() => {
-                              void exportResultTab(r, "json");
-                              setResMenu(null);
-                            }}
-                          >
-                            <Icon.Download size={13} /> Export results (JSON)
-                          </button>
+                          />
                         </>
                       )}
                       <button onClick={() => closeRes(r.id)}>
@@ -4096,9 +4217,11 @@ export default function App() {
       </div>
 
       {/* ---------- modals ---------- */}
-      {errorLogOpen && <ErrorLogModal onClose={() => setErrorLogOpen(false)} />}
-      {diagOpen && (
-        <DiagnosticsModal onClose={() => setDiagOpen(false)} tables={tables} />
+      {errorLogOpen && (
+        <ErrorLogModal
+          onClose={() => setErrorLogOpen(false)}
+          tables={tables}
+        />
       )}
       {activityOpen && (
         <ActivityModal
@@ -4106,13 +4229,28 @@ export default function App() {
           onTablesChanged={refreshTables}
         />
       )}
+      <ColumnLineageModal
+        open={lineageOpen}
+        onClose={() => setLineageOpen(null)}
+        onHighlightNode={(nodeId) => {
+          switchView("nodeflow");
+          setNodeCmd({
+            id: Date.now(),
+            action: "selectNode",
+            nodeId,
+          });
+        }}
+      />
       {ideFile && (
         <FileBrowser
           saveMode={ideFile.mode === "save"}
           defaultFileName={(() => {
             const tab = edTabs.find((t) => t.id === activeId);
             return wfFileName(
-              (tab && ideWfNames[tab.id]) || tab?.title || "query",
+              tab?.savedWorkflowName ||
+                (tab && ideWfNames[tab.id]) ||
+                tab?.title ||
+                "query",
             );
           })()}
           onClose={() => setIdeFile(null)}
@@ -4129,14 +4267,35 @@ export default function App() {
                 );
                 const r = await api.saveFile(path, content);
                 if (r.error) toast("error", "Save failed", r.error);
-                else toast("ok", "Saved", r.name || path);
+                else {
+                  if (tab) {
+                    setEdTabs((current) =>
+                      current.map((item) =>
+                        item.id === tab.id
+                          ? {
+                              ...item,
+                              savedFilePath: r.path || path,
+                              savedWorkflowName: undefined,
+                            }
+                          : item,
+                      ),
+                    );
+                  }
+                  toast("ok", "Saved", r.name || path);
+                }
               } else {
                 const r = await api.openFile(path);
                 if (r.error || typeof r.content !== "string") {
                   toast("error", "Open failed", r.error || "Empty file.");
                   return;
                 }
-                openWorkflowContent(r.content, r.name || "Opened");
+                // Kind detection + surface routing live in openWorkflowContent
+                // (query / journal / node / dashboard / created-node / raw SQL).
+                openWorkflowContent(
+                  r.content,
+                  r.name || "Opened",
+                  r.path || path,
+                );
               }
             } catch (e: any) {
               toast("error", "File error", e?.message || String(e));
@@ -4437,6 +4596,14 @@ export default function App() {
             <ChartPanel
               resultId={r?.resultId ?? null}
               columns={r?.page?.columns || []}
+              sampleRows={r?.page?.rows}
+              onExpired={() =>
+                toast(
+                  "warn",
+                  "Result expired",
+                  "Re-run the query to chart it again.",
+                )
+              }
             />
           );
         else if (f.view === "pivot")
@@ -4445,10 +4612,21 @@ export default function App() {
               tables={tables}
               result={
                 r?.resultId
-                  ? { id: r.resultId, columns: r.page?.columns || [] }
+                  ? {
+                      id: r.resultId,
+                      columns: r.page?.columns || [],
+                      sampleRows: r.page?.rows,
+                    }
                   : null
               }
               onToast={toast}
+              onExpired={() =>
+                toast(
+                  "warn",
+                  "Result expired",
+                  "Re-run the query to pivot it again.",
+                )
+              }
             />
           );
         else body = renderGridForRes(f.resId);

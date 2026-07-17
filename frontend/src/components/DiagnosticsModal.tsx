@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { Modal } from "./Modal";
 import { api, saveToDownloads } from "../lib/api";
 import type { DiagnosticMeta, TableInfo } from "../lib/types";
 
-// Settings -> Diagnostics. A generic front-end over /api/diagnostics: it lists
-// whatever diagnostics the backend registers, renders each one's declared
+// Error log -> Diagnostics tab. A generic front-end over /api/diagnostics: it
+// lists whatever diagnostics the backend registers, renders each one's declared
 // params (text / number / loaded-table picker), runs it, and shows the result.
 // The JSON load profiler gets a purpose-built view; anything else falls back to
 // a readable key/value + raw dump, so a future diagnostic needs no UI changes.
@@ -547,10 +546,10 @@ const GenericResultView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
   );
 };
 
-export const DiagnosticsModal: React.FC<{
-  onClose: () => void;
+/** Embeddable diagnostics UI (Error log → Diagnostics tab). */
+export const DiagnosticsPanel: React.FC<{
   tables: TableInfo[];
-}> = ({ onClose, tables }) => {
+}> = ({ tables }) => {
   const [metas, setMetas] = useState<DiagnosticMeta[]>([]);
   const [savedPath, setSavedPath] = useState<string | null>(null);
   const [env, setEnv] = useState<Record<string, any> | null>(null);
@@ -585,7 +584,6 @@ export const DiagnosticsModal: React.FC<{
         }
       })
       .catch((e) => setLoadErr(String(e?.message || e)));
-     
   }, []);
 
   const meta = metas.find((m) => m.name === selected);
@@ -632,16 +630,7 @@ export const DiagnosticsModal: React.FC<{
   };
 
   return (
-    <Modal
-      title="Diagnostics"
-      wide
-      onClose={onClose}
-      footer={
-        <button className="btn" onClick={onClose}>
-          Close
-        </button>
-      }
-    >
+    <div data-testid="diagnostics-panel">
       {env && <EnvStrip env={env} />}
       {loadErr && (
         <div style={{ color: "#b04a4a", fontSize: 13 }}>{loadErr}</div>
@@ -746,6 +735,6 @@ export const DiagnosticsModal: React.FC<{
           )}
         </div>
       )}
-    </Modal>
+    </div>
   );
 };

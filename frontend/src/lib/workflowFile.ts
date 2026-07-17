@@ -90,3 +90,17 @@ export function wfFileName(name: string): string {
       .slice(0, 48) || "workflow";
   return slug + ".samql.json";
 }
+
+/** Human label for the workspace surface that owns a workflow kind. */
+export function wfKindSurface(kind: WorkflowKind): string {
+  switch (kind) {
+    case "ide":
+      return "SQL editor";
+    case "journal":
+      return "Journal";
+    case "node":
+      return "NodeFlow";
+    case "dashboard":
+      return "Dashboard";
+  }
+}

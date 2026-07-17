@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
-import { parseWfFile } from "../lib/workflowFile";
+import {
+  parseCreatedNodeFile,
+  upsertCreatedNode,
+} from "../lib/createdNodes";
+import { parseWfFile, wfEnvelope } from "../lib/workflowFile";
 import type { WorkflowKind } from "../lib/types";
 import type { AppView, EdTab, ToastFn } from "./appTypes";
 
@@ -11,7 +15,8 @@ export type JournalCommand = {
 
 export type NodeCommand = {
   id: number;
-  action: "save" | "saveAs" | "open" | "exportLineage";
+  action: "save" | "saveAs" | "open" | "exportLineage" | "selectNode";
+  nodeId?: string;
 };
 
 export type DashboardCommand = {
@@ -32,6 +37,7 @@ interface UseWorkspaceControllerOptions {
   askConfirm: ConfirmAsk;
   refreshWorkflows: () => void;
   edTabsRef: React.MutableRefObject<EdTab[]>;
+  setEdTabs: React.Dispatch<React.SetStateAction<EdTab[]>>;
   activeIdRef: React.MutableRefObject<string>;
   loadSqlIntoEditor: (sql: string, preferredTabId?: string) => string | null | void;
 }
@@ -47,6 +53,7 @@ export function useWorkspaceController({
   askConfirm,
   refreshWorkflows,
   edTabsRef,
+  setEdTabs,
   activeIdRef,
   loadSqlIntoEditor,
 }: UseWorkspaceControllerOptions) {
@@ -97,11 +104,15 @@ export function useWorkspaceController({
     id: number;
     name: string;
     doc: string;
+    savedWorkflowName?: string;
+    savedFilePath?: string;
   } | null>(null);
   const [nodeLoad, setNodeLoad] = useState<{
     id: number;
     name: string;
     graph: unknown;
+    savedWorkflowName?: string;
+    savedFilePath?: string;
   } | null>(null);
   const [dashboardLoad, setDashboardLoad] = useState<{
     id: number;
@@ -120,7 +131,27 @@ export function useWorkspaceController({
       toast("error", "Nothing to save", "The editor is empty.");
       return;
     }
-    let name = ideWfNames[tab.id];
+    if (tab.savedFilePath) {
+      try {
+        const response = await api.saveFile(
+          tab.savedFilePath,
+          wfEnvelope("ide", tab.title || "query", { sql: tab.sql }),
+        );
+        if (response.error) {
+          toast("error", "Save failed", response.error);
+          return;
+        }
+        toast("ok", "Saved", response.name || tab.savedFilePath);
+      } catch (error: unknown) {
+        toast(
+          "error",
+          "Save failed",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+      return;
+    }
+    let name = tab.savedWorkflowName || ideWfNames[tab.id];
     if (!name) {
       name = (window.prompt("Save SQL as:", tab.title || "") || "").trim();
       if (!name) return;
@@ -132,6 +163,17 @@ export function useWorkspaceController({
         return;
       }
       setIdeWfNames((current) => ({ ...current, [tab.id]: name as string }));
+      setEdTabs((current) =>
+        current.map((item) =>
+          item.id === tab.id
+            ? {
+                ...item,
+                savedWorkflowName: response.name || name,
+                savedFilePath: undefined,
+              }
+            : item,
+        ),
+      );
       toast("ok", "Saved to Workflows", name);
       refreshWorkflows();
     } catch (error: unknown) {
@@ -141,7 +183,14 @@ export function useWorkspaceController({
         error instanceof Error ? error.message : String(error),
       );
     }
-  }, [activeIdRef, edTabsRef, ideWfNames, refreshWorkflows, toast]);
+  }, [
+    activeIdRef,
+    edTabsRef,
+    ideWfNames,
+    refreshWorkflows,
+    setEdTabs,
+    toast,
+  ]);
 
   const onLoadWorkflow = useCallback(
     async (kind: WorkflowKind, name: string) => {
@@ -171,6 +220,17 @@ export function useWorkspaceController({
               ...current,
               [loadedTabId]: name,
             }));
+            setEdTabs((current) =>
+              current.map((tab) =>
+                tab.id === loadedTabId
+                  ? {
+                      ...tab,
+                      savedWorkflowName: name,
+                      savedFilePath: undefined,
+                    }
+                  : tab,
+              ),
+            );
           }
           return;
         }
@@ -178,6 +238,7 @@ export function useWorkspaceController({
           setJournalLoad({
             id: Date.now(),
             name,
+            savedWorkflowName: name,
             doc:
               typeof graph.doc === "string"
                 ? graph.doc
@@ -191,7 +252,12 @@ export function useWorkspaceController({
           switchView("dashboard");
           return;
         }
-        setNodeLoad({ id: Date.now(), name, graph });
+        setNodeLoad({
+          id: Date.now(),
+          name,
+          graph,
+          savedWorkflowName: name,
+        });
         switchView("nodeflow");
       } catch (error: unknown) {
         if (!isCurrent() || (error as any)?.name === "AbortError") return;
@@ -206,7 +272,7 @@ export function useWorkspaceController({
         }
       }
     },
-    [activeIdRef, loadSqlIntoEditor, switchView, toast],
+    [activeIdRef, loadSqlIntoEditor, setEdTabs, switchView, toast],
   );
 
   const onDeleteWorkflow = useCallback(
@@ -228,17 +294,42 @@ export function useWorkspaceController({
   );
 
   const openWorkflowContent = useCallback(
-    (content: string, name: string) => {
-      const envelope = parseWfFile(content);
-      if (!envelope) {
-        switchView("ide");
-        loadSqlIntoEditor(content);
+    (content: string, name: string, filePath?: string) => {
+      // Created-node exports share disk space with workflows but are not
+      // workflow envelopes — detect them before falling through to SQL.
+      try {
+        const created = parseCreatedNodeFile(JSON.parse(content));
+        if (created.ok) {
+          upsertCreatedNode(created.definition);
+          switchView("nodeflow");
+          toast(
+            "ok",
+            "Created node loaded",
+            `"${created.definition.name}" is in the palette.`,
+          );
+          return;
+        }
+      } catch {
+        // Not JSON / not a created-node export — continue.
+      }
+
+      let envelope: ReturnType<typeof parseWfFile> = null;
+      try {
+        envelope = parseWfFile(content);
+      } catch (error: unknown) {
+        toast(
+          "error",
+          "Open failed",
+          error instanceof Error ? error.message : String(error),
+        );
         return;
       }
-      if (envelope.kind === "journal") {
+
+      if (envelope?.kind === "journal") {
         setJournalLoad({
           id: Date.now(),
           name: envelope.name || name,
+          savedFilePath: filePath,
           doc:
             typeof envelope.payload?.doc === "string"
               ? envelope.payload.doc
@@ -247,16 +338,17 @@ export function useWorkspaceController({
         switchView("notebook");
         return;
       }
-      if (envelope.kind === "node") {
+      if (envelope?.kind === "node") {
         setNodeLoad({
           id: Date.now(),
           name: envelope.name || name,
           graph: envelope.payload,
+          savedFilePath: filePath,
         });
         switchView("nodeflow");
         return;
       }
-      if (envelope.kind === "dashboard") {
+      if (envelope?.kind === "dashboard") {
         setDashboardLoad({
           id: Date.now(),
           name: envelope.name || name,
@@ -265,10 +357,76 @@ export function useWorkspaceController({
         switchView("dashboard");
         return;
       }
+      if (envelope?.kind === "ide") {
+        switchView("ide");
+        const loadedId = loadSqlIntoEditor(String(envelope.payload?.sql ?? ""));
+        if (loadedId && filePath) {
+          setEdTabs((current) =>
+            current.map((tab) =>
+              tab.id === loadedId
+                ? {
+                    ...tab,
+                    savedFilePath: filePath,
+                    savedWorkflowName: undefined,
+                  }
+                : tab,
+            ),
+          );
+        }
+        return;
+      }
+
+      // Non-envelope JSON: dashboard bundle / bare workspace, or node graph.
+      try {
+        const parsed = JSON.parse(content) as {
+          samql?: string;
+          dashboards?: unknown;
+          nodes?: unknown;
+          edges?: unknown;
+        };
+        if (
+          parsed?.samql === "dashboard-bundle" ||
+          Array.isArray(parsed?.dashboards)
+        ) {
+          setDashboardLoad({
+            id: Date.now(),
+            name,
+            graph: parsed,
+          });
+          switchView("dashboard");
+          return;
+        }
+        if (Array.isArray(parsed?.nodes)) {
+          setNodeLoad({
+            id: Date.now(),
+            name,
+            graph: parsed,
+            savedFilePath: filePath,
+          });
+          switchView("nodeflow");
+          return;
+        }
+      } catch {
+        // Raw SQL / text — open in the editor below.
+      }
+
       switchView("ide");
-      loadSqlIntoEditor(String(envelope.payload?.sql ?? ""));
+      const loadedId = loadSqlIntoEditor(content);
+      if (loadedId && filePath) {
+        setEdTabs((current) =>
+          current.map((tab) =>
+            tab.id === loadedId
+              ? {
+                  ...tab,
+                  savedFilePath: filePath,
+                  savedWorkflowName: undefined,
+                }
+              : tab,
+          ),
+        );
+      }
     },
-    [loadSqlIntoEditor, switchView],
+    [loadSqlIntoEditor, setEdTabs, switchView, toast],
   );
 
   const activeSave = useCallback(() => {
@@ -289,13 +447,9 @@ export function useWorkspaceController({
     else setNodeCmd({ id: Date.now(), action: "saveAs" });
   }, []);
 
+  /** Unified Open: one file picker that routes by detected document kind. */
   const activeOpen = useCallback(() => {
-    if (viewRef.current === "ide") setIdeFile({ mode: "open" });
-    else if (viewRef.current === "notebook")
-      setJournalCmd({ id: Date.now(), action: "open" });
-    else if (viewRef.current === "dashboard")
-      setDashboardCmd({ id: Date.now(), action: "open" });
-    else setNodeCmd({ id: Date.now(), action: "open" });
+    setIdeFile({ mode: "open" });
   }, []);
 
   return {

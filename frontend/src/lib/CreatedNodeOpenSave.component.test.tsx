@@ -1,14 +1,13 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
 import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useCreatedNodesSettings } from "../components/CreatedNodesSettings";
 import { NodeFlowMenus } from "../components/nodeflow/NodeFlowMenus";
 import { useNodeFlowDocumentController } from "../components/nodeflow/useNodeFlowDocumentController";
+import { api } from "./api";
 import {
   applyCreatedNodeToGraph,
   buildCreatedNodeDefinition,
   loadCreatedNodes,
-  registerActiveEditingDefinitionGetter,
   registerActiveNodeFlowGraphGetter,
   updateCreatedNodeDefinition,
   upsertCreatedNode,
@@ -107,54 +106,78 @@ function multiPortGraph(): { nodes: NbNode[]; edges: NbEdge[] } {
   };
 }
 
-function SettingsMenuHost() {
-  const ui = useCreatedNodesSettings(toast);
-  return <div>{ui.menu(() => {})}</div>;
+function useDocController() {
+  const [graphNodes, setNodes] = useState<NbNode[]>([]);
+  const [graphEdges, setEdges] = useState<NbEdge[]>([]);
+  const nodesRef = useRef(graphNodes);
+  const edgesRef = useRef(graphEdges);
+  useLayoutEffect(() => {
+    nodesRef.current = graphNodes;
+    edgesRef.current = graphEdges;
+  }, [graphEdges, graphNodes]);
+  return {
+    nodes: graphNodes,
+    setNodes,
+    setEdges,
+    controller: useNodeFlowDocumentController({
+      nodes: graphNodes,
+      edges: graphEdges,
+      nodesRef,
+      edgesRef,
+      setNodes,
+      setEdges,
+      setSelectedId: vi.fn(),
+      setSelectedIds: vi.fn(),
+      setNodeErrors: vi.fn(),
+      setNodeWarnings: vi.fn(),
+      setNodeMenu: vi.fn(),
+      setDeleteConfirm: vi.fn(),
+      onToast: toast,
+    }),
+  };
 }
 
-describe("Open Node / Save Node flows", () => {
+describe("Open Node / workspace Save flows", () => {
   beforeEach(() => {
     localStorage.clear();
     toast.mockReset();
     registerActiveNodeFlowGraphGetter(null);
-    registerActiveEditingDefinitionGetter(null);
   });
 
-  it("Save node warns when no created node is open for editing", () => {
-    registerActiveEditingDefinitionGetter(null);
-    registerActiveNodeFlowGraphGetter(() => simpleGraph());
-    render(<SettingsMenuHost />);
-    fireEvent.click(screen.getByTestId("save-node-menu"));
-    expect(toast).toHaveBeenCalledWith(
-      "warn",
-      "Save node",
-      expect.stringContaining("Open Node"),
-    );
-    expect(loadCreatedNodes()).toHaveLength(0);
-  });
-
-  it("Save node surfaces validation errors for an invalid editing graph", () => {
+  it("workspace Save surfaces validation errors for an invalid editing graph", async () => {
     const { nodes, edges } = simpleGraph();
     const built = buildCreatedNodeDefinition("Broken", "Star", nodes, edges);
     expect(built.ok).toBe(true);
     if (!built.ok) return;
     upsertCreatedNode(built.definition);
 
-    registerActiveEditingDefinitionGetter(() => ({
-      id: built.definition.id,
-      name: built.definition.name,
-      icon: built.definition.icon,
-    }));
-    registerActiveNodeFlowGraphGetter(() => ({
-      nodes: [{ id: "only", type: "select", x: 0, y: 0, config: {} }],
-      edges: [],
-    }));
+    const { result } = renderHook(() => useDocController());
+    await waitFor(() =>
+      expect(result.current.controller.tabs.length).toBeGreaterThan(0),
+    );
 
-    render(<SettingsMenuHost />);
-    fireEvent.click(screen.getByTestId("save-node-menu"));
+    act(() => {
+      result.current.controller.openGraphInNewTab(
+        {
+          nodes: [{ id: "only", type: "select", x: 0, y: 0, config: {} }],
+          edges: [],
+        },
+        built.definition.name,
+        { editingDefinitionId: built.definition.id },
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.controller.activeEditingDefinitionId()).toBe(
+        built.definition.id,
+      ),
+    );
+
+    await act(async () => {
+      await result.current.controller.saveWorkflow();
+    });
     expect(toast).toHaveBeenCalledWith(
       "error",
-      "Save node",
+      "Save failed",
       expect.stringMatching(/Dynamic Input/),
     );
     expect(loadCreatedNodes()[0].inputs).toHaveLength(1);
@@ -224,7 +247,13 @@ describe("Open Node / Save Node flows", () => {
     const file = serializeNodeFlowTabs(
       [
         { id: "t1", name: "Flow" },
-        { id: "t2", name: "MyNode", editingDefinitionId: "def-1" },
+        {
+          id: "t2",
+          name: "MyNode",
+          savedWorkflowName: "Saved MyNode",
+          savedFilePath: "C:/flows/MyNode.samql.json",
+          editingDefinitionId: "def-1",
+        },
       ],
       "t2",
     );
@@ -232,48 +261,28 @@ describe("Open Node / Save Node flows", () => {
     expect(parsed.tabs[1]).toMatchObject({
       id: "t2",
       name: "MyNode",
+      savedWorkflowName: "Saved MyNode",
+      savedFilePath: "C:/flows/MyNode.samql.json",
       editingDefinitionId: "def-1",
     });
   });
 
-  it("Open Node opens an editing tab and reuses it on a second open", async () => {
+  it("Open Node opens an editing tab and workspace Save upserts by id", async () => {
     const { nodes, edges } = simpleGraph();
     const built = buildCreatedNodeDefinition("Opened", "Layers", nodes, edges);
     expect(built.ok).toBe(true);
     if (!built.ok) return;
     upsertCreatedNode(built.definition);
 
-    const { result } = renderHook(() => {
-      const [graphNodes, setNodes] = useState<NbNode[]>([]);
-      const [graphEdges, setEdges] = useState<NbEdge[]>([]);
-      const nodesRef = useRef(graphNodes);
-      const edgesRef = useRef(graphEdges);
-      useLayoutEffect(() => {
-        nodesRef.current = graphNodes;
-        edgesRef.current = graphEdges;
-      }, [graphEdges, graphNodes]);
-      return useNodeFlowDocumentController({
-        nodes: graphNodes,
-        edges: graphEdges,
-        nodesRef,
-        edgesRef,
-        setNodes,
-        setEdges,
-        setSelectedId: vi.fn(),
-        setSelectedIds: vi.fn(),
-        setNodeErrors: vi.fn(),
-        setNodeWarnings: vi.fn(),
-        setNodeMenu: vi.fn(),
-        setDeleteConfirm: vi.fn(),
-        onToast: toast,
-      });
-    });
+    const { result } = renderHook(() => useDocController());
 
-    await waitFor(() => expect(result.current.tabs.length).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(result.current.controller.tabs.length).toBeGreaterThan(0),
+    );
 
     let firstTabId = "";
     act(() => {
-      firstTabId = result.current.openGraphInNewTab(
+      firstTabId = result.current.controller.openGraphInNewTab(
         built.definition.graph,
         built.definition.name,
         { editingDefinitionId: built.definition.id },
@@ -282,28 +291,116 @@ describe("Open Node / Save Node flows", () => {
 
     await waitFor(() =>
       expect(
-        result.current.tabs.some(
+        result.current.controller.tabs.some(
           (tab) => tab.editingDefinitionId === built.definition.id,
         ),
       ).toBe(true),
     );
-    expect(result.current.activeEditingDefinitionId()).toBe(built.definition.id);
-    expect(result.current.activeTabId).toBe(firstTabId);
+    expect(result.current.controller.activeEditingDefinitionId()).toBe(
+      built.definition.id,
+    );
+    expect(result.current.controller.activeTabId).toBe(firstTabId);
 
     act(() => {
-      result.current.openGraphInNewTab(built.definition.graph, "Other name", {
-        editingDefinitionId: built.definition.id,
-      });
+      result.current.controller.openGraphInNewTab(
+        built.definition.graph,
+        "Other name",
+        { editingDefinitionId: built.definition.id },
+      );
     });
     expect(
-      result.current.tabs.filter(
+      result.current.controller.tabs.filter(
         (tab) => tab.editingDefinitionId === built.definition.id,
       ),
     ).toHaveLength(1);
-    expect(result.current.activeTabId).toBe(firstTabId);
+    expect(result.current.controller.activeTabId).toBe(firstTabId);
+
+    await act(async () => {
+      await result.current.controller.saveWorkflow();
+    });
+    expect(loadCreatedNodes()).toHaveLength(1);
+    expect(loadCreatedNodes()[0].id).toBe(built.definition.id);
+    expect(toast).toHaveBeenCalledWith(
+      "ok",
+      "Node saved",
+      expect.stringContaining("Opened"),
+    );
   });
 
-  it("refreshes canvas instances after Save node updates the definition", async () => {
+  it("workspace Save overwrites ports on the same created-node id", async () => {
+    const { nodes, edges } = simpleGraph();
+    const built = buildCreatedNodeDefinition("Editable", "Layers", nodes, edges);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    upsertCreatedNode(built.definition);
+    const originalId = built.definition.id;
+
+    const multi = multiPortGraph();
+    const { result } = renderHook(() => useDocController());
+    await waitFor(() =>
+      expect(result.current.controller.tabs.length).toBeGreaterThan(0),
+    );
+
+    act(() => {
+      result.current.controller.openGraphInNewTab(multi, built.definition.name, {
+        editingDefinitionId: originalId,
+      });
+    });
+    await waitFor(() =>
+      expect(result.current.controller.activeEditingDefinitionId()).toBe(
+        originalId,
+      ),
+    );
+    await waitFor(() =>
+      expect(result.current.nodes.some((n) => n.type === "dyn_input")).toBe(true),
+    );
+
+    await act(async () => {
+      await result.current.controller.saveWorkflow();
+    });
+
+    const saved = loadCreatedNodes();
+    expect(saved).toHaveLength(1);
+    expect(saved[0].id).toBe(originalId);
+    expect(saved[0].name).toBe("Editable");
+    expect(saved[0].inputs).toHaveLength(2);
+    expect(saved[0].outputs).toHaveLength(2);
+    expect(toast).toHaveBeenCalledWith(
+      "ok",
+      "Node saved",
+      expect.stringContaining("Editable"),
+    );
+  });
+
+  it("saves a loaded NodeFlow by its stored identity, not its display suffix", async () => {
+    const saveSpy = vi
+      .spyOn(api, "workflowSave")
+      .mockResolvedValue({ ok: true, name: "Sales" });
+    const { nodes, edges } = simpleGraph();
+    const { result } = renderHook(() => useDocController());
+    await waitFor(() =>
+      expect(result.current.controller.tabs.length).toBeGreaterThan(0),
+    );
+    act(() => {
+      result.current.controller.openGraphInNewTab({ nodes, edges }, "Sales (2)", {
+        savedWorkflowName: "Sales",
+      });
+    });
+    await waitFor(() =>
+      expect(
+        result.current.controller.tabs.some(
+          (tab) => tab.savedWorkflowName === "Sales",
+        ),
+      ).toBe(true),
+    );
+    await act(async () => {
+      await result.current.controller.saveWorkflow();
+    });
+    expect(saveSpy).toHaveBeenCalledWith("Sales", expect.any(Object), "node");
+    saveSpy.mockRestore();
+  });
+
+  it("refreshes canvas instances after definition update", async () => {
     const { nodes, edges } = simpleGraph();
     const built = buildCreatedNodeDefinition("Refresh", "Beaker", nodes, edges);
     expect(built.ok).toBe(true);
@@ -318,34 +415,7 @@ describe("Open Node / Save Node flows", () => {
       config: usernodeConfigFromDefinition(built.definition),
     };
 
-    const { result } = renderHook(() => {
-      const [graphNodes, setNodes] = useState<NbNode[]>([]);
-      const [graphEdges, setEdges] = useState<NbEdge[]>([]);
-      const nodesRef = useRef(graphNodes);
-      const edgesRef = useRef(graphEdges);
-      useLayoutEffect(() => {
-        nodesRef.current = graphNodes;
-        edgesRef.current = graphEdges;
-      }, [graphEdges, graphNodes]);
-      return {
-        nodes: graphNodes,
-        controller: useNodeFlowDocumentController({
-          nodes: graphNodes,
-          edges: graphEdges,
-          nodesRef,
-          edgesRef,
-          setNodes,
-          setEdges,
-          setSelectedId: vi.fn(),
-          setSelectedIds: vi.fn(),
-          setNodeErrors: vi.fn(),
-          setNodeWarnings: vi.fn(),
-          setNodeMenu: vi.fn(),
-          setDeleteConfirm: vi.fn(),
-          onToast: toast,
-        }),
-      };
-    });
+    const { result } = renderHook(() => useDocController());
 
     await waitFor(() =>
       expect(result.current.controller.tabs.length).toBeGreaterThan(0),
@@ -430,34 +500,7 @@ describe("Open Node / Save Node flows", () => {
       JSON.stringify(serializeNodeFlowGraph([instance], [])),
     );
 
-    const { result } = renderHook(() => {
-      const [graphNodes, setNodes] = useState<NbNode[]>([]);
-      const [graphEdges, setEdges] = useState<NbEdge[]>([]);
-      const nodesRef = useRef(graphNodes);
-      const edgesRef = useRef(graphEdges);
-      useLayoutEffect(() => {
-        nodesRef.current = graphNodes;
-        edgesRef.current = graphEdges;
-      }, [graphEdges, graphNodes]);
-      return {
-        nodes: graphNodes,
-        controller: useNodeFlowDocumentController({
-          nodes: graphNodes,
-          edges: graphEdges,
-          nodesRef,
-          edgesRef,
-          setNodes,
-          setEdges,
-          setSelectedId: vi.fn(),
-          setSelectedIds: vi.fn(),
-          setNodeErrors: vi.fn(),
-          setNodeWarnings: vi.fn(),
-          setNodeMenu: vi.fn(),
-          setDeleteConfirm: vi.fn(),
-          onToast: toast,
-        }),
-      };
-    });
+    const { result } = renderHook(() => useDocController());
 
     await waitFor(() =>
       expect(result.current.controller.tabs.map((t) => t.id)).toEqual([

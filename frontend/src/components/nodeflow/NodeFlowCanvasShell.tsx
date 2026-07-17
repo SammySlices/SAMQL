@@ -11,6 +11,7 @@ import type { NodeFlowMarquee } from "./useNodeFlowCanvasInteractions";
 
 interface NodeFlowCanvasShellProps {
   running: boolean;
+  runningNodeIds?: Set<string> | null;
   isWiring: boolean;
   wrapRef: React.RefObject<HTMLDivElement | null>;
   contentRef: React.RefObject<HTMLDivElement | null>;
@@ -40,6 +41,7 @@ interface NodeFlowCanvasShellProps {
 
 export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
   running,
+  runningNodeIds,
   isWiring,
   wrapRef,
   contentRef,
@@ -107,6 +109,7 @@ export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
             >
               <WireLayer
                 wires={wires}
+                runningNodeIds={runningNodeIds}
                 dying={dyingIds}
                 dyingEdges={dyingEdgeIds}
                 selectedId={selectedEdge}

@@ -29,8 +29,8 @@
 #   .\build.ps1 -OneDir      # accepted for back-compat (onedir is already default)
 #
 # Onedir zips (after a successful AppWindow folder build):
-#   dist\SamQL-AppWindow.zip            — lean AppWindow (no assistant/)
-#   dist\SamQL-AppWindow-Assistant.zip  — same + SQL assistant runtime
+#   dist\SamQL-AppWindow.zip            - lean AppWindow (no assistant/)
+#   dist\SamQL-AppWindow-Assistant.zip  - same + SQL assistant runtime
 #                                         (llama.cpp llama-server; GGUF only
 #                                         when -AssistantPack post/embed pack
 #                                         already staged models). Written when
@@ -104,14 +104,14 @@ switch ($AssistantMode) {
   "embed"   { Write-Host "    embed: will bake full assistant/ into the PyInstaller payload (~+1 GB+)" }
 }
 if ($AssistantMode -eq "embed" -or $AssistantMode -eq "post") {
-  Write-Host "==> ensuring assistant pack (runtime + GGUF)…"
+  Write-Host "==> ensuring assistant pack (runtime + GGUF)..."
   & $py $asstTool ensure --root $Root --fetch --platform win-cpu
   if ($LASTEXITCODE -ne 0) {
     Write-Error "Assistant pack is required for mode '$AssistantMode' but could not be prepared."
     exit 1
   }
 } elseif ($AssistantMode -eq "runtime") {
-  Write-Host "==> ensuring assistant runtime (llama-server only, no GGUF)…"
+  Write-Host "==> ensuring assistant runtime (llama-server only, no GGUF)..."
   & $py $asstTool ensure --root $Root --fetch --platform win-cpu --runtime-only
   if ($LASTEXITCODE -ne 0) {
     $asstErr = @(
@@ -385,7 +385,18 @@ if ($UseOneDir) {
   Remove-Item Env:\\SAMQL_ONEDIR -ErrorAction SilentlyContinue
   Write-Host "    ONEFILE mode: SamQL-AppWindow.exe (self-extracting; not the recommended ship)"
 }
+# PyInstaller writes progress to stderr. With $ErrorActionPreference=Stop,
+# PowerShell turns those NativeCommandError records into a terminating stop
+# even when the process exit code is 0. Soften EAP for this call only.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $py -m PyInstaller --clean --noconfirm backend/samql.spec
+$pyiCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($pyiCode -ne 0) {
+  Write-Error "PyInstaller failed with exit code $pyiCode."
+  exit $pyiCode
+}
 
 # .500: the app icon SOURCE is now the user's own file in the repo ROOT
 # (samql.ico), which the spec reads and embeds into the exe. The build must NOT
@@ -447,14 +458,14 @@ if ($UseOneDir) {
 
 # Stage assistant/ next to dist outputs (and inside the AppWindow onedir).
 if ($AssistantMode -eq "runtime") {
-  Write-Host "==> staging assistant runtime beside dist (no GGUF)…"
+  Write-Host "==> staging assistant runtime beside dist (no GGUF)..."
   & $py $asstTool stage-post --root $Root --runtime-only
   if ($LASTEXITCODE -ne 0) {
     Write-Error "Failed to stage assistant/ runtime into dist/."
     exit 1
   }
 } elseif ($AssistantMode -eq "post") {
-  Write-Host "==> staging full assistant pack beside dist outputs…"
+  Write-Host "==> staging full assistant pack beside dist outputs..."
   & $py $asstTool stage-post --root $Root
   if ($LASTEXITCODE -ne 0) {
     Write-Error "Failed to stage assistant/ into dist/."
@@ -494,15 +505,20 @@ if ($UseOneDir) { $signTargets += $appExeOnedir } else { $signTargets += $appExe
 
 if ($NoSign) {
   Write-Host "    Skipping code signing (-NoSign)."
+  Write-Host "         Unsigned build is fine for local/CI. For bank/IT distribution,"
+  Write-Host "         re-run with -CertThumbprint or -CertPath (see DISTRIBUTION.md)."
 }
 elseif (-not ($CertThumbprint -or $CertPath)) {
   Write-Host "    No signing certificate provided; leaving BOTH exes unsigned."
-  Write-Host "         To sign, re-run with -CertThumbprint <thumb> or -CertPath <pfx>."
+  Write-Host "         Unsigned builds always succeed - a cert is never required to package."
+  Write-Host "         Bank/IT-friendly: .\build.ps1 -CertThumbprint <sha1>"
+  Write-Host "         or .\build.ps1 -CertPath .\codesign.pfx -CertPassword '...'."
+  Write-Host "         Details: DISTRIBUTION.md / WINDOWS_BUILD_CHECKLIST.txt."
 }
 else {
   $signtool = Find-SignTool
   if (-not $signtool) {
-    Write-Error "signtool.exe not found. Install the Windows 10/11 SDK, or add signtool to PATH."
+    Write-Error "signtool.exe not found. Install the Windows 10/11 SDK, or add signtool to PATH. (Or omit the cert flags / pass -NoSign for an unsigned build.)"
   }
   $signBase = @("sign", "/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256")
   if ($CertThumbprint) {

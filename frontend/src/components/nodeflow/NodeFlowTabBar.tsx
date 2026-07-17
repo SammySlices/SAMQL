@@ -4,6 +4,10 @@ import { Icon } from "../Icon";
 export interface NodeFlowTab {
   id: string;
   name: string;
+  /** Saved Workflows identity. Kept separate from the user-editable tab label. */
+  savedWorkflowName?: string;
+  /** File identity established by Save As / Open. */
+  savedFilePath?: string;
   /** When set, this tab is editing that Created Node definition. */
   editingDefinitionId?: string;
 }
@@ -86,7 +90,7 @@ export const NodeFlowTabBar = React.memo(function NodeFlowTabBar({
                   <span className="nb2-tab-name">{tab.name}</span>
                   {tabs.length > 1 && (
                     <button
-                      className="nb2-tab-x xbtn"
+                      className="nb2-tab-x"
                       title="Close canvas"
                       onClick={(event) => {
                         event.stopPropagation();

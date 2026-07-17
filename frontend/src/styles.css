@@ -23,6 +23,15 @@
   --accent-dim: #3d8f34;
   --accent-fade: rgba(84, 185, 73, 0.13);
   --accent-line: rgba(84, 185, 73, 0.35);
+  /* light green used for dropdown / option-list hover + selected rows
+     (native <select> options + custom popovers). Stronger than --accent-fade
+     so the row reads clearly on dark panels without going solid green. */
+  --menu-hl: rgba(84, 185, 73, 0.22);
+  --menu-hl-text: var(--text);
+
+  /* Dark chrome; keeps native <select> popups on the dark palette instead of
+     a light OS sheet with system-blue selection. */
+  color-scheme: dark;
 
   /* native form controls (checkboxes, radios, selects, range) use the app
      green for their highlight instead of the browser-default blue */
@@ -49,8 +58,60 @@
   --h-tabbar: 36px;
   --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
 
+  /* Motion tokens — prefer these for interactive chrome (iPhone-like 120–260ms) */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-modal: 240ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: ease-in;
+  --ease-spring: cubic-bezier(0.2, 0.8, 0.2, 1);
+
   /* Eye Care (Settings > View): uniform UI scale for text, chrome, nodes */
   --eye-care-scale: 1;
+}
+
+/* Light theme (Settings → Visual Toggles → Toggle Light Mode).
+   Cool green-tinted neutrals + SamQL accent — not purple/cream defaults.
+   Applied on <html> so every var(--*) surface flips together. */
+html.theme-light,
+html[data-theme="light"] {
+  --bg: #f2f5f1;
+  --panel: #ffffff;
+  --panel-2: #e9eee8;
+  --raised: #e2e8e0;
+  --raised-2: #d5ddd2;
+  --border: #c9d2c6;
+  --border-strong: #aeb9aa;
+  --text: #1a211c;
+  --text-dim: #4a554e;
+  --text-faint: #6a746c;
+
+  --accent: #3f9a36;
+  --accent-hi: #2f7a2a;
+  --accent-dim: #54b949;
+  --accent-fade: rgba(63, 154, 54, 0.12);
+  --accent-line: rgba(63, 154, 54, 0.4);
+  --menu-hl: rgba(84, 185, 73, 0.28);
+  --menu-hl-text: var(--text);
+
+  color-scheme: light;
+
+  --duck: #b8860b;
+  --duck-fade: rgba(184, 134, 11, 0.12);
+  --remote: #2f6fbf;
+  --remote-fade: rgba(47, 111, 191, 0.12);
+
+  --error: #c43c2a;
+  --error-fade: rgba(196, 60, 42, 0.12);
+  --warn: #b07a1a;
+  --info: #2f6fbf;
+
+  --shadow: 0 8px 28px rgba(26, 33, 28, 0.12);
+}
+
+html.theme-light select,
+html[data-theme="light"] select {
+  color-scheme: light;
 }
 
 /* Eye Care enlarges the whole surface together so buttons, nodes, panels,
@@ -138,13 +199,13 @@ body {
   height: 11px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3a404b;
+  background: var(--border-strong);
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #4a515e;
+  background: var(--text-faint);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-corner {
@@ -170,6 +231,26 @@ textarea {
   border-radius: var(--r-sm);
   padding: 6px 9px;
   outline: none;
+}
+select {
+  /* Reinforce root accent so open-list highlight follows brand green in
+     Chromium/WebView2 (system blue otherwise). */
+  accent-color: var(--accent);
+  color-scheme: dark;
+}
+/* Native <select> option rows. Chromium often ignores background-color on
+   option:checked; the linear-gradient form is the reliable paint path. */
+select option,
+select optgroup {
+  background-color: var(--panel);
+  color: var(--text);
+}
+select option:checked,
+select option:hover,
+select option:focus {
+  background-color: var(--menu-hl);
+  background: linear-gradient(0deg, var(--menu-hl) 0%, var(--menu-hl) 100%);
+  color: var(--menu-hl-text);
 }
 input:focus,
 select:focus,
@@ -235,8 +316,12 @@ textarea:focus {
   height: 30px;
   justify-content: center;
 }
-/* remove / cancel / close (×) buttons: a pronounced red button, not a faint × */
-.btn.xbtn {
+/* remove / cancel / close (×) buttons: a pronounced red button, not a faint ×.
+   `.ghost.xbtn` must beat `.btn.ghost` / `.btn.ghost:hover` (same cascade order
+   otherwise leaves the × transparent / muted inside reorder lists). */
+.btn.xbtn,
+.btn.ghost.xbtn,
+.iconbtn.xbtn {
   color: #e5484d;
   font-weight: 700;
   font-size: 15px;
@@ -244,7 +329,9 @@ textarea:focus {
   border-color: rgba(229, 72, 77, 0.45);
   background: rgba(229, 72, 77, 0.12);
 }
-.btn.xbtn:hover {
+.btn.xbtn:hover,
+.btn.ghost.xbtn:hover,
+.iconbtn.xbtn:hover:not(:disabled) {
   background: #e5484d;
   border-color: #e5484d;
   color: #fff;
@@ -590,10 +677,10 @@ textarea:focus {
   padding: 0 6px;
 }
 /* Idle: the action slot collapses to zero width so the table name gets the
-   full row -- no dead space. Hover: it animates open (width + fade + slide)
-   while the name reflows left, so the buttons arrive in an elegant sweep.
-   The 30px button height is unchanged whether open or collapsed, so the row
-   never grows vertically. */
+   full row -- no dead space. Hover: max-width snaps open (static end states
+   only — no max-width transition, avoids layout thrash) while opacity +
+   transform ease the buttons in. Name reflow is instant; buttons still
+   fade/slide. Row height stays fixed (30px buttons). */
 .tree-row .row-actions {
   display: inline-flex;
   flex: 0 0 auto;
@@ -605,9 +692,8 @@ textarea:focus {
   transform: translateX(8px);
   pointer-events: none;
   transition:
-    max-width 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
-    opacity 0.16s ease,
-    transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1);
+    opacity var(--dur-fast) ease,
+    transform var(--dur-base) var(--ease-out);
 }
 .tree-row:hover .row-actions,
 .tree-row:focus-within .row-actions {
@@ -809,11 +895,19 @@ textarea:focus {
   min-width: 140px;
   margin-right: 6px;
 }
-/* Save / Save As / Open row at the top of the Saved Workflows panel */
+/* Open / Save controls above the Saved Workflows list */
 .wf-actions {
   padding: 8px 10px 9px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-2, var(--raised));
+}
+.wf-actions-label {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 6px;
 }
 .wf-actions-row {
   display: flex;
@@ -909,14 +1003,15 @@ textarea:focus {
   background: var(--text-dim);
   top: 1.5px;
   left: 2px;
-  transition: left 0.15s, background 0.15s;
+  transform: translateX(0);
+  transition: transform var(--dur-fast) var(--ease-out), background var(--dur-fast) ease;
 }
 .toggle input:checked {
   background: var(--accent-fade);
   border-color: var(--accent-line);
 }
 .toggle input:checked::after {
-  left: 15px;
+  transform: translateX(13px);
   background: var(--accent);
 }
 
@@ -2011,7 +2106,8 @@ body.editor-ivory .code textarea.ta::placeholder {
   font-size: 12.5px;
 }
 .ctx-menu button:hover {
-  background: var(--raised-2);
+  background: var(--menu-hl);
+  color: var(--menu-hl-text);
 }
 .ctx-menu button:disabled {
   opacity: 0.5;
@@ -2359,7 +2455,8 @@ kbd {
   font-size: 13px;
 }
 .ctx-menu button:hover {
-  background: var(--raised-2);
+  background: var(--menu-hl);
+  color: var(--menu-hl-text);
 }
 
 /* change-type menu: column name/type header + explanatory note */
@@ -2634,7 +2731,8 @@ kbd {
   white-space: nowrap;
 }
 .rc-opt:hover {
-  background: var(--raised-2);
+  background: var(--menu-hl);
+  color: var(--menu-hl-text);
 }
 .rc-opt input {
   accent-color: var(--accent);
@@ -3240,21 +3338,6 @@ kbd {
   color: var(--accent);
   background: var(--raised);
 }
-/* Delete: a clearly destructive red button (trash icon already inside). */
-.nb-cell-actions .iconbtn[title="Delete cell"],
-.nb-cell-actions .iconbtn[title="Delete note"],
-.nb-note-actions .iconbtn[title="Delete note"] {
-  color: #e5614b;
-  border-color: rgba(229, 97, 75, 0.5);
-  background: rgba(229, 97, 75, 0.12);
-}
-.nb-cell-actions .iconbtn[title="Delete cell"]:hover,
-.nb-cell-actions .iconbtn[title="Delete note"]:hover,
-.nb-note-actions .iconbtn[title="Delete note"]:hover {
-  color: #fff;
-  background: #e5614b;
-  border-color: #e5614b;
-}
 
 .nb-ed {
   position: relative;
@@ -3300,6 +3383,18 @@ kbd {
 .nb-tabchip:hover { color: var(--text); }
 .nb-tabchip.on { color: var(--accent); border-color: var(--accent); }
 .nb-export { position: relative; display: inline-block; }
+.export-results-wrap {
+  position: relative;
+  display: inline-block;
+}
+.export-results-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 62;
+  min-width: 168px;
+  box-shadow: var(--shadow);
+}
 .nb-export-menu {
   position: absolute;
   top: 24px;
@@ -3324,7 +3419,7 @@ kbd {
   border-radius: 5px;
   cursor: pointer;
 }
-.nb-export-menu button:hover { background: var(--panel); color: var(--accent); }
+.nb-export-menu button:hover { background: var(--menu-hl); color: var(--accent-hi); }
 
 .nb-out {
   display: flex;
@@ -3636,10 +3731,38 @@ kbd {
   color: var(--text);
   font-size: 12px;
 }
+.pv-role-filters {
+  display: flex;
+  gap: 4px;
+  padding: 0 8px 8px;
+  flex-wrap: wrap;
+}
+.pv-role-chip {
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.pv-role-chip.on {
+  border-color: var(--accent-line);
+  color: var(--accent-hi);
+  background: var(--raised-2);
+}
 .pv-field-list {
   flex: 1 1 auto;
   overflow: auto;
   padding: 0 8px 8px;
+}
+.pv-field-section {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  padding: 8px 4px 4px;
 }
 .pv-field {
   display: flex;
@@ -3653,6 +3776,29 @@ kbd {
   font-size: 12.5px;
   cursor: grab;
   user-select: none;
+}
+.pv-field-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pv-ftype {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--raised-2);
+  color: var(--text-faint);
+  text-transform: lowercase;
+}
+.pv-ftype.measure {
+  color: #6dbf6a;
+}
+.pv-ftype.dim {
+  color: #7aa2e8;
 }
 .pv-field:hover {
   border-color: var(--accent-line);
@@ -3891,8 +4037,8 @@ kbd {
   font-size: 13px;
   cursor: pointer;
 }
-.pv-pop-opt:hover { background: var(--raised-2); }
-.pv-pop-opt.sel { background: var(--accent-fade); color: var(--accent-hi); }
+.pv-pop-opt:hover { background: var(--menu-hl); color: var(--menu-hl-text); }
+.pv-pop-opt.sel { background: var(--menu-hl); color: var(--accent-hi); }
 .pv-pop-select,
 .pv-pop-input,
 .pv-pop-area {
@@ -4028,7 +4174,7 @@ kbd {
   cursor: pointer;
   white-space: nowrap;
 }
-.nb-runmenu-pop button:hover { background: var(--accent-fade); color: var(--accent-hi); }
+.nb-runmenu-pop button:hover { background: var(--menu-hl); color: var(--accent-hi); }
 .nb-lineage {
   display: flex;
   flex-wrap: wrap;
@@ -4134,7 +4280,7 @@ kbd {
   cursor: pointer;
   font-size: 13px;
 }
-.nb-switch-item:hover { background: var(--accent-fade); }
+.nb-switch-item:hover { background: var(--menu-hl); }
 .nb-switch-item.on { color: var(--accent-hi); }
 .nb-switch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nb-switch-time { color: var(--text-faint); font-size: 11px; flex: none; }
@@ -4153,7 +4299,7 @@ kbd {
   cursor: pointer;
   font-size: 13px;
 }
-.nb-switch-action:hover { background: var(--accent-fade); color: var(--accent-hi); }
+.nb-switch-action:hover { background: var(--menu-hl); color: var(--accent-hi); }
 .nb-switch-action.danger:hover { background: rgba(229, 97, 75, 0.13); color: var(--error); }
 .nb-save {
   display: inline-flex;
@@ -4243,7 +4389,10 @@ kbd {
   background: var(--surface);
   color: var(--text-dim);
   cursor: pointer;
-  transition: all 0.12s;
+  transition:
+    border-color var(--dur-fast) ease,
+    background var(--dur-fast) ease,
+    color var(--dur-fast) ease;
 }
 .nb-recon-chip:hover { border-color: var(--accent-line); }
 .nb-recon-chip.on {
@@ -4864,24 +5013,16 @@ kbd {
   position: relative;
 }
 .nb2-fav-x {
-  width: 16px;
-  height: 16px;
-  min-width: 16px;
+  /* compact chip ×; red look comes from .btn.xbtn (do not mute/hide it) */
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
   padding: 0;
-  margin-left: -6px;
+  margin-left: 2px;
   margin-right: 2px;
   font-size: 13px;
   line-height: 1;
-  opacity: 0;
-  transition: opacity 0.12s;
-  color: var(--text-dim);
-}
-.nb2-fav-item:hover .nb2-fav-x {
-  opacity: 0.8;
-}
-.nb2-fav-x:hover {
-  opacity: 1 !important;
-  color: var(--danger, #dc2626);
+  opacity: 1;
 }
 .nb2-pal-search {
   flex: 0 1 200px;
@@ -5099,17 +5240,19 @@ kbd {
   content: "";
   position: absolute;
   top: 2px;
+  left: 2px;
   width: 11px;
   height: 11px;
   border-radius: 50%;
   background: #fff;
-  transition: left 0.12s ease;
+  transform: translateX(0);
+  transition: transform var(--dur-fast) var(--ease-out);
 }
 .nb2-node-bypass.on::after {
-  left: 13px;
+  transform: translateX(11px);
 }
 .nb2-node-bypass.off::after {
-  left: 2px;
+  transform: translateX(0);
 }
 /* a bypassed node is dimmed + dashed so it reads as "passing through" */
 .nb2-node.bypassed {
@@ -5120,16 +5263,27 @@ kbd {
   text-decoration: line-through;
 }
 .nb2-node-x {
-  background: none;
-  border: none;
-  color: var(--text-faint);
-  cursor: pointer;
+  /* legacy class kept for CSS vocabulary; canvas nodes delete via panel/menu.
+     Match the shared .btn.xbtn red × if reintroduced with btn classes. */
+  color: #e5484d;
+  font-weight: 700;
   font-size: 15px;
   line-height: 1;
-  padding: 0 2px;
+  border: 1px solid rgba(229, 72, 77, 0.45);
+  background: rgba(229, 72, 77, 0.12);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  padding: 6px;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .nb2-node-x:hover {
-  color: var(--danger, #e06c6c);
+  background: #e5484d;
+  border-color: #e5484d;
+  color: #fff;
 }
 .nb2-node-sub {
   font-size: 10.5px;
@@ -5259,6 +5413,19 @@ kbd {
 .nb2-inspector.is-empty {
   display: none;
 }
+/* Config-body swap: the inspector body is keyed by selected node id+type, so
+   picking a different node unmounts the old form atomically and mounts the
+   new one. This short fade covers the first frames of the new form (while
+   the column probe clears/reloads), so no stale config is ever visible.
+   Opacity-only, one-shot; killed by the global reduced-motion guards
+   (prefers-reduced-motion media query and body.motion-reduced). */
+.nb2-insp-swap {
+  animation: nb2-insp-swap-in var(--dur-fast) var(--ease-out) both;
+}
+@keyframes nb2-insp-swap-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
 /* text-box nodes (sql / formula / text / createtable / group notes) let the
    user drag their textarea wider; the panel grows to fit so the box is never
    clipped by the config background. Scoped to these nodes so field editors on
@@ -5336,6 +5503,13 @@ kbd {
 }
 .nb2-warn-sm code {
   font-family: var(--mono, monospace);
+}
+.nb2-stale-list {
+  margin: 6px 0 0;
+  padding-left: 1.1em;
+}
+.nb2-stale-area {
+  font-weight: 600;
 }
 .nb2-insp-empty {
   color: var(--text-faint);
@@ -5527,6 +5701,20 @@ kbd {
   position: sticky;
   top: 0;
   font-weight: 600;
+}
+/* .629: clicking into the NodeFlow results grid programmatically focuses the
+   scroll container (for Ctrl+C copy ownership). The global :focus-visible rule
+   paints a green (--accent) outline around the whole panel, and the browser's
+   focus-visible heuristic fires inconsistently on programmatic focus after a
+   click -- so the results panel "sometimes" flashes green. Drop the green ring
+   here (this is a scroll container, not an actionable control) while keeping a
+   subtle muted ring for keyboard focus so click-to-focus a11y is preserved. */
+.nb2-preview .grid:focus,
+.nb2-preview .grid:focus-visible {
+  outline: none;
+}
+.nb2-preview .grid:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
 /* NodeFlow Phase 2: select / join / union nodes + inspectors */
@@ -6136,7 +6324,8 @@ kbd {
   color: inherit;
 }
 .nb2-node-menu button:hover {
-  background: var(--bg-subtle, rgba(127, 127, 127, 0.12));
+  background: var(--menu-hl);
+  color: var(--menu-hl-text);
 }
 .nb2-node-menu button.danger {
   color: #c64a4a;
@@ -6225,7 +6414,8 @@ kbd {
   margin-right: -2px;
 }
 .nb2-node-menu button.active {
-  background: var(--bg-subtle, rgba(127, 127, 127, 0.12));
+  background: var(--menu-hl);
+  color: var(--menu-hl-text);
 }
 .nb2-hidden {
   display: none !important;
@@ -7091,19 +7281,6 @@ body.canvas-ivory .nb2-empty {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.nb2-reorder-x {
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  cursor: pointer;
-  padding: 2px;
-  display: inline-flex;
-  border-radius: 4px;
-}
-.nb2-reorder-x:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.07);
-}
 .nb2-reorder-body .nb2-agg-func,
 .nb2-reorder-body .nb2-agg-col {
   flex: 1;
@@ -7182,6 +7359,8 @@ body.canvas-ivory .nb2-empty {
 .tree-row .twist { transition: transform 0.15s ease; }
 button:not(:disabled) { transition: transform 0.08s ease; }
 button:not(:disabled):active { transform: scale(0.97); }
+/* Dense NodeFlow inspector: quieter press so chrome doesn't bounce. */
+.nb2-inspector button:not(:disabled):active { transform: scale(0.99); }
 
 /* .436: the floating Documentation window (value-inspector chrome) */
 .docs-float {
@@ -7750,6 +7929,367 @@ label.chk input[type="checkbox"],
   border-top: 1px solid var(--border);
 }
 
+/* Column lineage modal (results grid → Show lineage) */
+.col-lineage-win {
+  position: fixed;
+  z-index: 240;
+  width: 760px;
+  height: 600px;
+  min-width: 420px;
+  min-height: 280px;
+  max-width: 96vw;
+  max-height: 92vh;
+  resize: both;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+}
+.col-lineage-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  user-select: none;
+  flex: 0 0 auto;
+}
+.col-lineage-head code {
+  font-size: 12px;
+  color: var(--accent-hi, var(--accent));
+}
+.col-lineage-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.col-lineage-empty {
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--text-faint);
+}
+.col-lineage-empty-title {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.col-lineage-note {
+  font-size: 12px;
+  color: var(--text-faint);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.col-lineage-diagram {
+  /* Must not flex-shrink: overflow:auto makes min-height:0, which collapsed the
+     stage SVG to a bare horizontal scrollbar while Value History stayed visible. */
+  flex: 0 0 auto;
+  min-height: 214px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0) 0 0 / 16px 16px,
+    var(--bg);
+  padding: 4px;
+}
+.col-lineage-svg {
+  display: block;
+  flex-shrink: 0;
+  max-width: none;
+}
+.col-lineage-edge {
+  stroke: var(--text-faint);
+  stroke-width: 1.5;
+  fill: none;
+  opacity: 0.7;
+}
+.col-lineage-card {
+  fill: var(--panel);
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.18));
+}
+.col-lineage-node.source .col-lineage-card {
+  stroke: #5aa9e6;
+}
+.col-lineage-node.derived .col-lineage-card {
+  stroke: var(--accent);
+}
+.col-lineage-node.sql .col-lineage-card {
+  stroke: #c9a227;
+}
+.col-lineage-node.pass .col-lineage-card {
+  stroke: var(--border-strong);
+}
+.col-lineage-node.active .col-lineage-card {
+  stroke: var(--text);
+  stroke-width: 2.25;
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.35));
+}
+html.theme-light .col-lineage-node.active .col-lineage-card,
+html[data-theme="light"] .col-lineage-node.active .col-lineage-card {
+  stroke: var(--accent-hi);
+  filter: drop-shadow(0 0 6px var(--accent-fade));
+}
+.col-lineage-kicker {
+  fill: var(--text-faint);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.col-lineage-col {
+  fill: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+.col-lineage-label {
+  fill: var(--text-faint);
+  font-size: 11px;
+}
+.col-lineage-change-mini {
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text-faint);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.col-lineage-io-transform {
+  flex-wrap: wrap;
+}
+.col-lineage-transform-line {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-word;
+}
+.col-lineage-values {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.col-lineage-values-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.col-lineage-values-title {
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.col-lineage-value-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.col-lineage-value-step {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 8px;
+  min-height: 36px;
+}
+.col-lineage-value-step.focus .col-lineage-value-dot {
+  background: var(--text);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
+html.theme-light .col-lineage-value-step.focus .col-lineage-value-dot,
+html[data-theme="light"] .col-lineage-value-step.focus .col-lineage-value-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-fade);
+}
+.col-lineage-value-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 6px;
+}
+.col-lineage-value-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: 0 0 auto;
+}
+.col-lineage-value-line {
+  flex: 1 1 auto;
+  width: 1px;
+  margin-top: 4px;
+  background: var(--border-strong);
+  min-height: 14px;
+}
+.col-lineage-value-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 10px;
+}
+.col-lineage-value-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.col-lineage-value-chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.col-lineage-value-chip:hover,
+.col-lineage-value-chip.on {
+  border-color: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12);
+}
+html.theme-light .col-lineage-value-chip:hover,
+html.theme-light .col-lineage-value-chip.on,
+html[data-theme="light"] .col-lineage-value-chip:hover,
+html[data-theme="light"] .col-lineage-value-chip.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-fade);
+}
+.col-lineage-value-missing {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+.col-lineage-value-expr {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  padding: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.col-lineage-value-prior {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.col-lineage-value-prior-head {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.col-lineage-value-inputs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.col-lineage-value-inputs li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.col-lineage-detail {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.col-lineage-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.col-lineage-detail .pill {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.col-lineage-detail .pill.source { color: #5aa9e6; }
+.col-lineage-detail .pill.derived { color: var(--accent-hi, var(--accent)); }
+.col-lineage-detail .pill.sql { color: #c9a227; }
+.col-lineage-detail .pill.pass { color: var(--text-faint); }
+.col-lineage-io {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.col-lineage-io-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.col-lineage-io-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.col-lineage-io-arrow {
+  color: var(--text-faint);
+  font-size: 16px;
+}
+.col-lineage-summary {
+  margin: 0;
+  font-size: 13px;
+}
+.col-lineage-detail-text {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.col-lineage-expr {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow: auto;
+  max-height: 120px;
+}
+
 /* inline editor-tab rename */
 .tab-rename {
   width: 110px;
@@ -7860,13 +8400,21 @@ label.chk input[type="checkbox"],
 
 /* -- "Saved" / ok text eases in like it was typed ------------ */
 @keyframes ok-type {
-  from { opacity: 0; max-width: 0; }
-  to   { opacity: 1; max-width: 420px; }
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    clip-path: inset(0 0 0 0);
+  }
 }
 .ok-type {
   display: inline-block; overflow: hidden; white-space: nowrap;
   vertical-align: bottom;
-  animation: ok-type 0.4s ease-out;
+  animation: ok-type var(--dur-modal) var(--ease-out);
 }
 
 /* -- editor: the statement you ran flashes once -------------- */
@@ -7883,11 +8431,43 @@ label.chk input[type="checkbox"],
   border-radius: 3px;
 }
 
-/* -- NodeFlow: current through the wires while running -------- */
-@keyframes nb-dash { to { stroke-dashoffset: -24; } }
-.nb2-canvas-wrap.flowing .nb2-wire-line {
-  stroke-dasharray: 8 5;
-  animation: nb-dash 0.9s linear infinite;
+/* -- NodeFlow: a directional glow travels active wires while running ----
+   A soft comet of light runs source(a) -> target(b) along targeted connectors,
+   looping continuously while that node runs and resetting to the plain wire when it stops.
+   pathLength=1 normalises every wire so one dash+gap == one full pass,
+   making the loop seamless regardless of connector length. */
+@keyframes nb-flow-glow {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: -1; }
+}
+.nb2-wire-glow {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent-hi) 92%, #fff);
+  stroke-width: 3.75;
+  stroke-linecap: round;
+  opacity: 0; /* invisible unless the canvas is running and this wire is active */
+  pointer-events: none;
+  /* No filter: drop-shadow — per-edge animated filters re-blur every frame. */
+}
+.nb2-canvas-wrap.flowing .nb2-wire-glow.active {
+  opacity: 0.78;
+  stroke-dasharray: 0.28 0.72;
+  animation: nb-flow-glow 1.1s linear infinite;
+}
+/* Reduced motion: keep a soft static highlight, no travelling comet. */
+@media (prefers-reduced-motion: reduce) {
+  .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
+    animation: none;
+    stroke-dasharray: none;
+    opacity: 0.45;
+    stroke-width: 3.25;
+  }
+}
+body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
+  animation: none;
+  stroke-dasharray: none;
+  opacity: 0.45;
+  stroke-width: 3.25;
 }
 /* .473: journal tabs on their own row, under the controls -- the IDE
    strip pattern, now full-width beneath Run all / engine / dialect. */
@@ -7910,17 +8490,17 @@ label.chk input[type="checkbox"],
 /* .470: the flowing-canvas node pulse is retired. An infinite
    animation cancelled the instant the run finishes snaps its ring off
    EVERY node in the same frame -- a canvas-wide blink exactly at
-   completion (the reported flicker). The marching wire dashes remain
-   the running signal, and the staggered ripple is the done-glow. */
+   completion (the reported flicker). The travelling wire glow is the
+   running signal, and the staggered ripple is the done-glow. */
 
 /* -- ports glow while a wire is being dragged ----------------- */
 @keyframes nb-port-hot {
-  0%, 100% { filter: drop-shadow(0 0 0 transparent); transform: scale(1); }
-  50% { filter: drop-shadow(0 0 5px
-        color-mix(in srgb, var(--accent) 75%, transparent));
-        transform: scale(1.22); }
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.18); opacity: 0.88; }
 }
-.nb2-canvas-wrap.wiring .nb2-port.in { animation: nb-port-hot 0.9s ease-in-out infinite; }
+.nb2-canvas-wrap.wiring .nb2-port.in {
+  animation: nb-port-hot 0.9s ease-in-out infinite;
+}
 
 /* -- an edge snapping home gives its node a tiny elastic pop -- */
 @keyframes nb-snap {
@@ -8007,10 +8587,6 @@ label.chk input[type="checkbox"],
   100% { transform: scale(1); opacity: 1; }
 }
 .copy-ok svg { animation: copy-pop 0.28s ease; color: var(--ok, #3f9e5f); }
-button:hover .icon-trash svg {
-  transform: rotate(-9deg) translateY(-0.5px);
-}
-.icon-trash svg { transition: transform 0.14s ease; }
 @keyframes menu-item-in {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: none; }
@@ -8108,6 +8684,39 @@ button:hover .icon-trash svg {
   100% { transform: scale(1); }
 }
 .nb2-node.born { animation: nb-born 0.26s cubic-bezier(.34,1.4,.64,1); }
+/* Lineage modal → Highlight node: white glow (not green selection flash) */
+@keyframes nb-lineage-flash {
+  0% {
+    box-shadow:
+      0 0 0 2px rgba(255, 255, 255, 0.95),
+      0 0 18px 4px rgba(255, 255, 255, 0.55),
+      var(--shadow);
+  }
+  55% {
+    box-shadow:
+      0 0 0 3px rgba(255, 255, 255, 0.75),
+      0 0 28px 8px rgba(255, 255, 255, 0.35),
+      var(--shadow);
+  }
+  100% {
+    box-shadow:
+      0 0 0 0 transparent,
+      0 0 0 0 transparent,
+      var(--shadow);
+  }
+}
+.nb2-node.lineage-flash {
+  animation: nb-lineage-flash 0.9s ease-out;
+  border-color: rgba(255, 255, 255, 0.92) !important;
+  z-index: 6;
+}
+.nb2-node.lineage-flash.sel {
+  /* Keep selection state, but override green accent ring during lineage flash */
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.9),
+    0 0 22px 6px rgba(255, 255, 255, 0.4),
+    var(--shadow);
+}
 @keyframes nb-shake {
   0%, 100% { translate: 0; } 20% { translate: -4px; }
   40% { translate: 4px; } 60% { translate: -3px; } 80% { translate: 2px; }
@@ -8117,11 +8726,11 @@ button:hover .icon-trash svg {
   100% { box-shadow: 0 0 0 12px transparent; }
 }
 .nb2-node.err { animation: nb-shake 0.42s ease, nb-err-ring 0.6s ease-out; }
-.nb2-wire-line { transition: stroke-width 0.12s ease, filter 0.12s ease; }
+.nb2-wire-line { transition: stroke-width 0.12s ease, stroke 0.12s ease, opacity 0.12s ease; }
 .nb2-wire:hover .nb2-wire-line {
   stroke-width: 3.2;
-  filter: drop-shadow(0 0 3px
-    color-mix(in srgb, var(--accent) 55%, transparent));
+  stroke: var(--accent-hi);
+  opacity: 1;
 }
 
 /* -- guardrails --------------------------------------------------- */
@@ -8146,11 +8755,17 @@ button:hover .icon-trash svg {
   box-shadow: var(--shadow);
   animation: chip-fly 0.65s cubic-bezier(.5,.05,.55,.95) forwards;
 }
-.task-card { transition: opacity 0.2s ease, transform 0.2s ease; }
+.task-card { transition: opacity var(--dur-base) ease, transform var(--dur-base) ease; }
 .task-card.leaving {
   opacity: 0; transform: translateX(14px);
   max-height: 0 !important; margin: 0; padding-top: 0; padding-bottom: 0;
-  overflow: hidden; transition: all 0.22s ease;
+  overflow: hidden;
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease,
+    max-height 0.22s ease,
+    margin 0.22s ease,
+    padding 0.22s ease;
 }
 
 /* -- invalid-submit shake (promised in .460; wire it to any form
@@ -8327,7 +8942,7 @@ button:hover .icon-trash svg {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(130px, 180px));
   gap: 12px;
-  align-items: end;
+  align-items: start;
   margin-bottom: 14px;
 }
 .settings-grid label {
@@ -8335,6 +8950,22 @@ button:hover .icon-trash svg {
   gap: 6px;
   font-size: 12px;
   color: var(--muted);
+  align-content: start;
+}
+/* Threshold cards (Load thresholds + JSON & flatten): map each card's header,
+   input, and help text onto shared grid rows via subgrid so top edges, inputs,
+   and "default" badges line up across columns regardless of differing label or
+   help-text lengths (fixes the staggered-top misalignment). */
+.settings-grid .threshold-field {
+  grid-row: span 3;
+  grid-template-rows: subgrid;
+  row-gap: 6px;
+}
+.settings-grid .threshold-field-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
 }
 .settings-grid .check-row {
   display: flex;
@@ -8467,7 +9098,8 @@ button:hover .icon-trash svg {
 }
 .cmd-palette-item:hover,
 .cmd-palette-item.active {
-  background: var(--panel-2);
+  background: var(--menu-hl);
+  color: var(--menu-hl-text);
 }
 .cmd-palette-item.disabled {
   opacity: 0.45;
@@ -8531,11 +9163,12 @@ button:hover .icon-trash svg {
   border: none;
   background: transparent;
   color: var(--text-faint);
-  padding: 8px 10px;
-  font-size: 12px;
+  padding: 8px 6px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   border-bottom: 2px solid transparent;
+  line-height: 1.2;
 }
 .tt-tab.active {
   color: var(--text);
@@ -8678,6 +9311,28 @@ button:hover .icon-trash svg {
   font-size: 12px;
   line-height: 1.45;
   width: 100%;
+}
+.tt-tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  margin: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.tt-tool-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.tt-tool-card-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-faint);
 }
 .tt-mini {
   position: fixed;
@@ -8823,8 +9478,7 @@ button:hover .icon-trash svg {
   cursor: default;
   pointer-events: none;
 }
-.dash-board-locked .dash-resize,
-.dash-board-locked .dash-header-resize {
+.dash-board-locked .dash-resize {
   display: none;
 }
 .dash-run-wrap {
@@ -8865,6 +9519,8 @@ button:hover .icon-trash svg {
   background: var(--panel);
   color: var(--text);
   font-size: 13px;
+  accent-color: var(--accent);
+  color-scheme: dark;
 }
 .dash-board {
   position: relative;
@@ -8902,19 +9558,28 @@ button:hover .icon-trash svg {
   touch-action: manipulation;
   user-select: none;
   transition:
-    box-shadow 160ms ease,
-    border-color 160ms ease,
-    transform 160ms ease,
-    background 160ms ease;
+    box-shadow var(--dur-base) ease,
+    border-color var(--dur-base) ease,
+    transform var(--dur-base) ease,
+    background var(--dur-base) ease;
 }
 .dash-widget.dash-widget-glass {
   background: color-mix(in srgb, var(--panel) 42%, transparent);
   border-color: color-mix(in srgb, var(--border) 55%, transparent);
-  backdrop-filter: blur(18px) saturate(1.35);
-  -webkit-backdrop-filter: blur(18px) saturate(1.35);
+  /* 10px (was 18px): keeps glass read without saturating the compositor on dense boards. */
+  backdrop-filter: blur(10px) saturate(1.35);
+  -webkit-backdrop-filter: blur(10px) saturate(1.35);
   box-shadow:
     0 10px 28px rgba(0, 0, 0, 0.16),
     inset 0 1px 0 color-mix(in srgb, #fff 22%, transparent);
+}
+/* Suppress live blur while transform animations run (avoids per-frame re-blur). */
+.dash-anim-add,
+.dash-anim-drag,
+.dash-anim-remove,
+.dash-widget.dragging {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 .dash-widget.dash-widget-glass.dash-widget-text {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -9085,14 +9750,16 @@ button:hover .icon-trash svg {
   font-weight: 600;
 }
 .dash-more-menu-item:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: var(--menu-hl);
+  color: var(--menu-hl-text);
 }
 .dash-more-menu-item:disabled {
   opacity: 0.45;
   cursor: default;
 }
 .dash-more-menu-item.active {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: var(--menu-hl);
+  color: var(--menu-hl-text);
 }
 .dash-more-menu-item.danger {
   color: var(--danger, #e25b5b);
@@ -9120,18 +9787,6 @@ button:hover .icon-trash svg {
 .dash-table-wrap {
   pointer-events: auto;
   touch-action: auto;
-}
-.dash-header-resize {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -3px;
-  height: 6px;
-  cursor: ns-resize;
-  z-index: 2;
-}
-.dash-header-resize:hover {
-  background: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 .dash-config {
   display: flex;
@@ -9258,14 +9913,14 @@ button:hover .icon-trash svg {
   50% { border-color: color-mix(in srgb, var(--accent) 80%, var(--border)); }
 }
 .dash-anim-add {
-  animation: dash-pop-in 480ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: dash-pop-in var(--dur-modal) var(--ease-out) both;
 }
 .dash-anim-remove {
-  animation: dash-pop-out 260ms ease-in both;
+  animation: dash-pop-out 260ms var(--ease-in) both;
   pointer-events: none;
 }
 .dash-anim-drag {
-  animation: dash-lift 180ms ease-out both;
+  animation: dash-lift var(--dur-base) var(--ease-out) both;
   z-index: 5;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
 }

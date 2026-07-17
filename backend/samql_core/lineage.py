@@ -391,7 +391,8 @@ def _emit_chain(session, graph, node_id, port, field, data_element,
             seen.add(rk)
             rows.append({"input_file": input_file, "source": uc,
                          "used_in": field, "step": step,
-                         "data_element": data_element})
+                         "data_element": data_element,
+                         "node_id": node_id})
 
 
 def _terminals(graph):
@@ -454,6 +455,460 @@ def build_field_lineage(session, graph):
                                         "data_element": dc})
     return {"passthrough": passthrough, "derived": derived,
             "sql_flagged": sql_set}
+
+
+def _transform_line(inputs, op, output):
+    """Compact ``inputs → op → output`` line for diagrams and detail panels."""
+    left = ", ".join(str(x) for x in (inputs or []) if x) or "—"
+    mid = (op or "passthrough").strip() or "passthrough"
+    right = (output or "").strip() or "—"
+    return "%s → %s → %s" % (left, mid, right)
+
+
+def _describe_change(node, rec, col):
+    """Structural before→after description for how ``col`` is produced at
+    ``node``. Discovery-only: reads node config + the lineage record, never
+    materializes full tables.
+
+    Each change carries a richer transform summary::
+
+        inputs → expression/op → output
+
+    plus optional type / filter / join / summarize specifics from node cfg.
+    """
+    typ = node.get("type") or ""
+    cfg = node.get("config") or {}
+    kind = rec.get("kind") or "unknown"
+    srcs = [s[2] for s in (rec.get("srcs") or [])]
+    label = (cfg.get("label") or "").strip() or typ
+    change = {
+        "summary": "",
+        "detail": "",
+        "inputs": list(srcs),
+        "output": col,
+        "expression": None,
+        "mapping": None,
+        "predicate": None,
+        "unchanged": kind == "passthrough",
+        # Richer per-stage transform (additive; older clients ignore these).
+        "op": None,
+        "transform": None,
+        "type_from": None,
+        "type_to": None,
+        "group_by": None,
+        "join_how": None,
+    }
+
+    def _finish(op, transform=None, **extra):
+        change["op"] = op
+        for k, v in extra.items():
+            change[k] = v
+        change["transform"] = transform or _transform_line(
+            change.get("inputs"), op, change.get("output") or col)
+        return change
+
+    if kind == "source":
+        fname = rec.get("file") or cfg.get("table") or label
+        change["summary"] = "Loaded from %s" % fname
+        change["detail"] = "Source column from input file / table"
+        change["unchanged"] = False
+        change["inputs"] = []
+        return _finish("load", "%s → load → %s" % (fname, col))
+
+    if kind == "sql":
+        change["summary"] = "Opaque %s boundary" % (
+            "SQL" if typ == "sql" else (typ or "code"))
+        change["detail"] = SQL_NOTE
+        expr = (cfg.get("sql") or cfg.get("code") or "").strip()
+        change["expression"] = (expr[:500] + ("…" if len(expr) > 500 else "")
+                                ) if expr else None
+        change["unchanged"] = False
+        op = "SQL" if typ == "sql" else (typ or "code")
+        return _finish(op, _transform_line(srcs or ["…"], op, col))
+
+    if typ == "formula":
+        for f in (cfg.get("formulas") or []):
+            name = (f.get("name") or "").strip()
+            if _norm(name) != _norm(col):
+                continue
+            expr = (f.get("expr") or "").strip()
+            change["summary"] = "%s = %s" % (col, expr or "?")
+            change["expression"] = expr or None
+            change["detail"] = ("Inputs: %s" % ", ".join(srcs)) if srcs else ""
+            change["unchanged"] = False
+            op_txt = expr or "formula"
+            return _finish("formula", _transform_line(srcs, op_txt, col))
+
+    if typ == "summarize":
+        groups = [g for g in (cfg.get("group_by") or []) if g]
+        for a in (cfg.get("aggs") or []):
+            acol = (a.get("col") or "").strip()
+            func = _norm(a.get("func"))
+            name = ((a.get("name") or "").strip()
+                    or ("%s_%s" % (func, acol)))
+            if _norm(name) != _norm(col):
+                continue
+            expr = "%s(%s)" % (func or "agg", acol or "?")
+            change["summary"] = "%s → %s" % (expr, col)
+            change["expression"] = expr
+            change["detail"] = ("Group by %s" % ", ".join(groups)
+                                if groups else "No group keys")
+            change["unchanged"] = False
+            change["inputs"] = [acol] if acol else list(srcs)
+            return _finish(
+                func or "agg",
+                _transform_line(change["inputs"], expr, col),
+                group_by=list(groups) or None)
+        change["summary"] = "Group key (value unchanged)"
+        change["detail"] = ("Group by %s" % ", ".join(groups)
+                            if groups else "Group key")
+        change["unchanged"] = True
+        return _finish(
+            "group key",
+            _transform_line([col], "group key", col),
+            group_by=list(groups) or None)
+
+    if typ == "select":
+        for f in (cfg.get("fields") or []):
+            if f.get("keep") is False:
+                continue
+            name = (f.get("name") or "").strip()
+            alias = (f.get("rename") or name).strip() or name
+            if _norm(alias) != _norm(col) and _norm(name) != _norm(col):
+                continue
+            ty = (f.get("type") or "").strip()
+            if _norm(alias) != _norm(name):
+                change["summary"] = "Rename %s → %s" % (name, alias)
+                change["mapping"] = {"from": name, "to": alias}
+                change["unchanged"] = False
+                op = "rename"
+                if ty:
+                    change["type_to"] = ty
+                    change["expression"] = "CAST(%s AS %s)" % (name, ty)
+                    change["detail"] = "Rename with cast to %s" % ty
+                    op = "rename+cast"
+                return _finish(
+                    op,
+                    _transform_line([name], op, alias),
+                    type_to=ty or None)
+            if ty:
+                change["summary"] = "Cast %s as %s" % (alias, ty)
+                change["detail"] = "Values unchanged; type only"
+                change["unchanged"] = True
+                change["expression"] = "CAST(%s AS %s)" % (name or alias, ty)
+                change["type_to"] = ty
+                return _finish(
+                    "cast",
+                    _transform_line([name or alias], "CAST AS %s" % ty, alias),
+                    type_to=ty)
+            change["summary"] = "Selected (unchanged)"
+            change["unchanged"] = True
+            return _finish("select", _transform_line([name], "select", alias))
+
+    if typ == "renamecols":
+        if srcs and _norm(srcs[0]) != _norm(col):
+            change["summary"] = "Rename %s → %s" % (srcs[0], col)
+            change["mapping"] = {"from": srcs[0], "to": col}
+            change["unchanged"] = False
+            return _finish("rename", _transform_line([srcs[0]], "rename", col))
+        change["summary"] = "Rename pass-through"
+        change["unchanged"] = True
+        return _finish("rename", _transform_line([col], "rename", col))
+
+    if typ in ("join", "antijoin", "crossjoin", "multijoin"):
+        pairs = [(k.get("left"), k.get("right"))
+                 for k in (cfg.get("keys") or [])
+                 if k.get("left") and k.get("right")]
+        if typ == "antijoin" and not pairs:
+            lk, rk = cfg.get("left_key"), cfg.get("right_key")
+            if lk and rk:
+                pairs = [(lk, rk)]
+        how = (cfg.get("how") or cfg.get("type") or typ).strip()
+        key_txt = ", ".join("%s = %s" % (l, r) for l, r in pairs) or "(no keys)"
+        side = ""
+        if col.lower().startswith("r_"):
+            side = " from right (collision rename)"
+        change["summary"] = "%s join%s" % (how, side)
+        change["detail"] = "On %s" % key_txt
+        change["predicate"] = key_txt if pairs else None
+        change["unchanged"] = kind == "passthrough"
+        if kind == "derived":
+            change["detail"] = ((change["detail"] + "; ") if change["detail"]
+                                else "") + "New column from join inputs"
+        op = "%s join" % how
+        return _finish(
+            op,
+            _transform_line(srcs or [col], "%s on %s" % (op, key_txt), col),
+            join_how=how)
+
+    if typ == "filter":
+        pred = (cfg.get("condition") or cfg.get("expr") or "").strip()
+        change["summary"] = "Filter rows"
+        change["predicate"] = pred or None
+        change["detail"] = ("Keep where %s" % pred) if pred else "Row filter"
+        change["unchanged"] = True
+        op = "filter"
+        mid = ("filter(%s)" % pred) if pred else "filter"
+        return _finish(op, _transform_line([col], mid, col))
+
+    if typ == "sort":
+        keys = cfg.get("keys") or cfg.get("order") or []
+        bits = []
+        if isinstance(keys, list) and keys:
+            for k in keys:
+                if isinstance(k, dict):
+                    bits.append("%s %s" % (
+                        k.get("col") or k.get("column") or "?",
+                        (k.get("dir") or k.get("order") or "asc")))
+                else:
+                    bits.append(str(k))
+            change["detail"] = "Order by %s" % ", ".join(bits)
+        change["summary"] = "Sort rows (values unchanged)"
+        change["unchanged"] = True
+        mid = ("sort(%s)" % ", ".join(bits)) if bits else "sort"
+        return _finish("sort", _transform_line([col], mid, col))
+
+    if typ in ("sample", "topn", "limit"):
+        n = cfg.get("n") or cfg.get("limit") or cfg.get("count")
+        change["summary"] = "Keep a subset of rows"
+        change["detail"] = ("Keep %s rows" % n) if n else ("via %s" % typ)
+        change["unchanged"] = True
+        mid = ("%s(%s)" % (typ, n)) if n else typ
+        return _finish(typ, _transform_line([col], mid, col))
+
+    if typ in _TRANSPARENT:
+        change["summary"] = "Unchanged through %s" % (label or typ)
+        change["unchanged"] = True
+        return _finish(typ, _transform_line([col], typ, col))
+
+    if kind == "passthrough":
+        if srcs and _norm(srcs[0]) != _norm(col):
+            change["summary"] = "Pass-through rename %s → %s" % (srcs[0], col)
+            change["mapping"] = {"from": srcs[0], "to": col}
+            change["unchanged"] = False
+            return _finish(
+                "rename", _transform_line([srcs[0]], "rename", col))
+        change["summary"] = "Unchanged through %s" % (label or typ)
+        change["unchanged"] = True
+        return _finish(
+            typ or "passthrough",
+            _transform_line([col], typ or "passthrough", col))
+
+    step = rec.get("step") or typ or "derived"
+    change["summary"] = "Derived by %s" % step
+    if srcs:
+        change["detail"] = "From %s" % ", ".join(srcs)
+    change["unchanged"] = False
+    return _finish(step, _transform_line(srcs, step, col))
+
+
+def _should_emit_stage(typ, rec, col):
+    """Skip noise passthrough hops (e.g. a column riding unused through
+    formula nodes) so the diagram stays readable. Always keep sources,
+    real transforms, transparent row-ops, and joins."""
+    kind = rec.get("kind")
+    if kind in ("source", "derived", "sql"):
+        return True
+    if typ in _TRANSPARENT:
+        return True
+    if typ in ("join", "antijoin", "crossjoin", "multijoin", "union"):
+        return True
+    srcs = rec.get("srcs") or []
+    if srcs and _norm(srcs[0][2]) != _norm(col):
+        return True
+    return False
+
+
+def _collect_column_stages(session, graph, node_id, port, col, memo, seen,
+                           stages, depth=0):
+    """Walk upstream first, then append this hop — source → … → result."""
+    if depth > 256:
+        return
+    key = (node_id, port or "out", _norm(col))
+    if key in seen:
+        return
+    seen.add(key)
+
+    by_id = _nodes_by_id(graph)
+    node = by_id.get(node_id)
+    if node is None:
+        return
+    info = _node_columns_info(session, graph, node_id, port, memo)
+    real = _lookup_key(info, col)
+    if real is None:
+        return
+    rec = info[real]
+    for (un, up, uc) in (rec.get("srcs") or []):
+        _collect_column_stages(session, graph, un, up or "out", uc, memo,
+                               seen, stages, depth + 1)
+
+    typ = node.get("type") or ""
+    if not _should_emit_stage(typ, rec, real):
+        return
+    cfg = node.get("config") or {}
+    kind = rec.get("kind") or "unknown"
+    stages.append({
+        "id": "%s:%s:%s" % (node_id, port or "out", real),
+        "kind": kind,
+        "column": real,
+        "node_id": node_id,
+        "node_type": typ,
+        "node_label": (cfg.get("label") or "").strip() or typ,
+        "step": rec.get("step") or _step(typ, node),
+        "change": _describe_change(node, rec, real),
+    })
+
+
+def build_column_lineage(session, graph, column, node_id=None, port=None,
+                         row_index=None, cell_value=None):
+    """Diagram-ready lineage for one output column, reusing the same column
+    semantics as ``build_field_lineage``. Returns stages ordered source →
+    result, each with a structural change summary (no full-table materialize).
+
+    When ``row_index`` is provided (cell right-click), each stage also gets a
+    best-effort ``value`` sample for that row via cheap LIMIT/OFFSET probes.
+    """
+    column = (column or "").strip()
+    graph = graph or {}
+    if not column:
+        return {"ok": True, "available": False, "column": "",
+                "stages": [], "sql_flagged": False,
+                "reason": "No column specified."}
+    if not (graph.get("nodes") or []):
+        return {"ok": True, "available": False, "column": column,
+                "stages": [], "sql_flagged": False,
+                "reason": "Lineage is only available for NodeFlow results."}
+
+    memo = {}
+    terms = ([(node_id, port or "out")] if node_id
+             else _terminals(graph))
+    target = None
+    for tn, tport in terms:
+        if not tn:
+            continue
+        info = _node_columns_info(session, graph, tn, tport, memo)
+        if _lookup(info, column) is not None:
+            target = (tn, tport or "out")
+            break
+    if target is None and node_id:
+        target = (node_id, port or "out")
+    if target is None:
+        return {"ok": True, "available": False, "column": column,
+                "stages": [], "sql_flagged": False,
+                "reason": "Column not found in the workflow outputs."}
+
+    stages = []
+    _collect_column_stages(session, graph, target[0], target[1], column,
+                           memo, set(), stages)
+    if not stages:
+        return {"ok": True, "available": False, "column": column,
+                "stages": [], "sql_flagged": False,
+                "reason": "Could not trace lineage for this column."}
+
+    o = _origin(session, graph, target[0], target[1], column, memo)
+    sql_flagged = (o[0] == "sql"
+                   or any(s.get("kind") == "sql" for s in stages))
+
+    if row_index is not None:
+        _attach_stage_values(session, graph, stages, row_index, cell_value,
+                             column)
+
+    return {
+        "ok": True,
+        "available": True,
+        "column": column,
+        "terminal_node": target[0],
+        "terminal_port": target[1],
+        "sql_flagged": bool(sql_flagged),
+        "stages": stages,
+        "reason": None,
+        "row_index": row_index,
+    }
+
+
+def _jsonish_cell(v):
+    if v is None or isinstance(v, (bool, int, float, str)):
+        if isinstance(v, float) and (v != v):  # NaN
+            return None
+        return v
+    if isinstance(v, bytes):
+        try:
+            return v.decode("utf-8")
+        except Exception:
+            return repr(v)
+    return str(v)
+
+
+def _attach_stage_values(session, graph, stages, row_index, cell_value,
+                         target_column):
+    """Best-effort per-stage value samples for one result row.
+
+    Uses compile + LIMIT 1 OFFSET — never materializes multi-GB tables for
+    this path. Failures become ``available: false`` on that stage only.
+    """
+    try:
+        ri = int(row_index)
+    except (TypeError, ValueError):
+        return
+    if ri < 0 or ri > 100000:
+        return
+
+    probe = getattr(session, "nodeflow_probe_row_values", None)
+    if not callable(probe):
+        for st in stages:
+            st["value"] = {
+                "available": False,
+                "value": None,
+                "inputs": [],
+                "reason": "value unavailable",
+            }
+        return
+
+    for i, st in enumerate(stages):
+        cols = []
+        out_col = st.get("column")
+        if out_col:
+            cols.append(out_col)
+        ch = st.get("change") or {}
+        for ic in (ch.get("inputs") or []):
+            if ic and ic not in cols:
+                cols.append(ic)
+        try:
+            got = probe(graph, st.get("node_id"), "out", cols, ri) or {}
+        except Exception:
+            got = {"ok": False, "error": "probe failed"}
+        vals = got.get("values") if isinstance(got, dict) else None
+        if not isinstance(vals, dict):
+            vals = {}
+        available = bool(got.get("ok")) and out_col in vals
+        out_val = vals.get(out_col) if out_col else None
+        # Prefer the cell the user clicked for the final stage.
+        if (i == len(stages) - 1 and cell_value is not None
+                and _norm(out_col) == _norm(target_column)):
+            out_val = _jsonish_cell(cell_value)
+            available = True
+        inputs = []
+        for ic in (ch.get("inputs") or []):
+            if ic in vals:
+                inputs.append({
+                    "column": ic,
+                    "value": _jsonish_cell(vals[ic]),
+                    "available": True,
+                })
+            else:
+                inputs.append({
+                    "column": ic,
+                    "value": None,
+                    "available": False,
+                })
+        st["value"] = {
+            "available": available,
+            "value": _jsonish_cell(out_val) if available else None,
+            "inputs": inputs,
+            "reason": None if available else (
+                got.get("error") or "value unavailable"),
+            "expression": ch.get("expression"),
+        }
 
 
 def _write_sheet(ws, headers, rows):

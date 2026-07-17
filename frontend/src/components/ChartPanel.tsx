@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import {
   cancelOne,
@@ -7,7 +7,12 @@ import {
   unregisterRun,
   wasCancelled,
 } from "../lib/runController";
+import {
+  inferColumnTypes,
+  pickDefaultChartAxes,
+} from "../lib/fieldRoles";
 import type {
+  Cell,
   ChartData,
   ChartType,
   Aggregation,
@@ -17,10 +22,15 @@ import type {
 import { Icon } from "./Icon";
 import { ChartView } from "./ChartView";
 import { paletteColors } from "../lib/chartOption";
+import { ColumnOptGroups } from "./ColumnOptGroups";
 
 interface Props {
   resultId: string | null;
   columns: string[];
+  /** Optional SQL / inferred types keyed by column name. */
+  columnTypes?: Record<string, string> | null;
+  /** Sample rows used to infer types when columnTypes is absent. */
+  sampleRows?: Cell[][] | null;
   onExpired?: () => void;
   onPopOut?: () => void;
 }
@@ -64,7 +74,14 @@ const CHART_TYPES: { v: ChartType; label: string }[] = [
 ];
 const AGGS: Aggregation[] = ["sum", "avg", "count", "min", "max"];
 
-const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOut }) => {
+const ChartPanelImpl: React.FC<Props> = ({
+  resultId,
+  columns,
+  columnTypes,
+  sampleRows,
+  onExpired,
+  onPopOut,
+}) => {
   const [type, setType] = useState<ChartType>("bar");
   const [x, setX] = useState("");
   const [y, setY] = useState("");
@@ -95,19 +112,29 @@ const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOu
     setLoading(false);
   }, [cancelInflight]);
 
-  // initialise the pickers when columns change
+  const resolvedTypes = useMemo(() => {
+    if (columnTypes && Object.keys(columnTypes).length) return columnTypes;
+    return inferColumnTypes(columns, sampleRows);
+  }, [columnTypes, columns, sampleRows]);
+
+  // initialise the pickers when columns / types change
   useEffect(() => {
     if (!columns.length) return;
-    const at = (i: number) => columns[i] ?? columns[columns.length - 1] ?? "";
-    setX((prev) => (columns.includes(prev) ? prev : columns[0]));
-    setY((prev) => (columns.includes(prev) ? prev : columns[1] ?? columns[0]));
-    setCOpen((p) => (columns.includes(p) ? p : at(1)));
-    setCHigh((p) => (columns.includes(p) ? p : at(2)));
-    setCLow((p) => (columns.includes(p) ? p : at(3)));
-    setCClose((p) => (columns.includes(p) ? p : at(4)));
-    setX2((p) => (columns.includes(p) ? p : at(2)));
-    setY2((p) => (columns.includes(p) ? p : at(3)));
-  }, [columns]);
+    setX((prev) => pickDefaultChartAxes(columns, resolvedTypes, { x: prev }).x);
+    setY((prev) => pickDefaultChartAxes(columns, resolvedTypes, { y: prev }).y);
+    // Prefer measure columns for OHLC / secondary series when types exist.
+    const meas = columns.filter((c) =>
+      /INT|DOUBLE|FLOAT|REAL|DECIMAL|NUMERIC/i.test(resolvedTypes[c] || ""),
+    );
+    const at = (i: number) =>
+      meas[i] ?? columns[i] ?? columns[columns.length - 1] ?? "";
+    setCOpen((p) => (columns.includes(p) ? p : at(0)));
+    setCHigh((p) => (columns.includes(p) ? p : at(1)));
+    setCLow((p) => (columns.includes(p) ? p : at(2)));
+    setCClose((p) => (columns.includes(p) ? p : at(3)));
+    setX2((p) => (columns.includes(p) ? p : columns[0]));
+    setY2((p) => (columns.includes(p) ? p : at(1)));
+  }, [columns, resolvedTypes]);
 
   useEffect(() => {
     if (!resultId || !x) {
@@ -233,18 +260,14 @@ const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOu
               : "Category (X)"}
           </label>
           <select value={x} onChange={(e) => setX(e.target.value)}>
-            {columns.map((c) => (
-              <option key={c}>{c}</option>
-            ))}
+            <ColumnOptGroups columns={columns} types={resolvedTypes} />
           </select>
         </div>
         {needsY && (
           <div className="field">
             <label>{type === "scatter" ? "Y axis" : isMultiX || isMultiY ? "First Y" : "Value (Y)"}</label>
             <select value={y} onChange={(e) => setY(e.target.value)}>
-              {columns.map((c) => (
-                <option key={c}>{c}</option>
-              ))}
+              <ColumnOptGroups columns={columns} types={resolvedTypes} />
             </select>
           </div>
         )}
@@ -252,9 +275,7 @@ const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOu
           <div className="field">
             <label>Second Y (right axis)</label>
             <select value={y2} onChange={(e) => setY2(e.target.value)}>
-              {columns.map((c) => (
-                <option key={c}>{c}</option>
-              ))}
+              <ColumnOptGroups columns={columns} types={resolvedTypes} />
             </select>
           </div>
         )}
@@ -268,9 +289,7 @@ const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOu
             <div className="field" key={lbl}>
               <label>{lbl}</label>
               <select value={val} onChange={(e) => set(e.target.value)}>
-                {columns.map((c) => (
-                  <option key={c}>{c}</option>
-                ))}
+                <ColumnOptGroups columns={columns} types={resolvedTypes} />
               </select>
             </div>
           ))}
@@ -279,17 +298,13 @@ const ChartPanelImpl: React.FC<Props> = ({ resultId, columns, onExpired, onPopOu
             <div className="field">
               <label>Second X (top)</label>
               <select value={x2} onChange={(e) => setX2(e.target.value)}>
-                {columns.map((c) => (
-                  <option key={c}>{c}</option>
-                ))}
+                <ColumnOptGroups columns={columns} types={resolvedTypes} />
               </select>
             </div>
             <div className="field">
               <label>Second Y</label>
               <select value={y2} onChange={(e) => setY2(e.target.value)}>
-                {columns.map((c) => (
-                  <option key={c}>{c}</option>
-                ))}
+                <ColumnOptGroups columns={columns} types={resolvedTypes} />
               </select>
             </div>
           </>
@@ -762,7 +777,7 @@ const Axes: React.FC<{
   );
 };
 
-// Re-render only when the result or its columns actually change; the parent
+// Re-render only when the result or its columns/types actually change; the parent
 // recreates the columns array and the onExpired callback each render, so we
 // compare columns by value and ignore the callback identity.
 function sameStrArr(a: string[] = [], b: string[] = []): boolean {
@@ -771,7 +786,22 @@ function sameStrArr(a: string[] = [], b: string[] = []): boolean {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
+function sameTypeMap(
+  a?: Record<string, string> | null,
+  b?: Record<string, string> | null,
+): boolean {
+  if (a === b) return true;
+  const ak = a ? Object.keys(a) : [];
+  const bk = b ? Object.keys(b) : [];
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) if ((a as any)[k] !== (b as any)[k]) return false;
+  return true;
+}
 export const ChartPanel = React.memo(
   ChartPanelImpl,
-  (a, b) => a.resultId === b.resultId && sameStrArr(a.columns, b.columns),
+  (a, b) =>
+    a.resultId === b.resultId &&
+    sameStrArr(a.columns, b.columns) &&
+    sameTypeMap(a.columnTypes, b.columnTypes) &&
+    a.sampleRows === b.sampleRows,
 );

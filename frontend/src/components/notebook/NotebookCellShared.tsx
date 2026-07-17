@@ -126,8 +126,8 @@ export const NotebookMoveDeleteActions: React.FC<{
     >
       ↓
     </button>
-    <button className="iconbtn danger" title={deleteTitle} onClick={onDelete}>
-      <Icon.Trash size={13} />
+    <button className="iconbtn xbtn" title={deleteTitle} onClick={onDelete}>
+      ×
     </button>
     {after}
   </div>

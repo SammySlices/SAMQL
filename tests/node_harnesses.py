@@ -495,8 +495,9 @@ const refreshed = applySelectColumnsReconcile(stale, {
   sel: ["customer_id", "name"],
 });
 eq(refreshed[0].config.fields,
-   [{ name: "customer_id", keep: true }, { name: "name", keep: true }],
-   "Input table change replaces Select fields");
+   [{ name: "amount", keep: false },
+    { name: "customer_id", keep: true }, { name: "name", keep: true }],
+   "Input table change retains unchecked tombstones while refreshing Select fields");
 assert(applySelectColumnsReconcile(refreshed, {
   sel: ["customer_id", "name"],
 }) === refreshed, "no-op when fields already match");

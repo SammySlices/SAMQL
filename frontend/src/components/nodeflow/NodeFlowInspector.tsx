@@ -38,6 +38,28 @@ import {
   parseSqlProfiles,
   sanitizeProfileName,
 } from "../../lib/sqlProfiles";
+import { clearStaleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
+
+/** Empty-upstream note vs in-flight column probe (never show “Connect…” while probing). */
+function InspColsHint({
+  probing,
+  ready,
+  children,
+}: {
+  probing: boolean;
+  ready: boolean;
+  children: React.ReactNode;
+}) {
+  if (ready) return null;
+  if (probing) {
+    return (
+      <div className="nb2-note" data-testid="insp-cols-loading">
+        Loading fields…
+      </div>
+    );
+  }
+  return <div className="nb2-note">{children}</div>;
+}
 
 export interface NodeFlowInspectorContext {
   buildFilterCond: (field: string, op: string, value: string) => string;
@@ -85,6 +107,8 @@ export interface NodeFlowInspectorContext {
   IMAGE_FORMATS_CHART: string[];
   IMAGE_FORMATS_DASH: string[];
   inspCols: Record<string, string[]>;
+  /** True while upstream column probe is in flight for the selected node. */
+  inspColsProbing: boolean;
   inspectorDocked: boolean;
   inspectorHost: HTMLElement | null | undefined;
   loadDirList: (folder: string) => Promise<void>;
@@ -118,6 +142,7 @@ export interface NodeFlowInspectorContext {
   setSorts: (sorts: any[]) => void | null;
   setWindows: (windows: any[]) => void | null;
   showTables: boolean | undefined;
+  staleColRefs: { area: string; columns: string[] }[];
   tables: TableInfo[];
   toggleInArray: (field: string, col: string) => void;
   updateField: (idx: number, patch: Record<string, any>) => void;
@@ -176,6 +201,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
     IMAGE_FORMATS_CHART,
     IMAGE_FORMATS_DASH,
     inspCols,
+    inspColsProbing,
     inspectorDocked,
     inspectorHost,
     loadDirList,
@@ -204,6 +230,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
     setSorts,
     setWindows,
     showTables,
+    staleColRefs,
     tables,
     toggleInArray,
     updateField,
@@ -351,7 +378,11 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
         >
           {!sel && <div className="nb2-insp-empty">Select a node to configure it.</div>}
           {sel && (
-            <>
+            <div
+              className="nb2-insp-swap"
+              key={`${sel.id}:${sel.type}`}
+              data-testid="insp-swap-body"
+            >
               <div className="nb2-insp-head">
                 <span className="nb2-insp-title">
                   {inspectorDefinition?.label || sel.type} node
@@ -386,6 +417,47 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   {(nodes.find((g) => g.id === childSelCtx.groupId)?.config
                     .label as string) || "group"}
                   ”. Its input is the output of the step above it.
+                </div>
+              )}
+
+              {staleColRefs.length > 0 && (
+                <div className="nb2-warn-sm" data-testid="stale-col-refs-warn">
+                  <strong>Stale column references.</strong> Saved fields below are
+                  still missing from upstream after auto-prune (rename/drop). Update
+                  them before running, or clear the leftovers.
+                  <ul className="nb2-stale-list">
+                    {staleColRefs.map(({ area, columns }) => (
+                      <li key={area}>
+                        <span className="nb2-stale-area">{area}</span>:{" "}
+                        {columns.map((c) => (
+                          <code key={c} className="nb2-stale-col">
+                            {c}
+                          </code>
+                        )).reduce<React.ReactNode[]>(
+                          (acc, el, i) =>
+                            i === 0 ? [el] : [...acc, ", ", el],
+                          [],
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    type="button"
+                    className="btn xs"
+                    data-testid="stale-col-refs-clear"
+                    style={{ marginTop: 6 }}
+                    onClick={() => {
+                      if (!sel) return;
+                      const next = clearStaleNodeflowColumnRefs(
+                        sel.type,
+                        sel.config || {},
+                        staleColRefs,
+                      );
+                      if (next) patch(sel.id, next);
+                    }}
+                  >
+                    Clear stale references
+                  </button>
                 </div>
               )}
 
@@ -749,11 +821,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     title="Filter the field list by name or rename"
                     style={{ marginBottom: 6 }}
                   />
-                  {!inspCols.in && (
-                    <div className="nb2-note">
-                      Connect an input to choose fields and types.
-                    </div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to choose fields and types.
+                  </InspColsHint>
                   <div className="nb2-fields">
                     {(() => {
                       const allFields = (sel.config.fields || []) as SelField[];
@@ -1033,12 +1103,10 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {inspectorType === "formula" && (
                 <>
                   <label className="nb2-lbl">New / replaced columns</label>
-                  {!inspCols.in && (
-                    <div className="nb2-note">
-                      Connect an input to overwrite an existing column, or add a
-                      new one.
-                    </div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to overwrite an existing column, or add a
+                    new one.
+                  </InspColsHint>
                   {(sel.config.formulas || []).map((f: any, i: number) => {
                     const cols = inspCols.in || [];
                     const newMode =
@@ -1194,9 +1262,11 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     Write SQL expressions; refer to a field as{" "}
                     <code>[Field]</code>. Type <code>[</code> for field
                     suggestions; a name matching an existing column replaces it.
-                    {inspCols.in
-                      ? ` Fields: ${inspCols.in.join(", ")}`
-                      : " Connect an input to see available fields."}
+                    {inspColsProbing && !inspCols.in
+                      ? " Loading fields…"
+                      : inspCols.in
+                        ? ` Fields: ${inspCols.in.join(", ")}`
+                        : " Connect an input to see available fields."}
                   </div>
                   {(() => {
                     // When this formula sits inside an iterator, its loop
@@ -1238,9 +1308,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {inspectorType === "summarize" && (
                 <>
                   <label className="nb2-lbl">Group by (drag to reorder)</label>
-                  {!inspCols.in && (
-                    <div className="nb2-note">Connect an input to choose fields.</div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to choose fields.
+                  </InspColsHint>
                   <ColumnPicker
                     chosen={(sel.config.group_by || []) as string[]}
                     available={inspCols.in || []}
@@ -1291,7 +1361,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           ))}
                         </select>
                         <button
-                          className="nb2-reorder-x"
+                          className="btn ghost icon xbtn"
                           title="Remove aggregation"
                           onClick={() =>
                             setAggs(
@@ -1301,7 +1371,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             )
                           }
                         >
-                          <Icon.X size={12} />
+                          ×
                         </button>
                       </>
                     )}
@@ -1338,11 +1408,12 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     outer.
                   </div>
                   <label className="nb2-lbl">Join keys (left = right)</label>
-                  {!inspCols.left || !inspCols.right ? (
-                    <div className="nb2-note">
-                      Connect both <b>left</b> and <b>right</b> inputs to pick keys.
-                    </div>
-                  ) : null}
+                  <InspColsHint
+                    probing={inspColsProbing}
+                    ready={!!(inspCols.left && inspCols.right)}
+                  >
+                    Connect both <b>left</b> and <b>right</b> inputs to pick keys.
+                  </InspColsHint>
                   {(sel.config.keys || []).map((k: any, i: number) => (
                     <div className="nb2-keyrow" key={i}>
                       <select
@@ -1704,9 +1775,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {inspectorType === "sort" && (
                 <>
                   <label className="nb2-lbl">Sort by (drag to set priority)</label>
-                  {!inspCols.in && (
-                    <div className="nb2-note">Connect an input to choose fields.</div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to choose fields.
+                  </InspColsHint>
                   <ReorderList
                     items={(sel.config.sorts || []) as any[]}
                     keyOf={(_s, i) => i}
@@ -1746,7 +1817,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           <option value="desc">Desc ↓</option>
                         </select>
                         <button
-                          className="nb2-reorder-x"
+                          className="btn ghost icon xbtn"
                           title="Remove"
                           onClick={() =>
                             setSorts(
@@ -1756,7 +1827,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             )
                           }
                         >
-                          <Icon.X size={12} />
+                          ×
                         </button>
                       </>
                     )}
@@ -1816,9 +1887,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {inspectorType === "unique" && (
                 <>
                   <label className="nb2-lbl">Unique by</label>
-                  {!inspCols.in && (
-                    <div className="nb2-note">Connect an input to choose fields.</div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to choose fields.
+                  </InspColsHint>
                   <div className="nb2-groupby">
                     {(inspCols.in || []).map((c) => (
                       <label className="nb2-gb" key={c}>
@@ -1848,9 +1919,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {inspectorType === "unpivot" && (
                 <>
                   <label className="nb2-lbl">Keep as-is (id columns)</label>
-                  {!inspCols.in && (
-                    <div className="nb2-note">Connect an input to choose fields.</div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to choose fields.
+                  </InspColsHint>
                   <div className="nb2-groupby">
                     {(inspCols.in || [])
                       .filter((c) => !(sel.config.unpivot || []).includes(c))
@@ -1907,9 +1978,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {inspectorType === "window" && (
                 <>
                   <label className="nb2-lbl">Window calculations</label>
-                  {!inspCols.in && (
-                    <div className="nb2-note">Connect an input to choose fields.</div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to choose fields.
+                  </InspColsHint>
                   {(sel.config.windows || []).map((w: any, i: number) => {
                     const upd = (patchw: any) =>
                       setWindows(
@@ -2202,11 +2273,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     patch(sel.id, { values: vs });
                   return (
                     <>
-                      {!inspCols.in && (
-                        <div className="nb2-note">
-                          Connect an input to choose fields.
-                        </div>
-                      )}
+                      <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                        Connect an input to choose fields.
+                      </InspColsHint>
                       <label className="nb2-lbl">Rows (drag to reorder)</label>
                       {prows.length > 0 && (
                         <ReorderList
@@ -2217,7 +2286,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             <>
                               <span className="nb2-reorder-name">{c}</span>
                               <button
-                                className="nb2-reorder-x"
+                                className="btn ghost icon xbtn"
                                 title="Remove"
                                 onClick={() =>
                                   patch(sel.id, {
@@ -2225,7 +2294,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                                   })
                                 }
                               >
-                                <Icon.X size={12} />
+                                ×
                               </button>
                             </>
                           )}
@@ -2258,7 +2327,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             <>
                               <span className="nb2-reorder-name">{c}</span>
                               <button
-                                className="nb2-reorder-x"
+                                className="btn ghost icon xbtn"
                                 title="Remove"
                                 onClick={() =>
                                   patch(sel.id, {
@@ -2266,7 +2335,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                                   })
                                 }
                               >
-                                <Icon.X size={12} />
+                                ×
                               </button>
                             </>
                           )}
@@ -2329,7 +2398,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             </select>
                             {measures.length > 1 && (
                               <button
-                                className="nb2-reorder-x"
+                                className="btn ghost icon xbtn"
                                 title="Remove measure"
                                 onClick={() =>
                                   setMeasures(
@@ -2339,7 +2408,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                                   )
                                 }
                               >
-                                <Icon.X size={12} />
+                                ×
                               </button>
                             )}
                           </>
@@ -2855,11 +2924,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                       </button>
                     </div>
                   </div>
-                  {!inspCols.in && (
-                    <div className="nb2-note">
-                      Connect an input to choose columns.
-                    </div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to choose columns.
+                  </InspColsHint>
                   <div className="nb2-groupby">
                     {(inspCols.in || []).map((c) => (
                       <label className="nb2-gb" key={c}>
@@ -3463,11 +3530,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                       </button>
                     </div>
                   </div>
-                  {!inspCols.in && (
-                    <div className="nb2-note">
-                      Connect an input to choose columns.
-                    </div>
-                  )}
+                  <InspColsHint probing={inspColsProbing} ready={!!inspCols.in}>
+                    Connect an input to choose columns.
+                  </InspColsHint>
                   <div className="nb2-groupby">
                     {(inspCols.in || []).map((c) => (
                       <label className="nb2-gb" key={c}>
@@ -4637,11 +4702,12 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {inspectorType === "reconcile" && (
                 <>
                   <label className="nb2-lbl">Key fields (match on)</label>
-                  {!inspCols.left || !inspCols.right ? (
-                    <div className="nb2-note">
-                      Connect both <b>left</b> and <b>right</b> inputs.
-                    </div>
-                  ) : null}
+                  <InspColsHint
+                    probing={inspColsProbing}
+                    ready={!!(inspCols.left && inspCols.right)}
+                  >
+                    Connect both <b>left</b> and <b>right</b> inputs.
+                  </InspColsHint>
                   <div className="nb2-groupby">
                     {(inspCols.left || []).map((c) => (
                       <label className="nb2-gb" key={c}>
@@ -4731,7 +4797,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           }}
                         />
                         <button
-                          className="btn ghost icon danger"
+                          className="btn ghost icon xbtn"
                           title="Remove column"
                           onClick={() => {
                             const columns = (sel.config.columns || []).filter(
@@ -4743,7 +4809,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             patch(sel.id, { columns, rows });
                           }}
                         >
-                          <Icon.Trash size={12} />
+                          ×
                         </button>
                       </div>
                     ))}
@@ -4788,7 +4854,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           ),
                         )}
                         <button
-                          className="btn ghost icon danger"
+                          className="btn ghost icon xbtn"
                           title="Remove row"
                           onClick={() =>
                             patch(sel.id, {
@@ -4798,7 +4864,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             })
                           }
                         >
-                          <Icon.Trash size={12} />
+                          ×
                         </button>
                       </div>
                     ))}
@@ -4929,7 +4995,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                         }}
                       />
                       <button
-                        className="btn ghost icon"
+                        className="btn ghost icon xbtn"
                         title="Remove variable"
                         onClick={() =>
                           patch(sel.id, {
@@ -4939,7 +5005,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           })
                         }
                       >
-                        <Icon.Trash size={13} />
+                        ×
                       </button>
                     </div>
                   ))}
@@ -5183,7 +5249,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                         }}
                       />
                       <button
-                        className="btn sm ghost"
+                        className="btn ghost icon xbtn"
                         title="Remove"
                         onClick={() => {
                           const ps = [...(sel.config.params || [])];
@@ -5260,7 +5326,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     ))}
                   </select>
                   <div className="nb2-hint-sm">
-                    Reuse a profile saved under Load Data → REST API (password
+                    Reuse a profile saved under Load a Table → REST API (password
                     stays in the OS secret store).
                   </div>
 
@@ -5415,7 +5481,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   {inspectorType === "sqlserver" && (
                     <>
                       <div className="nb2-note">
-                        Same connection settings as Load Data → SQL Server.
+                        Same connection settings as Load a Table → SQL Server.
                         Save a profile with “Save password” so Dashboard and
                         NodeFlow runs can reconnect without typing credentials
                         again. Passwords stay in the OS secret store — never in
@@ -5588,7 +5654,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                         className="nb2-in"
                         data-testid="sqlserver-node-connection"
                         value={sel.config.connection || ""}
-                        placeholder="reuse a Load Data session connection"
+                        placeholder="reuse a Load a Table session connection"
                         onChange={(e) =>
                           patch(sel.id, { connection: e.target.value })
                         }
@@ -6664,7 +6730,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   ))}
                 </>
               )}
-            </>
+            </div>
           )}
         </InspectorShell>
   );

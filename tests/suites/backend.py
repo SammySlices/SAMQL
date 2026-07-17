@@ -3106,7 +3106,7 @@ def backend_tests(datadir, csv_path, json_path):
              "(lean projection; it gets its own table)")
         need('e0."receivingLeg"' in sql,
              "mixed-case struct fields are quoted, never case-gambled")
-        sql_tags = build_table_sql(by["trades_tags"], "json", "/x.parquet")
+        sql_tags = build_table_sql(by["trades_tags_flattened"], "json", "/x.parquet")
         need('AS "value"' in sql_tags, "scalar elements land in a value col")
         # collisions + cap
         node2 = parse_duckdb_type(
@@ -3166,7 +3166,7 @@ def backend_tests(datadir, csv_path, json_path):
         mgr.native_op_cursor = _noc(mgr)
         r = run("duckdb", "big", "json")
         need(r.get("ok") and [c["name"] for c in r["created"]]
-             == ["big", "big_legs_flattened", "big_flattened"],
+             == ["big__root", "big_legs_flattened", "big_flattened"],
              "all planned tables are created: " + repr(r))
         creates = [s2 for s2 in ran if s2.startswith("CREATE")]
         need(len(creates) == 3
@@ -3176,8 +3176,8 @@ def backend_tests(datadir, csv_path, json_path):
         need(synced, "the catalog resyncs so the new tables appear")
         # selection is honored
         ran.clear()
-        r = run("duckdb", "big", "json", tables=["big_legs"])
-        need([c["name"] for c in r["created"]] == ["big_legs"]
+        r = run("duckdb", "big", "json", tables=["big_legs_flattened"])
+        need([c["name"] for c in r["created"]] == ["big_legs_flattened"]
              and len([s2 for s2 in ran if s2.startswith("CREATE")]) == 1,
              "only the selected tables are created")
         # cancel between tables -> partial result, no error
@@ -3218,7 +3218,8 @@ def backend_tests(datadir, csv_path, json_path):
             ("the field explorer surfaces shred (plan eligibility + block)",
              "shredPlan(" in fx and "fx-shred" in fx),
             ("the app runs shred + flatten and wires both actions",
-             "shredRun(" in app and "flattenJson(" in app
+             "shredRun(" in app
+             and ("flattenJson(" in app or "flattenTableStart(" in app)
              and "onShred=" in app and "onFlatten=" in app),
         ]
         missing = [n for n, ok in checks if not ok]
@@ -3261,9 +3262,9 @@ def backend_tests(datadir, csv_path, json_path):
                 flatten_table=lambda tbl, base=None, **kw: (
                     calls["flatten"].append((tbl, base))
                     or {"ok": True, "created": [
-                        {"name": base, "kind": "base"},
+                        {"name": base + "__root", "kind": "base"},
                         {"name": base + "_flattened", "kind": "joinkeys"},
-                        {"name": base + "_legs", "kind": "list"}]}))
+                        {"name": base + "_legs_flattened", "kind": "list"}]}))
             sess._shred_after_load = \
                 S.Session._shred_after_load.__get__(sess, S.Session)
             lf = S.Session.load_file.__get__(sess, S.Session)
@@ -3274,7 +3275,7 @@ def backend_tests(datadir, csv_path, json_path):
             eq(calls["flatten"], [("big", "big")],
                "the whole table is flattened once (not per column)")
             need(sorted(out[0].get("shredded") or [])
-                 == ["big", "big_flattened", "big_legs_flattened"],
+                 == ["big__root", "big_flattened", "big_legs_flattened"],
                  "base + joinkeys + per-list tables are reported")
             # a flatten error is nonfatal to the LOAD
             sess.flatten_table = lambda *a, **k: {"error": "boom"}
@@ -4018,7 +4019,7 @@ def backend_tests(datadir, csv_path, json_path):
         css = rd("frontend", "src", "styles.css")
         checks = [
             ("Settings opens the panel",
-             "Storage &amp; memory" in app and "openStorage" in app),
+             "Storage &amp; Engine" in app and "openStorage" in app),
             ("journal: per-group tool bar removed (cells carry inserters); "
              "New Group lives in the TOP toolbar; empty groups stay usable",
              "nb-group-tools" not in nbsrc
@@ -4173,9 +4174,9 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_storage_memory_merge():
         # .381: ONE modal. The stat pill has no memory number and no free
-        # button; Settings has a single "Storage & memory" entry; the merged
+        # button; Settings has a single "Storage & Engine" entry; the merged
         # modal carries the memory row, Free memory, Clear temp and the
-        # server status block. NodeFlow cache lives as a tab inside it.
+        # Engine tuning tab. NodeFlow cache lives as a tab inside it.
         def rd(*parts):
             return open(os.path.join(ROOT, *parts), encoding="utf-8").read()
         app = rd("frontend", "src", "App.tsx")
@@ -4187,21 +4188,25 @@ def backend_tests(datadir, csv_path, json_path):
              and "freeMemFromMenu" not in app
              and "clearTempFromMenu" not in app),
             ("settings shows exactly the merged entry",
-             "Storage &amp; memory…" in app
+             "Storage &amp; Engine…" in app
+             and "Storage &amp; memory…" not in app
              and "Storage &amp; cleanup…" not in app
              and "Free memory &amp; cache" not in app
              and "clearTempFromMenu" not in app
-             and "NodeFlow cache…" not in app),
+             and "NodeFlow cache…" not in app
+             and "Engine tuning (memory / threads)" not in app),
             ("the merged modal is COMPACT: memory + four actions that "
              "wrap (no clipping), no server/tasks block, no scrolling",
-             'title="Storage & memory"' in storage
+             'title="Storage & Engine"' in storage
              and "Engine memory" in storage
              and "Free unused memory" in storage
              and "Clear temp files" in storage
              and "<ServerStatus />" not in storage
              and 'flexWrap: "wrap"' in storage
              and "NodeFlow cache" in storage
-             and "FlowCachePanel" in storage),
+             and "FlowCachePanel" in storage
+             and "EngineTuningPanel" in storage
+             and 'data-testid="engine-tuning-tab"' in storage),
             ("the server block lives in the Activity dashboard now",
              "<ServerStatus embedded />" in rd(
                  "frontend", "src", "components", "ActivityModal.tsx")
@@ -4488,19 +4493,17 @@ def backend_tests(datadir, csv_path, json_path):
              and "SW_SHOWMINNOACTIVE" not in la
              and "0x08000000" in la and "0x00000200" in la,
              "the server child gets NO_WINDOW-only creation flags")
-        # (3) Horizontal scrolling inside a journal cell moved NOTHING:
-        # the highlight <pre> is an absolute overlay (sizes nothing) and
-        # the textarea sat at width:100%, so the scroller never had a
-        # horizontal range. The textarea's min-width now tracks the
-        # highlight's real content width.
+        # (3) Long journal SQL now soft-wraps, so the editor measures its
+        # complete wrapped height rather than creating a giant horizontal rail.
         ed = open(os.path.join(ROOT, "frontend", "src", "components",
                                "SqlEditor.tsx"), encoding="utf-8").read()
-        need('ta.style.minWidth = pre.scrollWidth + "px"' in ed,
-             "the textarea supplies the horizontal scroll extent")
-        # (4) Resizing a cell overlaid the +SQL/+Note toolbar. The card
-        # is a contained column (overflow hidden, head/outbar fixed
-        # rows) and the editor takes min-height so it flexes with the
-        # grip instead of spilling.
+        need('ta.style.width = "100%"' in ed
+             and "const wrappedH = ta.scrollHeight" in ed,
+             "the textarea soft-wraps and measures its full content height")
+        # (4) Growing journal cells used to clip SQL behind a fixed
+        # overflow:hidden editor box. The card still contains the
+        # chrome, but .nb-ed now grows with content and .scroll is the
+        # live scroller.
         css = open(os.path.join(ROOT, "frontend", "src", "styles.css"),
                    encoding="utf-8").read()
         nbc = open(os.path.join(ROOT, "frontend", "src", "components",
@@ -4508,9 +4511,9 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         _i = css.index(".nb-ed {")
         ced = css[_i:css.index(".nb-outbar {", _i)]
-        need("overflow: hidden" in ced
+        need("overflow: visible" in ced
              and ".nb-ed .code .scroll { overflow: auto; }" in css,
-             "the cell editor is contained with a live scroller")
+             "the cell editor grows with content and keeps a live scroller")
         ccard = css[css.index(".nb-card {"):css.index(".nb-card.nb-collapsed")]
         need("overflow: hidden" in ccard
              and ".nb-card > .nb-outbar" in css
@@ -4549,7 +4552,7 @@ def backend_tests(datadir, csv_path, json_path):
             out = sess._shred_after_load(loaded)
             need(calls == [("soph", "soph")]
                  and out[0].get("shredded")
-                 == ["soph", "soph_flattened", "soph_fees_flattened"],
+                 == ["soph", "soph_flattened", "soph_fees"],
                  "a storage-less DuckDB item flattens (the allowlist is "
                  "gone): %r" % out)
             # a flatten error lands on the item, never silently
@@ -4904,7 +4907,7 @@ def backend_tests(datadir, csv_path, json_path):
         eq(keys, {"samql.editorIvory", "samql.reduceMotion",
                   "samql.eyeCare", "samql.nodeFlowDense",
                   "samql.nbMinimapMini", "samql.nb2.paletteHidden",
-                  "samql.canvasIvory"},
+                  "samql.canvasIvory", "samql.theme"},
            "the direct storage-key inventory is frozen and namespaced")
         model = open(os.path.join(FE, "lib", "nodeFlowModel.ts"),
                      encoding="utf-8").read()
@@ -8007,7 +8010,9 @@ def backend_tests(datadir, csv_path, json_path):
         keep = {n6: getattr(_LA, n6) for n6 in
                 ("_server_alive_now", "start_server",
                  "SERVER_BOOT_TIMEOUT_S", "write_log")}
+        supervise = dict(_LA._SUPERVISE)
         try:
+            _LA._SUPERVISE["on"] = True
             _LA.write_log = lambda m: None
             _LA._server_alive_now = lambda p: True
             started = []
@@ -8038,6 +8043,8 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             for n6, v in keep.items():
                 setattr(_LA, n6, v)
+            _LA._SUPERVISE.clear()
+            _LA._SUPERVISE.update(supervise)
 
         # the supervisor thread actually calls restart when the server
         # goes missing, then stops cleanly
@@ -8781,7 +8788,9 @@ def backend_tests(datadir, csv_path, json_path):
         need("AssistantPack runtime" in b
              or "runtime: will stage llama-server" in b,
              "build.ps1 documents runtime-only assistant packaging")
-        need("Compress-Archive" not in b,
+        # Comments may mention the forbidden cmdlet; only fail on real usage.
+        need(not re.search(r"(?m)^\s*Compress-Archive\b", b)
+             and "Compress-Archive -" not in b,
              "build.ps1 must not use Compress-Archive (large-archive failures)")
 
         # the distribution doc exists and answers the dependency question
@@ -9864,7 +9873,7 @@ def backend_tests(datadir, csv_path, json_path):
         srv = open(os.path.join(BACKEND, "server.py"),
                    encoding="utf-8").read()
         need("_srv_set_window_aumid" in srv
-             and 'native window AppUserModelID set.' in srv,
+             and "_srv_set_window_aumid(_hwnd)" in srv,
              "SamQL.exe --window also stamps the Form HWND AUMID")
 
     
@@ -10564,7 +10573,7 @@ def backend_tests(datadir, csv_path, json_path):
 
         # a list of SCALARS still carries the identifier next to value
         qs = build_table_sql(dict(next(t for t in pl["tables"]
-                                       if t["name"] == "qty"),
+                                       if t["name"] == "qty_flattened"),
                                   root_expr=rex), "json", "C:/c.pq")
         need('"root_id"' in qs and 'AS "value"' in qs,
              "elem-scalar child carries root_id")
@@ -10856,16 +10865,23 @@ def backend_tests(datadir, csv_path, json_path):
              "server ctypes: tsv")
         app = open(os.path.join(FRONTEND, "src", "App.tsx"),
                    encoding="utf-8").read()
-        need('["tsv", "TSV"]' in app and '["ndjson", "NDJSON"]' in app,
-             "IDE menu: tsv + ndjson")
+        ref = open(os.path.join(FRONTEND, "src", "lib",
+                                "resultExportFormats.ts"),
+                   encoding="utf-8").read()
+        need('["tsv", "TSV"]' in ref and '["ndjson", "NDJSON"]' in ref,
+             "shared export formats: tsv + ndjson")
+        need('"parquet"' in ref and "features?.pyarrow" in ref
+             and "features?.openpyxl" in ref,
+             "shared export formats: parquet/xlsx gated on features")
+        need("exportFormatsForResultTab" in app
+             and "ExportResultsMenuItems" in app,
+             "IDE Output menu consumes shared export formats")
         nc = open(os.path.join(FRONTEND, "src", "components",
                                "notebook", "SqlNotebookCell.tsx"),
                   encoding="utf-8").read()
-        need(all(('"%s"' % fmt) in nc
-                 for fmt in ("csv", "tsv", "json", "ndjson"))
-             and 'props.features?.openpyxl ? ["xlsx"]' in nc
-             and 'props.features?.pyarrow ? ["parquet"]' in nc,
-             "journal menu unified + optional formats gated")
+        need("backendResultExportFormats" in nc
+             and "backendResultExportFormats(props.features)" in nc,
+             "journal menu uses shared export formats + feature gates")
         nb = _nodeflow_source()
         need('"csv", "tsv", "json", "ndjson", "xlsx", "parquet"' in nb,
              "NodeFlow DATA_FORMATS unified")
@@ -11062,7 +11078,8 @@ def backend_tests(datadir, csv_path, json_path):
         # _parent_sk is the FULL element key (== hub._sk)
         pl = _plan("STRUCT(code BIGINT, pricing STRUCT(ctx VARCHAR, "
                    "curves STRUCT(x DOUBLE)[]))[]")
-        pc = next(t for t in pl["tables"] if t["name"] == "pricing_curves")
+        pc = next(t for t in pl["tables"]
+                  if t["name"] == "pricing_curves_flattened")
         eq(pc["keys"], ["_rid", "json_ord", "pricing_curves_ord"],
            "the hidden list gets the full compound key")
         q = _btA(pc, "json", "C:/c.pq")
@@ -11079,7 +11096,8 @@ def backend_tests(datadir, csv_path, json_path):
         # 7) MAP of an all-scalar STRUCT explodes into real columns
         pl = _plan("STRUCT(code BIGINT, identifier MAP(VARCHAR, "
                    "STRUCT(v VARCHAR, src VARCHAR)))[]")
-        mi = next(t for t in pl["tables"] if t["name"] == "identifier")
+        mi = next(t for t in pl["tables"]
+                  if t["name"] == "identifier_flattened")
         eq(mi["fields"], ["key", "v", "src"],
            "map values become (key, v, src) columns")
         q = _btA(mi, "json", "C:/c.pq")
@@ -11090,18 +11108,18 @@ def backend_tests(datadir, csv_path, json_path):
         pl = _plan("STRUCT(code BIGINT, m MAP(VARCHAR, "
                    "STRUCT(v VARCHAR, deep STRUCT(a INT))))[]")
         eq(next(t for t in pl["tables"]
-                if t["name"] == "m")["fields"], ["key", "value"],
+                if t["name"] == "m_flattened")["fields"], ["key", "value"],
            "a deep map value stays (key, value)")
         # 9) JSON-valued maps unchanged
         pl = _plan("STRUCT(code BIGINT, i MAP(VARCHAR, JSON))[]")
         eq(next(t for t in pl["tables"]
-                if t["name"] == "i")["fields"], ["key", "value"],
+                if t["name"] == "i_flattened")["fields"], ["key", "value"],
            "a JSON map value stays (key, value)")
         # 10) list-of-list: pinned current shape (value holds the inner
         # list) so any future change is deliberate
         pl = _plan("STRUCT(code BIGINT, mat DOUBLE[][])[]")
         eq(next(t for t in pl["tables"]
-                if t["name"] == "mat")["fields"], ["value"],
+                if t["name"] == "mat_flattened")["fields"], ["value"],
            "list-of-list keeps the inner list in value (documented)")
         # 11) embedded quotes are doubled on emission
         pl = _plan('STRUCT("we""ird" BIGINT, legs STRUCT(r DOUBLE)[])[]')
@@ -11845,7 +11863,13 @@ def backend_tests(datadir, csv_path, json_path):
              and "proc.wait(timeout=" in la
              and "stopped the server on port" in la
              and "def _kill_process_tree" in la
-             and 'taskkill", "/F", "/T"' in la,
+             and 'taskkill", "/F", "/T"' in la
+             and "def stop_supervisor" in la
+             and "t.join(timeout=" in la
+             and "exited cleanly" in la
+             and "not respawning" in la
+             and "def _pids_listening_on_port" in la
+             and "reaping leftover listener" in la,
              "window close stops the server we started and reaps the tree")
         # (2) the launcher does not set SAMQL_PARENT_PID (browser --app
         # fallback exits immediately and would kill the server). Watchdog
@@ -12744,17 +12768,19 @@ def backend_tests(datadir, csv_path, json_path):
         # name "<base>_json" keeps the whole hierarchy under it.
         pl = _psh("json", node, base="t_json")
         names = [t["name"] for t in pl["tables"]]
-        need(names[0] == "t_json",
+        need(names[0] == "t_json__root",
              "the deep root takes the shallow child name (no base collision)")
         need(len(pl["tables"]) > 2,
              "a nested-array element yields the full hierarchy, not 1 table")
-        need(any("joinkeys" in n for n in names),
-             "the deep hierarchy includes the joinkeys hub")
-        legs = next(t for t in pl["tables"] if t["name"].endswith("_legs"))
+        need("t_json_flattened" in names,
+             "the deep hierarchy includes the records hub (*_flattened)")
+        legs = next(t for t in pl["tables"]
+                    if t["name"].endswith("_legs_flattened"))
         eq(legs["keys"], ["_rid", "t_json_ord", "legs_ord"],
            "a list inside a list element gets a COMPOUND key "
            "(_rid + parent ord + own ord)")
-        bc = next(t for t in pl["tables"] if t["name"].endswith("_bc"))
+        bc = next(t for t in pl["tables"]
+                  if t["name"].endswith("_bc_flattened"))
         eq(len(bc["keys"]), 3,
            "a struct-nested list under a list element keys on _rid + the "
            "list ords only (struct hops add no key)")
@@ -12765,7 +12791,7 @@ def backend_tests(datadir, csv_path, json_path):
         # the test query ORDER BY "json_ord" could not bind "t_json_ord").
         pl_ro = _psh("json", node, base="t_json", root_ord="json_ord")
         legs_ro = next(t for t in pl_ro["tables"]
-                       if t["name"].endswith("_legs"))
+                       if t["name"].endswith("_legs_flattened"))
         eq(legs_ro["keys"], ["_rid", "json_ord", "legs_ord"],
            "root_ord renames only the ROOT ordinal (children keep their own)")
         need("json_ord" in _btsql(legs_ro, "json", RAW)
@@ -12826,8 +12852,8 @@ def backend_tests(datadir, csv_path, json_path):
                       base="deep")
         eq([t["name"] for t in _plg["tables"]
             if t["kind"] == "list" and len(t.get("list_path") or []) == 1],
-           ["json"],
-           "the shallow list child of table 'deep' is named 'json' (.501)")
+           ["json_flattened"],
+           "the shallow list child of table 'deep' is named json_flattened (.501)")
         need(any(t["kind"] == "list"
                  and (t.get("list_path") or []) == ["json", "legs"]
                  for t in _plg["tables"]),
@@ -12860,29 +12886,31 @@ def backend_tests(datadir, csv_path, json_path):
             # table's own name and children keep element-path names.
             need("deep_flattened" in made and "deep" not in made
                  and "json" not in made,
-                 ".518 no-root: the RECORDS HUB (deep_joinkeys) anchors "
+                 ".518 no-root: the RECORDS HUB (deep_flattened) anchors "
                  "the family; the bare table name is intentionally "
                  "unbound")
-            need("legs_flattened" in made,
+            need("legs_flattened" in made or "json_legs_flattened" in made,
                  "the nested array INSIDE the list element is broken out "
                  "(was left as a residual json column)")
-            eq(made["legs_flattened"], 4,
+            legs_name = ("legs_flattened" if "legs_flattened" in made
+                         else "json_legs_flattened")
+            eq(made[legs_name], 4,
                "the deep child holds every nested leg across all records "
                "(2 + 1 + 1)")
             _c, rows = mgr.execute(
-                'SELECT "rate" FROM "legs_flattened" WHERE "_rid" = 1 '
-                'ORDER BY "json_ord", "legs_ord"')
+                'SELECT "rate" FROM "%s" WHERE "_rid" = 1 '
+                'ORDER BY "json_ord", "legs_ord"' % legs_name)
             eq([round(float(r[0]), 2) for r in (rows or [])],
                [0.5, 0.6, 0.7],
                "the deep legs are correct and ordered by the compound key")
-            # the residual root is NOT still a json blob: the array became a
-            # table, so `legs` is gone from json
+            # the residual hub is NOT still a json blob: the array became a
+            # table, so `legs` is gone from the hub
             _c, rows = mgr.execute(
                 "SELECT COUNT(*) FROM information_schema.columns "
-                "WHERE lower(table_name) = 'deep_joinkeys' "
+                "WHERE lower(table_name) = 'deep_flattened' "
                 "AND lower(column_name) = 'legs'")
             eq(int(rows[0][0]), 0,
-               "the inner array column is gone from the root (broken out, "
+               "the inner array column is gone from the hub (broken out, "
                "not left as json)")
         finally:
             try:
@@ -12956,9 +12984,11 @@ def backend_tests(datadir, csv_path, json_path):
         raw = r"C:\x.parquet"
         root = _bt(sub["tables"][0], "json", raw)
         legs = _bt(next(t for t in sub["tables"]
-                        if t["name"].endswith("_legs")), "json", raw)
+                        if t["name"].endswith("_legs_flattened")
+                        and "resets" not in t["name"]), "json", raw)
         rst = _bt(next(t for t in sub["tables"]
-                       if t["name"].endswith("_resets")), "json", raw)
+                       if t["name"].endswith("_resets_flattened")),
+                  "json", raw)
         need(all(_sk(s) and _psk(s) for s in (legs, rst)),
              "deep child tables carry _sk + _parent_sk")
         eq(_psk(legs), _sk(root),
@@ -13706,7 +13736,7 @@ def backend_tests(datadir, csv_path, json_path):
         need("nb-breathe" not in css.replace(
                  "the flowing-canvas node pulse is retired", ""),
              "the flowing pulse is gone (rule and keyframes)")
-        need(".nb2-canvas-wrap.flowing .nb2-wire-line" in css
+        need(".nb2-canvas-wrap.flowing .nb2-wire-glow.active" in css
              and ".nb2-node.ripple" in css,
              "dashes still mark running; the ripple stays the "
              "done-glow")
@@ -14111,9 +14141,9 @@ def backend_tests(datadir, csv_path, json_path):
             ("pv.vt = 31", "the AUMID rides a VT_LPWSTR"),
         ):
             need(anchor in la, why)
-        need("import samql_core" not in la
-             and "from samql_core" not in la,
-             "the launcher stays stdlib-only")
+        need("from samql_core import _brand" in la
+             and "from samql_core import session" not in la,
+             "the launcher only uses the optional brand-art fallback")
         spec = open(os.path.join(BACKEND, "samql.spec"),
                     encoding="utf-8").read()
         need("_b.app_ico()" in spec
@@ -14175,10 +14205,11 @@ def backend_tests(datadir, csv_path, json_path):
         need("Check: (p: P)" in rd("Icon.tsx"),
              "Icon.Check exists")
         sb = rd("Sidebar.tsx")
-        need("fireRefreshSpin();" in sb
+        need("setRefreshSpin(true)" in sb
              and 'icon-spin' in sb
              and "clearTimeout(spinTimer.current)" in sb
-             and sb.count('"icon-trash"') == 2,
+             and sb.count("×") >= 2
+             and ('title="Delete"' in sb or "onDeleteWorkflow" in sb),
              "refresh spins once; trash tips at both sites")
         fx = rd("FieldExplorer.tsx")
         need('copiedKey === label' in fx
@@ -14241,8 +14272,10 @@ def backend_tests(datadir, csv_path, json_path):
         co = open(os.path.join(ROOT, "frontend", "src", "lib",
                                "chartOption.ts"),
                   encoding="utf-8").read()
-        need("animation: true," in co
-             and "animationDurationUpdate: 350," in co,
+        need("animation: animMs > 0," in co
+             and "animationDuration: animMs," in co
+             and "animationDurationUpdate: animMs > 0" in co
+             and "function chartAnimationMs" in co,
              "charts draw in and tween on update")
 
     def t_motion_set_459():
@@ -14276,7 +14309,7 @@ def backend_tests(datadir, csv_path, json_path):
         # .470 repoint: nb-breathe retired -- an infinite pulse
         # cancelled at run end snapped its ring off every node in the
         # same frame (the canvas-wide completion blink).
-        for kf in ("toast-spring", "ok-type", "runflash", "nb-dash",
+        for kf in ("toast-spring", "ok-type", "runflash", "nb-flow-glow",
                    "nb-port-hot", "nb-snap",
                    "nb-ripple", "check-draw", "tree-fresh",
                    "tabfade"):
@@ -14365,8 +14398,9 @@ def backend_tests(datadir, csv_path, json_path):
         ed = rd("SqlEditor.tsx")
         need('className="hl flash-layer"' in ed
              and "flashPreRef" in ed
-             and ed.count("fp.style.transform = tf") == 1,
-             "the flash layer rides the highlight transform")
+             and 'fp.style.transform = ""' in ed
+             and 'pre.style.transform = ""' in ed,
+             "the flash layer stays content-aligned with the highlight")
         nb = _nodeflow_source()
         need((('(status.kind === "running" ? " flowing" : "")' in nb)
               or ('running ? " flowing" : ""' in nb))
@@ -15533,7 +15567,7 @@ def backend_tests(datadir, csv_path, json_path):
 
         by = P('STRUCT(w_inner VARCHAR, "A" INT, a INT, '
                'w STRUCT(inner VARCHAR))[]', "c")
-        sql = build_table_sql(by["c"], "json", "/x.parquet")
+        sql = build_table_sql(by["c_flattened"], "json", "/x.parquet")
         outs = []
         for line in sql.splitlines():
             line = line.strip().rstrip(",")
@@ -15562,31 +15596,31 @@ def backend_tests(datadir, csv_path, json_path):
 
         by1 = P('STRUCT("a,b" INTEGER, "c(d" VARCHAR, '
                 '"e)f" DECIMAL(10,2), plain BIGINT)[]', "t")
-        eq(sorted(by1["t"]["fields"]),
+        eq(sorted(by1["t__root"]["fields"]),
            ["a,b", "c(d", "e)f", "plain"],
            "quoted commas/parens parse intact")
         by2 = P('STRUCT(x DECIMAL(18,4), y MAP(VARCHAR, JSON), '
                 'z VARCHAR)[]', "d")
         # .510: the MAP now spawns its own (key, value) table; DECIMAL
-        # params still spawn nothing.
-        eq(sorted(by2), ["d", "d_flattened", "d_y"],
+        # params still spawn nothing. Naming uses *_flattened / *__root.
+        eq(sorted(by2), ["d__root", "d_flattened", "d_y_flattened"],
            "DECIMAL params spawn nothing; the MAP is its own table")
-        need(by2["d_y"].get("map_field") == "y"
-             and "y" not in by2["d"]["fields"],
+        need(by2["d_y_flattened"].get("map_field") == "y"
+             and "y" not in by2["d__root"]["fields"],
              "the map table is keyed off the root, which drops the column")
         by3 = P('STRUCT(code BIGINT, tags VARCHAR[])[]', "r")
-        need(by3["r_tags"]["elem_scalar"] is True
-             and "value" in build_table_sql(by3["r_tags"], "json",
+        need(by3["r_tags_flattened"]["elem_scalar"] is True
+             and "value" in build_table_sql(by3["r_tags_flattened"], "json",
                                             "/x.parquet"),
              "scalar arrays become value tables")
         for degen in ("STRUCT()[]", "INTEGER[]"):
             P(degen, "e")  # must not raise
         by6 = P('STRUCT(id BIGINT, a STRUCT(b STRUCT(v INTEGER)[])[])'
                 '[]', "t3")
-        eq(by6["t3_a_b"]["keys"],
+        eq(by6["t3_a_b_flattened"]["keys"],
            ["_rid", "t3_ord", "a_ord", "b_ord"],
            "ordinals accumulate down the tree")
-        sql6 = build_table_sql(by6["t3_a_b"], "json", "/x.parquet")
+        sql6 = build_table_sql(by6["t3_a_b_flattened"], "json", "/x.parquet")
         need(" LATERAL " not in sql6 and "u0" in sql6
              and "SELECT *" not in sql6 and "EXCLUDE" not in sql6
              and "IS NOT NULL" in sql6
@@ -15594,7 +15628,7 @@ def backend_tests(datadir, csv_path, json_path):
              "pipeline invariants hold at depth 3")
         by7 = P('STRUCT("A B" STRUCT(v INTEGER)[], '
                 'a_b STRUCT(w INTEGER)[])[]', "x")
-        need("x_a_b" in by7 and "x_a_b_2" in by7,
+        need("x_a_b_flattened" in by7 and "x_a_b_flattened_2" in by7,
              "table-name collisions stay distinct")
         P('STRUCT("uni\u2014kod" VARCHAR, k INT)[]', "u")
 
@@ -16487,7 +16521,7 @@ def backend_tests(datadir, csv_path, json_path):
         # Wave 2 made Modal accessible and timer-safe. Validate the behavior,
         # not the obsolete one-line formatting used before focus trapping.
         close_timer = re.search(
-            r"window\.setTimeout\(\(\) => \{.*?onClose\(\);.*?\},\s*140\)",
+            r"window\.setTimeout\(\(\) => \{.*?onClose\(\);.*?\},\s*160\)",
             md, re.S)
         escape_branch = re.search(
             r'if \(e\.key === "Escape"\) \{.*?beginClose\(\);.*?\}',
@@ -16514,8 +16548,10 @@ def backend_tests(datadir, csv_path, json_path):
              "@keyframes cell-in" in css
              and ".nb-cell { animation: cell-in" in css
              and "@keyframes modal-out" in css
-             and ".modal.closing { animation: modal-out" in css
-             and ".modal-backdrop.closing { opacity: 0; }" in css),
+             and ".modal.closing" in css
+             and "animation: modal-out" in css
+             and ".modal-backdrop.closing" in css
+             and "opacity: 0;" in css),
             ("carets turn; buttons press",
              ".tree-row .twist { transition: transform" in css
              and "button:not(:disabled):active { transform: scale(0.97)"
@@ -16898,7 +16934,8 @@ def backend_tests(datadir, csv_path, json_path):
         ]
         kid = SH.build_table_sql(
             next(t for t in plan["tables"]
-                 if t["name"] == "soph_cashflows"), "json", "x.parquet")
+                 if t["name"] == "soph_cashflows_flattened"),
+            "json", "x.parquet")
         kp = kid.rsplit("SELECT", 1)[1].rsplit("FROM", 1)[0]
         checks += [
             ("child element: same lean rules",
@@ -17816,8 +17853,10 @@ def backend_tests(datadir, csv_path, json_path):
              "<Icon.Download size={14} /> Output" in app
              and "setOutputOpen((v) => !v)" in app),
             ("the Output menu lists the export formats",
-             "exportFormatsFor(activeRes).map" in app
-             and "doExport(fmt)" in app),
+             "ExportResultsMenuItems" in app
+             and "exportFormatsFor(activeRes)" in app
+             and "exportFormatsForResultTab" in app
+             and ("doExport(fmt)" in app or "void doExport(fmt)" in app)),
             ("the Output menu offers Save as table",
              "Save as table\u2026" in app
              and "setSaveTableOpen(true)" in app),
@@ -18428,7 +18467,7 @@ def backend_tests(datadir, csv_path, json_path):
            "parented to the root it slims down")
         sql = build_table_sql(jk, "json", "C:/x.parquet")
         need("e0.code" in sql and "e0.currency" in sql
-             and ".*" not in sql and "_joinkeys" in sql,
+             and ".*" not in sql and "trade_flattened" in sql,
              "explicit slim columns, never star: %s" % sql[:160])
         # (b) in-use cache guard, executed against the real handler
         import server as _srv
@@ -18496,7 +18535,7 @@ def backend_tests(datadir, csv_path, json_path):
         need(any(t.get("map_field") == "identifier"
                  for t in plan["tables"]),
              "the element-root MAP is its own (key, value) table (.510)")
-        need("trade_fixedflowslist_fixedflows" in names,
+        need("trade_fixedflowslist_fixedflows_flattened" in names,
              "the wrapper-hidden array gets its own table")
         root = plan["tables"][0]
         need("fixedFlowsList" not in root["fields"]
@@ -18505,7 +18544,7 @@ def backend_tests(datadir, csv_path, json_path):
              "(that duplication blew the 13 GiB ceiling); its scalar "
              "siblings survive as dotted LEAVES instead")
         ff = [x for x in plan["tables"]
-              if x["name"].endswith("_fixedflows")][0]
+              if x["name"].endswith("_fixedflows_flattened")][0]
         sql = build_table_sql(ff, "json", "C:/x.parquet")
         need('"fixedFlowsList"."fixedFlows"' in sql,
              "the dotted hop derefs through the wrapper: %s" % sql[:200])
@@ -18524,8 +18563,11 @@ def backend_tests(datadir, csv_path, json_path):
             eq(cols["json"]["arrays"], 9,
            "preflight counts six levels + wrapper + map + the join hub")
             need("trade" not in cols["json"]["tables"]
-                 and cols["json"]["tables"][0] == "t"
-                 or len(cols["json"]["tables"]) == 6,
+                 and cols["json"]["tables"][0] == "t__root"
+                 and "t_flattened" in cols["json"]["tables"]
+                 and "t_fixedflowslist_fixedflows_flattened"
+                 in cols["json"]["tables"]
+                 and len(cols["json"]["tables"]) == 9,
                  "the planned table NAMES are visible: %r"
                  % cols["json"]["tables"])
             need("TRUNCATED" in cols["cut"]["reason"],
@@ -19498,7 +19540,7 @@ def backend_tests(datadir, csv_path, json_path):
                             eq(n, 50, "%s flatten-on child rows" % fmt)
                             hub = next(
                                 (n for n in names
-                                 if n and "joinkeys" in n.lower()), None)
+                                 if n == base + "_flattened"), None)
                             need(hub, "%s flatten-on hub table: %s" % (fmt, names))
                             hn = s.run_query(
                                 'SELECT COUNT(*) FROM "%s"' % hub,
@@ -19507,7 +19549,7 @@ def backend_tests(datadir, csv_path, json_path):
                         else:
                             hub = next(
                                 (n for n in names
-                                 if n and "joinkeys" in n.lower()),
+                                 if n == base + "_flattened"),
                                 None)
                             need(hub,
                                  "%s flatten-on hub ({base}_flattened): %s"
@@ -21240,7 +21282,7 @@ def backend_tests(datadir, csv_path, json_path):
         # for a '[' file -- the lever for boxes where ijson's per-object event
         # building is the slow part. (2) the CLI tool (tools/diag_load.py) is a
         # thin wrapper over the shared samql_core.diagnostics core, so the CLI
-        # and the Settings -> Diagnostics modal never drift. Pure -> everywhere.
+        # and the Error log -> Diagnostics tab never drift. Pure -> everywhere.
         import tempfile
         from samql_core import flatten as F
         p = tempfile.mktemp(suffix=".json")
@@ -24749,12 +24791,16 @@ def backend_tests(datadir, csv_path, json_path):
     def t_build_script_signing():
         with open(_root_script("build.ps1"), encoding="utf-8") as f:
             ps = f.read()
-        need("CertThumbprint" in ps and "signtool" in ps,
+        need("CertThumbprint" in ps and "CertPath" in ps
+             and "CertPassword" in ps and "signtool" in ps,
              "build.ps1 exposes an opt-in code-signing step")
         need("/tr" in ps and "SHA256" in ps,
              "the signature is SHA-256 and RFC-3161 timestamped")
         need("-NoSign" in ps and "unsigned" in ps,
              "the build still completes without a certificate")
+        need("No signing certificate provided" in ps
+             or "leaving BOTH exes unsigned" in ps,
+             "unsigned builds print a clear skip message (no cert required)")
         need("param(" in ps.split("$ErrorActionPreference")[0],
              "the param() block precedes the first statement (valid PS)")
 
@@ -25919,6 +25965,91 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
             _shj.rmtree(d, ignore_errors=True)
+
+    def t_join_alias_dedup_and_ci_keys():
+        # F1: join/crossjoin must never emit two columns with the same name,
+        # and a configured key must be excluded case-insensitively (only the
+        # alias/exclusion logic changed -- rows and join semantics are the same).
+        s = Session()
+        try:
+            # (i) duplicate-name collision: the left already has `name` AND
+            # `r_name`; the right side also has `name`. The right `name`
+            # collides with left `name` -> `r_name`, which ALSO already exists
+            # -> must become `r_name_2` (no duplicate column names).
+            g = {"nodes": [
+                {"id": "L", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS id, 'L' AS name, 'LR' AS r_name",
+                    "label": "L"}},
+                {"id": "R", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS id, 'R' AS name", "label": "R"}},
+                {"id": "J", "type": "join", "config": {
+                    "label": "join",
+                    "keys": [{"left": "id", "right": "id"}]}}],
+                "edges": [
+                    {"from": {"node": "L", "port": "out"},
+                     "to": {"node": "J", "port": "left"}},
+                    {"from": {"node": "R", "port": "out"},
+                     "to": {"node": "J", "port": "right"}}]}
+            r = s.run_nodeflow(g, "J", "inner")
+            need(not r.get("error"), "join runs: %s" % r.get("error"))
+            cols = r["columns"]
+            eq(len(set(cols)), len(cols),
+               "join output column names are all unique: %s" % cols)
+            need("r_name_2" in cols,
+                 "a right column colliding with an existing r_ alias is "
+                 "suffixed (_2), not duplicated: %s" % cols)
+            eq(r["total_rows"], 1, "inner join still matches on the key")
+
+            # (ii) case-mismatched configured key: the real column is `id` but
+            # the key is stored as `ID`. It must still be excluded from the
+            # right projection (never leak as `r_id`), matching case-insensitively.
+            g2 = {"nodes": [
+                {"id": "L", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS id, 'L' AS lval", "label": "L"}},
+                {"id": "R", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS id, 'R' AS rval", "label": "R"}},
+                {"id": "J", "type": "join", "config": {
+                    "label": "join",
+                    "keys": [{"left": "ID", "right": "ID"}]}}],
+                "edges": [
+                    {"from": {"node": "L", "port": "out"},
+                     "to": {"node": "J", "port": "left"}},
+                    {"from": {"node": "R", "port": "out"},
+                     "to": {"node": "J", "port": "right"}}]}
+            r2 = s.run_nodeflow(g2, "J", "inner")
+            need(not r2.get("error"),
+                 "case-mismatched key join runs: %s" % r2.get("error"))
+            lc = [c.lower() for c in r2["columns"]]
+            need("r_id" not in lc,
+                 "a case-mismatched key (ID vs id) is excluded, not leaked as "
+                 "r_id: %s" % r2["columns"])
+            eq(lc.count("id"), 1,
+               "only the left key column survives once: %s" % r2["columns"])
+            eq(r2["total_rows"], 1, "case-insensitive key still joins the row")
+
+            # crossjoin de-dups too (no keys): right `a` collides with left
+            # `a` and the existing `r_a`, so it becomes `r_a_2`.
+            g3 = {"nodes": [
+                {"id": "L", "type": "sql", "config": {
+                    "sql": "SELECT 1 AS a, 2 AS r_a", "label": "L"}},
+                {"id": "R", "type": "sql", "config": {
+                    "sql": "SELECT 3 AS a", "label": "R"}},
+                {"id": "cj", "type": "crossjoin", "config": {}}],
+                "edges": [
+                    {"from": {"node": "L", "port": "out"},
+                     "to": {"node": "cj", "port": "left"}},
+                    {"from": {"node": "R", "port": "out"},
+                     "to": {"node": "cj", "port": "right"}}]}
+            r3 = s.run_nodeflow(g3, "cj", "out")
+            need(not r3.get("error"), "crossjoin runs: %s" % r3.get("error"))
+            c3 = r3["columns"]
+            eq(len(set(c3)), len(c3),
+               "crossjoin output column names are all unique: %s" % c3)
+            need("r_a_2" in c3,
+                 "right `a` colliding with left `a` + `r_a` becomes r_a_2: %s"
+                 % c3)
+        finally:
+            s.shutdown()
 
     def t_nodeflow_formula_summarize():
         import csv as _cf
@@ -33353,6 +33484,116 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_column_lineage_transform_depth():
+        # Per-column diagram lineage: each stage exposes inputs → op → output,
+        # plus filter/join/summarize/cast specifics from node cfg.
+        from samql_core import lineage as _lin
+
+        def edge(a, b, ap="out", bp="in"):
+            return {"from": {"node": a, "port": ap},
+                    "to": {"node": b, "port": bp}}
+
+        g = {"nodes": [
+            {"id": "src", "type": "createtable", "config": {
+                "label": "Orders", "columns": ["region", "amount", "qty"],
+                "rows": [["east", "10", "2"]], "dest": "sqlite"}},
+            {"id": "flt", "type": "filter", "config": {
+                "label": "keep east",
+                "condition": "[region] = 'east'"}},
+            {"id": "sel", "type": "select", "config": {"label": "cast amt",
+             "fields": [
+                 {"name": "region", "keep": True},
+                 {"name": "amount", "type": "integer", "keep": True},
+                 {"name": "qty", "keep": True},
+             ]}},
+            {"id": "agg", "type": "summarize", "config": {
+                "label": "totals",
+                "group_by": ["region"],
+                "aggs": [{"col": "amount", "func": "sum",
+                          "name": "sum_amount"}]}},
+            {"id": "out", "type": "output", "config": {"label": "out"}},
+        ], "edges": [
+            edge("src", "flt"), edge("flt", "sel"),
+            edge("sel", "agg"), edge("agg", "out"),
+        ]}
+
+        s = _fresh_session()
+        try:
+            r = _lin.build_column_lineage(s, g, "sum_amount")
+            need(r.get("available"), "sum_amount lineage available: %r" % r)
+            stages = r.get("stages") or []
+            need(len(stages) >= 2, "expected multiple stages: %r" % stages)
+            by_type = {st.get("node_type"): st for st in stages}
+            # summarize stage
+            agg = by_type.get("summarize") or stages[-1]
+            ch = agg.get("change") or {}
+            need(ch.get("transform"), "summarize transform line: %r" % ch)
+            need("→" in (ch.get("transform") or ""),
+                 "transform is inputs → op → output: %r" % ch.get("transform"))
+            need((ch.get("op") or "").lower() in ("sum", "agg"),
+                 "op names the aggregate: %r" % ch.get("op"))
+            need(ch.get("group_by") == ["region"],
+                 "group_by from cfg: %r" % ch.get("group_by"))
+            need("amount" in (ch.get("inputs") or []),
+                 "inputs include amount: %r" % ch.get("inputs"))
+            need(ch.get("output") == "sum_amount",
+                 "output is sum_amount: %r" % ch.get("output"))
+
+            # Direct unit: _describe_change on the select node for cast.
+            sel_node = [n for n in g["nodes"] if n["id"] == "sel"][0]
+            rec = {"kind": "passthrough", "srcs": [("flt", "out", "amount")]}
+            ch_cast = _lin._describe_change(sel_node, rec, "amount")
+            need(ch_cast.get("type_to") == "integer",
+                 "cast type_to: %r" % ch_cast)
+            need("CAST" in (ch_cast.get("transform") or "").upper()
+                 or (ch_cast.get("op") or "") == "cast",
+                 "cast transform/op: %r" % ch_cast)
+
+            flt_node = [n for n in g["nodes"] if n["id"] == "flt"][0]
+            ch_flt = _lin._describe_change(
+                flt_node,
+                {"kind": "passthrough", "srcs": [("src", "out", "amount")]},
+                "amount")
+            need(ch_flt.get("predicate"), "filter predicate: %r" % ch_flt)
+            need("filter" in (ch_flt.get("op") or ""),
+                 "filter op: %r" % ch_flt.get("op"))
+            need("→" in (ch_flt.get("transform") or ""),
+                 "filter transform: %r" % ch_flt.get("transform"))
+
+            # join specifics
+            gj = {"nodes": [
+                {"id": "l", "type": "createtable", "config": {
+                    "label": "L", "columns": ["id", "v"],
+                    "rows": [["1", "a"]], "dest": "sqlite"}},
+                {"id": "r", "type": "createtable", "config": {
+                    "label": "R", "columns": ["id", "w"],
+                    "rows": [["1", "b"]], "dest": "sqlite"}},
+                {"id": "j", "type": "join", "config": {
+                    "label": "J", "how": "inner",
+                    "keys": [{"left": "id", "right": "id"}]}},
+                {"id": "o", "type": "output", "config": {"label": "o"}},
+            ], "edges": [
+                {"from": {"node": "l", "port": "out"},
+                 "to": {"node": "j", "port": "left"}},
+                {"from": {"node": "r", "port": "out"},
+                 "to": {"node": "j", "port": "right"}},
+                {"from": {"node": "j", "port": "out"},
+                 "to": {"node": "o", "port": "in"}},
+            ]}
+            rj = _lin.build_column_lineage(s, gj, "v")
+            need(rj.get("available"), "join lineage available: %r" % rj)
+            jstages = [st for st in (rj.get("stages") or [])
+                       if st.get("node_type") == "join"]
+            need(jstages, "join stage present: %r" % rj.get("stages"))
+            jch = jstages[0].get("change") or {}
+            need(jch.get("join_how") == "inner",
+                 "join_how: %r" % jch.get("join_how"))
+            need(jch.get("predicate"), "join predicate: %r" % jch)
+            need("→" in (jch.get("transform") or ""),
+                 "join transform: %r" % jch.get("transform"))
+        finally:
+            s.shutdown()
+
     def t_loaders_auto_resolves_to_default_engine():
         # loaders.load_file must honour destination="auto" by resolving it to
         # the session's default engine (DuckDB when available), not silently
@@ -34622,7 +34863,7 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_diagnostics_module_and_endpoints():
         # The shared diagnostics registry powers the CLI, the /api/diagnostics
-        # endpoints, and the Settings -> Diagnostics modal. Assert: the registry
+        # endpoints, and the Error log -> Diagnostics tab. Assert: the registry
         # lists the built-in checks; environment + json_load run correctly
         # (json_load on a temp file returns the phase split + tables + write + a
         # cProfile); an unknown name fails gracefully (never raises); the server
@@ -34783,28 +35024,35 @@ def backend_tests(datadir, csv_path, json_path):
              "a too-small capped scan is guarded from projecting a fake verdict")
 
     def t_diagnostics_modal_wiring():
-        # The Settings -> Diagnostics modal is wired end to end: the component
-        # fetches the diagnostics list + runs one; App opens it from settings and
-        # renders it; the api + types expose the endpoints. Source-inspection.
+        # The Error log -> Diagnostics tab is wired end to end: DiagnosticsPanel
+        # fetches the diagnostics list + runs one; ErrorLogModal hosts it on a
+        # tab; App opens Error log from settings (not a separate Diagnostics
+        # menu entry); the api + types expose the endpoints. Source-inspection.
         def rd(*parts):
             return open(os.path.join(FRONTEND, *parts), encoding="utf-8").read()
         app = rd("src", "App.tsx")
-        modal = rd("src", "components", "DiagnosticsModal.tsx")
+        panel = rd("src", "components", "DiagnosticsModal.tsx")
+        errlog = rd("src", "components", "ErrorLogModal.tsx")
         apisrc = rd("src", "lib", "api.ts")
         types = rd("src", "lib", "types.ts")
         checks = [
-            ("DiagnosticsModal fetches the list and runs a diagnostic",
-             "DiagnosticsModal" in modal and ".diagnostics(" in modal
-             and ".runDiagnostic(" in modal),
-            ("modal renders the heaviest-records view for json_heaviest",
-             "HeaviestResultView" in modal
-             and 'selected === "json_heaviest"' in modal),
-            ("modal has the full-analysis view and defaults to it",
-             "FullAnalysisView" in modal
-             and 'selected === "full_analysis"' in modal
-             and '"full_analysis"' in modal),
-            ("App opens Diagnostics from settings and renders the modal",
-             "setDiagOpen(true)" in app and "<DiagnosticsModal" in app),
+            ("DiagnosticsPanel fetches the list and runs a diagnostic",
+             "DiagnosticsPanel" in panel and ".diagnostics(" in panel
+             and ".runDiagnostic(" in panel),
+            ("panel renders the heaviest-records view for json_heaviest",
+             "HeaviestResultView" in panel
+             and 'selected === "json_heaviest"' in panel),
+            ("panel has the full-analysis view and defaults to it",
+             "FullAnalysisView" in panel
+             and 'selected === "full_analysis"' in panel
+             and '"full_analysis"' in panel),
+            ("Error log hosts Diagnostics tab (Settings has no Diagnostics entry)",
+             "DiagnosticsPanel" in errlog
+             and 'tab === "diagnostics"' in errlog
+             and "ErrorLogModal" in app
+             and "Diagnostics…" not in app
+             and "setDiagOpen" not in app
+             and "<DiagnosticsModal" not in app),
             ("api exposes diagnostics + runDiagnostic to the right routes",
              "diagnostics:" in apisrc and "/api/diagnostics" in apisrc
              and "runDiagnostic:" in apisrc and "/api/diagnostics/run" in apisrc),
@@ -36403,6 +36651,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("flow cache: blocking join checkpoint reused on downstream edit",
          t_flow_cache_checkpoint),
         ("NodeFlow join (3 outputs) + union + select", t_nodeflow_join_union_select),
+        ("NodeFlow join/crossjoin alias de-dup + case-insensitive keys",
+         t_join_alias_dedup_and_ci_keys),
         ("NodeFlow formula + summarize", t_nodeflow_formula_summarize),
         ("NodeFlow pivot + chart + reconcile", t_nodeflow_pivot_chart_reconcile),
         ("NodeFlow columns probe + temp-table cleanup", t_nodeflow_columns_and_temp_cleanup),
@@ -37466,7 +37716,7 @@ def backend_tests(datadir, csv_path, json_path):
          t_json_heaviest_scanner),
         ("diagnostics: full load analysis (scan+flatten+write+projection+verdict)",
          t_full_analysis),
-        ("diagnostics: Settings->Diagnostics modal wired to the endpoints",
+        ("diagnostics: Error log->Diagnostics tab wired to the endpoints",
          t_diagnostics_modal_wiring),
         ("loading: deep-flatten->nested fallback is logged, not silent",
          t_flatten_fallback_is_visible),
@@ -37536,6 +37786,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_flow_error_names_failing_node),
         ("lineage: cast-only passes through; a rename stays a tracked change",
          t_lineage_cast_passthrough_rename_tracked),
+        ("column lineage: transform depth (inputs→op→output, filter/join/agg)",
+         t_column_lineage_transform_depth),
         ("loaders: destination=auto resolves to the default engine (DuckDB)",
          t_loaders_auto_resolves_to_default_engine),
         ("DuckDB load: a cancel aborts the read (no tolerant-reader retry)",

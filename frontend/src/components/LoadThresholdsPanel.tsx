@@ -23,16 +23,36 @@ const FIELD_ORDER = [
   "filecache_gb",
 ] as const;
 
+const DEFAULT_HINT =
+  "Controls when large files convert to on-disk Parquet (and related " +
+  "JSON / upload limits). Changes apply immediately and persist across " +
+  "restarts. Set a field to 0 where noted to disable that gate.";
+
 const sourceLabel = (src: string) => {
   if (src === "override") return "saved";
   if (src === "env") return "env";
   return "default";
 };
 
-/** Editable load-file size thresholds (Parquet / JSON / upload / cache). */
+/** Editable load-file size thresholds (Parquet / JSON / upload / cache).
+ *
+ * Renders the full set by default; pass ``fieldKeys`` to scope it to a subset
+ * (e.g. the JSON & flatten tab) reusing the same GET/POST settings pathway. */
 export const LoadThresholdsPanel: React.FC<{
   onToast: ToastFn;
-}> = ({ onToast }) => {
+  fieldKeys?: readonly string[];
+  hint?: React.ReactNode;
+  panelTestId?: string;
+  applyTestId?: string;
+  resetTestId?: string;
+}> = ({
+  onToast,
+  fieldKeys = FIELD_ORDER,
+  hint = DEFAULT_HINT,
+  panelTestId = "load-thresholds-panel",
+  applyTestId = "load-thresholds-apply",
+  resetTestId = "load-thresholds-reset",
+}) => {
   const [fields, setFields] = useState<Record<string, LoadThresholdField>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -42,13 +62,13 @@ export const LoadThresholdsPanel: React.FC<{
     const next = info.thresholds || {};
     setFields(next);
     const d: Record<string, string> = {};
-    for (const key of FIELD_ORDER) {
+    for (const key of fieldKeys) {
       const f = next[key];
       if (f) d[key] = String(f.value);
     }
     setDrafts(d);
     setError("");
-  }, []);
+  }, [fieldKeys]);
 
   const refresh = useCallback(async () => {
     try {
@@ -65,7 +85,7 @@ export const LoadThresholdsPanel: React.FC<{
 
   const apply = async () => {
     const thresholds: Record<string, number> = {};
-    for (const key of FIELD_ORDER) {
+    for (const key of fieldKeys) {
       const meta = fields[key];
       const raw = drafts[key];
       if (!meta || raw == null || raw === "") continue;
@@ -121,18 +141,16 @@ export const LoadThresholdsPanel: React.FC<{
   };
 
   return (
-    <div data-testid="load-thresholds-panel" className="settings-grid">
+    <div data-testid={panelTestId} className="settings-grid">
       <div className="hint" style={{ marginBottom: 4, gridColumn: "1 / -1" }}>
-        Controls when large files convert to on-disk Parquet (and related
-        JSON / upload limits). Changes apply immediately and persist across
-        restarts. Set a field to 0 where noted to disable that gate.
+        {hint}
       </div>
-      {FIELD_ORDER.map((key) => {
+      {fieldKeys.map((key) => {
         const meta = fields[key];
         if (!meta) return null;
         return (
-          <label key={key} title={meta.help}>
-            <span style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          <label key={key} className="threshold-field" title={meta.help}>
+            <span className="threshold-field-head">
               <span>
                 {meta.label}
                 <span className="faint"> ({meta.unit})</span>
@@ -180,7 +198,7 @@ export const LoadThresholdsPanel: React.FC<{
           className="btn ghost"
           disabled={busy}
           onClick={() => void reset()}
-          data-testid="load-thresholds-reset"
+          data-testid={resetTestId}
         >
           Reset to defaults
         </button>
@@ -198,7 +216,7 @@ export const LoadThresholdsPanel: React.FC<{
           className="btn primary"
           disabled={busy}
           onClick={() => void apply()}
-          data-testid="load-thresholds-apply"
+          data-testid={applyTestId}
         >
           {busy ? "Saving…" : "Apply"}
         </button>

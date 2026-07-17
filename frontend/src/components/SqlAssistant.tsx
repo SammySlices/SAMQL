@@ -58,7 +58,7 @@ export function assistantModelBadge(modelName?: string | null): string {
  * Detachable SQL assistant chat panel (beta).
  *
  * Launchers live in the IDE toolbar and Journal chrome; this component owns
- * the floating draggable panel only. Talks to /api/assistant/* which gates
+ * the floating draggable panel only. Talks to the assistant API routes which gate
  * on DuckDB idle and either a local llama.cpp pack or a configured
  * OpenAI-compatible API. When allowInsert is true, inserts/loads SQL into
  * the IDE via parent callbacks. From Journal, allowInsert is false so only
@@ -286,9 +286,16 @@ export const SqlAssistant: React.FC<{
   };
 
   const isApi = status?.mode === "api";
+  const busyOpSummary =
+    status?.duckdb_busy_op?.summary ||
+    status?.duckdb_busy_op?.label ||
+    status?.duckdb_busy_op?.target ||
+    null;
   const packHint =
     status?.duckdb_busy
-      ? "DuckDB is busy — finish or cancel the current job, then ask again."
+      ? busyOpSummary
+        ? `Waiting: ${busyOpSummary} — cancel it in Activity, then ask again.`
+        : "DuckDB is busy — finish or cancel the current job in Activity, then ask again."
       : isApi && !status?.available
         ? status?.hint ||
           "Configure an API base URL under Settings → SQL assistant."
@@ -367,12 +374,17 @@ export const SqlAssistant: React.FC<{
         </button>
       </div>
 
-      <div className="sql-asst-status">
-        {status?.available
-          ? isApi
-            ? "API ready · runs only while DuckDB is idle"
-            : "Local model ready · runs only while DuckDB is idle"
-          : packHint || "Checking assistant…"}
+      <div
+        className="sql-asst-status"
+        data-testid={status?.duckdb_busy ? "sql-assistant-duckdb-busy" : undefined}
+      >
+        {status?.duckdb_busy
+          ? packHint
+          : status?.available
+            ? isApi
+              ? "API ready · runs only while DuckDB is idle"
+              : "Local model ready · runs only while DuckDB is idle"
+            : packHint || "Checking assistant…"}
       </div>
 
       <div className="sql-asst-msgs" ref={listRef}>

@@ -278,6 +278,8 @@ export interface NbMeta {
   name: string;
   createdAt: number;
   updatedAt: number;
+  savedWorkflowName?: string;
+  savedFilePath?: string;
 }
 export interface NbRecovery {
   id: string;
@@ -470,6 +472,22 @@ export function renameNotebook(id: string, name: string): NbMeta | null {
     updatedAt: Date.now(),
   };
   writeIndex(upsertMeta(others, updated));
+  return updated;
+}
+export function setNotebookSaveIdentity(
+  id: string,
+  identity: { savedWorkflowName?: string; savedFilePath?: string },
+): NbMeta | null {
+  const idx = listNotebooks();
+  const existing = idx.find((item) => item.id === id);
+  if (!existing) return null;
+  const updated: NbMeta = {
+    ...existing,
+    savedWorkflowName: identity.savedWorkflowName,
+    savedFilePath: identity.savedFilePath,
+    updatedAt: Date.now(),
+  };
+  writeIndex(upsertMeta(idx.filter((item) => item.id !== id), updated));
   return updated;
 }
 export function duplicateNotebook(id: string): NbMeta | null {

@@ -190,7 +190,7 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
                       setNodeMenu(null);
                     }}
                   >
-                    <Icon.Trash size={13} />{" "}
+                    ×{" "}
                     {multi ? `Delete ${count} nodes` : "Delete node"}
                   </button>
                 </>
@@ -222,7 +222,7 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
             role="dialog"
           >
             <div className="nb2-delconfirm-msg">
-              <Icon.Trash size={13} />{" "}
+              ×{" "}
               {deleteConfirm.msg || "Delete this node?"}
             </div>
             <div className="nb2-delconfirm-row">

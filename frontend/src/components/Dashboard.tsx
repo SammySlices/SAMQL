@@ -56,9 +56,11 @@ import {
   wasCancelled,
 } from "../lib/runController";
 import { uid } from "../lib/ids";
+import { parseWfFile, wfEnvelope, wfFileName, wfKindSurface } from "../lib/workflowFile";
 import { Icon } from "./Icon";
 import { DataGrid } from "./DataGrid";
 import { ChartView } from "./ChartView";
+import { FileBrowser } from "./LoadDataModal";
 import { useWinDrag } from "./ActivityShared";
 import { useConfirmPop } from "./ConfirmPop";
 
@@ -445,6 +447,9 @@ export const Dashboard: React.FC<{
   const [eligible, setEligible] = useState<{ name: string }[]>([]);
   const [loadingEligible, setLoadingEligible] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [fileModal, setFileModal] = useState<{
+    mode: "save" | "open";
+  } | null>(null);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [configKind, setConfigKind] = useState<
     null | "title" | { widgetId: string }
@@ -470,7 +475,7 @@ export const Dashboard: React.FC<{
   const runRef = useRef<{ queryId: string; ctrl: AbortController } | null>(null);
   const dragRef = useRef<{
     id: string;
-    mode: "move" | "resize" | "header";
+    mode: "move" | "resize";
     startX: number;
     startY: number;
     orig: DashboardWidget;
@@ -1019,23 +1024,133 @@ export const Dashboard: React.FC<{
     workspace.savedName,
   ]);
 
+  const applyLoadedGraph = useCallback(
+    async (
+      graph: unknown,
+      name: string,
+      isCancelled?: () => boolean,
+    ) => {
+      const g = graph as any;
+      if (g?.samql === "dashboard-bundle") {
+        const imported = await importDashboardBundle(g);
+        if (isCancelled?.()) return;
+        if (!imported.ok) {
+          onToast("error", "Load failed", imported.error);
+          return;
+        }
+        setWorkspace(imported.workspace);
+        setResults({});
+        onToast("ok", "Dashboard loaded", name);
+        onWorkflowsChanged?.();
+        return;
+      }
+      const ws = normalizeWorkspace(g);
+      if (Array.isArray(g?.workflows)) {
+        for (const wf of g.workflows) {
+          if (wf?.name && wf?.graph) {
+            await api.workflowSave(wf.name, wf.graph, "node");
+          }
+        }
+      } else {
+        for (const wfName of collectWorkflowNames(ws)) {
+          await api.workflowLoad(wfName, "node");
+        }
+      }
+      if (isCancelled?.()) return;
+      const next = { ...ws, savedName: name || ws.savedName };
+      setWorkspace(next);
+      saveDashboardWorkspace(next);
+      setResults({});
+      onToast("ok", "Dashboard loaded", name);
+      onWorkflowsChanged?.();
+    },
+    [onToast, onWorkflowsChanged],
+  );
+
+  const onPickDashboardFile = useCallback(
+    async (path: string) => {
+      const mode = fileModal?.mode;
+      setFileModal(null);
+      try {
+        if (mode === "save") {
+          const content = wfEnvelope(
+            "dashboard",
+            workspace.savedName || doc.name || "dashboard",
+            workspace,
+          );
+          const r = await api.saveFile(path, content);
+          if (r.error) {
+            onToast("error", "Save failed", r.error);
+            return;
+          }
+          onToast("ok", "Saved", r.name || path);
+          return;
+        }
+        const r = await api.openFile(path);
+        if (r.error || typeof r.content !== "string") {
+          onToast("error", "Open failed", r.error || "Empty file.");
+          return;
+        }
+        const baseName = (r.name || "Dashboard").replace(
+          /\.samql(-dashboard)?\.json$|\.json$/i,
+          "",
+        );
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(r.content);
+        } catch {
+          onToast("error", "Open failed", "Not a dashboard file.");
+          return;
+        }
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          (parsed as { samql?: string }).samql === "dashboard-bundle"
+        ) {
+          await applyLoadedGraph(parsed, baseName);
+          return;
+        }
+        const env = parseWfFile(r.content);
+        if (env?.kind === "dashboard") {
+          await applyLoadedGraph(env.payload, env.name || baseName);
+          return;
+        }
+        if (env) {
+          onToast(
+            "warn",
+            "Not a dashboard file",
+            `That looks like a ${env.kind} workflow — open it from the ${wfKindSurface(env.kind)}.`,
+          );
+          return;
+        }
+        // Bare workspace JSON (no envelope / bundle wrapper).
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          Array.isArray((parsed as { dashboards?: unknown }).dashboards)
+        ) {
+          await applyLoadedGraph(parsed, baseName);
+          return;
+        }
+        onToast("error", "Open failed", "Not a dashboard file.");
+      } catch (e: any) {
+        onToast("error", "File error", e?.message || String(e));
+      }
+    },
+    [applyLoadedGraph, doc.name, fileModal?.mode, onToast, workspace],
+  );
+
   useEffect(() => {
     if (!command || command.id === handledCmd.current) return;
     handledCmd.current = command.id;
     void (async () => {
       if (command.action === "save") await persistWorkspace();
-      else if (command.action === "saveAs") await persistWorkspace("");
+      else if (command.action === "saveAs") setFileModal({ mode: "save" });
       else if (command.action === "export") await exportWorkspace();
-      else if (command.action === "open") {
-        onToast(
-          "warn",
-          "Open",
-          "Use Sidebar → Saved Workflows → Dashboard, or Settings → Load dashboard.",
-        );
-      }
+      else if (command.action === "open") setFileModal({ mode: "open" });
       onCommandConsumed?.();
     })();
-  }, [command, exportWorkspace, onCommandConsumed, onToast, persistWorkspace]);
+  }, [command, exportWorkspace, onCommandConsumed, persistWorkspace]);
 
   useEffect(() => {
     if (!loadRequest || loadRequest.id === handledLoad.current) return;
@@ -1043,40 +1158,11 @@ export const Dashboard: React.FC<{
     let cancelled = false;
     void (async () => {
       try {
-        // If this is a bundle nested under graph.workflows, restore those first.
-        const g = loadRequest.graph as any;
-        if (g?.samql === "dashboard-bundle") {
-          const imported = await importDashboardBundle(g);
-          if (cancelled) return;
-          if (!imported.ok) {
-            onToast("error", "Load failed", imported.error);
-          } else {
-            setWorkspace(imported.workspace);
-            setResults({});
-            onToast("ok", "Dashboard loaded", loadRequest.name);
-          }
-        } else {
-          const ws = normalizeWorkspace(g);
-          // Restore any referenced node workflows if embedded
-          if (Array.isArray(g?.workflows)) {
-            for (const wf of g.workflows) {
-              if (wf?.name && wf?.graph) {
-                await api.workflowSave(wf.name, wf.graph, "node");
-              }
-            }
-          } else {
-            // Soft-load: ensure names exist by attempting loads (no-op if present)
-            for (const name of collectWorkflowNames(ws)) {
-              await api.workflowLoad(name, "node");
-            }
-          }
-          if (cancelled) return;
-          setWorkspace({ ...ws, savedName: loadRequest.name });
-          saveDashboardWorkspace({ ...ws, savedName: loadRequest.name });
-          setResults({});
-          onToast("ok", "Dashboard loaded", loadRequest.name);
-        }
-        if (!cancelled) onWorkflowsChanged?.();
+        await applyLoadedGraph(
+          loadRequest.graph,
+          loadRequest.name,
+          () => cancelled,
+        );
       } catch (e: any) {
         if (!cancelled) onToast("error", "Load failed", e?.message || String(e));
       } finally {
@@ -1086,7 +1172,7 @@ export const Dashboard: React.FC<{
     return () => {
       cancelled = true;
     };
-  }, [loadRequest, onLoadConsumed, onToast, onWorkflowsChanged]);
+  }, [applyLoadedGraph, loadRequest, onLoadConsumed, onToast]);
 
   const onPointerDownMove = (e: React.PointerEvent, widget: DashboardWidget) => {
     if (widgetsLocked) return;
@@ -1094,7 +1180,6 @@ export const Dashboard: React.FC<{
       (e.target as HTMLElement).closest(
         [
           ".dash-resize",
-          ".dash-header-resize",
           ".dash-widget-actions",
           ".dash-text-body",
           ".dash-text-grab",
@@ -1135,23 +1220,6 @@ export const Dashboard: React.FC<{
     dragRef.current = {
       id: widget.id,
       mode: "resize",
-      startX: e.clientX,
-      startY: e.clientY,
-      orig: { ...widget },
-    };
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-  };
-
-  const onPointerDownHeaderResize = (
-    e: React.PointerEvent,
-    widget: DashboardWidget,
-  ) => {
-    if (widgetsLocked) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dragRef.current = {
-      id: widget.id,
-      mode: "header",
       startX: e.clientX,
       startY: e.clientY,
       orig: { ...widget },
@@ -1200,15 +1268,6 @@ export const Dashboard: React.FC<{
         );
         return { ...doc, widgets: packAroundFocus(resized, d.id) };
       });
-    } else if (d.mode === "header") {
-      const hh = Math.max(
-        DASH_HEADER_MIN,
-        Math.min(
-          DASH_HEADER_MAX,
-          (d.orig.headerHeight ?? DASH_HEADER_DEFAULT) + dy,
-        ),
-      );
-      updateWidget(d.id, { headerHeight: hh, showHeader: true });
     }
   };
 
@@ -1621,7 +1680,7 @@ export const Dashboard: React.FC<{
         style={{ marginTop: 14 }}
         onClick={() => removeWidget(selected.id)}
       >
-        <Icon.Trash size={13} /> Delete widget
+        × Delete widget
       </button>
     </div>
   ) : null;
@@ -1737,6 +1796,14 @@ export const Dashboard: React.FC<{
   return (
     <div className="dash-root" data-testid="dashboard-root">
       {confirmUi}
+      {fileModal && (
+        <FileBrowser
+          saveMode={fileModal.mode === "save"}
+          defaultFileName={wfFileName(workspace.savedName || doc.name || "dashboard")}
+          onClose={() => setFileModal(null)}
+          onPick={onPickDashboardFile}
+        />
+      )}
       <div className="dash-toolbar">
         <div className="dash-toolbar-left">
           <div className="dash-title-wrap">
@@ -1979,7 +2046,7 @@ export const Dashboard: React.FC<{
                     }}
                   >
                     <span className="dash-more-menu-label">
-                      <Icon.Trash size={14} />
+                      ×
                       Delete board
                     </span>
                   </button>
@@ -2181,21 +2248,16 @@ export const Dashboard: React.FC<{
                     </button>
                     <button
                       type="button"
-                      className="btn sm ghost"
+                      className="btn sm ghost icon xbtn"
                       title="Delete widget"
                       onClick={(e) => {
                         e.stopPropagation();
                         removeWidget(widget.id);
                       }}
                     >
-                      <Icon.Trash size={12} />
+                      ×
                     </button>
                   </div>
-                  <div
-                    className="dash-header-resize"
-                    onPointerDown={(e) => onPointerDownHeaderResize(e, widget)}
-                    title="Resize header"
-                  />
                 </div>
               ) : null}
               {!headerOn ? (

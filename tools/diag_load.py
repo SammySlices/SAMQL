@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """CLI for the JSON load profiler. Thin wrapper over samql_core.diagnostics --
-the SAME code the app runs in Settings -> Diagnostics -- so the CLI and the UI
+the SAME code the app runs in Error log -> Diagnostics -- so the CLI and the UI
 never drift.
 
     python tools/diag_load.py path/to/instruments.json

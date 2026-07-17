@@ -186,3 +186,32 @@ Copy `assistant\` next to `SamQL-AppWindow.exe` if missing, then drop the
   a code-signing certificate is supplied.
 - If your organization allows it, adding an AV exclusion for the install
   folder makes the first launch faster still.
+
+---
+
+## Code signing (optional — not required to build)
+
+A plain `.\build.ps1` (or CI without cert secrets) always produces a complete
+**unsigned** package. Signing is opt-in and never blocks packaging.
+
+Corporate IT (SmartScreen / AppLocker) often blocks unsigned exes, so for
+bank/colleague distribution sign **both** product binaries
+(`SamQL-AppWindow.exe` and the `SamQL.exe` server sidecar) with the same cert:
+
+```powershell
+# Certificate already in the Windows certificate store (SHA-1 thumbprint):
+.\build.ps1 -CertThumbprint 1A2B3C4D...
+
+# Certificate in a .pfx file:
+.\build.ps1 -CertPath .\codesign.pfx -CertPassword 'secret'
+
+# Force unsigned even if a cert is configured in the environment:
+.\build.ps1 -NoSign
+```
+
+Requirements when signing: Windows SDK `signtool.exe` on the build machine,
+plus an OV/EV code-signing certificate from a trusted CA (EV/OV is what
+removes SmartScreen prompts). The script signs with SHA-256, RFC-3161
+timestamps via `-TimestampUrl` (default DigiCert), and runs `signtool verify`
+on each target. See also `WINDOWS_BUILD_CHECKLIST.txt` and the header of
+`build.ps1`.

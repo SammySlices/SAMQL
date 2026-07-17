@@ -2,12 +2,52 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-16.627
+Current build:   2026-07-17.630
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-17.630  (v2.16.4)
+
+NODEFLOW F2 AUTO-PRUNE, LINEAGE DEPTH, LIGHT THEME, SELECT KEEP FIX,
+APPWINDOW ORPHAN REAP, CODESIGN DOCS. Select unchecked fields survive
+temporary upstream shrink around runs. Stale column refs auto-prune with
+toast. Lineage stages show richer inputs/op/output. Light theme under
+Visual Toggles. Launcher joins supervisor and reaps leftover SamQL.exe
+after Exit & stop. Signing remains opt-in with clearer docs. Contract
+tests aligned to current UI. Refresh samql_txt full-source bundle.
+
+----------------------------------------------------------------------
+build 2026-07-17.629  (v2.16.4)
+
+OPEN/SAVE WORKSPACE ROUTING + SETTINGS/UI POLISH + COLUMN LINEAGE.
+Generic Open/Save/Save As section routes saved nodes, journals,
+dashboards, queries, and workflows to the correct surface and tab.
+Settings: Load a Table rename, JSON Field Explorer under Tools,
+Open/Save section, About above Clear, Storage & Engine consolidation,
+Visual/Toolbar toggles. Dashboard: header height only in Configure
+(no live drag/glow). Dropdown menus use theme light-green highlight.
+Column lineage modal, typed pivot/chart pickers, Ctrl+S overwrite save,
+and related NodeFlow/results polish. Bump identity and refresh
+samql_txt full-source bundle.
+
+----------------------------------------------------------------------
+build 2026-07-16.628  (v2.16.4)
+
+STORAGE/MEMORY JSON+FLATTEN DEPTH CONTROLS + NODEFLOW/PIVOT FIXES +
+ANIMATION POLISH. Storage & memory JSON & flatten settings gain settable
+json load depth and flatten nesting depth via load_thresholds. Field
+Explorer hides the field list when no table is selected. NodeFlow drops
+the no-output preview toast; join/crossjoin de-dup duplicate columns and
+use case-insensitive join keys; Select reconcile is case-insensitive.
+Pivot fixes result-switch recompute, expired-result state, pivot-node
+config reconcile, and dedupe axis roles. Animation pass softens per-edge
+glow to stroke comet, fixes dashboard blur-during-transform, snappier
+pop-in, compositor-friendly row-actions, and per-node scoped running-edge
+glow. Bump identity and refresh samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-16.627  (v2.16.4)

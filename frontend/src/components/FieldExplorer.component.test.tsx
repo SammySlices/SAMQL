@@ -181,6 +181,7 @@ describe("FieldExplorer shred steering", () => {
       expect(api.tableFields).toHaveBeenCalledWith(
         "duckdb",
         "highly_nested_trades",
+        expect.any(AbortSignal),
       ),
     );
   });
@@ -687,6 +688,75 @@ describe("FieldExplorer shred steering", () => {
     expect(sqlText).toContain('AS "Id"');
     expect(sqlText).toContain('AS "fixingdate"');
     expect(sqlText).toContain("UNNEST(from_json");
+  });
+});
+
+describe("FieldExplorer no-table state", () => {
+  beforeEach(() => {
+    localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
+    vi.mocked(api.tableFields).mockResolvedValue(arrayFieldTree as any);
+    vi.mocked(api.columnAccessPreview).mockResolvedValue({ ok: false } as any);
+  });
+
+  // Two nested tables so the single-source auto-pick does NOT fire — the
+  // panel opens with nothing selected.
+  const twoNestedTables = (): TableInfo[] => [
+    {
+      engine: "duckdb",
+      name: "orders",
+      source: "orders.json",
+      row_count: 10,
+      columns: [{ name: "json", type: "JSON", hint: "json" }],
+    },
+    {
+      engine: "duckdb",
+      name: "trades",
+      source: "trades.json",
+      row_count: 5,
+      columns: [{ name: "json", type: "JSON", hint: "json" }],
+    },
+  ];
+
+  it("renders no field list when no table is selected", async () => {
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={twoNestedTables()}
+        onToast={vi.fn()}
+      />,
+    );
+    // Nothing selected → placeholder, and never a field row / selection bar.
+    expect(await screen.findByTestId("fx-no-table")).toBeTruthy();
+    expect(screen.queryByTestId("fx-sel-bar")).toBeNull();
+    expect(screen.queryByTestId("fx-field-json")).toBeNull();
+    expect(screen.queryByText("json")).toBeNull();
+    expect(api.tableFields).not.toHaveBeenCalled();
+  });
+
+  it("renders fields once a table is picked from the empty state", async () => {
+    render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={twoNestedTables()}
+        onToast={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("fx-no-table");
+    fireEvent.change(screen.getByTitle("Pick a loaded table to explore"), {
+      target: { value: "duckdb\u0000orders" },
+    });
+    await screen.findByText("json");
+    expect(screen.queryByTestId("fx-no-table")).toBeNull();
+    expect(screen.getByTestId("fx-sel-bar")).toBeTruthy();
+    await waitFor(() =>
+      expect(api.tableFields).toHaveBeenCalledWith(
+        "duckdb",
+        "orders",
+        expect.any(AbortSignal),
+      ),
+    );
   });
 });
 

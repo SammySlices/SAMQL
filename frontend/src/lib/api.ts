@@ -460,7 +460,7 @@ export const api = {
       timeoutMs: 8000,
     }),
 
-  // --- diagnostics (Settings -> Diagnostics modal) ---
+  // --- diagnostics (Error log -> Diagnostics tab) ---
   // List available diagnostics + a ready environment report.
   diagnostics: () =>
     jsonFetch<DiagnosticsList>("/api/diagnostics", { timeoutMs: 15000 }),
@@ -481,7 +481,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ order }),
     }),
-  columnFields: (engine: string, table: string, column: string) =>
+  columnFields: (
+    engine: string,
+    table: string,
+    column: string,
+    signal?: AbortSignal,
+  ) =>
     jsonFetch<{
       type?: string;
       fields: {
@@ -510,10 +515,11 @@ export const api = {
     }>("/api/column/fields", {
       method: "POST",
       body: JSON.stringify({ engine, table, column }),
+      signal,
     }),
 
   /** Unified Field Explorer tree: one loaded table → all columns + nests. */
-  tableFields: (engine: string, table: string) =>
+  tableFields: (engine: string, table: string, signal?: AbortSignal) =>
     jsonFetch<{
       ok?: boolean;
       error?: string;
@@ -544,6 +550,7 @@ export const api = {
     }>(`/api/table/${encodeURIComponent(table)}/fields`, {
       method: "POST",
       body: JSON.stringify({ engine }),
+      signal,
     }),
 
   columnAccessPreview: (
@@ -1332,6 +1339,70 @@ export const api = {
     jsonFetch<{ path: string; filename: string }>("/api/nodeflow/lineage", {
       method: "POST",
       body: JSON.stringify({ graph, save: true }),
+    }),
+
+  /** Column lineage for the results-grid modal (JSON stages + change summaries). */
+  columnLineage: (
+    graph: any,
+    column: string,
+    opts?: {
+      node?: string | null;
+      port?: string | null;
+      rowIndex?: number | null;
+      cellValue?: unknown;
+      signal?: AbortSignal;
+    },
+  ) =>
+    jsonFetch<{
+      ok?: boolean;
+      available: boolean;
+      column: string;
+      terminal_node?: string;
+      terminal_port?: string;
+      sql_flagged?: boolean;
+      reason?: string | null;
+      row_index?: number | null;
+      stages: {
+        id: string;
+        kind: string;
+        column: string;
+        node_id: string;
+        node_type: string;
+        node_label: string;
+        step: string;
+        change: {
+          summary: string;
+          detail?: string;
+          inputs?: string[];
+          output?: string;
+          expression?: string | null;
+          mapping?: { from: string; to: string } | null;
+          predicate?: string | null;
+          unchanged?: boolean;
+        };
+        value?: {
+          available: boolean;
+          value: unknown;
+          inputs?: { column: string; value: unknown; available: boolean }[];
+          reason?: string | null;
+          expression?: string | null;
+        } | null;
+      }[];
+    }>("/api/nodeflow/column-lineage", {
+      method: "POST",
+      body: JSON.stringify({
+        graph: graph || {},
+        column,
+        node: opts?.node || undefined,
+        port: opts?.port || undefined,
+        row_index:
+          opts?.rowIndex === undefined || opts?.rowIndex === null
+            ? undefined
+            : opts.rowIndex,
+        cell_value:
+          opts?.cellValue === undefined ? undefined : opts.cellValue,
+      }),
+      signal: opts?.signal,
     }),
 
   // --- sql helpers ---

@@ -300,12 +300,12 @@ export const ApiLoadTab: React.FC<{
               <Icon.Save size={13} />
             </button>
             <button
-              className="btn sm"
+              className="btn sm ghost icon xbtn"
               onClick={deleteProfile}
               disabled={profileSel === "(new)"}
               title="Delete profile"
             >
-              <Icon.Trash size={13} />
+              ×
             </button>
           </div>
         </div>
@@ -340,11 +340,11 @@ export const ApiLoadTab: React.FC<{
                   onChange={(e) => setParam(i, { value: e.target.value })}
                 />
                 <button
-                  className="btn sm icon xbtn"
+                  className="btn ghost icon xbtn"
                   onClick={() => removeParam(i)}
                   title="Remove parameter"
                 >
-                  <Icon.X size={12} />
+                  ×
                 </button>
               </div>
             ))}

@@ -8,11 +8,16 @@ import {
   composeMultiFieldSql,
   formatFieldSql,
 } from "../lib/fieldExplorerSql";
+import {
+  abortTableFieldsDiscovery,
+  startTableFieldsDiscovery,
+} from "../lib/fieldTreeDiscovery";
 import { FlattenUidModal } from "./FlattenUidModal";
 
-// A floating, draggable field-access explorer. Stays open across the IDE,
+// A floating, draggable JSON Field Explorer. Stays open across the IDE,
 // Journal and Node views (it is rendered at the App root, outside the view
-// switch). Pick a loaded table (flatten-off = one table with nested fields),
+// switch). Open from Settings → Tools, Tools & Tables (NodeFlow), or Ctrl+K.
+// Pick a loaded table (flatten-off = one table with nested fields),
 // multi-select fields for a combined query, and Flatten to tables prompts
 // for a Unique Identifier from any level of that table.
 
@@ -237,14 +242,18 @@ export const FieldExplorer: React.FC<Props> = ({
     setPreviewErr(null);
     setPreviewSample(null);
     setShredInfo(null);
+    // Abort competing Sidebar column samples for this table, then own the slot.
+    const ctrl = startTableFieldsDiscovery(engine, table);
     api
-      .tableFields(engine, table)
+      .tableFields(engine, table, ctrl.signal)
       .then((r) => {
         if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
+        if (ctrl.signal.aborted) return;
         setFields((r.fields || []) as FieldRow[]);
       })
       .catch(() => {
         if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
+        if (ctrl.signal.aborted) return;
         setFields([]);
       })
       .finally(() => {
@@ -271,8 +280,21 @@ export const FieldExplorer: React.FC<Props> = ({
       return;
     }
     reloadFields(src.engine, src.table, src.key);
+    return () => {
+      abortTableFieldsDiscovery(src.engine, src.table);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey]);
+
+  // Clear stale fields if the selected source disappears without srcKey
+  // changing (e.g. its table was removed/renamed on a tables refresh), so
+  // the "no table selected" state never leaves the previous list on screen.
+  useEffect(() => {
+    if (!src) {
+      setFields(null);
+      setShredInfo(null);
+    }
+  }, [src]);
 
   // Validate Field Explorer SQL when a field is selected (primary → alt → rewrite).
   useEffect(() => {
@@ -411,7 +433,7 @@ export const FieldExplorer: React.FC<Props> = ({
         }
         style={{ left: pos.x, top: pos.y }}
         data-testid="field-explorer-mini"
-        title="Field explorer — drag to move; click to expand"
+        title="JSON Field Explorer — drag to move; click to expand"
         onMouseDown={(event) => {
           const startX = event.clientX;
           const startY = event.clientY;
@@ -438,7 +460,7 @@ export const FieldExplorer: React.FC<Props> = ({
         }}
       >
         <Icon.ListTree size={14} />
-        <span>Fields</span>
+        <span>JSON Fields</span>
       </button>
     );
   }
@@ -599,7 +621,7 @@ export const FieldExplorer: React.FC<Props> = ({
       }
       style={{ left: pos.x, top: pos.y }}
       role="dialog"
-      aria-label="Field explorer"
+      aria-label="JSON Field Explorer"
       data-testid="field-explorer-panel"
     >
       <div
@@ -608,7 +630,7 @@ export const FieldExplorer: React.FC<Props> = ({
         title="Drag to move"
       >
         <Icon.ListTree size={14} />
-        <span className="fx-title">Field explorer</span>
+        <span className="fx-title">JSON Field Explorer</span>
         <span className="spacer" />
         <button
           className="btn sm ghost"
@@ -649,7 +671,11 @@ export const FieldExplorer: React.FC<Props> = ({
             ))}
           </select>
           <div className="fx-tree">
-            {busy ? (
+            {!src ? (
+              <div className="faint" style={{ padding: 8 }} data-testid="fx-no-table">
+                Pick a table above.
+              </div>
+            ) : busy ? (
               <div className="faint" style={{ padding: 8 }}>
                 <span className="spin" /> loading fields…
               </div>

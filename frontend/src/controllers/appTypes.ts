@@ -13,6 +13,10 @@ export interface EdTab {
   id: string;
   title: string;
   sql: string;
+  /** Saved Workflows identity, independent of the editable tab title. */
+  savedWorkflowName?: string;
+  /** File identity established by Save As / Open. */
+  savedFilePath?: string;
   liveResId?: string;
 }
 
@@ -42,6 +46,10 @@ export interface ResultTab {
   sql?: string;
   statements?: StatementEntry[];
   activeStmt?: number;
+  /** Optional NodeFlow graph attached when this result came from a flow run. */
+  lineageGraph?: unknown | null;
+  lineageNodeId?: string | null;
+  lineagePort?: string | null;
   profileTable?: string;
   profileEngine?: EngineKind;
   profile?: TableProfile | null;

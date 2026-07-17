@@ -653,13 +653,24 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
         join_kw = "JOIN" if mode == "inner" else "LEFT JOIN"
         lcols = _cols_of_rel(cols_of, left)
         rcols = _cols_of_rel(cols_of, right)
-        rkeys = {r for _, r in pairs}
+        # exclude join keys case-insensitively (a configured "ID" must still
+        # drop a real "id"), and de-dup right aliases against the left columns
+        # AND each other -- same proven scheme as multijoin -- so the result
+        # never carries two columns with one name.
+        rkeys = {r.lower() for _, r in pairs}
         lset = {c.lower() for c in lcols}
+        used = set(lset)
         sel = ["a.%s" % _q(c) for c in lcols]
         for c in rcols:
-            if c in rkeys:
+            if c.lower() in rkeys:
                 continue
-            alias = c if c.lower() not in lset else ("r_" + c)
+            base = c if c.lower() not in lset else ("r_" + c)
+            alias = base
+            i = 2
+            while alias.lower() in used:
+                alias = "%s_%d" % (base, i)
+                i += 1
+            used.add(alias.lower())
             sel.append("b.%s AS %s" % (_q(c), _q(alias)))
         return "SELECT %s FROM %s AS a %s %s AS b ON %s" % (
             ", ".join(sel), left, join_kw, right, oncond)
@@ -1559,10 +1570,20 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
         right = need("right")
         lcols = _cols_of_rel(cols_of, left)
         rcols = _cols_of_rel(cols_of, right)
+        # de-dup right aliases against the left columns AND each other so a
+        # cross join never emits two columns with one name (mirrors the join /
+        # multijoin scheme; a cross join has no keys to exclude).
         lset = {c.lower() for c in lcols}
+        used = set(lset)
         sel = ["a.%s" % _q(c) for c in lcols]
         for c in rcols:
-            alias = c if c.lower() not in lset else ("r_" + c)
+            base = c if c.lower() not in lset else ("r_" + c)
+            alias = base
+            i = 2
+            while alias.lower() in used:
+                alias = "%s_%d" % (base, i)
+                i += 1
+            used.add(alias.lower())
             sel.append("b.%s AS %s" % (_q(c), _q(alias)))
         return ("SELECT %s FROM %s AS a CROSS JOIN %s AS b"
                 % (", ".join(sel), left, right))
