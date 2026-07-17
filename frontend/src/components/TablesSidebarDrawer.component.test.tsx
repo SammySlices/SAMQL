@@ -92,32 +92,71 @@ describe("TablesSidebarDrawer", () => {
     expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
   });
 
-  it("opens from the hamburger and keeps the handle mounted", () => {
+  it("opens from the hamburger and keeps the handle mounted on the panel", () => {
     render(<Harness />);
     fireEvent.click(screen.getByTestId("tables-sidebar-peek-menu"));
     const drawer = screen.getByTestId("tables-sidebar-drawer");
     expect(drawer).toHaveAttribute("data-open", "1");
     expect(drawer.className).toContain("is-open");
-    // Folder handle remains as the open-panel toggle affordance.
-    expect(screen.getByTestId("tables-sidebar-peek")).toBeInTheDocument();
+    // Folder handle remains nested on the panel's right edge.
+    const peek = screen.getByTestId("tables-sidebar-peek");
+    expect(peek).toBeInTheDocument();
+    expect(screen.getByTestId("tables-sidebar-panel").contains(peek)).toBe(
+      true,
+    );
     const menu = screen.getByTestId("tables-sidebar-peek-menu");
-    expect(menu).toHaveAttribute("aria-label", "Close tables panel");
+    expect(menu).toHaveAttribute(
+      "aria-label",
+      "Drag to resize, click to close tables panel",
+    );
     expect(menu).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByTestId("open-flag")).toHaveTextContent("open");
   });
 
-  it("closes from the same hamburger while open", () => {
+  it("closes from a quick click on the hamburger while open (no drag)", () => {
     render(<Harness initialOpen />);
-    fireEvent.click(screen.getByTestId("tables-sidebar-peek-menu"));
+    const menu = screen.getByTestId("tables-sidebar-peek-menu");
+    fireEvent.pointerDown(menu, { clientX: 100, clientY: 200 });
+    fireEvent.pointerUp(window, { clientX: 101, clientY: 201 });
     expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
       "data-open",
       "0",
     );
-    expect(screen.getByTestId("tables-sidebar-peek-menu")).toHaveAttribute(
-      "aria-label",
-      "Open tables panel",
-    );
+    expect(menu).toHaveAttribute("aria-label", "Open tables panel");
     expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
+  });
+
+  it("closes from a keyboard-style click while open", () => {
+    render(<Harness initialOpen />);
+    fireEvent.click(screen.getByTestId("tables-sidebar-peek-menu"));
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
+  });
+
+  it("starts resize from the open folder handle on pointerdown", () => {
+    render(<Harness initialOpen />);
+    expect(screen.getByTestId("resize-count")).toHaveTextContent("0");
+    fireEvent.pointerDown(screen.getByTestId("tables-sidebar-peek-menu"), {
+      clientX: 280,
+      clientY: 200,
+    });
+    expect(screen.getByTestId("resize-count")).toHaveTextContent("1");
+    // Drag past click slop — panel stays open (resize, not toggle).
+    fireEvent.pointerMove(window, { clientX: 300, clientY: 200 });
+    fireEvent.pointerUp(window, { clientX: 300, clientY: 200 });
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-open",
+      "1",
+    );
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("open");
+  });
+
+  it("does not start resize from the closed folder handle", () => {
+    render(<Harness />);
+    fireEvent.pointerDown(screen.getByTestId("tables-sidebar-peek-menu"), {
+      clientX: 10,
+      clientY: 200,
+    });
+    expect(screen.getByTestId("resize-count")).toHaveTextContent("0");
   });
 
   it("does not toggle open class when switching tabs while already open", () => {
@@ -160,22 +199,30 @@ describe("TablesSidebarDrawer", () => {
     expect(screen.getByTestId("tables-sidebar-drawer").className).toContain(
       "is-inspector",
     );
-    // Same folder handle as normal open — on the panel's right edge.
-    expect(screen.getByTestId("tables-sidebar-peek")).toBeInTheDocument();
+    // Same folder handle as normal open — nested on the panel's right edge.
+    const peek = screen.getByTestId("tables-sidebar-peek");
+    expect(peek).toBeInTheDocument();
+    expect(screen.getByTestId("tables-sidebar-panel").contains(peek)).toBe(
+      true,
+    );
     const menu = screen.getByTestId("tables-sidebar-peek-menu");
-    expect(menu).toHaveAttribute("aria-label", "Close tables panel");
+    expect(menu).toHaveAttribute(
+      "aria-label",
+      "Drag to resize, click to close tables panel",
+    );
     expect(menu).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("requests close from the handle while in inspector mode", () => {
+  it("requests close from a quick handle click while in inspector mode", () => {
     const onOpenChange = vi.fn();
+    const onResize = vi.fn();
     render(
       <TablesSidebarDrawer
         enabled
         open={false}
         onOpenChange={onOpenChange}
         width={280}
-        onResizePointerDown={() => {}}
+        onResizePointerDown={onResize}
         inspectorMode
       >
         <div>inspector</div>
@@ -185,7 +232,10 @@ describe("TablesSidebarDrawer", () => {
       "data-open",
       "1",
     );
-    fireEvent.click(screen.getByTestId("tables-sidebar-peek-menu"));
+    const menu = screen.getByTestId("tables-sidebar-peek-menu");
+    fireEvent.pointerDown(menu, { clientX: 100, clientY: 200 });
+    expect(onResize).toHaveBeenCalledTimes(1);
+    fireEvent.pointerUp(window, { clientX: 100, clientY: 200 });
     // Same path as Escape / outside-click — App clears selection so the dock closes.
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });

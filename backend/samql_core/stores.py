@@ -429,12 +429,13 @@ class WorkflowStore:
 
 
 class LoadManifestStore:
-    """Remembers file/folder loads so a restarted session can rebuild itself.
+    """Remembers the CURRENT session's restorable loads for the next launch.
 
     Stored as a JSON list under ~/.json_csv_sql_explorer/session_manifest.json.
-    Only stable, re-readable sources are recorded -- transient uploads and
-    credential-bearing connections (SQL Server) are intentionally left out, so
-    they are not auto-restored.
+    This is a session snapshot, not an unbounded load history: callers rewrite
+    it to match currently loaded tables so a restart never replays orphaned
+    older files. Only stable, re-readable sources belong here -- transient
+    uploads and credential-bearing connections (SQL Server) are left out.
     """
     MAX_ENTRIES = 300
 
@@ -470,6 +471,13 @@ class LoadManifestStore:
         if origin:
             entry["origin"] = origin
         self.entries.append(entry)
+        if len(self.entries) > self.MAX_ENTRIES:
+            self.entries = self.entries[-self.MAX_ENTRIES:]
+        self._save()
+
+    def replace(self, entries):
+        """Atomically replace the whole snapshot (latest successful persist)."""
+        self.entries = list(entries or [])
         if len(self.entries) > self.MAX_ENTRIES:
             self.entries = self.entries[-self.MAX_ENTRIES:]
         self._save()

@@ -1333,6 +1333,8 @@ textarea:focus {
   transition: transform 0.22s ease;
   pointer-events: none;
   will-change: transform;
+  /* Peek handle sits at left:100% outside the box — do not clip it. */
+  overflow: visible;
 }
 .tables-sidebar-drawer.is-open .tables-sidebar-panel {
   transform: translateX(0);
@@ -1351,11 +1353,13 @@ textarea:focus {
   flex: 0 0 5px;
   pointer-events: auto;
 }
-/* Short folder-handle tab (hamburger only) — not a full-height rail. */
+/* Short folder-handle tab — nested on the panel's right edge (left: 100%) so
+   closed = visible at the viewport left (panel translateX(-100%)), open =
+   glued to the panel during resize (no separate left / CSS-var lag). */
 .tables-sidebar-peek {
   pointer-events: auto;
   position: absolute;
-  left: 0;
+  left: 100%;
   top: 50%;
   transform: translateY(-50%);
   width: 34px;
@@ -1370,11 +1374,6 @@ textarea:focus {
   border-radius: 0 10px 10px 0;
   box-shadow: 3px 0 12px rgba(0, 0, 0, 0.18);
   z-index: 3;
-  transition: left 0.22s ease;
-}
-/* Open: same handle on the panel's right edge (toggle to close). */
-.tables-sidebar-drawer.is-open .tables-sidebar-peek {
-  left: var(--tables-sidebar-w, 290px);
 }
 .tables-sidebar-peek-menu {
   border: none;
@@ -1389,6 +1388,9 @@ textarea:focus {
   padding: 0;
   border-radius: 0 10px 10px 0;
 }
+.tables-sidebar-drawer.is-open .tables-sidebar-peek-menu {
+  cursor: col-resize;
+}
 .tables-sidebar-peek-menu:hover {
   color: var(--text, #e6e9ef);
   background: var(--raised);
@@ -1400,8 +1402,7 @@ html[data-samql-nf-drag="1"] .tables-sidebar-peek {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tables-sidebar-panel,
-  .tables-sidebar-peek {
+  .tables-sidebar-panel {
     transition: none;
   }
 }

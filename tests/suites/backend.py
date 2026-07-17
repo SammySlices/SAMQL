@@ -19023,10 +19023,12 @@ def backend_tests(datadir, csv_path, json_path):
             ("session shutdown closes remote connections then recycles engines",
              "interrupt_loads()" in sess
              and "for name, conn in list((self.connections" in sess
+             and "sync_restore_manifest()" in sess
+             and "self.clear_all(clear_manifest=False)" in sess
              and sess.index("interrupt_loads()")
-             < sess.index("self.clear_all(clear_manifest=True)")
+             < sess.index("self.clear_all(clear_manifest=False)")
              and sess.index("self.connections.clear()")
-             < sess.index("self.clear_all(clear_manifest=True)")),
+             < sess.index("self.clear_all(clear_manifest=False)")),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing, "temp-cleanup wiring broken: " + "; ".join(missing))
@@ -25540,9 +25542,9 @@ def backend_tests(datadir, csv_path, json_path):
             s1.record_load("file", cp, "sqlite", "people")
             eq(len(s1.manifest.all()), 1, "the load is recorded in the manifest")
             # Simulate a hard crash: the process dies WITHOUT a graceful
-            # shutdown, so the manifest file survives on disk and the next launch
-            # can rebuild from it. (A graceful Ctrl+C shutdown deliberately
-            # clears the manifest -- see t_shutdown_clears_tables_and_manifest.)
+            # shutdown. sync_restore_manifest during record_load already
+            # kept the on-disk snapshot equal to the live tables, so the
+            # next launch rebuilds that set (not a cumulative older history).
             need(man.exists() and len(s1.manifest.all()) == 1,
                  "the manifest persists on disk for crash recovery")
             s2 = _fresh_session()
@@ -31985,29 +31987,162 @@ def backend_tests(datadir, csv_path, json_path):
                 except Exception:
                     pass
 
-    def t_shutdown_clears_tables_and_manifest():
-        # Ctrl+C / graceful shutdown is a clean exit: every table is dropped and
-        # the restore manifest is cleared, so the next launch loads nothing.
+    def t_shutdown_persists_session_manifest():
+        # Graceful Exit drops in-memory tables but persists a restore snapshot
+        # of the tables that were loaded, so the next launch rebuilds that set
+        # (not an empty catalog, and not an older cumulative history).
+        import csv as _csh
         import os as _osh
+        import tempfile as _tfsh
+        import shutil as _shsh
+        import time as _tsh
         from samql_core.stores import LoadManifestStore
-        s = _fresh_session()
-        # isolate the manifest to a throwaway file (don't touch the real one)
-        s.manifest = LoadManifestStore(
-            filename="_test_manifest_%d.json" % _osh.getpid())
+        d = _tfsh.mkdtemp(prefix="t_shutdown_persist_")
         try:
-            s.db.execute("CREATE TABLE keep_me (a INTEGER)")
-            s.db.table_columns["keep_me"] = ["a"]
-            s.manifest.add("file", "/tmp/keep_me.csv", destination="sqlite")
-            need(len(s.manifest.all()) >= 1, "manifest populated pre-shutdown")
-            need("keep_me" in s.db.table_columns, "table tracked pre-shutdown")
+            s = _fresh_session()
+            s.manifest = LoadManifestStore(
+                filename="_test_manifest_%d.json" % _osh.getpid())
+            # Seed an older orphan that must NOT survive sync/shutdown.
+            old = _osh.path.join(d, "old_stale.csv")
+            with open(old, "w", newline="") as f:
+                w = _csh.writer(f)
+                w.writerow(["id"])
+                w.writerow([1])
+            s.manifest.add("file", old, destination="sqlite",
+                           base_name="old_stale")
+            s.manifest.add("folder", d, destination="sqlite")
+            cp = _osh.path.join(d, "keep_me.csv")
+            with open(cp, "w", newline="") as f:
+                w = _csh.writer(f)
+                w.writerow(["a"])
+                w.writerow([1])
+            s.load_file(cp, destination="sqlite", base_name="keep_me")
+            s.record_load("file", cp, "sqlite", "keep_me")
+            names = [e.get("base_name") for e in s.manifest.all()]
+            need("keep_me" in names and "old_stale" not in names,
+                 "sync dropped the orphaned older entry: %r" % names)
+            need(all(e.get("kind") == "file" for e in s.manifest.all()),
+                 "folder history entries are not kept in the snapshot")
             s.shutdown()
-            eq(len(s.manifest.all()), 0, "shutdown clears the restore manifest")
-            eq(len(s.db.table_columns), 0, "shutdown drops every table")
+            need(len(s.db.table_columns) == 0,
+                 "shutdown drops every in-memory table")
+            # Manifest still on disk with the last session's tables.
+            s.manifest._load()
+            eq(len(s.manifest.all()), 1,
+               "shutdown kept the last-session restore snapshot")
+            eq(s.manifest.all()[0].get("base_name"), "keep_me",
+               "snapshot is the table that was loaded at exit")
+            # Next launch restores only that table.
+            s2 = _fresh_session()
+            s2.manifest.path = s.manifest.path
+            s2.manifest._load()
+            s2.restore_session()
+            for _ in range(100):
+                if not s2.restoring:
+                    break
+                _tsh.sleep(0.03)
+            tree = [t["name"] for t in s2.tables_tree()]
+            need("keep_me" in tree and "old_stale" not in tree,
+                 "restore rebuilt only the last session tables: %r" % tree)
+            s2.shutdown()
         finally:
             try:
                 _osh.unlink(s.manifest.path)
             except Exception:
                 pass
+            _shsh.rmtree(d, ignore_errors=True)
+
+    def t_restore_manifest_ignores_stale_and_filecache():
+        # Cumulative history + folder entries + shared filecache paths must
+        # never become auto-loaded tables. Only currently loaded, restorable
+        # user files belong in the snapshot.
+        import csv as _cst
+        import os as _ost
+        import tempfile as _tfst
+        import shutil as _shst
+        import time as _tst
+        from samql_core.stores import LoadManifestStore
+        from samql_core import filecache as _fc
+        d = _tfst.mkdtemp(prefix="t_restore_stale_")
+        fc_path = None
+        man_path = None
+        try:
+            s = _fresh_session()
+            s.manifest = LoadManifestStore(
+                filename="_test_manifest_stale_%d.json" % _ost.getpid())
+            man_path = s.manifest.path
+            stale = _ost.path.join(d, "stale_a.csv")
+            keep = _ost.path.join(d, "keep_b.csv")
+            for p, rows in ((stale, [["x"], [1]]), (keep, [["y"], [2]])):
+                with open(p, "w", newline="") as f:
+                    w = _cst.writer(f)
+                    w.writerows(rows)
+            # Pretend an older crash left junk + a folder load in the manifest.
+            s.manifest.add("file", stale, destination="sqlite",
+                           base_name="stale_a")
+            s.manifest.add("folder", d, destination="duckdb", recursive=True)
+            # A shared filecache parquet must never be treated as a restore root.
+            fc_path = _ost.path.join(_fc._DIR, "fc_restore_test_fake.parquet")
+            try:
+                _ost.makedirs(_fc._DIR, exist_ok=True)
+                with open(fc_path, "wb") as f:
+                    f.write(b"PAR1")
+                s.manifest.add("file", fc_path, destination="duckdb",
+                               base_name="fc_fake")
+            except Exception:
+                fc_path = None
+            s.load_file(keep, destination="sqlite", base_name="keep_b")
+            s.record_load("file", keep, "sqlite", "keep_b")
+            paths = [e.get("path") for e in s.manifest.all()]
+            names = [e.get("base_name") for e in s.manifest.all()]
+            need(paths == [keep] and names == ["keep_b"],
+                 "snapshot is only the live table, not stale/folder/cache: "
+                 "paths=%r names=%r" % (paths, names))
+            # Drop the live table -- snapshot must empty (not revive stale_a).
+            s.drop_table("sqlite", "keep_b")
+            eq(len(s.manifest.all()), 0,
+               "dropping the last table clears the restore snapshot")
+            # Re-load, exit: next session restores keep_b only.
+            s.load_file(keep, destination="sqlite", base_name="keep_b")
+            s.record_load("file", keep, "sqlite", "keep_b")
+            s.shutdown()
+            s2 = _fresh_session()
+            s2.manifest.path = man_path
+            s2.manifest._load()
+            # Corrupted leftover folder / filecache rows must be stripped
+            # before replay (never bulk-load a folder or every cache parquet).
+            if fc_path and _ost.path.isfile(fc_path):
+                s2.manifest.add("file", fc_path, destination="duckdb",
+                                base_name="fc_fake")
+            s2.manifest.add("folder", d, destination="sqlite")
+            s2.restore_session()
+            for _ in range(100):
+                if not s2.restoring:
+                    break
+                _tst.sleep(0.03)
+            tree = sorted(t["name"] for t in s2.tables_tree())
+            need(tree == ["keep_b"],
+                 "restore rebuilt only the last session table: %r" % tree)
+            kinds = [e.get("kind") for e in s2.manifest.all()]
+            need("folder" not in kinds,
+                 "restore stripped folder entries from the snapshot")
+            if fc_path:
+                need(fc_path not in [e.get("path") for e in s2.manifest.all()],
+                     "filecache paths are not restore roots")
+            s2.clear_all(clear_manifest=True)
+            s2.shutdown()
+        finally:
+            if fc_path:
+                try:
+                    _ost.unlink(fc_path)
+                except Exception:
+                    pass
+            if man_path:
+                try:
+                    _ost.unlink(man_path)
+                except Exception:
+                    pass
+            _shst.rmtree(d, ignore_errors=True)
 
     def t_dashboard_node():
         # The dashboard node has four chart inputs and one output, and is a
@@ -36838,7 +36973,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_sharepoint_sign_in_and_windows_auth),
         ("Web scrape nested tables + JSON objects", t_webscrape_tables_and_json),
         ("legacy saved queries migrate into Saved Workflows", t_saved_queries_migrate_to_workflows),
-        ("graceful shutdown drops tables + clears restore manifest", t_shutdown_clears_tables_and_manifest),
+        ("graceful shutdown persists last-session restore snapshot",
+         t_shutdown_persists_session_manifest),
+        ("restore snapshot drops stale/folder/filecache entries",
+         t_restore_manifest_ignores_stale_and_filecache),
         ("chart multi-series split (grouped/stacked/multi-line)",
          t_chart_multi_series),
         ("chart treemap + candlestick + multix shapes", t_chart_treemap_candlestick),

@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-17.634
+Current build:   2026-07-17.635
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-17.635  (v2.16.4)
+
+TABLES FOLDER-HANDLE RESIZE + NO-LAG; SESSION RESTORE LIVE SNAPSHOT.
+Tables sidebar folder handle resizes from the nested panel edge without
+lag. Session restore writes a live loaded-tables snapshot (not append-only
+stale history) so hard-kill / AppWindow races do not resurrect forgotten
+files. Refresh samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-17.634  (v2.16.4)

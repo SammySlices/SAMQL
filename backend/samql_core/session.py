@@ -1169,8 +1169,9 @@ class Session:
                 self._running.clear()
         except Exception:
             pass
-        # fresh launch starts EMPTY: clear the restore manifest (this is
-        # what a graceful shutdown does) -- NO background rebuild.
+        # fresh launch starts EMPTY: clear the restore manifest. Graceful
+        # Exit instead persists the last session's tables; nuclear reset is
+        # the deliberate "forget everything" path -- NO background rebuild.
         try:
             stats["tables_forgotten"] = len(self.manifest.all())
         except Exception:
@@ -2942,6 +2943,192 @@ class Session:
                               origin=origin)
         except Exception:
             pass
+        # Keep the on-disk snapshot equal to currently loaded tables so a
+        # hard kill / AppWindow race never leaves an older cumulative history.
+        try:
+            self.sync_restore_manifest()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _manifest_entry_table_key(entry):
+        """Table name a restore entry would target (base_name or file stem)."""
+        if not isinstance(entry, dict):
+            return ""
+        bn = entry.get("base_name")
+        if bn:
+            return str(bn).lower()
+        path = entry.get("path") or ""
+        return os.path.splitext(os.path.basename(path))[0].lower()
+
+    def _is_instance_temp_path(self, path):
+        """True when ``path`` lives under this process's throwaway temp dir."""
+        if not path or not isinstance(path, str):
+            return False
+        try:
+            from . import tmputil
+            inst = os.path.abspath(tmputil.instance_dir())
+            ap = os.path.abspath(path)
+            return os.path.commonpath([inst, ap]) == inst
+        except Exception:
+            return False
+
+    def _restorable_source_path(self, path, origin=None):
+        """Pick a filesystem path restore can re-read on the next launch.
+
+        Prefer the original user file (``origin`` / stable ``path``) over a
+        Parquet cache or per-instance upload temp -- those are not a durable
+        session snapshot. Never invent loads from the shared filecache dir.
+        """
+        candidates = []
+        for p in (origin, path):
+            if p and isinstance(p, str) and p not in candidates:
+                candidates.append(p)
+        for p in candidates:
+            try:
+                if not os.path.isfile(p):
+                    continue
+            except Exception:
+                continue
+            if self._is_instance_temp_path(p):
+                continue
+            # Shared filecache entries are keyed lookups during load, not
+            # first-class restore sources -- reloading the user origin hits
+            # the cache. Skipping them also prevents "restore every parquet".
+            try:
+                from . import filecache
+                fc = os.path.abspath(filecache._DIR)
+                ap = os.path.abspath(p)
+                if os.path.commonpath([fc, ap]) == fc:
+                    continue
+            except Exception:
+                pass
+            low = (p or "").lower()
+            if low in ("nodeflow", "nodebook") or low.startswith("sql server"):
+                continue
+            return p
+        return None
+
+    def _loaded_restore_targets(self):
+        """Currently loaded user tables that can be rebuilt from disk."""
+        out = []
+        engines = [("sqlite", self.db)]
+        if self.duckdb is not None:
+            engines.append(("duckdb", self.duckdb))
+        for dest, eng in engines:
+            if eng is None:
+                continue
+            cols = getattr(eng, "table_columns", {}) or {}
+            sources = getattr(eng, "table_sources", {}) or {}
+            origins = getattr(eng, "table_origins", {}) or {}
+            family = getattr(self, "_table_family", {}) or {}
+            for name in cols:
+                if not name or str(name).startswith("__"):
+                    continue
+                # Flatten/shred children are rebuilt with their root load.
+                if name in family:
+                    continue
+                src = sources.get(name) or ""
+                if isinstance(src, str) and src.lower() in (
+                        "nodeflow", "nodebook"):
+                    continue
+                origin = origins.get(name)
+                path = self._restorable_source_path(src, origin)
+                if not path:
+                    continue
+                out.append({
+                    "name": name,
+                    "destination": dest,
+                    "path": path,
+                    "origin": origin if (
+                        origin and isinstance(origin, str)
+                        and origin != path) else None,
+                })
+        return out
+
+    def sync_restore_manifest(self):
+        """Rewrite the restore manifest to ONLY currently loaded tables.
+
+        Prevents cumulative load history (and orphaned folder entries) from
+        bringing back stale files the user was not looking at. Prefer keeping
+        existing manifest metadata when a loaded table still matches; otherwise
+        synthesize a file entry from table_origins / table_sources. Folder
+        entries are dropped unless rewritten as per-file rows for live tables.
+        """
+        loaded_names = set()
+        engines = [("sqlite", self.db)]
+        if self.duckdb is not None:
+            engines.append(("duckdb", self.duckdb))
+        for _dest, eng in engines:
+            if eng is None:
+                continue
+            cols = getattr(eng, "table_columns", {}) or {}
+            sources = getattr(eng, "table_sources", {}) or {}
+            family = getattr(self, "_table_family", {}) or {}
+            for name in cols:
+                if not name or str(name).startswith("__"):
+                    continue
+                if name in family:
+                    continue
+                src = sources.get(name) or ""
+                if isinstance(src, str) and src.lower() in (
+                        "nodeflow", "nodebook"):
+                    continue
+                loaded_names.add(str(name).lower())
+
+        by_name = {str(t["name"]).lower(): t
+                   for t in self._loaded_restore_targets()}
+        kept = []
+        claimed = set()
+        # Prefer the newest matching file entry already on disk.
+        for e in reversed(self.manifest.all()):
+            if not isinstance(e, dict) or e.get("kind") != "file":
+                continue
+            key = self._manifest_entry_table_key(e)
+            if not key or key not in loaded_names or key in claimed:
+                continue
+            meta = by_name.get(key) or {}
+            path = self._restorable_source_path(
+                e.get("path"), e.get("origin"))
+            if not path:
+                path = meta.get("path")
+            if not path:
+                continue
+            entry = dict(e)
+            entry["path"] = path
+            entry["kind"] = "file"
+            entry["destination"] = meta.get("destination") or entry.get(
+                "destination") or "auto"
+            entry["base_name"] = meta.get("name") or entry.get("base_name")
+            if meta.get("origin") and not entry.get("origin"):
+                entry["origin"] = meta["origin"]
+            kept.append(entry)
+            claimed.add(key)
+        kept.reverse()
+        # Synthesize entries for loaded tables missing from the prior snapshot.
+        import datetime as _dt_sync
+        for key, meta in by_name.items():
+            if key in claimed:
+                continue
+            path = meta.get("path")
+            if not path:
+                continue
+            entry = {
+                "kind": "file",
+                "path": path,
+                "destination": meta.get("destination") or "auto",
+                "base_name": meta.get("name"),
+                "recursive": False,
+                "ts": _dt_sync.datetime.now().isoformat(timespec="seconds"),
+            }
+            if meta.get("origin"):
+                entry["origin"] = meta["origin"]
+            kept.append(entry)
+        try:
+            self.manifest.replace(kept)
+        except Exception:
+            pass
+        return list(kept)
 
     def restore_session(self):
         """Replay the persisted load manifest in the background, so a restart
@@ -2951,7 +3138,17 @@ class Session:
         if self._restore_started:
             return
         self._restore_started = True
-        actions = self.manifest.all()
+        # Defensive: never replay a bloated historical list if sync was skipped.
+        try:
+            actions = [e for e in self.manifest.all()
+                       if isinstance(e, dict) and e.get("kind") == "file"
+                       and self._restorable_source_path(
+                           e.get("path"), e.get("origin"))]
+            # If the on-disk file still has folder/orphan junk, rewrite now.
+            if actions != list(self.manifest.all()):
+                self.manifest.replace(actions)
+        except Exception:
+            actions = self.manifest.all()
         if not actions:
             return
         self.restoring = True
@@ -9389,6 +9586,10 @@ class Session:
             self.manifest.remove_for_table(name)  # so a drop survives restart
         except Exception:
             pass
+        try:
+            self.sync_restore_manifest()
+        except Exception:
+            pass
         self._drop_table_ui_order(engine, name)
         self._invalidate_profiles()
         self._invalidate_counts()
@@ -9645,9 +9846,9 @@ class Session:
         except Exception:
             pass
         if clear_manifest:
-            # only when the user explicitly clears everything -- NOT on the
-            # internal clear during shutdown, or restore would have nothing
-            # left to rebuild from on the next launch
+            # Explicit Clear-all / nuclear reset: forget the restore snapshot.
+            # Graceful Exit does NOT clear -- it rewrites the snapshot to the
+            # tables that were loaded, so the next launch restores that set.
             try:
                 self.manifest.clear()
             except Exception:
@@ -13771,11 +13972,17 @@ class Session:
         except Exception:
             pass
         # Graceful shutdown (Ctrl+C / SIGTERM / Exit → stop / AppWindow close
-        # via launcher stop_server → /api/shutdown) is a clean exit: drop
-        # every table (loaded + temp) AND clear the restore manifest, so the
-        # next launch comes up empty with nothing loaded. (A hard crash never
-        # reaches here, so its manifest survives for crash recovery.)
-        self.clear_all(clear_manifest=True)
+        # via launcher stop_server → /api/shutdown) drops in-memory tables but
+        # PERSISTS a restore snapshot of the tables that were loaded -- so the
+        # next launch rebuilds exactly that set, not an older cumulative
+        # history and not an empty catalog. (A hard crash never reaches here;
+        # sync_restore_manifest during the session already kept the snapshot
+        # equal to the live tables, so kill races also restore the last set.)
+        try:
+            self.sync_restore_manifest()
+        except Exception:
+            pass
+        self.clear_all(clear_manifest=False)
         try:
             self.db.recycle()
         except Exception:
