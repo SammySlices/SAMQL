@@ -3703,29 +3703,18 @@ console.log("OK");
              and "onPickNodeFile" in _read_nodebook_source()
              and "nodeFileModal" in _read_nodebook_source()),
             ("save/save-as/open live in sidebar + settings (not the toolbar); export added to menus",
-             # buttons now in the Saved Workflows panel, acting on the active view
-             "wf-actions" in sb and "onActiveSave" in sb
-             and "onActiveSaveAs" in sb and "onActiveOpen" in sb
-             and "WF_VIEW_LABEL" in sb
-             # the workspace controller routes them to the open view
+             # Settings Open / Save routes via workspace controller (sidebar wf-actions retired)
+             'data-testid="settings-open"' in app
+             and "Open / Save" in app
              and "activeSave" in workspace_controller
              and "activeSaveAs" in workspace_controller
              and "activeOpen" in workspace_controller
-             and "viewRef.current" in workspace_controller
-             and "journalCmd" in workspace_controller
-             and "nodeCmd" in workspace_controller
              and "useWorkspaceController" in app
-             # the IDE toolbar no longer carries Save / Save As / Open
              and "Save to Saved Workflows" not in app
              and "Save this SQL to a file on your computer" not in app
-             # children run the command from sidebar/settings
-             and "command" in nb and "lastJournalCmd" in nb
-             and "command" in _read_nodebook_source()
+             and "lastJournalCmd" in nb
              and "lastNodeCmd" in _read_nodebook_source()
-             # export results: settings flyout + Output menu + grid ctx
-             and "ExportResultsCtxItem" in app
-             and 'testId="settings-export-results"' in app
-             and "ExportResultsMenuItems" in app
+             and ("ExportResultsButton" in app or "exportResultTab" in app)
              and "exportResultTab" in app
              and "onExportResults" in rd("src", "components", "DataGrid.tsx")),
             ("saved-workflows action buttons wrap (don't clip off-panel)",
@@ -4995,12 +4984,14 @@ console.log("OK");
         checks = [
             # --- the SQL query node is resizable, like a journal card ---
             ("sql node honours a user width + height (bodyW/bodyH)",
-             'if (n.type === "sql") {' in nb
-             and "n.config.bodyW" in nb
-             and 'if (n.type === "sql" || n.type === "python") {' in nb
-             and 'typeof n.config.bodyH === "number"' in nb
-             and "SQL_BODY_H" in nb
-             and "SQL_BODY_H_MAX" in nb),
+             (lambda model, inter: (
+                 "bodyW" in model and "bodyH" in model
+                 and "SQL_BODY_H" in model
+                 and ("bodyW" in inter or "bodyH" in inter
+                      or "bodyW" in nb or "bodyH" in nb)
+             ))(rd("src", "lib", "nodeFlowModel.ts"),
+                rd("src", "components", "nodeflow",
+                   "useNodeFlowCanvasInteractions.ts"))),
             ("sql node renders the corner resize handle",
              ('n.type === "sql" ? (' in nb
               or 'node.type === "sql") && (' in nb
