@@ -77,7 +77,13 @@ describe("Settings View consolidations", () => {
   beforeEach(() => {
     localStorage.clear();
     setNodeFlowDenseMode(false);
-    document.documentElement.classList.remove("eye-care", "nb-dense", "theme-light");
+    document.documentElement.classList.remove(
+      "eye-care",
+      "nb-dense",
+      "theme-light",
+      "has-user-canvas-bg",
+    );
+    document.documentElement.style.removeProperty("--user-canvas-bg");
     document.documentElement.removeAttribute("data-eye-care");
     document.documentElement.removeAttribute("data-nb-dense");
     document.documentElement.setAttribute("data-theme", "dark");
@@ -188,6 +194,7 @@ describe("Settings View consolidations", () => {
     expect(screen.queryByTestId("nodeflow-dense-toggle")).toBeNull();
     expect(screen.queryByTestId("node-snap-toggle")).toBeNull();
     expect(screen.queryByTestId("settings-reduce-motion-toggle")).toBeNull();
+    expect(screen.queryByTestId("settings-canvas-color")).toBeNull();
 
     fireEvent.click(screen.getByTestId("settings-visual-toggles"));
     const theme = screen.getByTestId("settings-theme-toggle");
@@ -195,12 +202,14 @@ describe("Settings View consolidations", () => {
     const motion = screen.getByTestId("settings-reduce-motion-toggle");
     const dense = screen.getByTestId("nodeflow-dense-toggle");
     const snap = screen.getByTestId("node-snap-toggle");
+    const canvasColor = screen.getByTestId("settings-canvas-color");
     expect(theme).toHaveTextContent("Toggle Light Mode");
     expect(eye).toHaveTextContent("Eye Care");
     expect(motion).toHaveTextContent("Reduce motion");
     expect(dense).toHaveTextContent("Condensed NodeFlow");
     expect(snap).toHaveTextContent("Node Snap");
     expect(snap).toHaveAttribute("aria-pressed", "true");
+    expect(canvasColor).toHaveTextContent("Change Canvas Color");
     expect(localStorage.getItem("samql.nodeSnap")).toBe("1");
 
     fireEvent.click(theme);
@@ -240,6 +249,62 @@ describe("Settings View consolidations", () => {
       expect(snap).toHaveTextContent("Node Snap");
       expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
     });
+  });
+
+  it("Change Canvas Color updates storage and CSS variable in real time", async () => {
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    fireEvent.click(screen.getByTestId("settings-canvas-color"));
+    expect(screen.getByTestId("settings-canvas-color-panel")).toBeTruthy();
+    expect(screen.getByTestId("settings-canvas-color-input")).toBeTruthy();
+
+    const swatch = screen.getByTestId("settings-canvas-swatch-e4ebe4");
+    fireEvent.click(swatch);
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasColor")).toBe("#e4ebe4");
+      expect(
+        document.documentElement.classList.contains("has-user-canvas-bg"),
+      ).toBe(true);
+      expect(
+        document.documentElement.style.getPropertyValue("--user-canvas-bg"),
+      ).toBe("#e4ebe4");
+    });
+
+    const wheel = screen.getByTestId(
+      "settings-canvas-color-input",
+    ) as HTMLInputElement;
+    fireEvent.input(wheel, { target: { value: "#ffffff" } });
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasColor")).toBe("#ffffff");
+      expect(
+        document.documentElement.style.getPropertyValue("--user-canvas-bg"),
+      ).toBe("#ffffff");
+    });
+  });
+
+  it("restores persisted canvas color on load", async () => {
+    localStorage.setItem("samql.canvasColor", "#ececec");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    expect(
+      document.documentElement.classList.contains("has-user-canvas-bg"),
+    ).toBe(true);
+    expect(
+      document.documentElement.style.getPropertyValue("--user-canvas-bg"),
+    ).toBe("#ececec");
   });
 
   it("closes Toolbar Toggle flyout after pointer leaves trigger and menu", async () => {

@@ -182,6 +182,14 @@ describe("reconcileSelectFields case-insensitive matching", () => {
     expect(isSelectFieldMissingUpstream(next[1], ["a"])).toBe(true);
   });
 
+  it("treats unknown upstream (null/undefined) as not missing", () => {
+    const f: SelField = { name: "a", keep: true };
+    expect(isSelectFieldMissingUpstream(f, null)).toBe(false);
+    expect(isSelectFieldMissingUpstream(f, undefined)).toBe(false);
+    // Known-empty upstream: field is missing.
+    expect(isSelectFieldMissingUpstream(f, [])).toBe(true);
+  });
+
   it("does not treat blank rename as special — blank rename still retained until Clear missing", () => {
     const current: SelField[] = [
       { name: "a", keep: true },

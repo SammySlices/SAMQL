@@ -6359,19 +6359,9 @@ kbd {
 .nb2-inspector.is-empty {
   display: none;
 }
-/* Config-body swap: the inspector body is keyed by selected node id+type, so
-   picking a different node unmounts the old form atomically and mounts the
-   new one. This short fade covers the first frames of the new form (while
-   the column probe clears/reloads), so no stale config is ever visible.
-   Opacity-only, one-shot; killed by the global reduced-motion guards
-   (prefers-reduced-motion media query and body.motion-reduced). */
-.nb2-insp-swap {
-  animation: nb2-insp-swap-in var(--dur-fast) var(--ease-out) both;
-}
-@keyframes nb2-insp-swap-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
+/* Config body uses .nb2-insp-body: stable chrome updated in place on selection
+   change (no remount key, no opacity fade). Stream isolation is inspCols
+   ownership; cache hits publish before paint. */
 /* text-box nodes (sql / formula / text / createtable / group notes) let the
    user drag their textarea wider; the panel grows to fit so the box is never
    clipped by the config background. Scoped to these nodes so field editors on
@@ -11948,4 +11938,92 @@ html.theme-light .nb2-zoom .btn.primary:hover {
   background: var(--btn-hover-bg) !important;
   border-color: var(--btn-hover-border) !important;
   color: var(--btn-hover-fg) !important;
+}
+
+/* ---- Settings → Visual → Change Canvas Color ----
+   User color on <html> (--user-canvas-bg + .has-user-canvas-bg) paints
+   NodeFlow canvas, Journal page, and SQL editor. Wins over ivory / light
+   hard-coded whites when set. Dot grid on the canvas is preserved. */
+.settings-canvas-color-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+.settings-canvas-color-wheel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.settings-canvas-color-wheel input[type="color"] {
+  width: 36px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  cursor: pointer;
+}
+.settings-canvas-color-label {
+  font-size: 11.5px;
+}
+.settings-canvas-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.settings-canvas-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  padding: 0;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.settings-canvas-swatch:hover {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.settings-canvas-swatch.on {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+html.has-user-canvas-bg .nb2-canvas-wrap,
+html.has-user-canvas-bg body.canvas-ivory .nb2-canvas-wrap,
+html.theme-light.has-user-canvas-bg .nb2-canvas-wrap,
+html.theme-light.has-user-canvas-bg body.canvas-ivory .nb2-canvas-wrap,
+html[data-theme="light"].has-user-canvas-bg .nb2-canvas-wrap,
+html[data-theme="light"].has-user-canvas-bg body.canvas-ivory .nb2-canvas-wrap {
+  background-color: var(--user-canvas-bg) !important;
+}
+html.has-user-canvas-bg .nb,
+html.has-user-canvas-bg .nb-scroll,
+html.has-user-canvas-bg .nb-groups,
+html.theme-light.has-user-canvas-bg .nb,
+html.theme-light.has-user-canvas-bg .nb-scroll,
+html.theme-light.has-user-canvas-bg .nb-groups,
+html[data-theme="light"].has-user-canvas-bg .nb,
+html[data-theme="light"].has-user-canvas-bg .nb-scroll,
+html[data-theme="light"].has-user-canvas-bg .nb-groups {
+  background-color: var(--user-canvas-bg) !important;
+  background: var(--user-canvas-bg) !important;
+}
+html.has-user-canvas-bg .code,
+html.has-user-canvas-bg body.editor-ivory .code,
+html.has-user-canvas-bg .nb-ed .code,
+html.theme-light.has-user-canvas-bg .code,
+html.theme-light.has-user-canvas-bg body.editor-ivory .code,
+html.theme-light.has-user-canvas-bg .nb-ed .code,
+html[data-theme="light"].has-user-canvas-bg .code,
+html[data-theme="light"].has-user-canvas-bg body.editor-ivory .code,
+html[data-theme="light"].has-user-canvas-bg .nb-ed .code {
+  background-color: var(--user-canvas-bg) !important;
+  background: var(--user-canvas-bg) !important;
 }

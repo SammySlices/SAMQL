@@ -141,10 +141,9 @@ describe("useNodeFlowInspectorController column probe cache", () => {
     act(() => {
       rerender({ graphSig: "sig-1", selectedId: "sel-1" });
     });
-    await waitFor(() => {
-      expect(result.current.inspCols.in).toEqual(["a", "b"]);
-      expect(result.current.inspColsProbing).toBe(false);
-    });
+    // useLayoutEffect cache publish: no empty frame after re-select.
+    expect(result.current.inspCols.in).toEqual(["a", "b"]);
+    expect(result.current.inspColsProbing).toBe(false);
     expect(nodeflowColumnsBatch.mock.calls.length).toBe(afterFirst);
 
     // Upstream config change bumps graphSig → must refetch inspector columns.
@@ -489,13 +488,13 @@ describe("useNodeFlowInspectorController column probe cache", () => {
     });
 
     // Back to sort-b: no cross-bleed of A's missing refs.
+    // Cache hit publishes in useLayoutEffect — columns ready in the same act().
     act(() => {
       rerender({ selectedId: "sort-b", graphSig: "iso-2" });
     });
-    await waitFor(() => {
-      expect(result.current.inspCols.in).toEqual(["sku", "qty"]);
-      expect(result.current.staleColRefs).toEqual([]);
-    });
+    expect(result.current.inspCols.in).toEqual(["sku", "qty"]);
+    expect(result.current.inspColsProbing).toBe(false);
+    expect(result.current.staleColRefs).toEqual([]);
     expect(snapshot("sel-b")).toEqual(beforeB.sel);
     expect(snapshot("sort-b")).toEqual(beforeB.sort);
   });

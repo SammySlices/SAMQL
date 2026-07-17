@@ -379,6 +379,45 @@ def _zip_directory(source_dir: Path, zip_path: Path) -> None:
         raise SystemExit(f"failed to write zip: {zip_path}")
 
 
+def _assert_appwindow_zip_has_tcl_tk(zip_path: Path) -> None:
+    """Fail if a distribution zip is missing AppWindow Tcl/Tk payload.
+
+    Lean and Assistant zips share the same ``_internal`` tree; only
+    ``assistant/`` differs. Verifying **inside the zip** (not just the
+    onedir folder) catches a bad lean archive after the aside-move that
+    strips ``assistant/`` for ``SamQL-AppWindow.zip``.
+    """
+    import zipfile
+
+    zip_path = zip_path.resolve()
+    if not zip_path.is_file() or zip_path.stat().st_size <= 0:
+        raise SystemExit(f"AppWindow zip missing or empty: {zip_path}")
+    need = (
+        "SamQL-AppWindow/_internal/_tcl_data/init.tcl",
+        "SamQL-AppWindow/_internal/_tk_data/tk.tcl",
+        "SamQL-AppWindow/_internal/_tkinter.pyd",
+        "SamQL-AppWindow/_internal/tcl86t.dll",
+        "SamQL-AppWindow/_internal/tk86t.dll",
+    )
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = set(zf.namelist())
+        missing = [n for n in need if n not in names]
+        if missing:
+            raise SystemExit(
+                f"AppWindow zip missing Tcl/Tk payload ({zip_path.name}): "
+                + ", ".join(missing)
+            )
+        # Directory-only markers without file members used to slip past
+        # isdir checks after a partial Explorer extract; require real bytes.
+        for n in need:
+            info = zf.getinfo(n)
+            if info.file_size <= 0:
+                raise SystemExit(
+                    f"AppWindow zip has empty Tcl/Tk member: {n} in {zip_path.name}"
+                )
+    print(f"    OK: {zip_path.name} contains Tcl/Tk (_tcl_data/_tk_data/_tkinter)")
+
+
 def write_onedir_distribution_zips(
     onedir: Path,
     *,
@@ -419,6 +458,10 @@ def write_onedir_distribution_zips(
             if asst.exists():
                 shutil.rmtree(asst)
             shutil.move(str(asst_aside), str(asst))
+    # .638: verify Tcl/Tk inside each written zip (lean especially — same
+    # _internal as Assistant; only assistant/ is excluded).
+    for z in written:
+        _assert_appwindow_zip_has_tcl_tk(z)
     return written
 
 

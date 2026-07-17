@@ -387,8 +387,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
           {!sel && <div className="nb2-insp-empty">Select a node to configure it.</div>}
           {sel && (
             <div
-              className="nb2-insp-swap"
-              key={`${sel.id}:${sel.type}`}
+              className="nb2-insp-body"
               data-testid="insp-swap-body"
             >
               <div className="nb2-insp-head">
@@ -430,6 +429,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
 
               {(() => {
                 if (!sel) return null;
+                // While columns are still probing, do not flash the missing
+                // banner — unknown upstream is not the same as known-absent.
+                if (inspColsProbing) return null;
                 const selectMissing =
                   sel.type === "select"
                     ? ((sel.config.fields || []) as SelField[]).filter((f) =>
@@ -906,7 +908,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                         selectFieldSearch,
                       );
                       const filtering = !!selectFieldSearch.trim();
-                      const upstreamNames = inspCols.in || [];
+                      const upstreamNames = inspCols.in;
                       const renderField = (f: SelField, i: number) => {
                         const missing = isSelectFieldMissingUpstream(
                           f,
@@ -1012,7 +1014,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               )}
 
               {inspectorType === "filter" && (() => {
-                const cols = inspCols.in || [];
+                const cols = inspCols.in;
                 const fld = sel.config.field || "";
                 const op = sel.config.op || ">";
                 const val = sel.config.value || "";
@@ -1420,7 +1422,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   </InspColsHint>
                   <ColumnPicker
                     chosen={(sel.config.group_by || []) as string[]}
-                    available={inspCols.in || []}
+                    available={inspCols.in}
                     onChange={(next) => patch(sel.id, { group_by: next })}
                     addLabel="+ Add group field…"
                   />
@@ -1452,7 +1454,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                                                 <select
                           className={
                             "nb2-agg-col" +
-                            (isColumnMissingUpstream(a.col, inspCols.in || [])
+                            (isColumnMissingUpstream(a.col, inspCols.in)
                               ? " nb2-col-missing"
                               : "")
                           }
@@ -1466,7 +1468,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           }
                         >
                           <ColumnOptions
-                            available={inspCols.in || []}
+                            available={inspCols.in}
                             value={a.col}
                             emptyLabel="field…"
                           />
@@ -1900,7 +1902,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             "nb2-agg-col" +
                             (isColumnMissingUpstream(
                               srt.col,
-                              inspCols.in || [],
+                              inspCols.in,
                             )
                               ? " nb2-col-missing"
                               : "")
@@ -1915,7 +1917,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           }
                         >
                           <ColumnOptions
-                            available={inspCols.in || []}
+                            available={inspCols.in}
                             value={srt.col}
                             emptyLabel="field…"
                           />
@@ -3316,7 +3318,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   </label>
                   <ColumnPicker
                     chosen={(sel.config.group || []) as string[]}
-                    available={inspCols.in || []}
+                    available={inspCols.in}
                     onChange={(next) => patch(sel.id, { group: next })}
                     addLabel="+ Add group field…"
                   />
@@ -3743,7 +3745,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   </label>
                   <ColumnPicker
                     chosen={(sel.config.group || []) as string[]}
-                    available={inspCols.in || []}
+                    available={inspCols.in}
                     onChange={(next) => patch(sel.id, { group: next })}
                     addLabel="+ Add group field…"
                   />
@@ -3823,7 +3825,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   </label>
                   <ColumnPicker
                     chosen={(sel.config.cols || []) as string[]}
-                    available={inspCols.in || []}
+                    available={inspCols.in}
                     onChange={(next) => patch(sel.id, { cols: next })}
                     addLabel="+ Add column…"
                   />

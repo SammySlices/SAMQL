@@ -61,14 +61,19 @@ export function ReorderList<T>(props: {
   );
 }
 
-/** True when `name` is absent from `available` (case-insensitive). */
+/**
+ * True when `name` is absent from `available` (case-insensitive).
+ * `null` / `undefined` available = upstream unknown (do not flash missing).
+ * Empty array = known empty upstream (name is missing).
+ */
 export function isColumnMissingUpstream(
   name: string | null | undefined,
   available: string[] | null | undefined,
 ): boolean {
   const n = String(name || "").trim();
   if (!n) return false;
-  const up = new Set((available || []).map((c) => String(c).toLowerCase()));
+  if (available == null) return false;
+  const up = new Set(available.map((c) => String(c).toLowerCase()));
   return !up.has(n.toLowerCase());
 }
 
@@ -77,11 +82,12 @@ export function isColumnMissingUpstream(
  * (so the control is not blank) and marks it for strikethrough styling.
  */
 export function ColumnOptions(props: {
-  available: string[];
+  available?: string[] | null;
   value?: string | null;
   emptyLabel?: string;
 }) {
-  const avail = props.available || [];
+  const avail = props.available;
+  const list = avail || [];
   const v = String(props.value || "").trim();
   const missing = isColumnMissingUpstream(v, avail);
   return (
@@ -94,7 +100,7 @@ export function ColumnOptions(props: {
           {v}
         </option>
       )}
-      {avail.map((c) => (
+      {list.map((c) => (
         <option key={c} value={c}>
           {c}
         </option>
@@ -105,12 +111,13 @@ export function ColumnOptions(props: {
 
 export function ColumnPicker(props: {
   chosen: string[];
-  available: string[];
+  available?: string[] | null;
   onChange: (next: string[]) => void;
   addLabel: string;
 }) {
   const { chosen, available, onChange, addLabel } = props;
-  const addable = available.filter((c) => !chosen.includes(c));
+  const list = available || [];
+  const addable = list.filter((c) => !chosen.includes(c));
   return (
     <>
       {chosen.length > 0 && (

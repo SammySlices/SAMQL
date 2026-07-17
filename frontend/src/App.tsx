@@ -81,6 +81,13 @@ import { useRunProgress } from "./lib/useRunProgress";
 import { cancelOne, isCancelledError, registerRun, unregisterRun, wasCancelled } from "./lib/runController";
 import { uid } from "./lib/ids";
 import { setNodeFlowDenseMode } from "./lib/nodeFlowModel";
+import {
+  applyCanvasColor,
+  CANVAS_COLOR_PRESETS,
+  DEFAULT_CANVAS_COLOR,
+  persistCanvasColor,
+  readPersistedCanvasColor,
+} from "./lib/canvasColor";
 import { ReconcileModal, ReconSpec } from "./components/ReconcileModal";
 import { DocsModal } from "./components/DocsModal";
 import { Notebook } from "./components/Notebook";
@@ -745,6 +752,30 @@ export default function App() {
       /* ignore */
     }
   }, [lightTheme]);
+  // Custom workspace canvas color (NodeFlow + Journal + SQL editor).
+  // When set, --user-canvas-bg wins over ivory / light hard-coded whites.
+  const [canvasColor, setCanvasColor] = useState<string | null>(() => {
+    const saved = readPersistedCanvasColor();
+    if (saved) applyCanvasColor(saved);
+    return saved;
+  });
+  const [canvasColorPanelOpen, setCanvasColorPanelOpen] = useState(false);
+  useEffect(() => {
+    if (canvasColor) {
+      applyCanvasColor(canvasColor);
+      persistCanvasColor(canvasColor);
+    }
+  }, [canvasColor]);
+  useEffect(() => {
+    if (settingsFlyout?.kind !== "visual") setCanvasColorPanelOpen(false);
+  }, [settingsFlyout?.kind]);
+  const pickCanvasColor = useCallback((raw: string) => {
+    const next = raw.trim().toLowerCase();
+    if (!/^#[0-9a-f]{6}$/.test(next)) return;
+    setCanvasColor(next);
+    applyCanvasColor(next);
+    persistCanvasColor(next);
+  }, []);
   const [exiting, setExiting] = useState<null | "kept" | "stopped">(null);
   // While true, the browser shows a native "leave site?" prompt on tab
   // close / reload. We flip it off only for an intentional exit.
@@ -2701,7 +2732,7 @@ export default function App() {
                   data-testid="settings-visual-toggles"
                   aria-expanded={settingsFlyout?.kind === "visual"}
                   aria-haspopup="menu"
-                  title="Light/Dark mode, Eye Care, reduce motion, Condensed NodeFlow, and Node Snap"
+                  title="Light/Dark mode, Eye Care, reduce motion, Condensed NodeFlow, Node Snap, and canvas color"
                   onMouseEnter={(e) =>
                     showSettingsFlyout("visual", e.currentTarget)
                   }
@@ -3004,6 +3035,77 @@ export default function App() {
                   >
                     {nodeSnap ? "Node Snap: on" : "Node Snap"}
                   </button>
+                  <button
+                    role="menuitem"
+                    data-testid="settings-canvas-color"
+                    aria-expanded={canvasColorPanelOpen}
+                    aria-haspopup="dialog"
+                    title="Change NodeFlow canvas, Journal, and SQL editor backgrounds"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setCanvasColorPanelOpen((v) => !v);
+                    }}
+                  >
+                    Change Canvas Color
+                  </button>
+                  {canvasColorPanelOpen ? (
+                    <div
+                      className="settings-canvas-color-panel"
+                      data-testid="settings-canvas-color-panel"
+                      role="dialog"
+                      aria-label="Change Canvas Color"
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <label className="settings-canvas-color-wheel">
+                        <span className="settings-canvas-color-label">
+                          Color
+                        </span>
+                        <input
+                          type="color"
+                          data-testid="settings-canvas-color-input"
+                          value={canvasColor ?? DEFAULT_CANVAS_COLOR}
+                          aria-label="Canvas color wheel"
+                          onInput={(e) =>
+                            pickCanvasColor(
+                              (e.target as HTMLInputElement).value,
+                            )
+                          }
+                          onChange={(e) =>
+                            pickCanvasColor(
+                              (e.target as HTMLInputElement).value,
+                            )
+                          }
+                        />
+                      </label>
+                      <div
+                        className="settings-canvas-swatches"
+                        role="listbox"
+                        aria-label="Basic colors"
+                      >
+                        {CANVAS_COLOR_PRESETS.map((p) => (
+                          <button
+                            key={p.value}
+                            type="button"
+                            role="option"
+                            data-testid={`settings-canvas-swatch-${p.value.slice(1)}`}
+                            className={
+                              "settings-canvas-swatch" +
+                              ((canvasColor ?? "").toLowerCase() === p.value
+                                ? " on"
+                                : "")
+                            }
+                            title={p.label}
+                            aria-label={p.label}
+                            aria-selected={
+                              (canvasColor ?? "").toLowerCase() === p.value
+                            }
+                            style={{ background: p.value }}
+                            onClick={() => pickCanvasColor(p.value)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               )}
             </>

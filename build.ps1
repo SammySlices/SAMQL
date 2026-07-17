@@ -437,10 +437,12 @@ if ($UseOneDir) {
 }
 Write-Host "==> 4/4  Both targets present (SamQL.exe + SamQL-AppWindow)"
 
-# .637: refuse to ship an AppWindow onedir that is missing Tcl/Tk data.
+# .637/.638: refuse to ship an AppWindow onedir that is missing Tcl/Tk data.
 # Stock PyInstaller aborts at pyi_rth__tkinter when _tcl_data/_tk_data are
 # absent; we also ship a lenient rthook, but the splash still needs these
 # files for a real UI. Hard-fail here so a bad collect never becomes a zip.
+# zip-onedir additionally asserts the same members inside the lean zip
+# (SamQL-AppWindow.zip) after assistant/ is aside-moved.
 if ($UseOneDir) {
   $tclInit = Join-Path $Root "dist\SamQL-AppWindow\_internal\_tcl_data\init.tcl"
   $tkTcl = Join-Path $Root "dist\SamQL-AppWindow\_internal\_tk_data\tk.tcl"

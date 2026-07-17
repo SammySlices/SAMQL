@@ -2,12 +2,24 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-17.637
+Current build:   2026-07-17.638
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-17.638  (v2.16.4)
+
+APPWINDOW LEAN ZIP VERIFY + CONFIG INSPECTOR ANTI-FLICKER.
+Audit: lean vs Assistant `_internal` is identical (only `assistant/`
+differs); stock pyi_rth__tkinter FileNotFoundError is when `_tcl_data`
+is missing at runtime (pre-637), not lean zip stripping Tcl. Ship
+post-zip Tcl/Tk member asserts for both zips; rthook requires
+init.tcl/tk.tcl before setting TCL_LIBRARY (partial extract safe).
+NodeFlow config: inspCols probing (no missing flash), no opacity
+remount on select. Refresh samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-17.637  (v2.16.4)

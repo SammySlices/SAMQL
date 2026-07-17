@@ -18,6 +18,11 @@ export function selectFieldRename(f: SelField | null | undefined): string {
  * True when this Select field's source column is not in the current upstream
  * column list (case-insensitive). Used for inspector strikethrough / missing
  * styling on kept, unchecked, and renamed tombstones.
+ *
+ * `null` / `undefined` upstream means columns are not known yet (selection
+ * switch / probe in flight) — treat as not missing so the inspector does not
+ * flash every field as tombstoned. An empty array means upstream is known and
+ * empty; those fields are missing.
  */
 export function isSelectFieldMissingUpstream(
   f: SelField,
@@ -25,9 +30,8 @@ export function isSelectFieldMissingUpstream(
 ): boolean {
   const name = String(f?.name || "").trim();
   if (!name) return true;
-  const up = new Set(
-    (upstreamCols || []).map((c) => String(c).toLowerCase()),
-  );
+  if (upstreamCols == null) return false;
+  const up = new Set(upstreamCols.map((c) => String(c).toLowerCase()));
   return !up.has(name.toLowerCase());
 }
 

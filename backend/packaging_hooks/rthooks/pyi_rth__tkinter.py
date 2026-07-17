@@ -24,10 +24,22 @@ def _pyi_rthook():
     tcldir = os.path.join(meipass, "_tcl_data")
     tkdir = os.path.join(meipass, "_tk_data")
 
-    if os.path.isdir(tcldir):
+    # Prefer bundled trees. Also require init.tcl / tk.tcl so a partial
+    # Explorer extract (empty _tcl_data dir present, files still copying)
+    # does not point TCL_LIBRARY at an incomplete tree.
+    tcl_ok = os.path.isfile(os.path.join(tcldir, "init.tcl"))
+    tk_ok = os.path.isfile(os.path.join(tkdir, "tk.tcl"))
+
+    if tcl_ok:
         os.environ["TCL_LIBRARY"] = tcldir
-    if os.path.isdir(tkdir):
+    else:
+        # Drop stale host/venv TCL_LIBRARY that can break splash on a
+        # lean unzip where the frozen tree is still incomplete.
+        os.environ.pop("TCL_LIBRARY", None)
+    if tk_ok:
         os.environ["TK_LIBRARY"] = tkdir
+    else:
+        os.environ.pop("TK_LIBRARY", None)
 
 
 _pyi_rthook()

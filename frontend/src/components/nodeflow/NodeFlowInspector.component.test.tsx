@@ -441,7 +441,7 @@ describe("NodeFlowInspector", () => {
     expect(screen.getByText(/Connect an input to choose fields and types/i)).toBeTruthy();
   });
 
-  it("remounts the keyed config body when the selected node changes (swap fade)", () => {
+  it("keeps the same config body DOM across selection changes (no swap remount)", () => {
     const sumNode: NbNode = {
       id: "sum-1",
       type: "summarize",
@@ -466,7 +466,7 @@ describe("NodeFlowInspector", () => {
       />,
     );
     const firstBody = screen.getByTestId("insp-swap-body");
-    expect(firstBody.className).toContain("nb2-insp-swap");
+    expect(firstBody.className).toContain("nb2-insp-body");
     expect(screen.getByText("Summarize node")).toBeInTheDocument();
 
     rerender(
@@ -475,9 +475,8 @@ describe("NodeFlowInspector", () => {
       />,
     );
     const secondBody = screen.getByTestId("insp-swap-body");
-    // Keyed by node id+type: a different selection must be a fresh DOM subtree
-    // (the swap-in fade plays on mount), never the old form updated in place.
-    expect(secondBody).not.toBe(firstBody);
+    // Stable wrapper: content updates in place (no opacity remount fade).
+    expect(secondBody).toBe(firstBody);
     expect(screen.queryByText("Summarize node")).toBeNull();
     expect(screen.getByText("Sort node")).toBeInTheDocument();
   });
@@ -504,8 +503,34 @@ describe("NodeFlowInspector", () => {
         )}
       />,
     );
-    // Same id+type: editing config must NOT remount (no focus loss, no re-fade).
+    // Same selection: editing config must NOT remount (no focus loss).
     expect(screen.getByTestId("insp-swap-body")).toBe(firstBody);
+  });
+
+  it("does not flash missing-field UI while columns are probing", () => {
+    const node: NbNode = {
+      id: "sel-1",
+      type: "select",
+      x: 0,
+      y: 0,
+      config: {
+        label: "select",
+        fields: [
+          { name: "a", keep: true },
+          { name: "b", keep: true },
+        ],
+      },
+    };
+    render(
+      <NodeFlowInspector
+        context={context(node, { inspCols: {}, inspColsProbing: true })}
+      />,
+    );
+    expect(screen.queryByTestId("stale-col-refs-warn")).toBeNull();
+    expect(screen.queryByText(/Missing column references/i)).toBeNull();
+    const fields = screen.getAllByTitle("Keep this field");
+    expect(fields.length).toBe(2);
+    expect(document.querySelectorAll(".nb2-field.missing").length).toBe(0);
   });
 
   it("uses red xbtn on summarize and sort remove controls", () => {

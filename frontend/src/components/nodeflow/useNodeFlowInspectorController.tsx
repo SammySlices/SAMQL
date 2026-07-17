@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import {
   applySelectColumnsReconcile,
@@ -134,19 +134,12 @@ export function useNodeFlowInspectorController({
     setInspColsOwnedBy(null);
     setInspColsRaw({});
   };
-  // Clear the cached input columns only when the SELECTED node changes, so a
-  // freshly selected node never briefly shows the previous node's columns.
-  // Editing the current node's own config must NOT clear them: doing that
-  // blanked every column-derived list (the replace-keys checkboxes, the reduce
-  // controls, the select fields) on each keystroke, which read as a flicker.
-  useEffect(() => {
-    clearInspCols();
-    const ports = selectedNode ? PORTS[selectedNode.type]?.inputs || [] : [];
-    setInspColsProbing(ports.length > 0);
-    // Only re-clear when the selected node id changes — not on every config patch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey, selId]);
-  useEffect(() => {
+  // Resolve upstream columns for the selection. Ownership gating (inspCols)
+  // already hides sibling schemas on selId change — do not clear-on-select
+  // before paint (that raced cache hits and flashed empty inspectors).
+  // Cache hits publish in useLayoutEffect so the first painted frame already
+  // has the new node's columns when known.
+  useLayoutEffect(() => {
     if (!sel) {
       setInspColsProbing(false);
       return;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export interface NodeFlowViewportRect {
   x: number;
@@ -7,8 +7,21 @@ export interface NodeFlowViewportRect {
   h: number;
 }
 
-const ZOOM_MIN = 0.3;
-const ZOOM_MAX = 2.5;
+export const ZOOM_MIN = 0.3;
+export const ZOOM_MAX = 2.5;
+
+/** Optional client-space pivot so zoom keeps that screen point fixed. */
+export interface NodeFlowZoomPivot {
+  clientX: number;
+  clientY: number;
+}
+
+interface PendingZoomPivot {
+  worldX: number;
+  worldY: number;
+  cursorX: number;
+  cursorY: number;
+}
 
 export function useNodeFlowViewport(
   wrapRef: React.RefObject<HTMLDivElement | null>,
@@ -29,6 +42,7 @@ export function useNodeFlowViewport(
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   const viewportFrameRef = useRef<number | null>(null);
+  const pendingPivotRef = useRef<PendingZoomPivot | null>(null);
 
   useEffect(() => {
     zoomRef.current = zoom;
@@ -82,6 +96,17 @@ export function useNodeFlowViewport(
     };
   }, [measureViewport, readViewport, wrapRef]);
 
+  // Apply cursor pivot after the scaler size updates with the new zoom.
+  useLayoutEffect(() => {
+    const pending = pendingPivotRef.current;
+    const element = wrapRef.current;
+    if (!pending || !element) return;
+    pendingPivotRef.current = null;
+    element.scrollLeft = pending.worldX * zoom - pending.cursorX;
+    element.scrollTop = pending.worldY * zoom - pending.cursorY;
+    readViewport();
+  }, [zoom, readViewport, wrapRef]);
+
   const panTo = useCallback(
     (cx: number, cy: number) => {
       const element = wrapRef.current;
@@ -106,21 +131,69 @@ export function useNodeFlowViewport(
   }, []);
 
   const zoomBy = useCallback(
-    (multiplier: number) => {
+    (multiplier: number, pivot?: NodeFlowZoomPivot) => {
+      const prev = zoomRef.current;
       const next = Math.min(
         ZOOM_MAX,
-        Math.max(ZOOM_MIN, zoomRef.current * multiplier),
+        Math.max(ZOOM_MIN, prev * multiplier),
       );
+      if (next === prev) return;
+
+      const element = wrapRef.current;
+      if (element && pivot) {
+        const rect = element.getBoundingClientRect();
+        const cursorX = pivot.clientX - rect.left;
+        const cursorY = pivot.clientY - rect.top;
+        pendingPivotRef.current = {
+          worldX: (element.scrollLeft + cursorX) / prev,
+          worldY: (element.scrollTop + cursorY) / prev,
+          cursorX,
+          cursorY,
+        };
+      } else {
+        pendingPivotRef.current = null;
+      }
+
       zoomRef.current = next;
       setZoom(next);
       measureViewport();
     },
-    [measureViewport],
+    [measureViewport, wrapRef],
   );
 
   const resetZoom = useCallback(() => {
     zoomBy(1 / zoomRef.current);
   }, [zoomBy]);
+
+  // Ctrl+wheel (and Windows Precision Touchpad pinch → ctrl+wheel) zooms the
+  // canvas. Plain wheel keeps overflow scroll/pan. Non-passive so we can block
+  // browser page-zoom while over the wrap.
+  useEffect(() => {
+    const element = wrapRef.current;
+    if (!element) return;
+
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const delta =
+        event.deltaY !== 0
+          ? event.deltaY
+          : event.deltaX !== 0
+            ? event.deltaX
+            : 0;
+      if (delta === 0) return;
+
+      // Negative delta (scroll up / pinch-out) → zoom in; positive → zoom out.
+      const raw = Math.exp(-delta * 0.002);
+      const multiplier = Math.min(1.25, Math.max(0.8, raw));
+      zoomBy(multiplier, { clientX: event.clientX, clientY: event.clientY });
+    };
+
+    element.addEventListener("wheel", onWheel, { passive: false });
+    return () => element.removeEventListener("wheel", onWheel);
+  }, [wrapRef, zoomBy]);
 
   return {
     mmMini,

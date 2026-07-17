@@ -40,4 +40,16 @@ describe("ColumnPicker remove ×", () => {
     expect(gone).toHaveAttribute("data-missing", "1");
     expect(screen.getByText("a")).not.toHaveClass("nb2-col-missing");
   });
+
+  it("does not mark chosen columns missing when available is still unknown", () => {
+    render(
+      <ColumnPicker
+        chosen={["a", "b"]}
+        available={undefined}
+        onChange={vi.fn()}
+        addLabel="+ Add field…"
+      />,
+    );
+    expect(document.querySelectorAll(".nb2-col-missing").length).toBe(0);
+  });
 });
