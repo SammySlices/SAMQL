@@ -82,8 +82,14 @@ describe("Settings View consolidations", () => {
       "nb-dense",
       "theme-light",
       "has-user-canvas-bg",
+      "has-user-canvas-bg-ide",
+      "has-user-canvas-bg-journal",
+      "has-user-canvas-bg-node",
     );
     document.documentElement.style.removeProperty("--user-canvas-bg");
+    document.documentElement.style.removeProperty("--user-canvas-bg-ide");
+    document.documentElement.style.removeProperty("--user-canvas-bg-journal");
+    document.documentElement.style.removeProperty("--user-canvas-bg-node");
     document.documentElement.removeAttribute("data-eye-care");
     document.documentElement.removeAttribute("data-nb-dense");
     document.documentElement.setAttribute("data-theme", "dark");
@@ -251,7 +257,7 @@ describe("Settings View consolidations", () => {
     });
   });
 
-  it("Change Canvas Color updates storage and CSS variable in real time", async () => {
+  it("Change Canvas Color opens floating modal with surface tabs", async () => {
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -263,35 +269,65 @@ describe("Settings View consolidations", () => {
     fireEvent.click(screen.getByTestId("settings-button"));
     fireEvent.click(screen.getByTestId("settings-visual-toggles"));
     fireEvent.click(screen.getByTestId("settings-canvas-color"));
-    expect(screen.getByTestId("settings-canvas-color-panel")).toBeTruthy();
+    // Settings closes; floating modal opens (hot-path: UI first).
+    await waitFor(() => {
+      expect(document.querySelector(".settings-menu")).toBeNull();
+      expect(screen.getByTestId("settings-canvas-color-panel")).toBeTruthy();
+    });
+    expect(screen.getByTestId("settings-canvas-tab-ide")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByTestId("settings-canvas-tab-journal")).toBeTruthy();
+    expect(screen.getByTestId("settings-canvas-tab-node")).toBeTruthy();
     expect(screen.getByTestId("settings-canvas-color-input")).toBeTruthy();
 
     const swatch = screen.getByTestId("settings-canvas-swatch-e4ebe4");
     fireEvent.click(swatch);
     await waitFor(() => {
-      expect(localStorage.getItem("samql.canvasColor")).toBe("#e4ebe4");
+      expect(localStorage.getItem("samql.canvasColor.ide")).toBe("#e4ebe4");
       expect(
-        document.documentElement.classList.contains("has-user-canvas-bg"),
+        document.documentElement.classList.contains("has-user-canvas-bg-ide"),
       ).toBe(true);
       expect(
-        document.documentElement.style.getPropertyValue("--user-canvas-bg"),
+        document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
       ).toBe("#e4ebe4");
     });
 
+    fireEvent.click(screen.getByTestId("settings-canvas-tab-journal"));
+    expect(screen.getByTestId("settings-canvas-tab-journal")).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    fireEvent.click(screen.getByTestId("settings-canvas-swatch-ffffff"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasColor.journal")).toBe("#ffffff");
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-bg-journal",
+        ),
+      ).toBe("#ffffff");
+      // IDE color unchanged
+      expect(localStorage.getItem("samql.canvasColor.ide")).toBe("#e4ebe4");
+    });
+
+    fireEvent.click(screen.getByTestId("settings-canvas-tab-node"));
     const wheel = screen.getByTestId(
       "settings-canvas-color-input",
     ) as HTMLInputElement;
-    fireEvent.input(wheel, { target: { value: "#ffffff" } });
+    fireEvent.input(wheel, { target: { value: "#ececec" } });
     await waitFor(() => {
-      expect(localStorage.getItem("samql.canvasColor")).toBe("#ffffff");
+      expect(localStorage.getItem("samql.canvasColor.node")).toBe("#ececec");
       expect(
-        document.documentElement.style.getPropertyValue("--user-canvas-bg"),
-      ).toBe("#ffffff");
+        document.documentElement.style.getPropertyValue("--user-canvas-bg-node"),
+      ).toBe("#ececec");
     });
   });
 
-  it("restores persisted canvas color on load", async () => {
-    localStorage.setItem("samql.canvasColor", "#ececec");
+  it("restores persisted per-surface canvas colors on load", async () => {
+    localStorage.setItem("samql.canvasColor.ide", "#ececec");
+    localStorage.setItem("samql.canvasColor.journal", "#e4ebe4");
+    localStorage.setItem("samql.canvasColor.node", "#ffffff");
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -300,11 +336,64 @@ describe("Settings View consolidations", () => {
       ),
     );
     expect(
-      document.documentElement.classList.contains("has-user-canvas-bg"),
+      document.documentElement.classList.contains("has-user-canvas-bg-ide"),
     ).toBe(true);
     expect(
-      document.documentElement.style.getPropertyValue("--user-canvas-bg"),
+      document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
     ).toBe("#ececec");
+    expect(
+      document.documentElement.style.getPropertyValue(
+        "--user-canvas-bg-journal",
+      ),
+    ).toBe("#e4ebe4");
+    expect(
+      document.documentElement.style.getPropertyValue("--user-canvas-bg-node"),
+    ).toBe("#ffffff");
+  });
+
+  it("migrates legacy samql.canvasColor to all three surfaces", async () => {
+    localStorage.setItem("samql.canvasColor", "#d8d8d8");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    expect(localStorage.getItem("samql.canvasColor.ide")).toBe("#d8d8d8");
+    expect(localStorage.getItem("samql.canvasColor.journal")).toBe("#d8d8d8");
+    expect(localStorage.getItem("samql.canvasColor.node")).toBe("#d8d8d8");
+    expect(localStorage.getItem("samql.canvasColor")).toBeNull();
+    expect(
+      document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
+    ).toBe("#d8d8d8");
+  });
+
+  it("resets a surface canvas color to default", async () => {
+    localStorage.setItem("samql.canvasColor.ide", "#ffffff");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    fireEvent.click(screen.getByTestId("settings-canvas-color"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-canvas-color-panel")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByTestId("settings-canvas-color-reset"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasColor.ide")).toBeNull();
+      expect(
+        document.documentElement.classList.contains("has-user-canvas-bg-ide"),
+      ).toBe(false);
+      expect(
+        document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
+      ).toBe("");
+    });
   });
 
   it("closes Toolbar Toggle flyout after pointer leaves trigger and menu", async () => {

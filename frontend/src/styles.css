@@ -11941,16 +11941,71 @@ html.theme-light .nb2-zoom .btn.primary:hover {
 }
 
 /* ---- Settings → Visual → Change Canvas Color ----
-   User color on <html> (--user-canvas-bg + .has-user-canvas-bg) paints
-   NodeFlow canvas, Journal page, and SQL editor. Wins over ivory / light
-   hard-coded whites when set. Dot grid on the canvas is preserved. */
-.settings-canvas-color-panel {
+   Floating modal (useWinDrag + win-float). Per-surface vars on <html>
+   (--user-canvas-bg-ide|journal|node + .has-user-canvas-bg-*) paint IDE
+   editor, Journal, and NodeFlow. Wins over ivory / light hard-coded whites.
+   Dot grid on the canvas is preserved. */
+.canvas-color-win {
+  position: fixed;
+  z-index: 260;
+  width: 300px;
+  max-width: min(300px, 92vw);
   display: flex;
   flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.canvas-color-head {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  padding: 8px 10px 10px;
-  border-top: 1px solid var(--border);
-  margin-top: 2px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+}
+.canvas-color-title {
+  font-size: 13px;
+  font-weight: 650;
+}
+.canvas-color-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.canvas-color-tab {
+  flex: 1 1 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  cursor: pointer;
+}
+.canvas-color-tab:hover {
+  color: var(--text);
+  background: var(--raised);
+}
+.canvas-color-tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.canvas-color-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px 12px;
 }
 .settings-canvas-color-wheel {
   display: flex;
@@ -11994,36 +12049,52 @@ html.theme-light .nb2-zoom .btn.primary:hover {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+.canvas-color-reset {
+  align-self: flex-start;
+  font-size: 11.5px;
+  padding: 4px 8px;
+}
 
-html.has-user-canvas-bg .nb2-canvas-wrap,
-html.has-user-canvas-bg body.canvas-ivory .nb2-canvas-wrap,
-html.theme-light.has-user-canvas-bg .nb2-canvas-wrap,
-html.theme-light.has-user-canvas-bg body.canvas-ivory .nb2-canvas-wrap,
-html[data-theme="light"].has-user-canvas-bg .nb2-canvas-wrap,
-html[data-theme="light"].has-user-canvas-bg body.canvas-ivory .nb2-canvas-wrap {
-  background-color: var(--user-canvas-bg) !important;
+html.has-user-canvas-bg-node .nb2-canvas-wrap,
+html.has-user-canvas-bg-node body.canvas-ivory .nb2-canvas-wrap,
+html.theme-light.has-user-canvas-bg-node .nb2-canvas-wrap,
+html.theme-light.has-user-canvas-bg-node body.canvas-ivory .nb2-canvas-wrap,
+html[data-theme="light"].has-user-canvas-bg-node .nb2-canvas-wrap,
+html[data-theme="light"].has-user-canvas-bg-node body.canvas-ivory .nb2-canvas-wrap {
+  background-color: var(--user-canvas-bg-node) !important;
 }
-html.has-user-canvas-bg .nb,
-html.has-user-canvas-bg .nb-scroll,
-html.has-user-canvas-bg .nb-groups,
-html.theme-light.has-user-canvas-bg .nb,
-html.theme-light.has-user-canvas-bg .nb-scroll,
-html.theme-light.has-user-canvas-bg .nb-groups,
-html[data-theme="light"].has-user-canvas-bg .nb,
-html[data-theme="light"].has-user-canvas-bg .nb-scroll,
-html[data-theme="light"].has-user-canvas-bg .nb-groups {
-  background-color: var(--user-canvas-bg) !important;
-  background: var(--user-canvas-bg) !important;
+html.has-user-canvas-bg-journal .nb,
+html.has-user-canvas-bg-journal .nb-scroll,
+html.has-user-canvas-bg-journal .nb-groups,
+html.theme-light.has-user-canvas-bg-journal .nb,
+html.theme-light.has-user-canvas-bg-journal .nb-scroll,
+html.theme-light.has-user-canvas-bg-journal .nb-groups,
+html[data-theme="light"].has-user-canvas-bg-journal .nb,
+html[data-theme="light"].has-user-canvas-bg-journal .nb-scroll,
+html[data-theme="light"].has-user-canvas-bg-journal .nb-groups {
+  background-color: var(--user-canvas-bg-journal) !important;
+  background: var(--user-canvas-bg-journal) !important;
 }
-html.has-user-canvas-bg .code,
-html.has-user-canvas-bg body.editor-ivory .code,
-html.has-user-canvas-bg .nb-ed .code,
-html.theme-light.has-user-canvas-bg .code,
-html.theme-light.has-user-canvas-bg body.editor-ivory .code,
-html.theme-light.has-user-canvas-bg .nb-ed .code,
-html[data-theme="light"].has-user-canvas-bg .code,
-html[data-theme="light"].has-user-canvas-bg body.editor-ivory .code,
-html[data-theme="light"].has-user-canvas-bg .nb-ed .code {
-  background-color: var(--user-canvas-bg) !important;
-  background: var(--user-canvas-bg) !important;
+html.has-user-canvas-bg-ide .code,
+html.has-user-canvas-bg-ide body.editor-ivory .code,
+html.has-user-canvas-bg-ide .nb-ed .code,
+html.theme-light.has-user-canvas-bg-ide .code,
+html.theme-light.has-user-canvas-bg-ide body.editor-ivory .code,
+html.theme-light.has-user-canvas-bg-ide .nb-ed .code,
+html[data-theme="light"].has-user-canvas-bg-ide .code,
+html[data-theme="light"].has-user-canvas-bg-ide body.editor-ivory .code,
+html[data-theme="light"].has-user-canvas-bg-ide .nb-ed .code {
+  background-color: var(--user-canvas-bg-ide) !important;
+  background: var(--user-canvas-bg-ide) !important;
+}
+
+html.theme-light .canvas-color-head,
+html[data-theme="light"] .canvas-color-head {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink-hi) !important;
+  color: var(--chrome-fg) !important;
+}
+html.theme-light .canvas-color-head *,
+html[data-theme="light"] .canvas-color-head * {
+  color: var(--chrome-fg) !important;
 }

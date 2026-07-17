@@ -92,6 +92,7 @@ frontend/src/components/ActivityShared.engineReset.component.test.tsx
 frontend/src/components/ActivityShared.tsx
 frontend/src/components/AssistantModelsPanel.component.test.tsx
 frontend/src/components/AssistantModelsPanel.tsx
+frontend/src/components/CanvasColorModal.tsx
 frontend/src/components/ChartPanel.abort.component.test.tsx
 frontend/src/components/ChartPanel.expired.component.test.tsx
 frontend/src/components/ChartPanel.tsx
@@ -205,6 +206,7 @@ frontend/src/components/nodeflow/useNodeFlowInspectorController.cache.component.
 frontend/src/components/nodeflow/useNodeFlowInspectorController.stalePrune.component.test.tsx
 frontend/src/components/nodeflow/useNodeFlowInspectorController.tsx
 frontend/src/components/nodeflow/useNodeFlowKeyboardShortcuts.ts
+frontend/src/components/nodeflow/useNodeFlowViewport.component.test.tsx
 frontend/src/components/nodeflow/useNodeFlowViewport.ts
 frontend/src/components/notebook/NoteNotebookCell.tsx
 frontend/src/components/notebook/NotebookCellShared.tsx

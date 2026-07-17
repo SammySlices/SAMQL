@@ -82,11 +82,12 @@ import { cancelOne, isCancelledError, registerRun, unregisterRun, wasCancelled }
 import { uid } from "./lib/ids";
 import { setNodeFlowDenseMode } from "./lib/nodeFlowModel";
 import {
+  applyAllCanvasColors,
   applyCanvasColor,
-  CANVAS_COLOR_PRESETS,
-  DEFAULT_CANVAS_COLOR,
   persistCanvasColor,
-  readPersistedCanvasColor,
+  readPersistedCanvasColors,
+  type CanvasColors,
+  type CanvasSurface,
 } from "./lib/canvasColor";
 import { ReconcileModal, ReconSpec } from "./components/ReconcileModal";
 import { DocsModal } from "./components/DocsModal";
@@ -105,6 +106,7 @@ import { useIdeController } from "./controllers/useIdeController";
 import { useWorkspaceController } from "./controllers/useWorkspaceController";
 import { useSaveShortcut } from "./lib/useSaveShortcut";
 import { FloatingPanel } from "./components/FloatingPanel";
+import { CanvasColorModal } from "./components/CanvasColorModal";
 import {
   moveFloat as moveFloatById,
   resizeFloat as resizeFloatById,
@@ -752,29 +754,28 @@ export default function App() {
       /* ignore */
     }
   }, [lightTheme]);
-  // Custom workspace canvas color (NodeFlow + Journal + SQL editor).
-  // When set, --user-canvas-bg wins over ivory / light hard-coded whites.
-  const [canvasColor, setCanvasColor] = useState<string | null>(() => {
-    const saved = readPersistedCanvasColor();
-    if (saved) applyCanvasColor(saved);
+  // Per-surface canvas colors (IDE / Journal / NodeFlow). When set,
+  // --user-canvas-bg-* wins over ivory / light hard-coded whites.
+  const [canvasColors, setCanvasColors] = useState<CanvasColors>(() => {
+    const saved = readPersistedCanvasColors();
+    applyAllCanvasColors(saved);
     return saved;
   });
   const [canvasColorPanelOpen, setCanvasColorPanelOpen] = useState(false);
-  useEffect(() => {
-    if (canvasColor) {
-      applyCanvasColor(canvasColor);
-      persistCanvasColor(canvasColor);
-    }
-  }, [canvasColor]);
-  useEffect(() => {
-    if (settingsFlyout?.kind !== "visual") setCanvasColorPanelOpen(false);
-  }, [settingsFlyout?.kind]);
-  const pickCanvasColor = useCallback((raw: string) => {
-    const next = raw.trim().toLowerCase();
-    if (!/^#[0-9a-f]{6}$/.test(next)) return;
-    setCanvasColor(next);
-    applyCanvasColor(next);
-    persistCanvasColor(next);
+  const pickCanvasColor = useCallback(
+    (surface: CanvasSurface, raw: string) => {
+      const next = raw.trim().toLowerCase();
+      if (!/^#[0-9a-f]{6}$/.test(next)) return;
+      setCanvasColors((prev) => ({ ...prev, [surface]: next }));
+      applyCanvasColor(surface, next);
+      persistCanvasColor(surface, next);
+    },
+    [],
+  );
+  const resetCanvasColor = useCallback((surface: CanvasSurface) => {
+    setCanvasColors((prev) => ({ ...prev, [surface]: null }));
+    applyCanvasColor(surface, null);
+    persistCanvasColor(surface, null);
   }, []);
   const [exiting, setExiting] = useState<null | "kept" | "stopped">(null);
   // While true, the browser shows a native "leave site?" prompt on tab
@@ -3040,72 +3041,17 @@ export default function App() {
                     data-testid="settings-canvas-color"
                     aria-expanded={canvasColorPanelOpen}
                     aria-haspopup="dialog"
-                    title="Change NodeFlow canvas, Journal, and SQL editor backgrounds"
+                    title="Change IDE, Journal, and NodeFlow canvas backgrounds"
                     onClick={(e) => {
                       e.preventDefault();
-                      setCanvasColorPanelOpen((v) => !v);
+                      // Open UI first; picker mounts immediately (hot-path).
+                      setCanvasColorPanelOpen(true);
+                      setSettingsOpen(false);
+                      setSettingsFlyout(null);
                     }}
                   >
                     Change Canvas Color
                   </button>
-                  {canvasColorPanelOpen ? (
-                    <div
-                      className="settings-canvas-color-panel"
-                      data-testid="settings-canvas-color-panel"
-                      role="dialog"
-                      aria-label="Change Canvas Color"
-                      onMouseDown={(e) => e.stopPropagation()}
-                    >
-                      <label className="settings-canvas-color-wheel">
-                        <span className="settings-canvas-color-label">
-                          Color
-                        </span>
-                        <input
-                          type="color"
-                          data-testid="settings-canvas-color-input"
-                          value={canvasColor ?? DEFAULT_CANVAS_COLOR}
-                          aria-label="Canvas color wheel"
-                          onInput={(e) =>
-                            pickCanvasColor(
-                              (e.target as HTMLInputElement).value,
-                            )
-                          }
-                          onChange={(e) =>
-                            pickCanvasColor(
-                              (e.target as HTMLInputElement).value,
-                            )
-                          }
-                        />
-                      </label>
-                      <div
-                        className="settings-canvas-swatches"
-                        role="listbox"
-                        aria-label="Basic colors"
-                      >
-                        {CANVAS_COLOR_PRESETS.map((p) => (
-                          <button
-                            key={p.value}
-                            type="button"
-                            role="option"
-                            data-testid={`settings-canvas-swatch-${p.value.slice(1)}`}
-                            className={
-                              "settings-canvas-swatch" +
-                              ((canvasColor ?? "").toLowerCase() === p.value
-                                ? " on"
-                                : "")
-                            }
-                            title={p.label}
-                            aria-label={p.label}
-                            aria-selected={
-                              (canvasColor ?? "").toLowerCase() === p.value
-                            }
-                            style={{ background: p.value }}
-                            onClick={() => pickCanvasColor(p.value)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
               )}
             </>
@@ -4364,6 +4310,13 @@ export default function App() {
             nodeId,
           });
         }}
+      />
+      <CanvasColorModal
+        open={canvasColorPanelOpen}
+        colors={canvasColors}
+        onPick={pickCanvasColor}
+        onReset={resetCanvasColor}
+        onClose={() => setCanvasColorPanelOpen(false)}
       />
       {ideFile && (
         <FileBrowser

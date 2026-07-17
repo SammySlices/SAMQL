@@ -186,8 +186,11 @@ export function useNodeFlowViewport(
       if (delta === 0) return;
 
       // Negative delta (scroll up / pinch-out) → zoom in; positive → zoom out.
-      const raw = Math.exp(-delta * 0.002);
-      const multiplier = Math.min(1.25, Math.max(0.8, raw));
+      // Scale with |deltaY| so trackpad pinch (small deltas) and mouse wheel
+      // ticks both feel responsive; per-event clamp keeps a single tick from
+      // jumping too far while ZOOM_MIN/MAX still bound the absolute range.
+      const raw = Math.exp(-delta * 0.005);
+      const multiplier = Math.min(1.35, Math.max(1 / 1.35, raw));
       zoomBy(multiplier, { clientX: event.clientX, clientY: event.clientY });
     };
 
