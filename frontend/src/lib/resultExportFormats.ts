@@ -4,7 +4,7 @@ export type ExportFormatOption = readonly [fmt: string, label: string];
 
 /** Backend-backed query result formats (CSV through Parquet when available). */
 export function backendResultExportFormats(
-  features?: Features | null,
+  features?: Partial<Features> | null,
 ): ExportFormatOption[] {
   return [
     ["csv", "CSV"],
@@ -27,7 +27,7 @@ export function clientResultExportFormats(): ExportFormatOption[] {
 /** Formats for a result tab: full backend set for queries, CSV/JSON for recon/profile. */
 export function exportFormatsForResultTab(
   kind: "result" | "recon" | "profile" | string | undefined,
-  features?: Features | null,
+  features?: Partial<Features> | null,
 ): ExportFormatOption[] {
   return kind === "result"
     ? backendResultExportFormats(features)

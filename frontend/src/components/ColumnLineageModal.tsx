@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { api } from "../lib/api";
 import {
   formatLineageValue,
+  formatTransformSummary,
+  formatTypeChange,
   kindLabel,
   type ColumnLineageOpenArgs,
   type ColumnLineageResult,
@@ -18,8 +20,8 @@ type Props = {
   onHighlightNode?: (nodeId: string) => void;
 };
 
-const STAGE_W = 168;
-const STAGE_H = 118;
+const STAGE_W = 188;
+const STAGE_H = 132;
 const GAP = 36;
 const PAD_X = 28;
 const PAD_Y = 24;
@@ -297,9 +299,15 @@ export const ColumnLineageModal: React.FC<Props> = ({
                             "…"
                           : stage.node_label || stage.node_type}
                       </text>
-                      <foreignObject x={8} y={74} width={STAGE_W - 16} height={38}>
-                        <div className="col-lineage-change-mini">
-                          {stage.change?.summary || "—"}
+                      <foreignObject x={8} y={74} width={STAGE_W - 16} height={52}>
+                        <div
+                          className="col-lineage-change-mini"
+                          data-testid="column-lineage-transform-mini"
+                        >
+                          {formatTransformSummary(
+                            stage.change,
+                            stage.column,
+                          )}
                         </div>
                       </foreignObject>
                     </g>
@@ -460,13 +468,27 @@ export const ColumnLineageModal: React.FC<Props> = ({
                         </button>
                       ) : null}
                     </div>
-                    <div className="col-lineage-io">
+                    <div
+                      className="col-lineage-io col-lineage-io-transform"
+                      data-testid="column-lineage-transform"
+                    >
                       <div>
                         <div className="col-lineage-io-label">Input</div>
                         <div className="col-lineage-io-val">
-                          {(ch.inputs && ch.inputs.length
+                          {ch.inputs && ch.inputs.length
                             ? ch.inputs.join(", ")
-                            : "—")}
+                            : "—"}
+                        </div>
+                      </div>
+                      <div className="col-lineage-io-arrow">→</div>
+                      <div>
+                        <div className="col-lineage-io-label">Op</div>
+                        <div
+                          className="col-lineage-io-val"
+                          data-testid="column-lineage-op"
+                        >
+                          {(ch.expression || ch.op || ch.summary || "—").trim() ||
+                            "—"}
                         </div>
                       </div>
                       <div className="col-lineage-io-arrow">→</div>
@@ -477,6 +499,12 @@ export const ColumnLineageModal: React.FC<Props> = ({
                         </div>
                       </div>
                     </div>
+                    <p
+                      className="col-lineage-transform-line"
+                      data-testid="column-lineage-transform-line"
+                    >
+                      {formatTransformSummary(ch, stage.column)}
+                    </p>
                     <p className="col-lineage-summary">
                       {ch.unchanged ? (
                         <span className="pill pass">Unchanged</span>
@@ -485,6 +513,37 @@ export const ColumnLineageModal: React.FC<Props> = ({
                       )}{" "}
                       {ch.summary}
                     </p>
+                    {formatTypeChange(ch) ? (
+                      <p
+                        className="col-lineage-detail-text"
+                        data-testid="column-lineage-type-change"
+                      >
+                        Type: <code>{formatTypeChange(ch)}</code>
+                      </p>
+                    ) : null}
+                    {ch.group_by && ch.group_by.length > 0 ? (
+                      <p
+                        className="col-lineage-detail-text"
+                        data-testid="column-lineage-group-by"
+                      >
+                        Group by:{" "}
+                        <code>{ch.group_by.join(", ")}</code>
+                      </p>
+                    ) : null}
+                    {ch.join_how ? (
+                      <p
+                        className="col-lineage-detail-text"
+                        data-testid="column-lineage-join-how"
+                      >
+                        Join: <code>{ch.join_how}</code>
+                        {ch.predicate ? (
+                          <>
+                            {" "}
+                            on <code>{ch.predicate}</code>
+                          </>
+                        ) : null}
+                      </p>
+                    ) : null}
                     {ch.detail ? (
                       <p className="col-lineage-detail-text">{ch.detail}</p>
                     ) : null}
@@ -497,8 +556,11 @@ export const ColumnLineageModal: React.FC<Props> = ({
                         <code>{ch.mapping.to}</code>
                       </p>
                     ) : null}
-                    {ch.predicate ? (
-                      <p className="col-lineage-detail-text">
+                    {ch.predicate && !ch.join_how ? (
+                      <p
+                        className="col-lineage-detail-text"
+                        data-testid="column-lineage-predicate"
+                      >
                         Predicate: <code>{ch.predicate}</code>
                       </p>
                     ) : null}

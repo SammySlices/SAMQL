@@ -8,6 +8,7 @@ const apiMock = vi.hoisted(() => ({
   history: vi.fn(),
   saved: vi.fn(),
   workflowsList: vi.fn(),
+  assistantStatus: vi.fn(),
 }));
 
 vi.mock("./lib/api", () => ({

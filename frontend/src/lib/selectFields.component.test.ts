@@ -89,6 +89,43 @@ describe("reconcileSelectFields case-insensitive matching", () => {
       { name: "extra", keep: true },
     ]);
   });
+
+  it("retains unchecked fields across a temporary upstream shrink/grow (run race)", () => {
+    // Reproduce: deselect b, probe briefly returns only a+c (projection /
+    // mid-run), then full columns return -- b must stay keep:false, not be
+    // re-appended as keep:true.
+    const selected: SelField[] = [
+      { name: "a", keep: true },
+      { name: "b", keep: false },
+      { name: "c", keep: true },
+    ];
+    const shrunk = reconcileSelectFields(["a", "c"], selected);
+    expect(shrunk).toEqual([
+      { name: "a", keep: true },
+      { name: "b", keep: false },
+      { name: "c", keep: true },
+    ]);
+    const grown = reconcileSelectFields(["a", "b", "c"], shrunk);
+    expect(grown).toEqual([
+      { name: "a", keep: true },
+      { name: "b", keep: false },
+      { name: "c", keep: true },
+    ]);
+    expect(grown.find((f) => f.name === "b")?.keep).toBe(false);
+  });
+
+  it("still drops kept fields that permanently leave upstream", () => {
+    const current: SelField[] = [
+      { name: "a", keep: true },
+      { name: "gone", keep: true },
+      { name: "skip", keep: false },
+    ];
+    const next = reconcileSelectFields(["a"], current);
+    expect(next).toEqual([
+      { name: "a", keep: true },
+      { name: "skip", keep: false },
+    ]);
+  });
 });
 
 describe("select fields follow upstream Input table changes", () => {
@@ -186,7 +223,10 @@ describe("select fields follow upstream Input table changes", () => {
       sel: ["customer_id", "name"],
     });
     expect(next).not.toBe(nodes);
+    // kept fields that left upstream are dropped; unchecked fields are
+    // retained (tombstones) so a later reappearance cannot re-select them.
     expect(next[1].config.fields).toEqual([
+      { name: "amount", keep: false },
       { name: "customer_id", keep: true },
       { name: "name", keep: true },
     ]);

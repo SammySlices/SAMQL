@@ -195,6 +195,7 @@ frontend/src/components/nodeflow/useNodeFlowGraphController.ts
 frontend/src/components/nodeflow/useNodeFlowGraphSnapshot.component.test.ts
 frontend/src/components/nodeflow/useNodeFlowGraphSnapshot.ts
 frontend/src/components/nodeflow/useNodeFlowInspectorController.cache.component.test.tsx
+frontend/src/components/nodeflow/useNodeFlowInspectorController.stalePrune.component.test.tsx
 frontend/src/components/nodeflow/useNodeFlowInspectorController.tsx
 frontend/src/components/nodeflow/useNodeFlowKeyboardShortcuts.ts
 frontend/src/components/nodeflow/useNodeFlowViewport.ts
@@ -225,6 +226,7 @@ frontend/src/lib/api.ts
 frontend/src/lib/apiProfiles.ts
 frontend/src/lib/chartOption.component.test.ts
 frontend/src/lib/chartOption.ts
+frontend/src/lib/columnLineage.component.test.ts
 frontend/src/lib/columnLineage.ts
 frontend/src/lib/commandPaletteTools.component.test.tsx
 frontend/src/lib/connectionProfiles.component.test.ts

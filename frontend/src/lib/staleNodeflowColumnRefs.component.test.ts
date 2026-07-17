@@ -112,4 +112,14 @@ describe("clearStaleNodeflowColumnRefs", () => {
       ),
     ).toBeNull();
   });
+
+  it("returns null when there is nothing to prune (no toast path)", () => {
+    expect(
+      clearStaleNodeflowColumnRefs(
+        "sort",
+        { sorts: [{ col: "a", dir: "asc" }] },
+        [],
+      ),
+    ).toBeNull();
+  });
 });

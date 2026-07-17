@@ -58,7 +58,7 @@ export function assistantModelBadge(modelName?: string | null): string {
  * Detachable SQL assistant chat panel (beta).
  *
  * Launchers live in the IDE toolbar and Journal chrome; this component owns
- * the floating draggable panel only. Talks to /api/assistant/* which gates
+ * the floating draggable panel only. Talks to the assistant API routes which gate
  * on DuckDB idle and either a local llama.cpp pack or a configured
  * OpenAI-compatible API. When allowInsert is true, inserts/loads SQL into
  * the IDE via parent callbacks. From Journal, allowInsert is false so only

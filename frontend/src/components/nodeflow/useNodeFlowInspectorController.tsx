@@ -15,7 +15,10 @@ import {
   setNodeflowColsCache,
 } from "../../lib/nodeflowColumnsCache";
 import { runAfterPaint } from "../../lib/prettyStruct";
-import { staleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
+import {
+  clearStaleNodeflowColumnRefs,
+  staleNodeflowColumnRefs,
+} from "../../lib/staleNodeflowColumnRefs";
 import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import type { NodeFlowInspectorContext } from "./NodeFlowInspector";
 
@@ -387,6 +390,39 @@ export function useNodeFlowInspectorController({
     if (!sel) return [];
     return staleNodeflowColumnRefs(sel.type, sel.config || {}, inspCols);
   }, [sel, inspCols]);
+
+  // F2: when upstream columns arrive and the selected node still has WARN
+  // stale refs, auto-apply the same prune as Clear once per distinct stale
+  // set, then toast. Banner stays only if anything remains after prune.
+  // Cross-cutting: same inspector reconcile path as select/pivot field sync;
+  // does not touch load/JSON/join execution — only node config refs.
+  const autoPrunedStaleSigRef = useRef("");
+  useEffect(() => {
+    if (!sel || !staleColRefs.length) return;
+    const sig = [
+      sel.id,
+      staleColRefs
+        .map((r) => `${r.area}:${[...r.columns].map((c) => c.toLowerCase()).sort().join(",")}`)
+        .sort()
+        .join(";"),
+      Object.keys(inspCols)
+        .sort()
+        .map((p) => `${p}=${(inspCols[p] || []).join(",")}`)
+        .join("|"),
+    ].join("\0");
+    if (autoPrunedStaleSigRef.current === sig) return;
+    const next = clearStaleNodeflowColumnRefs(
+      sel.type,
+      sel.config || {},
+      staleColRefs,
+    );
+    if (!next) return;
+    autoPrunedStaleSigRef.current = sig;
+    patch(sel.id, next);
+    const nodeName = String(sel.config?.label || "").trim() || sel.type;
+    runtime.onToast("ok", `Removed stale column refs on ${nodeName}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey, selId, inspCols, staleColRefs]);
 
   const seedSelectFields = () => {
     if (sel && inspCols.in)

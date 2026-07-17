@@ -601,6 +601,9 @@ export default function App() {
   // applied as a body class so the NodeFlow canvas CSS can pick it up
   const [ivoryCanvas, setIvoryCanvas] = useState(() => {
     try {
+      const theme = window.localStorage?.getItem("samql.theme");
+      if (theme === "light") return true;
+      if (theme === "dark") return false;
       return window.localStorage?.getItem("samql.canvasIvory") === "1";
     } catch {
       return false;
@@ -685,9 +688,13 @@ export default function App() {
       /* ignore */
     }
   }, [nodeFlowDense]);
-  // optional ivory background for the SQL editor (separate toggle in Settings)
+  // optional ivory background for the SQL editor (paired with canvas under
+  // Visual Toggles → light mode)
   const [ivoryEditor, setIvoryEditor] = useState(() => {
     try {
+      const theme = window.localStorage?.getItem("samql.theme");
+      if (theme === "light") return true;
+      if (theme === "dark") return false;
       return window.localStorage?.getItem("samql.editorIvory") === "1";
     } catch {
       return false;
@@ -701,6 +708,22 @@ export default function App() {
       /* ignore */
     }
   }, [ivoryEditor]);
+  // Full app light/dark theme (CSS variables on <html>). Synced with the
+  // Visual Toggles light switch (ivory canvas + editor + theme-light).
+  const lightTheme = !!(ivoryCanvas && ivoryEditor);
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("theme-light", lightTheme);
+    root.setAttribute("data-theme", lightTheme ? "light" : "dark");
+    try {
+      window.localStorage?.setItem(
+        "samql.theme",
+        lightTheme ? "light" : "dark",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [lightTheme]);
   const [exiting, setExiting] = useState<null | "kept" | "stopped">(null);
   // While true, the browser shows a native "leave site?" prompt on tab
   // close / reload. We flip it off only for an intentional exit.
@@ -2912,10 +2935,10 @@ export default function App() {
                     data-testid="settings-theme-toggle"
                     aria-checked={!!(ivoryCanvas && ivoryEditor)}
                     aria-pressed={!!(ivoryCanvas && ivoryEditor)}
-                    title="Switch the whole app between light (ivory) and dark"
+                    title="Switch the whole app between light and dark (chrome, menus, canvas, editor)"
                     onClick={() => {
-                      // one switch for the whole app: light = ivory canvas +
-                      // ivory editor; dark = both dark. Flip them together.
+                      // one switch for the whole app: light = CSS theme-light
+                      // + ivory canvas/editor; dark = both dark.
                       const goLight = !(ivoryCanvas && ivoryEditor);
                       setIvoryCanvas(goLight);
                       setIvoryEditor(goLight);

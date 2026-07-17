@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SqlAssistant, assistantModelBadge } from "./SqlAssistant";
 
-const copyTextMock = vi.fn(async () => undefined);
+const copyTextMock = vi.fn(async (_text: string) => undefined);
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -11,7 +11,7 @@ vi.mock("../lib/api", () => ({
     assistantChat: vi.fn(),
     assistantCancel: vi.fn(),
   },
-  copyText: (...args: unknown[]) => copyTextMock(...args),
+  copyText: (text: string) => copyTextMock(text),
 }));
 
 import { api } from "../lib/api";

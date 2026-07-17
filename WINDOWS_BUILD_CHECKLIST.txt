@@ -70,6 +70,22 @@ EXPECT both commands to pass before any executable packaging begins.
      (or dist\SamQL.exe --help before the onedir copy)
      EXPECT: the argparse help with --port, --browser, --no-server;
      exit code 0.
+3.4  CODE SIGNING (optional — never required to finish a build).
+     Plain `.\build.ps1` leaves BOTH exes unsigned and still succeeds.
+     That is the CI / local default. For bank/IT-friendly distribution
+     (SmartScreen / AppLocker), pass a real OV/EV code-signing cert:
+
+       PS> .\build.ps1 -CertThumbprint <sha1-of-store-cert>
+       PS> .\build.ps1 -CertPath .\codesign.pfx -CertPassword '...'
+       PS> .\build.ps1 -NoSign   # force unsigned even if a cert is set
+
+     EXPECT when no cert / -NoSign: console lines saying the exes are
+     left unsigned (or "-NoSign"), and packaging continues.
+     EXPECT when a cert is supplied: Windows SDK signtool signs
+     SamQL-AppWindow.exe and SamQL.exe with SHA-256 + RFC-3161
+     timestamp, then `signtool verify` succeeds for each. Missing
+     signtool with a cert requested is a hard error; omit the cert
+     flags (or use -NoSign) to stay unsigned. See DISTRIBUTION.md.
 
 ----------------------------------------------------------------------
 4. LAUNCHER BEHAVIOR (the .456 contracts, live)

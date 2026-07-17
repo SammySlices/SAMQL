@@ -79,6 +79,8 @@ describe("ColumnLineageModal", () => {
             expression: "[UniqueID]",
             inputs: ["UniqueID"],
             output: "MaturityDate",
+            op: "formula",
+            transform: "UniqueID → [UniqueID] → MaturityDate",
             unchanged: false,
           },
         },
@@ -115,11 +117,82 @@ describe("ColumnLineageModal", () => {
     expect(stages[1]).toHaveAttribute("data-stage-kind", "derived");
     expect(stages[0].textContent).toMatch(/UniqueID/);
     expect(stages[1].textContent).toMatch(/MaturityDate/);
+    expect(screen.getAllByTestId("column-lineage-transform-mini")[1].textContent)
+      .toMatch(/UniqueID → \[UniqueID\] → MaturityDate/);
 
     await act(async () => {
       fireEvent.click(stages[1]);
     });
     expect(onHighlight).toHaveBeenCalledWith("f4");
+    expect(screen.getByTestId("column-lineage-transform")).toBeInTheDocument();
+    expect(screen.getByTestId("column-lineage-transform-line").textContent).toMatch(
+      /UniqueID → \[UniqueID\] → MaturityDate/,
+    );
+    expect(screen.getByTestId("column-lineage-op").textContent).toMatch(
+      /\[UniqueID\]/,
+    );
+  });
+
+  it("shows type / group-by / join specifics in the detail panel", async () => {
+    columnLineage.mockResolvedValue({
+      ok: true,
+      available: true,
+      column: "sum_amount",
+      stages: [
+        {
+          id: "src:out:amount",
+          kind: "source",
+          column: "amount",
+          node_id: "src",
+          node_type: "createtable",
+          node_label: "Orders",
+          step: "createtable",
+          change: {
+            summary: "Loaded from Orders",
+            inputs: [],
+            output: "amount",
+            op: "load",
+            transform: "Orders → load → amount",
+          },
+        },
+        {
+          id: "agg:out:sum_amount",
+          kind: "derived",
+          column: "sum_amount",
+          node_id: "agg",
+          node_type: "summarize",
+          node_label: "Totals",
+          step: "summarize",
+          change: {
+            summary: "sum(amount) → sum_amount",
+            expression: "sum(amount)",
+            inputs: ["amount"],
+            output: "sum_amount",
+            op: "sum",
+            transform: "amount → sum(amount) → sum_amount",
+            group_by: ["region"],
+            unchanged: false,
+          },
+        },
+      ],
+    });
+
+    render(
+      <ColumnLineageModal
+        open={{
+          column: "sum_amount",
+          graph: { nodes: [], edges: [] },
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("column-lineage-group-by")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("column-lineage-group-by").textContent).toMatch(
+      /region/,
+    );
   });
 
   it("renders value-history when cell context is provided", async () => {

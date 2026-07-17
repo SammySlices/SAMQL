@@ -423,8 +423,8 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {staleColRefs.length > 0 && (
                 <div className="nb2-warn-sm" data-testid="stale-col-refs-warn">
                   <strong>Stale column references.</strong> Saved fields below are
-                  no longer in upstream data (after a rename or drop). Update them
-                  before running — config is not auto-changed.
+                  still missing from upstream after auto-prune (rename/drop). Update
+                  them before running, or clear the leftovers.
                   <ul className="nb2-stale-list">
                     {staleColRefs.map(({ area, columns }) => (
                       <li key={area}>

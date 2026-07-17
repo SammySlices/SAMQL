@@ -5,12 +5,13 @@ import {
   ExportResultsButton,
   ExportResultsCtxItem,
 } from "../components/ExportResultsMenu";
+import type { ExportFormatOption } from "./resultExportFormats";
 
-const formats = [
+const formats: ExportFormatOption[] = [
   ["csv", "CSV"],
   ["json", "JSON"],
   ["parquet", "Parquet"],
-] as const;
+];
 
 describe("ExportResultsMenu", () => {
   beforeEach(() => {

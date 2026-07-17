@@ -77,10 +77,11 @@ describe("Settings View consolidations", () => {
   beforeEach(() => {
     localStorage.clear();
     setNodeFlowDenseMode(false);
-    document.documentElement.classList.remove("eye-care", "nb-dense");
+    document.documentElement.classList.remove("eye-care", "nb-dense", "theme-light");
     document.documentElement.removeAttribute("data-eye-care");
     document.documentElement.removeAttribute("data-nb-dense");
-    document.body.classList.remove("motion-reduced");
+    document.documentElement.setAttribute("data-theme", "dark");
+    document.body.classList.remove("motion-reduced", "canvas-ivory", "editor-ivory");
     apiMock.health.mockClear();
     apiMock.tables.mockClear();
   });
@@ -208,8 +209,23 @@ describe("Settings View consolidations", () => {
       expect(theme).toHaveTextContent("Toggle Dark Mode");
       expect(localStorage.getItem("samql.canvasIvory")).toBe("1");
       expect(localStorage.getItem("samql.editorIvory")).toBe("1");
+      expect(localStorage.getItem("samql.theme")).toBe("light");
       expect(document.body.classList.contains("canvas-ivory")).toBe(true);
       expect(document.body.classList.contains("editor-ivory")).toBe(true);
+      expect(document.documentElement.classList.contains("theme-light")).toBe(
+        true,
+      );
+      expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    });
+
+    fireEvent.click(theme);
+    await waitFor(() => {
+      expect(theme).toHaveTextContent("Toggle Light Mode");
+      expect(localStorage.getItem("samql.theme")).toBe("dark");
+      expect(document.documentElement.classList.contains("theme-light")).toBe(
+        false,
+      );
+      expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
     });
 
     fireEvent.click(motion);

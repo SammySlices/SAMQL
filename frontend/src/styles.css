@@ -70,6 +70,50 @@
   --eye-care-scale: 1;
 }
 
+/* Light theme (Settings → Visual Toggles → Toggle Light Mode).
+   Cool green-tinted neutrals + SamQL accent — not purple/cream defaults.
+   Applied on <html> so every var(--*) surface flips together. */
+html.theme-light,
+html[data-theme="light"] {
+  --bg: #f2f5f1;
+  --panel: #ffffff;
+  --panel-2: #e9eee8;
+  --raised: #e2e8e0;
+  --raised-2: #d5ddd2;
+  --border: #c9d2c6;
+  --border-strong: #aeb9aa;
+  --text: #1a211c;
+  --text-dim: #4a554e;
+  --text-faint: #6a746c;
+
+  --accent: #3f9a36;
+  --accent-hi: #2f7a2a;
+  --accent-dim: #54b949;
+  --accent-fade: rgba(63, 154, 54, 0.12);
+  --accent-line: rgba(63, 154, 54, 0.4);
+  --menu-hl: rgba(84, 185, 73, 0.28);
+  --menu-hl-text: var(--text);
+
+  color-scheme: light;
+
+  --duck: #b8860b;
+  --duck-fade: rgba(184, 134, 11, 0.12);
+  --remote: #2f6fbf;
+  --remote-fade: rgba(47, 111, 191, 0.12);
+
+  --error: #c43c2a;
+  --error-fade: rgba(196, 60, 42, 0.12);
+  --warn: #b07a1a;
+  --info: #2f6fbf;
+
+  --shadow: 0 8px 28px rgba(26, 33, 28, 0.12);
+}
+
+html.theme-light select,
+html[data-theme="light"] select {
+  color-scheme: light;
+}
+
 /* Eye Care enlarges the whole surface together so buttons, nodes, panels,
    and type stay proportional. Chromium/Edge `zoom` scales layout + hit
    targets (transform: scale would misalign fixed modals and clicks). */
@@ -155,13 +199,13 @@ body {
   height: 11px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3a404b;
+  background: var(--border-strong);
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #4a515e;
+  background: var(--text-faint);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-corner {
@@ -7990,9 +8034,14 @@ label.chk input[type="checkbox"],
   stroke: var(--border-strong);
 }
 .col-lineage-node.active .col-lineage-card {
-  stroke: #fff;
+  stroke: var(--text);
   stroke-width: 2.25;
-  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.45));
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.35));
+}
+html.theme-light .col-lineage-node.active .col-lineage-card,
+html[data-theme="light"] .col-lineage-node.active .col-lineage-card {
+  stroke: var(--accent-hi);
+  filter: drop-shadow(0 0 6px var(--accent-fade));
 }
 .col-lineage-kicker {
   fill: var(--text-faint);
@@ -8015,8 +8064,18 @@ label.chk input[type="checkbox"],
   color: var(--text-faint);
   overflow: hidden;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
+}
+.col-lineage-io-transform {
+  flex-wrap: wrap;
+}
+.col-lineage-transform-line {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-word;
 }
 .col-lineage-values {
   border: 1px solid var(--border);
@@ -8055,8 +8114,13 @@ label.chk input[type="checkbox"],
   min-height: 36px;
 }
 .col-lineage-value-step.focus .col-lineage-value-dot {
-  background: #fff;
+  background: var(--text);
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
+}
+html.theme-light .col-lineage-value-step.focus .col-lineage-value-dot,
+html[data-theme="light"] .col-lineage-value-step.focus .col-lineage-value-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-fade);
 }
 .col-lineage-value-rail {
   display: flex;
@@ -8107,6 +8171,13 @@ label.chk input[type="checkbox"],
 .col-lineage-value-chip.on {
   border-color: rgba(255, 255, 255, 0.55);
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12);
+}
+html.theme-light .col-lineage-value-chip:hover,
+html.theme-light .col-lineage-value-chip.on,
+html[data-theme="light"] .col-lineage-value-chip:hover,
+html[data-theme="light"] .col-lineage-value-chip.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-fade);
 }
 .col-lineage-value-missing {
   font-size: 12px;

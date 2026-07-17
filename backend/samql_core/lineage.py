@@ -457,10 +457,25 @@ def build_field_lineage(session, graph):
             "sql_flagged": sql_set}
 
 
+def _transform_line(inputs, op, output):
+    """Compact ``inputs → op → output`` line for diagrams and detail panels."""
+    left = ", ".join(str(x) for x in (inputs or []) if x) or "—"
+    mid = (op or "passthrough").strip() or "passthrough"
+    right = (output or "").strip() or "—"
+    return "%s → %s → %s" % (left, mid, right)
+
+
 def _describe_change(node, rec, col):
     """Structural before→after description for how ``col`` is produced at
     ``node``. Discovery-only: reads node config + the lineage record, never
-    materializes full tables."""
+    materializes full tables.
+
+    Each change carries a richer transform summary::
+
+        inputs → expression/op → output
+
+    plus optional type / filter / join / summarize specifics from node cfg.
+    """
     typ = node.get("type") or ""
     cfg = node.get("config") or {}
     kind = rec.get("kind") or "unknown"
@@ -475,13 +490,30 @@ def _describe_change(node, rec, col):
         "mapping": None,
         "predicate": None,
         "unchanged": kind == "passthrough",
+        # Richer per-stage transform (additive; older clients ignore these).
+        "op": None,
+        "transform": None,
+        "type_from": None,
+        "type_to": None,
+        "group_by": None,
+        "join_how": None,
     }
+
+    def _finish(op, transform=None, **extra):
+        change["op"] = op
+        for k, v in extra.items():
+            change[k] = v
+        change["transform"] = transform or _transform_line(
+            change.get("inputs"), op, change.get("output") or col)
+        return change
 
     if kind == "source":
         fname = rec.get("file") or cfg.get("table") or label
         change["summary"] = "Loaded from %s" % fname
+        change["detail"] = "Source column from input file / table"
         change["unchanged"] = False
-        return change
+        change["inputs"] = []
+        return _finish("load", "%s → load → %s" % (fname, col))
 
     if kind == "sql":
         change["summary"] = "Opaque %s boundary" % (
@@ -491,7 +523,8 @@ def _describe_change(node, rec, col):
         change["expression"] = (expr[:500] + ("…" if len(expr) > 500 else "")
                                 ) if expr else None
         change["unchanged"] = False
-        return change
+        op = "SQL" if typ == "sql" else (typ or "code")
+        return _finish(op, _transform_line(srcs or ["…"], op, col))
 
     if typ == "formula":
         for f in (cfg.get("formulas") or []):
@@ -503,9 +536,11 @@ def _describe_change(node, rec, col):
             change["expression"] = expr or None
             change["detail"] = ("Inputs: %s" % ", ".join(srcs)) if srcs else ""
             change["unchanged"] = False
-            return change
+            op_txt = expr or "formula"
+            return _finish("formula", _transform_line(srcs, op_txt, col))
 
     if typ == "summarize":
+        groups = [g for g in (cfg.get("group_by") or []) if g]
         for a in (cfg.get("aggs") or []):
             acol = (a.get("col") or "").strip()
             func = _norm(a.get("func"))
@@ -513,17 +548,25 @@ def _describe_change(node, rec, col):
                     or ("%s_%s" % (func, acol)))
             if _norm(name) != _norm(col):
                 continue
-            groups = [g for g in (cfg.get("group_by") or []) if g]
-            change["summary"] = "%s(%s) → %s" % (func or "agg", acol or "?",
-                                                 col)
-            change["expression"] = "%s(%s)" % (func or "agg", acol or "?")
+            expr = "%s(%s)" % (func or "agg", acol or "?")
+            change["summary"] = "%s → %s" % (expr, col)
+            change["expression"] = expr
             change["detail"] = ("Group by %s" % ", ".join(groups)
                                 if groups else "No group keys")
             change["unchanged"] = False
-            return change
+            change["inputs"] = [acol] if acol else list(srcs)
+            return _finish(
+                func or "agg",
+                _transform_line(change["inputs"], expr, col),
+                group_by=list(groups) or None)
         change["summary"] = "Group key (value unchanged)"
+        change["detail"] = ("Group by %s" % ", ".join(groups)
+                            if groups else "Group key")
         change["unchanged"] = True
-        return change
+        return _finish(
+            "group key",
+            _transform_line([col], "group key", col),
+            group_by=list(groups) or None)
 
     if typ == "select":
         for f in (cfg.get("fields") or []):
@@ -538,26 +581,39 @@ def _describe_change(node, rec, col):
                 change["summary"] = "Rename %s → %s" % (name, alias)
                 change["mapping"] = {"from": name, "to": alias}
                 change["unchanged"] = False
-            elif ty:
+                op = "rename"
+                if ty:
+                    change["type_to"] = ty
+                    change["expression"] = "CAST(%s AS %s)" % (name, ty)
+                    change["detail"] = "Rename with cast to %s" % ty
+                    op = "rename+cast"
+                return _finish(
+                    op,
+                    _transform_line([name], op, alias),
+                    type_to=ty or None)
+            if ty:
                 change["summary"] = "Cast %s as %s" % (alias, ty)
                 change["detail"] = "Values unchanged; type only"
                 change["unchanged"] = True
-            else:
-                change["summary"] = "Selected (unchanged)"
-                change["unchanged"] = True
-            if ty:
                 change["expression"] = "CAST(%s AS %s)" % (name or alias, ty)
-            return change
+                change["type_to"] = ty
+                return _finish(
+                    "cast",
+                    _transform_line([name or alias], "CAST AS %s" % ty, alias),
+                    type_to=ty)
+            change["summary"] = "Selected (unchanged)"
+            change["unchanged"] = True
+            return _finish("select", _transform_line([name], "select", alias))
 
     if typ == "renamecols":
         if srcs and _norm(srcs[0]) != _norm(col):
             change["summary"] = "Rename %s → %s" % (srcs[0], col)
             change["mapping"] = {"from": srcs[0], "to": col}
             change["unchanged"] = False
-        else:
-            change["summary"] = "Rename pass-through"
-            change["unchanged"] = True
-        return change
+            return _finish("rename", _transform_line([srcs[0]], "rename", col))
+        change["summary"] = "Rename pass-through"
+        change["unchanged"] = True
+        return _finish("rename", _transform_line([col], "rename", col))
 
     if typ in ("join", "antijoin", "crossjoin", "multijoin"):
         pairs = [(k.get("left"), k.get("right"))
@@ -579,7 +635,11 @@ def _describe_change(node, rec, col):
         if kind == "derived":
             change["detail"] = ((change["detail"] + "; ") if change["detail"]
                                 else "") + "New column from join inputs"
-        return change
+        op = "%s join" % how
+        return _finish(
+            op,
+            _transform_line(srcs or [col], "%s on %s" % (op, key_txt), col),
+            join_how=how)
 
     if typ == "filter":
         pred = (cfg.get("condition") or cfg.get("expr") or "").strip()
@@ -587,12 +647,14 @@ def _describe_change(node, rec, col):
         change["predicate"] = pred or None
         change["detail"] = ("Keep where %s" % pred) if pred else "Row filter"
         change["unchanged"] = True
-        return change
+        op = "filter"
+        mid = ("filter(%s)" % pred) if pred else "filter"
+        return _finish(op, _transform_line([col], mid, col))
 
     if typ == "sort":
         keys = cfg.get("keys") or cfg.get("order") or []
+        bits = []
         if isinstance(keys, list) and keys:
-            bits = []
             for k in keys:
                 if isinstance(k, dict):
                     bits.append("%s %s" % (
@@ -603,36 +665,41 @@ def _describe_change(node, rec, col):
             change["detail"] = "Order by %s" % ", ".join(bits)
         change["summary"] = "Sort rows (values unchanged)"
         change["unchanged"] = True
-        return change
+        mid = ("sort(%s)" % ", ".join(bits)) if bits else "sort"
+        return _finish("sort", _transform_line([col], mid, col))
 
     if typ in ("sample", "topn", "limit"):
         n = cfg.get("n") or cfg.get("limit") or cfg.get("count")
         change["summary"] = "Keep a subset of rows"
         change["detail"] = ("Keep %s rows" % n) if n else ("via %s" % typ)
         change["unchanged"] = True
-        return change
+        mid = ("%s(%s)" % (typ, n)) if n else typ
+        return _finish(typ, _transform_line([col], mid, col))
 
     if typ in _TRANSPARENT:
         change["summary"] = "Unchanged through %s" % (label or typ)
         change["unchanged"] = True
-        return change
+        return _finish(typ, _transform_line([col], typ, col))
 
     if kind == "passthrough":
         if srcs and _norm(srcs[0]) != _norm(col):
             change["summary"] = "Pass-through rename %s → %s" % (srcs[0], col)
             change["mapping"] = {"from": srcs[0], "to": col}
             change["unchanged"] = False
-        else:
-            change["summary"] = "Unchanged through %s" % (label or typ)
-            change["unchanged"] = True
-        return change
+            return _finish(
+                "rename", _transform_line([srcs[0]], "rename", col))
+        change["summary"] = "Unchanged through %s" % (label or typ)
+        change["unchanged"] = True
+        return _finish(
+            typ or "passthrough",
+            _transform_line([col], typ or "passthrough", col))
 
     step = rec.get("step") or typ or "derived"
     change["summary"] = "Derived by %s" % step
     if srcs:
         change["detail"] = "From %s" % ", ".join(srcs)
     change["unchanged"] = False
-    return change
+    return _finish(step, _transform_line(srcs, step, col))
 
 
 def _should_emit_stage(typ, rec, col):

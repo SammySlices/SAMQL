@@ -160,7 +160,7 @@ function dropDeadNames(names: string[] | undefined, dead: Set<string>): string[]
   return (names || []).filter((n) => !isDead(n, dead));
 }
 
-/** User-initiated: drop only the WARN-listed stale names from config (no silent prune). */
+/** Drop WARN-listed stale names from config (manual Clear or auto-prune + toast). */
 export function clearStaleNodeflowColumnRefs(
   nodeType: NodeType,
   config: Record<string, any>,

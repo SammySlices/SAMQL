@@ -265,7 +265,7 @@ describe("NodeFlowInspector", () => {
     expect(doFetchApi).toHaveBeenCalled();
   });
 
-  it("shows stale column reference warning without mutating config (F2)", () => {
+  it("shows residual stale column warning banner when refs remain (F2)", () => {
     const node: NbNode = {
       id: "sort-1",
       type: "sort",
@@ -284,6 +284,9 @@ describe("NodeFlowInspector", () => {
     );
     expect(screen.getByTestId("stale-col-refs-warn")).toBeInTheDocument();
     expect(screen.getByText(/Stale column references/i)).toBeInTheDocument();
+    expect(screen.getByTestId("stale-col-refs-warn")).toHaveTextContent(
+      /after auto-prune/i,
+    );
     expect(screen.getByTestId("stale-col-refs-warn")).toHaveTextContent("old_name");
     expect(patch).not.toHaveBeenCalled();
   });

@@ -84,7 +84,12 @@ _MUTEX_WINDOW_GRACE_S = 100.0
 # supervisor respawns it so the window's Reconnect finds a live server
 # instead of nothing. Off once the window closes; the launcher then stops
 # the server it started so nothing is left in Task Manager.
-_SUPERVISE = {"on": False, "port": None, "restarts": 0}
+# .629: also refuse to respawn after a clean /api/shutdown (exit code 0)
+# and join the supervisor thread on stop so a mid-flight restart cannot
+# leave an orphan SamQL.exe in Task Manager after Exit & stop / window close.
+_SUPERVISE = {"on": False, "port": None, "restarts": 0, "thread": None}
+_SERVER_LOCK = threading.Lock()
+
 
 
 def _bundled_asset(name):
@@ -381,46 +386,47 @@ def start_server(port, splash):
     _own_mei = getattr(sys, "_MEIPASS", None)
     if _own_mei:
         env["SAMQL_LAUNCHER_MEI"] = _own_mei
-    for kind, path in server_candidates():
-        if not os.path.isfile(path):
-            continue
-        try:
-            if kind == "exe":
-                # --no-browser: the LAUNCHER owns window-opening; the
-                # server's own auto-open gave the on-box double window
-                # (a normal tab AND the app window).
-                # Pass --port explicitly -- SAMQL_PORT alone is not read by
-                # server.py, so a non-default launcher --port must be argv.
-                # .512: KEEP the handle -- after revoke/restart we can reap it.
-                globals()["_SERVER_PROC"] = subprocess.Popen(
-                    [path, "--no-browser", "--port", str(port)],
-                    creationflags=creation,
-                    startupinfo=startup, env=env,
-                    cwd=os.path.dirname(path))
-            elif kind == "self":
-                globals()["_SERVER_PROC"] = subprocess.Popen(
-                    [path, "--serve", "--port", str(port)],
-                    creationflags=creation,
-                    startupinfo=startup, env=env,
-                    cwd=os.path.dirname(path))
-            else:
-                py = None if getattr(sys, "frozen", False) \
-                    else sys.executable
-                if py is None:
-                    import shutil as _sh
-                    py = _sh.which("python") or _sh.which("py")
-                if not py:
-                    continue
-                globals()["_SERVER_PROC"] = subprocess.Popen(
-                    [py, path, "--no-browser", "--port", str(port)],
-                    creationflags=creation,
-                    startupinfo=startup, env=env,
-                    cwd=os.path.dirname(
-                        os.path.dirname(path)))
-            write_log("INFO started server via %s" % path)
-            return True
-        except Exception as e:
-            write_log("WARN could not start %s (%s)" % (path, e))
+    with _SERVER_LOCK:
+        for kind, path in server_candidates():
+            if not os.path.isfile(path):
+                continue
+            try:
+                if kind == "exe":
+                    # --no-browser: the LAUNCHER owns window-opening; the
+                    # server's own auto-open gave the on-box double window
+                    # (a normal tab AND the app window).
+                    # Pass --port explicitly -- SAMQL_PORT alone is not read by
+                    # server.py, so a non-default launcher --port must be argv.
+                    # .512: KEEP the handle -- after revoke/restart we can reap it.
+                    globals()["_SERVER_PROC"] = subprocess.Popen(
+                        [path, "--no-browser", "--port", str(port)],
+                        creationflags=creation,
+                        startupinfo=startup, env=env,
+                        cwd=os.path.dirname(path))
+                elif kind == "self":
+                    globals()["_SERVER_PROC"] = subprocess.Popen(
+                        [path, "--serve", "--port", str(port)],
+                        creationflags=creation,
+                        startupinfo=startup, env=env,
+                        cwd=os.path.dirname(path))
+                else:
+                    py = None if getattr(sys, "frozen", False) \
+                        else sys.executable
+                    if py is None:
+                        import shutil as _sh
+                        py = _sh.which("python") or _sh.which("py")
+                    if not py:
+                        continue
+                    globals()["_SERVER_PROC"] = subprocess.Popen(
+                        [py, path, "--no-browser", "--port", str(port)],
+                        creationflags=creation,
+                        startupinfo=startup, env=env,
+                        cwd=os.path.dirname(
+                            os.path.dirname(path)))
+                write_log("INFO started server via %s" % path)
+                return True
+            except Exception as e:
+                write_log("WARN could not start %s (%s)" % (path, e))
     return False
 
 
@@ -440,23 +446,55 @@ def restart_server(port):
     bundled --serve self-spawn), then waits with the same heartbeat
     boot semantics as cold start. Returns True once the server answers.
     Safe to call from the supervisor thread or an API-triggered path;
-    never raises."""
+    never raises.
+
+    .629: refuse to spawn when supervision is off (window closing / Exit
+    & stop), and reap anything we started if the flag flipped mid-flight.
+    """
     try:
         if _server_alive_now(port):
             return True
+        # Refuse to spawn when supervision is off (window closing / Exit &
+        # stop). Alive short-circuit above still works for explicit callers.
+        if not _SUPERVISE.get("on"):
+            return False
         # a dead handle may still be mapped; best-effort reap first
-        proc = globals().get("_SERVER_PROC")
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                pass
+        with _SERVER_LOCK:
+            proc = globals().get("_SERVER_PROC")
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
+        if not _SUPERVISE.get("on"):
+            return False
         if not start_server(port, _NullSplash()):
             write_log("WARN restart_server: nothing to start")
             return False
+        # Window closed / Exit & stop while we were spawning -- kill the
+        # child immediately so Task Manager does not keep an orphan.
+        if not _SUPERVISE.get("on"):
+            write_log("INFO restart_server: supervise off; reaping mid-flight spawn")
+            with _SERVER_LOCK:
+                proc = globals().get("_SERVER_PROC")
+                pid = getattr(proc, "pid", None) if proc is not None else None
+            _kill_process_tree(pid)
+            with _SERVER_LOCK:
+                globals()["_SERVER_PROC"] = None
+            return False
         err = wait_for_server_ready(port, _NullSplash())
         if err is None:
+            if not _SUPERVISE.get("on"):
+                write_log("INFO restart_server: supervise off after boot; "
+                          "reaping respawn")
+                with _SERVER_LOCK:
+                    proc = globals().get("_SERVER_PROC")
+                    pid = getattr(proc, "pid", None) if proc is not None else None
+                _kill_process_tree(pid)
+                with _SERVER_LOCK:
+                    globals()["_SERVER_PROC"] = None
+                return False
             write_log("INFO server is back up on port %d" % port)
             return True
         write_log("WARN restart_server: %s" % err)
@@ -483,16 +521,38 @@ def _supervisor_loop():
     """.546: while the window is open AND we started the server, respawn
     it if it dies. A short grace between checks avoids fighting a
     still-booting server; a burst cap avoids a hot crash-loop (after
-    which the window's banner + manual Reconnect take over)."""
+    which the window's banner + manual Reconnect take over).
+
+    .629: a clean exit (returncode 0 from /api/shutdown / Exit & stop)
+    must NOT respawn -- that was leaving SamQL.exe in Task Manager after
+    the user intentionally stopped the server and closed the window.
+    """
     consecutive = 0
     while _SUPERVISE["on"]:
         try:
             port = _SUPERVISE["port"]
+            # Intentional stop: child exited cleanly -- do not bring it back.
+            proc = globals().get("_SERVER_PROC")
+            if proc is not None and proc.poll() is not None:
+                rc = proc.returncode
+                if rc == 0:
+                    write_log("INFO supervisor: server exited cleanly "
+                              "(code 0); not respawning")
+                    _SUPERVISE["on"] = False
+                    break
             if port and not _server_alive_now(port):
                 # confirm it is really gone (two beats, ~3s) -- a busy
                 # server can miss one health check under load
                 time.sleep(3.0)
                 if not _SUPERVISE["on"]:
+                    break
+                # Re-check clean exit after the grace (shutdown is async).
+                proc = globals().get("_SERVER_PROC")
+                if proc is not None and proc.poll() is not None \
+                        and proc.returncode == 0:
+                    write_log("INFO supervisor: server exited cleanly "
+                              "during grace; not respawning")
+                    _SUPERVISE["on"] = False
                     break
                 if not _server_alive_now(port):
                     consecutive += 1
@@ -503,6 +563,8 @@ def _supervisor_loop():
                         time.sleep(30.0)
                         consecutive = 0
                         continue
+                    if not _SUPERVISE["on"]:
+                        break
                     _SUPERVISE["restarts"] += 1
                     write_log("INFO supervisor: server is down -- "
                               "respawning (restart #%d)"
@@ -525,15 +587,28 @@ def start_supervisor(port):
         return
     _SUPERVISE["on"] = True
     _SUPERVISE["port"] = port
-    import threading
     t = threading.Thread(target=_supervisor_loop, daemon=True,
                          name="samql-server-supervisor")
+    _SUPERVISE["thread"] = t
     t.start()
     write_log("INFO server supervisor started (port %d)" % port)
 
 
 def stop_supervisor():
+    """Flip the supervise flag off and wait for the loop to finish.
+
+    Joining matters: a mid-flight ``restart_server`` must finish (and
+    then reap itself when it sees supervise-off) before ``stop_server``
+    runs, otherwise a newly spawned SamQL.exe can outlive the window.
+    """
     _SUPERVISE["on"] = False
+    t = _SUPERVISE.get("thread")
+    if t is not None and t.is_alive() and t is not threading.current_thread():
+        try:
+            t.join(timeout=12.0)
+        except Exception:
+            pass
+    _SUPERVISE["thread"] = None
 
 
 def _kill_process_tree(pid):
@@ -559,6 +634,36 @@ def _kill_process_tree(pid):
         pass
 
 
+def _pids_listening_on_port(port):
+    """Best-effort PIDs with a LISTENING socket on ``port`` (Windows)."""
+    pids = set()
+    if os.name != "nt" or not port:
+        return pids
+    try:
+        out = subprocess.check_output(
+            ["netstat", "-ano", "-p", "tcp"],
+            stderr=subprocess.DEVNULL, text=True, timeout=5,
+            errors="replace")
+    except Exception:
+        return pids
+    needle = ":%d" % int(port)
+    for line in out.splitlines():
+        if "LISTENING" not in line.upper():
+            continue
+        # TCP    0.0.0.0:8765    0.0.0.0:0    LISTENING    1234
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        local = parts[1] if parts[0].upper() == "TCP" else ""
+        if not local.endswith(needle):
+            continue
+        try:
+            pids.add(int(parts[-1]))
+        except Exception:
+            pass
+    return pids
+
+
 def stop_server(port):
     """.490: gracefully stop the server WE started once the native window
     closes. The launcher owns that server, so 'close the window' should quit
@@ -570,7 +675,12 @@ def stop_server(port):
     actually exits (delayed teardown + ``os._exit``). Wait briefly, then
     kill the process tree so SamQL.exe / python / llama-server never linger
     in Task Manager. Best-effort: every failure swallowed so this never
-    crashes the launcher's own exit."""
+    crashes the launcher's own exit.
+
+    .629: after the Popen wait, also reap any leftover listener on ``port``
+    (supervisor mid-flight respawn / race) so Task Manager cannot keep a
+    second SamQL.exe the launcher no longer holds.
+    """
     try:
         _local_urlopen(
             "http://127.0.0.1:%d/api/shutdown" % port,
@@ -580,30 +690,44 @@ def stop_server(port):
     except Exception as e:
         write_log("INFO server shutdown request failed (%s)"
                   % e.__class__.__name__)
-    proc = globals().get("_SERVER_PROC")
-    if proc is None:
-        return
-    try:
-        # /api/shutdown sleeps ~0.4s then tears down; allow headroom.
-        proc.wait(timeout=8)
-        write_log("INFO server process exited after shutdown request")
-    except Exception:
-        write_log("INFO server still alive after shutdown request; "
-                  "killing process tree")
-        pid = getattr(proc, "pid", None)
-        _kill_process_tree(pid)
+    with _SERVER_LOCK:
+        proc = globals().get("_SERVER_PROC")
+        globals()["_SERVER_PROC"] = None
+    if proc is not None:
         try:
-            proc.wait(timeout=3)
+            # /api/shutdown sleeps ~0.4s then tears down; allow headroom.
+            proc.wait(timeout=8)
+            write_log("INFO server process exited after shutdown request")
         except Exception:
+            write_log("INFO server still alive after shutdown request; "
+                      "killing process tree")
+            pid = getattr(proc, "pid", None)
+            _kill_process_tree(pid)
             try:
-                proc.kill()
+                proc.wait(timeout=3)
             except Exception:
-                pass
-            try:
-                proc.wait(timeout=2)
-            except Exception:
-                pass
-    globals()["_SERVER_PROC"] = None
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+    # Belt-and-suspenders: anything still LISTENING on our port (a
+    # supervisor respawn that swapped _SERVER_PROC, or a stuck child)
+    # must die with the window.
+    try:
+        if port_open(port):
+            leftovers = _pids_listening_on_port(port)
+            own = os.getpid()
+            for pid in leftovers:
+                if pid and pid != own:
+                    write_log("INFO reaping leftover listener pid %s on "
+                              "port %d" % (pid, port))
+                    _kill_process_tree(pid)
+    except Exception:
+        pass
 
 
 # ------------------------------------------------- single instance
@@ -2432,12 +2556,14 @@ def main(argv=None):
     # closed. Falls through to a chromeless Edge/Chrome window when pywebview
     # isn't bundled, so the launcher still works on a bare stdlib interpreter.
     if open_native_window(url, args, splash):
-        stop_supervisor()  # .546: window closed -> stop respawning
+        stop_supervisor()  # .546/.629: window closed -> stop + join supervisor
         write_log("INFO native window closed; launcher done")
         # Window close must not leave SamQL.exe / python / llama-server in
         # Task Manager. Stop the server WE started (graceful /api/shutdown
         # + reap). A server we only reattached to is left alone -- the
         # in-app Exit modal still offers "keep server" / "stop server".
+        # .629: join supervisor BEFORE stop_server so a mid-flight respawn
+        # cannot outlive the window after Exit & stop.
         if we_started_server:
             stop_server(args.port)
             write_log("INFO window closed; stopped the server on port %d"
