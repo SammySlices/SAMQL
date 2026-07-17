@@ -11,7 +11,6 @@ import {
   CREATED_NODES_KEY,
   buildCreatedNodeDefinition,
   loadCreatedNodes,
-  registerActiveEditingDefinitionGetter,
   registerActiveNodeFlowGraphGetter,
   serializeCreatedNodeFile,
   upsertCreatedNode,
@@ -53,12 +52,21 @@ function SettingsMenuHost() {
   return <div>{ui.menu(() => {})}</div>;
 }
 
-describe("Created Node modals — save / export / load", () => {
+describe("Created Node modals — create / export / load", () => {
   beforeEach(() => {
     localStorage.clear();
     toast.mockReset();
     registerActiveNodeFlowGraphGetter(() => sampleGraph());
-    registerActiveEditingDefinitionGetter(null);
+  });
+
+  it("settings menu has Create / Created Nodes but no Export / Load / Save node", () => {
+    render(<SettingsMenuHost />);
+    expect(screen.getByTestId("create-node-menu")).toBeTruthy();
+    expect(screen.getByTestId("manage-created-nodes-menu")).toBeTruthy();
+    expect(screen.queryByText("Export created node…")).toBeNull();
+    expect(screen.queryByText("Load created node…")).toBeNull();
+    expect(screen.queryByTestId("save-node-menu")).toBeNull();
+    expect(screen.queryByText("Save node")).toBeNull();
   });
 
   it("saves the active tab graph as a created node", async () => {
@@ -149,65 +157,6 @@ describe("Created Node modals — save / export / load", () => {
       "ok",
       "Created node loaded",
       expect.stringContaining("Imported"),
-    );
-  });
-
-  it("Save node updates the opened created-node definition ports", () => {
-    const { nodes, edges } = sampleGraph();
-    const built = buildCreatedNodeDefinition("Editable", "Layers", nodes, edges);
-    expect(built.ok).toBe(true);
-    if (!built.ok) return;
-    upsertCreatedNode(built.definition);
-
-    const edited = {
-      nodes: [
-        ...nodes,
-        {
-          id: "di2",
-          type: "dyn_input" as const,
-          x: 0,
-          y: 90,
-          config: { label: "in2" },
-        },
-        {
-          id: "do2",
-          type: "dyn_output" as const,
-          x: 160,
-          y: 90,
-          config: { label: "out2" },
-        },
-      ],
-      edges: [
-        ...edges,
-        {
-          id: "e3",
-          from: { node: "di2", port: "out" },
-          to: { node: "sel", port: "in" },
-        },
-        {
-          id: "e4",
-          from: { node: "sel", port: "out" },
-          to: { node: "do2", port: "in" },
-        },
-      ],
-    };
-    registerActiveNodeFlowGraphGetter(() => edited);
-    registerActiveEditingDefinitionGetter(() => ({
-      id: built.definition.id,
-      name: built.definition.name,
-      icon: built.definition.icon,
-    }));
-
-    render(<SettingsMenuHost />);
-    fireEvent.click(screen.getByTestId("save-node-menu"));
-
-    const saved = loadCreatedNodes().find((d) => d.id === built.definition.id);
-    expect(saved?.inputs).toHaveLength(2);
-    expect(saved?.outputs).toHaveLength(2);
-    expect(toast).toHaveBeenCalledWith(
-      "ok",
-      "Node saved",
-      expect.stringContaining("Editable"),
     );
   });
 });

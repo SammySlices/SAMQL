@@ -402,7 +402,7 @@ describe("Created Nodes — save / export / load / ports", () => {
     expect(loadCreatedNodes()).toHaveLength(1);
   });
 
-  it("rejects Save node when the editing graph has no Dynamic ports", () => {
+  it("rejects updateCreatedNodeDefinition when the editing graph has no Dynamic ports", () => {
     const result = updateCreatedNodeDefinition(
       "bad",
       [{ id: "a", type: "select", x: 0, y: 0, config: {} }],
@@ -414,7 +414,7 @@ describe("Created Nodes — save / export / load / ports", () => {
     expect(result.error).toMatch(/Dynamic Input/);
   });
 
-  it("expands instance ports when Save node adds Dynamic Input/Output", () => {
+  it("expands instance ports when updateCreatedNodeDefinition adds Dynamic Input/Output", () => {
     const { nodes, edges } = simpleGraph();
     const built = buildCreatedNodeDefinition("Grow", "Layers", nodes, edges);
     expect(built.ok).toBe(true);

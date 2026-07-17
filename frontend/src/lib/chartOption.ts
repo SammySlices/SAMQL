@@ -52,12 +52,35 @@ export function exportBackground(style?: ChartStyle): string {
   return style?.theme === "light" ? THEMES.light.bg : THEMES.dark.bg;
 }
 
+/** Align chart entrance with `--dur-modal` (240ms); honor OS / app reduce-motion. */
+export function chartAnimationMs(): number {
+  if (typeof window === "undefined") return 240;
+  try {
+    if (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return 0;
+    }
+  } catch {
+    /* ignore matchMedia failures in odd hosts */
+  }
+  if (
+    typeof document !== "undefined" &&
+    document.body?.classList.contains("motion-reduced")
+  ) {
+    return 0;
+  }
+  return 240;
+}
+
 export function buildChartOption(data: ChartData): Record<string, any> {
   const style: ChartStyle = data.style || {};
   const theme = THEMES[style.theme === "light" ? "light" : "dark"];
   const palette = paletteColors(style.palette);
   const ct = data.chart_type;
   const isLight = style.theme === "light";
+  const animMs = chartAnimationMs();
 
   const tooltip = {
     backgroundColor: theme.bg,
@@ -68,11 +91,11 @@ export function buildChartOption(data: ChartData): Record<string, any> {
     ? { text: style.title, left: "center", textStyle: { color: theme.text, fontSize: 14 } }
     : undefined;
   const base: Record<string, any> = {
-    // .460: charts draw in and TWEEN on re-query instead of snapping.
-    animation: true,
-    animationDuration: 500,
+    // Charts draw in and tween on re-query; duration matches UI chrome (--dur-modal).
+    animation: animMs > 0,
+    animationDuration: animMs,
     animationEasing: "cubicOut",
-    animationDurationUpdate: 350,
+    animationDurationUpdate: animMs > 0 ? Math.round(animMs * 0.85) : 0,
     animationEasingUpdate: "cubicInOut",
     backgroundColor: isLight ? theme.bg : "transparent",
     color: palette,

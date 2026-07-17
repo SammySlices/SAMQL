@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import { Icon } from "../Icon";
 
 export function ReorderList<T>(props: {
   items: T[];
@@ -81,11 +80,11 @@ export function ColumnPicker(props: {
             <>
               <span className="nb2-reorder-name">{c}</span>
               <button
-                className="nb2-reorder-x"
+                className="btn ghost icon xbtn"
                 title="Remove"
                 onClick={() => onChange(chosen.filter((x) => x !== c))}
               >
-                <Icon.X size={12} />
+                ×
               </button>
             </>
           )}

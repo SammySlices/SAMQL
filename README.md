@@ -18,10 +18,10 @@ server does the data work.
   dependencies**: loading files, the SQLite engine, profiling, charting,
   and serving the UI all work on a bare Python interpreter. Optional
   libraries unlock extra speed and formats (see below).
-- **Frontend** — React + TypeScript built with Vite. It has **no runtime
-  dependencies beyond React itself**: the SQL editor, the virtualized data
-  grid, and every chart are hand-written, so the bundle is tiny and the
-  build is dependable.
+- **Frontend** — React + TypeScript built with Vite. Runtime deps are
+  intentionally small: **React** plus **echarts** for the Chart panel.
+  The SQL editor, virtualized data grid, Pivot UI, NodeFlow canvas, and
+  most other surfaces are first-party code.
 - **Packaging** — PyInstaller bundles the backend and the built frontend
   into one executable. Optional libraries are folded in only if they're
   installed when you build.
@@ -412,7 +412,7 @@ streaming uses it (C-accelerated); otherwise a pure-stdlib incremental
 parser is used. (Loading JSON into DuckDB instead keeps the nesting as
 STRUCT/LIST columns via DuckDB's native reader — a different, non-flattened
 shape; see the note on JSON shapes.) **Flatten on load** is **off by default**
-(Storage & memory → Flatten JSON on load, or `POST /api/settings/flatten-json`);
+(Storage & Engine → Flatten JSON on load, or `POST /api/settings/flatten-json`);
 turn it on only when you want nested JSON shredded into relational tables.
 
 **Robust numbers and shapes.** JSON integers larger than 64-bit (e.g. long
@@ -642,23 +642,31 @@ Fully implemented end to end:
 - **Charts** — bar, line, area, pie/donut, scatter, histogram, treemap,
   tree, candlestick, multi-axis, **period-delta bars**, and **waterfalls**,
   aggregated server-side over the full result set (sum/avg/count/min/max).
+  The Chart panel uses **echarts**.
+- **Pivot tables** — full Pivot UI over a result (rows / columns / values,
+  aggregates, sort), backed by `POST /api/pivot`.
 - **Period-change analytics** — a NodeFlow node computes previous-period
   values, absolute or percentage change, and running totals with optional
   partitioning, ordering direction, and lag offset.
+- **NodeFlow** — visual multi-node pipelines (joins, select, summarize,
+  iterators, validate, chart/dashboard panes, and more) with inspector
+  column probing and preview.
+- **Journal** — notebook-style SQL cells with shared session tables.
+- **Field Explorer** — browse nested JSON / struct fields; optional
+  shred/flatten steering for discovery (does not silently mutate load
+  defaults).
+- **Storage & Engine** — live process / DuckDB memory, engine tuning
+  (memory/threads), free-unused-memory, and JSON flatten/shred depth controls.
+- **Lazy paging** — large results page on scroll; sort and filter stay
+  server-side.
+- **HDFS** — Load modal tab to browse WebHDFS and import CSV / JSON /
+  Parquet (optional cluster URL).
+- **Microsoft SQL Server** — Load / NodeFlow connect UI with driver
+  discovery (`/api/mssql/*`); requires `pyodbc`.
 - **Export** — CSV, JSON, NDJSON, and (with the right libraries) xlsx and
   Parquet, honoring the current sort.
 - **History & saved queries** — recent queries are logged; save queries
   with names and tags and reload them with a click.
-
-Backend-complete with a lighter or scaffolded UI (the API endpoints exist
-and are tested; the front-end surface is intentionally minimal and is a
-natural place to extend):
-
-- **Pivot tables** — `POST /api/pivot`.
-- **Microsoft SQL Server** — driver discovery and connect endpoints
-  (`/api/mssql/*`); requires `pyodbc`.
-
-Not ported: the original's HDFS file browser.
 
 ---
 

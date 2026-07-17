@@ -1,9 +1,31 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildJournalDependencyGraph,
+  createNotebook,
+  listNotebooks,
   planJournalRunAll,
+  setNotebookSaveIdentity,
   type ChainCell,
 } from "./notebook";
+
+beforeEach(() => localStorage.clear());
+
+describe("Journal save identity", () => {
+  it("persists one overwrite target per journal and replaces it on Save As", () => {
+    const journal = createNotebook("Daily", []);
+    setNotebookSaveIdentity(journal.id, { savedWorkflowName: "Daily saved" });
+    expect(listNotebooks().find((item) => item.id === journal.id)).toMatchObject({
+      savedWorkflowName: "Daily saved",
+    });
+
+    setNotebookSaveIdentity(journal.id, {
+      savedFilePath: "C:/flows/daily.samql.json",
+    });
+    const saved = listNotebooks().find((item) => item.id === journal.id);
+    expect(saved?.savedFilePath).toBe("C:/flows/daily.samql.json");
+    expect(saved?.savedWorkflowName).toBeUndefined();
+  });
+});
 
 function sql(
   id: string,

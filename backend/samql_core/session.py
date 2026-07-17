@@ -111,8 +111,8 @@ def _duckdb_oom_query_message(message, engine=None):
     return (
         "%s\n\nDuckDB exhausted its working-memory budget while executing "
         "this query.%s The failed allocation size is not the configured "
-        "memory limit. Free unused memory or raise Engine tuning → memory "
-        "only when RAM and temporary-disk capacity allow it. For nested JSON, "
+        "memory limit. Free unused memory or raise Storage & Engine → Engine "
+        "memory only when RAM and temporary-disk capacity allow it. For nested JSON, "
         "extract/project the fields you need before UNNEST; expand one array "
         "at a time and avoid recursive or sibling-array cross-products."
         % (text, budget_note)
@@ -2304,7 +2304,7 @@ class Session:
                 "biggest files.")
         if size >= 4 * 1024 * 1024 * 1024:
             warnings.append(
-                "File is over 4 GiB. Use Load Data → File (path). Drag-drop "
+                "File is over 4 GiB. Use Load a Table → File (path). Drag-drop "
                 "uploads are capped (see Storage & memory → Load thresholds).")
         return info
 
@@ -4197,6 +4197,95 @@ class Session:
         ``{ok, path, ...}`` or ``{ok: False, error}``."""
         from . import lineage
         return lineage.export_lineage_xlsx(self, graph)
+
+    def nodeflow_column_lineage(self, graph, column, node_id=None, port=None,
+                                row_index=None, cell_value=None):
+        """JSON lineage for one result column (diagram + per-step changes).
+
+        Optional ``row_index`` / ``cell_value`` (from a cell right-click) add
+        best-effort per-stage value samples without materializing full tables.
+        """
+        from . import lineage
+        return lineage.build_column_lineage(
+            self, graph, column, node_id=node_id, port=port,
+            row_index=row_index, cell_value=cell_value)
+
+    def nodeflow_probe_row_values(self, graph, node_id, port, columns,
+                                  row_index):
+        """Fetch one row's column values for lineage value history.
+
+        Compiles the port as a subquery and runs
+        ``SELECT cols FROM (sql) LIMIT 1 OFFSET n``. Caps offset and never
+        builds a full-table temp for this path (pivot/python ports that need
+        materialize are skipped as unavailable).
+        """
+        from . import nodeflow
+        from .engines import _quote_ident
+        try:
+            ri = int(row_index)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid row_index", "values": {}}
+        if ri < 0 or ri > 100000:
+            return {"ok": False, "error": "row_index out of range", "values": {}}
+        if not node_id:
+            return {"ok": False, "error": "missing node", "values": {}}
+        port = port or "out"
+        want = []
+        seen = set()
+        for c in (columns or [])[:32]:
+            name = (c or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            want.append(name)
+        if not want:
+            return {"ok": False, "error": "no columns", "values": {}}
+        try:
+            try:
+                self._shred_flow_prepass(graph, [(node_id, port)])
+            except Exception:
+                pass
+            if self._flow_has_pivot_upstream(graph, node_id, port):
+                return {"ok": False,
+                        "error": "value unavailable (runtime columns)",
+                        "values": {}}
+            eng_name = ("duckdb"
+                        if self._flow_engine_target(graph) == DUCKDB_TARGET
+                        else "sqlite")
+            _ccache = {}
+
+            def _cols(sql):
+                hit = _ccache.get(sql)
+                if hit is not None:
+                    return hit
+                out = self.relation_columns(sql)
+                _ccache[sql] = out
+                return out
+
+            sql = nodeflow.compile_port(graph, node_id, port, _cols, None,
+                                        eng_name)
+            sel = ", ".join(_quote_ident(c) for c in want)
+            q = ("SELECT %s FROM (%s) AS _lin_v LIMIT 1 OFFSET %d"
+                 % (sel, sql, ri))
+            target = self._choose_local_engine(q)
+            eng, _kind = self._engine_obj(target)
+            cols, rows = eng.execute(q)
+            if not rows:
+                return {"ok": False, "error": "no row at index", "values": {}}
+            row = rows[0]
+            values = {}
+            for i, c in enumerate(cols or want):
+                values[c] = row[i] if i < len(row) else None
+            # Case-insensitive fill for requested names missing due to rename.
+            lower = {str(k).lower(): k for k in values}
+            for c in want:
+                if c not in values and c.lower() in lower:
+                    values[c] = values[lower[c.lower()]]
+            return {"ok": True, "values": values}
+        except nodeflow.NodeflowError as e:
+            return {"ok": False, "error": str(e), "values": {}}
+        except Exception as e:
+            return {"ok": False, "error": err_str(e), "values": {}}
 
     def _flow_exc(self, e, graph=None):
         """Map a flow-op exception to its error reply: a NodeflowError
@@ -12858,7 +12947,7 @@ class Session:
                 return {"error":
                         'Connection "%s" is not active and no saved profile '
                         "or server fields were found. Save an mssql profile "
-                        "(with password if needed) or connect in Load Data, "
+                        "(with password if needed) or connect in Load a Table, "
                         "then Fetch again." % conn_name}
 
             auth = fields.get("auth", "windows") or "windows"
@@ -12876,7 +12965,7 @@ class Session:
             if auth in ("sql", "windows_alt") and not pwd:
                 return {"error":
                         "No password available for %s. Enter it once and tick "
-                        "Save password on the SQL Server node (or Load Data "
+                        "Save password on the SQL Server node (or Load a Table "
                         "profile), then retry." % (secret_key or pk or conn_name)}
 
             alt_creds = None

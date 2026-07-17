@@ -947,6 +947,67 @@ def duckdb_busy(session):
     return False
 
 
+def duckdb_busy_op(session):
+    """Best-effort label for the operation holding DuckDB (Activity / opreg).
+
+    Returns a small dict ``{kind, target, label, summary}`` or ``None`` when
+    idle / unknown. Does not change the idle gate — callers still use
+    :func:`duckdb_busy`.
+    """
+    if session is None or not duckdb_busy(session):
+        return None
+    ops = []
+    restoring = False
+    try:
+        st = session.status() or {}
+        ops = list(st.get("operations") or [])
+        restoring = bool(st.get("restoring"))
+    except Exception:
+        ops = []
+    duck_ops = [
+        o for o in ops
+        if str((o or {}).get("engine") or "").lower() == "duckdb"
+    ]
+    pick = duck_ops[0] if duck_ops else (ops[0] if ops else None)
+    if pick is None and restoring:
+        return {
+            "kind": "restore",
+            "target": None,
+            "label": None,
+            "summary": "Rebuilding tables",
+        }
+    if pick is None:
+        return {
+            "kind": "duckdb",
+            "target": None,
+            "label": None,
+            "summary": "DuckDB is working on something",
+        }
+    kind = str(pick.get("kind") or "op")
+    target = pick.get("target")
+    label = pick.get("label")
+    verb = {
+        "load": "Loading",
+        "restore": "Restoring",
+        "query": "Running query",
+        "run": "Running flow",
+        "folder": "Loading folder",
+        "hdfs": "HDFS download",
+        "convert": "Converting",
+        "flatten": "Flattening",
+        "api": "API fetch",
+        "iterator": "Iterator",
+    }.get(kind, kind)
+    detail = label or target
+    summary = f"{verb} {detail}".strip() if detail else verb
+    return {
+        "kind": kind,
+        "target": target,
+        "label": label,
+        "summary": summary,
+    }
+
+
 def _free_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -1264,6 +1325,7 @@ def status(session=None):
     """UI-facing assistant status snapshot."""
     pack = find_pack()
     busy = duckdb_busy(session)
+    busy_op = duckdb_busy_op(session) if busy else None
     mem = {}
     try:
         from . import resourcebudget
@@ -1315,6 +1377,7 @@ def status(session=None):
             "preferred_missing": bool(pack.get("preferred_missing")),
             "default_model": pack.get("default_model"),
             "duckdb_busy": busy,
+            "duckdb_busy_op": busy_op,
             "generating": bool(_generating),
             "server_url": api.get("base_url"),
             "memory": mem,
@@ -1362,6 +1425,7 @@ def status(session=None):
         "preferred_missing": bool(pack.get("preferred_missing")),
         "default_model": pack.get("default_model"),
         "duckdb_busy": busy,
+        "duckdb_busy_op": busy_op,
         "generating": bool(_generating),
         "server_url": _llama_base_url(),
         "memory": mem,
@@ -1428,11 +1492,14 @@ def chat(session, question, dialect="native", timeout_s=180.0):
                 "status": st,
             }
     if duckdb_busy(session):
+        op = duckdb_busy_op(session)
+        waiting = (op or {}).get("summary") or "a DuckDB job"
         return {
             "ok": False,
             "error": (
-                "DuckDB is busy. The assistant only runs while the engine "
-                "is idle — finish or cancel the current query/load, then retry."
+                "DuckDB is busy (%s). The assistant only runs while the "
+                "engine is idle — cancel that job in Activity, then retry."
+                % waiting
             ),
             "status": status(session),
             "queued_reason": "duckdb_busy",
@@ -1484,9 +1551,15 @@ def chat(session, question, dialect="native", timeout_s=180.0):
     try:
         # Re-check busy immediately before starting the sidecar / request.
         if duckdb_busy(session):
+            op = duckdb_busy_op(session)
+            waiting = (op or {}).get("summary") or "a DuckDB job"
             return {
                 "ok": False,
-                "error": "DuckDB became busy before generation started.",
+                "error": (
+                    "DuckDB became busy before generation started (%s). "
+                    "Cancel it in Activity, then retry."
+                    % waiting
+                ),
                 "queued_reason": "duckdb_busy",
                 "status": status(session),
             }

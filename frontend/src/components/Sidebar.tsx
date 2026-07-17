@@ -9,6 +9,11 @@ import type {
   EngineKind,
 } from "../lib/types";
 import { api } from "../lib/api";
+import {
+  abortColumnFieldsDiscovery,
+  abortFieldTreeDiscoveriesForTable,
+  startColumnFieldsDiscovery,
+} from "../lib/fieldTreeDiscovery";
 import { Icon } from "./Icon";
 import {
   familyJoinKeys,
@@ -220,11 +225,15 @@ const TablesTree: React.FC<
     // "no nested fields" forever.
     if (Object.prototype.hasOwnProperty.call(colFields, key)) return;
     setColFieldsBusy((p) => new Set(p).add(key));
+    const ctrl = startColumnFieldsDiscovery(engine, table, col);
     api
-      .columnFields(engine, table, col)
-      .then((r) => setColFields((p) => ({ ...p, [key]: r.fields || [] })))
+      .columnFields(engine, table, col, ctrl.signal)
+      .then((r) => {
+        if (ctrl.signal.aborted) return;
+        setColFields((p) => ({ ...p, [key]: r.fields || [] }));
+      })
       .catch(() => {
-        /* leave unset so a later expand retries */
+        /* leave unset so a later expand retries (also covers abort) */
       })
       .finally(() =>
         setColFieldsBusy((p) => {
@@ -236,12 +245,22 @@ const TablesTree: React.FC<
   };
   const toggleColFields = (engine: string, table: string, col: string) => {
     const key = colKey(engine, table, col);
-    setExpandedCols((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    if (expandedCols.has(key)) {
+      setExpandedCols((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      abortColumnFieldsDiscovery(engine, table, col);
+      setColFieldsBusy((p) => {
+        if (!p.has(key)) return p;
+        const n = new Set(p);
+        n.delete(key);
+        return n;
+      });
+      return;
+    }
+    setExpandedCols((prev) => new Set(prev).add(key));
     fetchColFields(key, engine, table, col);
   };
   // Idempotent open (never collapses) -- used by field search to reveal the
@@ -476,6 +495,15 @@ const TablesTree: React.FC<
     // Drop cached nested-field trees when the catalog changes so a hollow
     // sample taken mid-load / pre-refresh cannot stick after tables update.
     if (added.size || removed.length) {
+      // Catalog churn: abort in-flight samples and drop cached trees.
+      for (const k of removed) {
+        const i = k.indexOf(":");
+        if (i > 0) abortFieldTreeDiscoveriesForTable(k.slice(0, i), k.slice(i + 1));
+      }
+      for (const k of added) {
+        const i = k.indexOf(":");
+        if (i > 0) abortFieldTreeDiscoveriesForTable(k.slice(0, i), k.slice(i + 1));
+      }
       setColFields({});
       setColFieldsBusy(new Set());
     }
@@ -559,7 +587,36 @@ const TablesTree: React.FC<
           <span
             className={"twist" + (isOpen ? " open" : "")}
             onClick={() => {
-              if (!isOpen && t.remote) loadRemoteCols(t.name);
+              if (isOpen) {
+                // Collapsing the table: drop in-flight nested discoveries.
+                abortFieldTreeDiscoveriesForTable(t.engine, t.name);
+                setExpandedCols((prev) => {
+                  const prefix = `${t.engine}\u0000${t.name}\u0000`;
+                  let changed = false;
+                  const next = new Set(prev);
+                  for (const k of prev) {
+                    if (k.startsWith(prefix)) {
+                      next.delete(k);
+                      changed = true;
+                    }
+                  }
+                  return changed ? next : prev;
+                });
+                setColFieldsBusy((p) => {
+                  const prefix = `${t.engine}\u0000${t.name}\u0000`;
+                  let changed = false;
+                  const n = new Set(p);
+                  for (const k of p) {
+                    if (k.startsWith(prefix)) {
+                      n.delete(k);
+                      changed = true;
+                    }
+                  }
+                  return changed ? n : p;
+                });
+              } else if (t.remote) {
+                loadRemoteCols(t.name);
+              }
               setOpen((p) => ({
                 ...p,
                 [t.engine + ":" + t.name]: !isOpen,
@@ -632,11 +689,11 @@ const TablesTree: React.FC<
                 <Icon.Edit size={14} />
               </button>
               <button
-                className="btn ghost icon danger"
+                className="btn ghost icon xbtn"
                 title="Drop"
                 onClick={() => onDrop(t.engine, t.name)}
               >
-                <span className="icon-trash"><Icon.Trash size={14} /></span>
+                ×
               </button>
             </span>
           )}
@@ -867,7 +924,7 @@ const TablesTree: React.FC<
         >
           <Icon.Refresh size={15} />
         </button>
-        <button className="btn ghost icon" title="Load data" onClick={onOpenLoad}>
+        <button className="btn ghost icon" title="Load a Table" onClick={onOpenLoad}>
           <Icon.Plus size={16} />
         </button>
       </div>
@@ -953,7 +1010,7 @@ const TablesTree: React.FC<
                 style={{ marginTop: 12 }}
                 onClick={onOpenLoad}
               >
-                <Icon.Upload size={15} /> Load data
+                <Icon.Upload size={15} /> Load a Table
               </button>
             </div>
           </div>
@@ -1363,16 +1420,14 @@ function WorkflowItemRow({
           {w.name}
         </span>
         <button
-          className="btn ghost icon danger"
+          className="btn ghost icon xbtn"
           title="Delete"
           onClick={(e) => {
             e.stopPropagation();
             onDeleteWorkflow(kind, w.name);
           }}
         >
-          <span className="icon-trash">
-            <Icon.Trash size={14} />
-          </span>
+          ×
         </button>
       </div>
       {kind === "ide" && w.preview ? (
@@ -1412,36 +1467,40 @@ const WorkflowsPanel: React.FC<Props> = ({
 
   return (
     <>
-      <div className="side-head">
-        <span className="title">Saved Workflows</span>
-      </div>
-      <div className="wf-actions">
+      <div className="wf-actions" data-testid="open-save-section">
+        <div className="wf-actions-label">Open / Save</div>
         <div className="wf-actions-row">
           <button
             className="btn sm"
+            data-testid="workspace-open"
+            onClick={onActiveOpen}
+            title="Open a saved node, journal, dashboard, query, or workflow"
+          >
+            <Icon.Folder size={13} /> Open
+          </button>
+          <button
+            className="btn sm"
+            data-testid="workspace-save"
             onClick={onActiveSave}
-            title={`Save the current ${WF_VIEW_LABEL[activeView]} here`}
+            title={`Save the current ${WF_VIEW_LABEL[activeView]}`}
           >
             <Icon.Save size={13} /> Save
           </button>
           <button
             className="btn sm"
+            data-testid="workspace-save-as"
             onClick={onActiveSaveAs}
-            title="Save to a file on your computer"
+            title="Save to a file anywhere on your computer"
           >
             Save As
-          </button>
-          <button
-            className="btn sm"
-            onClick={onActiveOpen}
-            title="Open a workflow file from your computer"
-          >
-            <Icon.Folder size={13} /> Open
           </button>
         </div>
         <div className="wf-actions-hint">
           Acting on: <strong>{WF_VIEW_LABEL[activeView]}</strong>
         </div>
+      </div>
+      <div className="side-head">
+        <span className="title">Saved Workflows</span>
       </div>
       <div className="side-body">
         {workflows.length === 0 ? (
@@ -1449,8 +1508,8 @@ const WorkflowsPanel: React.FC<Props> = ({
             <div className="inner">
               <Icon.Bookmark size={24} className="faint" />
               <p>
-                Use Save in the SQL editor, Journal or Node and your work is kept
-                here, grouped by where it came from.
+                Use Save in the SQL editor, Journal, NodeFlow or Dashboard and
+                your work is kept here, grouped by where it came from.
               </p>
             </div>
           </div>
@@ -1595,13 +1654,13 @@ const WorkflowsPanel: React.FC<Props> = ({
                             <span className="wf-count">{members.length}</span>
                             <button
                               type="button"
-                              className="btn ghost icon danger"
+                              className="btn ghost icon xbtn"
                               title="Delete group"
                               onClick={() =>
                                 persist(deleteWorkflowGroup(groupState, g.id))
                               }
                             >
-                              <Icon.Trash size={12} />
+                              ×
                             </button>
                           </div>
                           {!g.collapsed ? (

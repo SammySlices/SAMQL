@@ -408,7 +408,18 @@ class PackAndGateTests(unittest.TestCase):
     def test_chat_refuses_when_duckdb_busy(self):
         class Sess:
             def status(self):
-                return {"engines": {"duckdb": {"active": True, "busy": True}}}
+                return {
+                    "engines": {"duckdb": {"active": True, "busy": True}},
+                    "operations": [
+                        {
+                            "kind": "load",
+                            "target": "trades.csv",
+                            "engine": "duckdb",
+                            "label": None,
+                        }
+                    ],
+                    "restoring": False,
+                }
 
             def tables_tree(self):
                 return []
@@ -433,6 +444,7 @@ class PackAndGateTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out.get("queued_reason"), "duckdb_busy")
         self.assertIn("idle", (out.get("error") or "").lower())
+        self.assertIn("Loading trades.csv", out.get("error") or "")
 
     def test_chat_refuses_without_pack(self):
         class Sess:

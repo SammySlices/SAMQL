@@ -204,3 +204,61 @@ describe("Sidebar loaded-tables drag reorder", () => {
     });
   });
 });
+
+describe("Sidebar Open / Save section", () => {
+  it("lists Open, Save, then Save As under Open / Save", () => {
+    const onOpen = vi.fn();
+    const onSave = vi.fn();
+    const onSaveAs = vi.fn();
+    render(
+      <Sidebar
+        tables={[]}
+        history={[]}
+        saved={[]}
+        workflows={[]}
+        onInsertTable={noop}
+        onInsertColumn={noop}
+        onLoadSql={noop}
+        onProfile={noop}
+        onReconcile={noop}
+        onChangeType={noop}
+        onRename={noop}
+        onDrop={noop}
+        onDropMany={noop}
+        onOptimize={noop}
+        onImport={noop}
+        onDisconnect={noop}
+        onDeleteSaved={noop}
+        onLoadWorkflow={noop}
+        onDeleteWorkflow={noop}
+        onActiveSave={onSave}
+        onActiveSaveAs={onSaveAs}
+        onActiveOpen={onOpen}
+        activeView="ide"
+        onRefresh={noop}
+        onClearHistory={noop}
+        onOpenLoad={noop}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Workflows/i }));
+    const section = screen.getByTestId("open-save-section");
+    expect(section).toHaveTextContent("Open / Save");
+    const open = screen.getByTestId("workspace-open");
+    const save = screen.getByTestId("workspace-save");
+    const saveAs = screen.getByTestId("workspace-save-as");
+    expect(
+      open.compareDocumentPosition(save) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      save.compareDocumentPosition(saveAs) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.click(open);
+    fireEvent.click(save);
+    fireEvent.click(saveAs);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSaveAs).toHaveBeenCalledTimes(1);
+  });
+});

@@ -1705,8 +1705,8 @@ class Api:
 
     @staticmethod
     def diagnostics(s, m, body, ctx):
-        # List the diagnostics available to the Settings -> Diagnostics modal,
-        # plus a ready environment report so the modal has content on open.
+        # List the diagnostics available to the Error log -> Diagnostics tab,
+        # plus a ready environment report so the tab has content on open.
         from samql_core import diagnostics as _diag
         return {"diagnostics": _diag.list_diagnostics(),
                 "environment": _diag.env_report(s)}
@@ -4015,6 +4015,25 @@ class Api:
             "spreadsheetml.sheet")
 
     @staticmethod
+    def nodeflow_column_lineage(s, m, body, ctx):
+        b = body or {}
+        graph = b.get("graph") if isinstance(b.get("graph"), dict) else {}
+        column = (b.get("column") or "").strip()
+        if not column:
+            raise ApiError(400, "column is required.")
+        node = (b.get("node") or b.get("node_id") or "").strip() or None
+        port = (b.get("port") or "").strip() or None
+        row_index = b.get("row_index")
+        if row_index is None:
+            row_index = b.get("rowIndex")
+        cell_value = b.get("cell_value")
+        if cell_value is None and "cellValue" in b:
+            cell_value = b.get("cellValue")
+        return s.nodeflow_column_lineage(
+            graph, column, node_id=node, port=port,
+            row_index=row_index, cell_value=cell_value)
+
+    @staticmethod
     def nodeflow_write(s, m, body, ctx):
         b = body or {}
         graph = _reqdict(b, "graph")
@@ -4359,6 +4378,7 @@ ROUTES = [
     ("POST", r"^/api/nodeflow/export$", Api.nodeflow_export),
     ("POST", r"^/api/nodeflow/export-many$", Api.nodeflow_export_many),
     ("POST", r"^/api/nodeflow/lineage$", Api.nodeflow_lineage),
+    ("POST", r"^/api/nodeflow/column-lineage$", Api.nodeflow_column_lineage),
     ("POST", r"^/api/save/download$", Api.save_download),
     ("POST", r"^/api/nodeflow/write$", Api.nodeflow_write),
     ("POST", r"^/api/mssql/import$", Api.mssql_import),
@@ -4808,7 +4828,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(413, {"error": (
                     "That upload is %.1f GB, above the configured %d MB "
                     "limit (SAMQL_UPLOAD_MB). Load it by file path instead "
-                    "(Load Data \u2192 File)."
+                    "(Load a Table \u2192 File)."
                     % (length / 1e9, cap // (1024 * 1024)))})
                 return
             try:

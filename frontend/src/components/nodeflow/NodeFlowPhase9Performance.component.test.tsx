@@ -74,6 +74,7 @@ function makeSceneProps(
     ripple: false,
     snapId: null,
     bornId: null,
+    lineageFlashId: null,
     chartData: {},
     patchNode: vi.fn(),
     ensureChartFor: async () => {},

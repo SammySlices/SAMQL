@@ -569,13 +569,6 @@ export function parseCreatedNodeFile(
 /** Bridge so App settings can read the active NodeFlow tab graph. */
 let _graphGetter: (() => { nodes: NbNode[]; edges: NbEdge[] } | null) | null =
   null;
-let _editingDefinitionGetter:
-  | (() => {
-      id: string;
-      name: string;
-      icon: CreatedNodeIcon;
-    } | null)
-  | null = null;
 
 export function registerActiveNodeFlowGraphGetter(
   getter: (() => { nodes: NbNode[]; edges: NbEdge[] } | null) | null,
@@ -589,30 +582,6 @@ export function getActiveNodeFlowGraph(): {
 } | null {
   try {
     return _graphGetter ? _graphGetter() : null;
-  } catch {
-    return null;
-  }
-}
-
-export function registerActiveEditingDefinitionGetter(
-  getter:
-    | (() => {
-        id: string;
-        name: string;
-        icon: CreatedNodeIcon;
-      } | null)
-    | null,
-): void {
-  _editingDefinitionGetter = getter;
-}
-
-export function getActiveEditingDefinition(): {
-  id: string;
-  name: string;
-  icon: CreatedNodeIcon;
-} | null {
-  try {
-    return _editingDefinitionGetter ? _editingDefinitionGetter() : null;
   } catch {
     return null;
   }

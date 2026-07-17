@@ -61,6 +61,7 @@ export const VisualizationNotebookCell: React.FC<NotebookCellProps> = (
             <ChartPanel
               resultId={source.resultId as string}
               columns={source.columns}
+              sampleRows={source.sampleRows}
               onExpired={props.onSourceExpired}
             />
           </div>
@@ -71,6 +72,7 @@ export const VisualizationNotebookCell: React.FC<NotebookCellProps> = (
               result={{
                 id: source.resultId as string,
                 columns: source.columns,
+                sampleRows: source.sampleRows,
               }}
               onToast={props.onToast}
               onExpired={props.onSourceExpired}

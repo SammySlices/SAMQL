@@ -8,7 +8,7 @@
 import { saveToDownloads } from "./api";
 
 const EXPORT_HIDE =
-  ".dash-resize, .dash-header-resize, .dash-widget-actions, .dash-text-grab, .dash-add, button";
+  ".dash-resize, .dash-widget-actions, .dash-text-grab, .dash-add, button";
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";

@@ -3218,7 +3218,8 @@ def backend_tests(datadir, csv_path, json_path):
             ("the field explorer surfaces shred (plan eligibility + block)",
              "shredPlan(" in fx and "fx-shred" in fx),
             ("the app runs shred + flatten and wires both actions",
-             "shredRun(" in app and "flattenJson(" in app
+             "shredRun(" in app
+             and ("flattenJson(" in app or "flattenTableStart(" in app)
              and "onShred=" in app and "onFlatten=" in app),
         ]
         missing = [n for n, ok in checks if not ok]
@@ -4018,7 +4019,7 @@ def backend_tests(datadir, csv_path, json_path):
         css = rd("frontend", "src", "styles.css")
         checks = [
             ("Settings opens the panel",
-             "Storage &amp; memory" in app and "openStorage" in app),
+             "Storage &amp; Engine" in app and "openStorage" in app),
             ("journal: per-group tool bar removed (cells carry inserters); "
              "New Group lives in the TOP toolbar; empty groups stay usable",
              "nb-group-tools" not in nbsrc
@@ -4173,9 +4174,9 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_storage_memory_merge():
         # .381: ONE modal. The stat pill has no memory number and no free
-        # button; Settings has a single "Storage & memory" entry; the merged
+        # button; Settings has a single "Storage & Engine" entry; the merged
         # modal carries the memory row, Free memory, Clear temp and the
-        # server status block. NodeFlow cache lives as a tab inside it.
+        # Engine tuning tab. NodeFlow cache lives as a tab inside it.
         def rd(*parts):
             return open(os.path.join(ROOT, *parts), encoding="utf-8").read()
         app = rd("frontend", "src", "App.tsx")
@@ -4187,21 +4188,25 @@ def backend_tests(datadir, csv_path, json_path):
              and "freeMemFromMenu" not in app
              and "clearTempFromMenu" not in app),
             ("settings shows exactly the merged entry",
-             "Storage &amp; memory…" in app
+             "Storage &amp; Engine…" in app
+             and "Storage &amp; memory…" not in app
              and "Storage &amp; cleanup…" not in app
              and "Free memory &amp; cache" not in app
              and "clearTempFromMenu" not in app
-             and "NodeFlow cache…" not in app),
+             and "NodeFlow cache…" not in app
+             and "Engine tuning (memory / threads)" not in app),
             ("the merged modal is COMPACT: memory + four actions that "
              "wrap (no clipping), no server/tasks block, no scrolling",
-             'title="Storage & memory"' in storage
+             'title="Storage & Engine"' in storage
              and "Engine memory" in storage
              and "Free unused memory" in storage
              and "Clear temp files" in storage
              and "<ServerStatus />" not in storage
              and 'flexWrap: "wrap"' in storage
              and "NodeFlow cache" in storage
-             and "FlowCachePanel" in storage),
+             and "FlowCachePanel" in storage
+             and "EngineTuningPanel" in storage
+             and 'data-testid="engine-tuning-tab"' in storage),
             ("the server block lives in the Activity dashboard now",
              "<ServerStatus embedded />" in rd(
                  "frontend", "src", "components", "ActivityModal.tsx")
@@ -8781,7 +8786,9 @@ def backend_tests(datadir, csv_path, json_path):
         need("AssistantPack runtime" in b
              or "runtime: will stage llama-server" in b,
              "build.ps1 documents runtime-only assistant packaging")
-        need("Compress-Archive" not in b,
+        # Comments may mention the forbidden cmdlet; only fail on real usage.
+        need(not re.search(r"(?m)^\s*Compress-Archive\b", b)
+             and "Compress-Archive -" not in b,
              "build.ps1 must not use Compress-Archive (large-archive failures)")
 
         # the distribution doc exists and answers the dependency question
@@ -21240,7 +21247,7 @@ def backend_tests(datadir, csv_path, json_path):
         # for a '[' file -- the lever for boxes where ijson's per-object event
         # building is the slow part. (2) the CLI tool (tools/diag_load.py) is a
         # thin wrapper over the shared samql_core.diagnostics core, so the CLI
-        # and the Settings -> Diagnostics modal never drift. Pure -> everywhere.
+        # and the Error log -> Diagnostics tab never drift. Pure -> everywhere.
         import tempfile
         from samql_core import flatten as F
         p = tempfile.mktemp(suffix=".json")
@@ -34707,7 +34714,7 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_diagnostics_module_and_endpoints():
         # The shared diagnostics registry powers the CLI, the /api/diagnostics
-        # endpoints, and the Settings -> Diagnostics modal. Assert: the registry
+        # endpoints, and the Error log -> Diagnostics tab. Assert: the registry
         # lists the built-in checks; environment + json_load run correctly
         # (json_load on a temp file returns the phase split + tables + write + a
         # cProfile); an unknown name fails gracefully (never raises); the server
@@ -34868,28 +34875,35 @@ def backend_tests(datadir, csv_path, json_path):
              "a too-small capped scan is guarded from projecting a fake verdict")
 
     def t_diagnostics_modal_wiring():
-        # The Settings -> Diagnostics modal is wired end to end: the component
-        # fetches the diagnostics list + runs one; App opens it from settings and
-        # renders it; the api + types expose the endpoints. Source-inspection.
+        # The Error log -> Diagnostics tab is wired end to end: DiagnosticsPanel
+        # fetches the diagnostics list + runs one; ErrorLogModal hosts it on a
+        # tab; App opens Error log from settings (not a separate Diagnostics
+        # menu entry); the api + types expose the endpoints. Source-inspection.
         def rd(*parts):
             return open(os.path.join(FRONTEND, *parts), encoding="utf-8").read()
         app = rd("src", "App.tsx")
-        modal = rd("src", "components", "DiagnosticsModal.tsx")
+        panel = rd("src", "components", "DiagnosticsModal.tsx")
+        errlog = rd("src", "components", "ErrorLogModal.tsx")
         apisrc = rd("src", "lib", "api.ts")
         types = rd("src", "lib", "types.ts")
         checks = [
-            ("DiagnosticsModal fetches the list and runs a diagnostic",
-             "DiagnosticsModal" in modal and ".diagnostics(" in modal
-             and ".runDiagnostic(" in modal),
-            ("modal renders the heaviest-records view for json_heaviest",
-             "HeaviestResultView" in modal
-             and 'selected === "json_heaviest"' in modal),
-            ("modal has the full-analysis view and defaults to it",
-             "FullAnalysisView" in modal
-             and 'selected === "full_analysis"' in modal
-             and '"full_analysis"' in modal),
-            ("App opens Diagnostics from settings and renders the modal",
-             "setDiagOpen(true)" in app and "<DiagnosticsModal" in app),
+            ("DiagnosticsPanel fetches the list and runs a diagnostic",
+             "DiagnosticsPanel" in panel and ".diagnostics(" in panel
+             and ".runDiagnostic(" in panel),
+            ("panel renders the heaviest-records view for json_heaviest",
+             "HeaviestResultView" in panel
+             and 'selected === "json_heaviest"' in panel),
+            ("panel has the full-analysis view and defaults to it",
+             "FullAnalysisView" in panel
+             and 'selected === "full_analysis"' in panel
+             and '"full_analysis"' in panel),
+            ("Error log hosts Diagnostics tab (Settings has no Diagnostics entry)",
+             "DiagnosticsPanel" in errlog
+             and 'tab === "diagnostics"' in errlog
+             and "ErrorLogModal" in app
+             and "Diagnostics…" not in app
+             and "setDiagOpen" not in app
+             and "<DiagnosticsModal" not in app),
             ("api exposes diagnostics + runDiagnostic to the right routes",
              "diagnostics:" in apisrc and "/api/diagnostics" in apisrc
              and "runDiagnostic:" in apisrc and "/api/diagnostics/run" in apisrc),
@@ -37553,7 +37567,7 @@ def backend_tests(datadir, csv_path, json_path):
          t_json_heaviest_scanner),
         ("diagnostics: full load analysis (scan+flatten+write+projection+verdict)",
          t_full_analysis),
-        ("diagnostics: Settings->Diagnostics modal wired to the endpoints",
+        ("diagnostics: Error log->Diagnostics tab wired to the endpoints",
          t_diagnostics_modal_wiring),
         ("loading: deep-flatten->nested fallback is logged, not silent",
          t_flatten_fallback_is_visible),

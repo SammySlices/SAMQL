@@ -80,6 +80,7 @@ test("Dense NodeFlow shrinks nodes and restores on toggle off", async ({
   expect(before, "node box before Dense NodeFlow").toBeTruthy();
 
   await page.getByTestId("settings-button").click();
+  await page.getByTestId("settings-visual-toggles").click();
   const toggle = page.getByTestId("nodeflow-dense-toggle");
   await expect(toggle).toBeVisible();
   await expect(toggle).toHaveAttribute("aria-pressed", "false");
@@ -88,7 +89,7 @@ test("Dense NodeFlow shrinks nodes and restores on toggle off", async ({
   await expect(page.locator("html")).toHaveClass(/nb-dense/);
   await expect(page.locator("html")).toHaveAttribute("data-nb-dense", "on");
   await expect(toggle).toHaveAttribute("aria-pressed", "true");
-  await expect(toggle).toContainText("Dense NodeFlow: on");
+  await expect(toggle).toContainText("Condensed NodeFlow: on");
 
   const after = await node.boundingBox();
   expect(after, "node box with Dense NodeFlow").toBeTruthy();
@@ -110,6 +111,7 @@ test("Dense NodeFlow restores from localStorage on boot", async ({ page }) => {
   await expect(page.locator("html")).toHaveClass(/nb-dense/);
   await expect(page.locator("html")).toHaveAttribute("data-nb-dense", "on");
   await page.getByTestId("settings-button").click();
+  await page.getByTestId("settings-visual-toggles").click();
   await expect(page.getByTestId("nodeflow-dense-toggle")).toHaveAttribute(
     "aria-pressed",
     "true",

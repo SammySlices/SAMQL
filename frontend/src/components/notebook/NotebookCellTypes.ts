@@ -1,4 +1,5 @@
 import type {
+  Cell,
   ResultPage,
   TableInfo,
   ReconcileResult,
@@ -82,7 +83,12 @@ export interface NotebookCellProps {
     title: string,
     message?: string,
   ) => void;
-  sources?: { name: string; resultId?: string | null; columns: string[] }[];
+  sources?: {
+    name: string;
+    resultId?: string | null;
+    columns: string[];
+    sampleRows?: Cell[][] | null;
+  }[];
   onSetSource?: (name: string) => void;
   onRename?: (name: string) => void;
   onSourceExpired?: () => void;

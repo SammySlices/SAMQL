@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useCreatedNodesSettings } from "../components/CreatedNodesSettings";
 import {
@@ -187,5 +187,37 @@ describe("Created Nodes — manage / rename / delete", () => {
       "Deleted",
       expect.stringContaining("RenamedMe"),
     );
+  });
+
+  it("Created Nodes modal exposes Export and Load (not Settings)", async () => {
+    const { nodes, edges } = simpleGraph();
+    const built = buildCreatedNodeDefinition("Pack", "Beaker", nodes, edges);
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    upsertCreatedNode(built.definition);
+
+    render(<SettingsHost />);
+    expect(screen.queryByText("Export created node…")).toBeNull();
+    expect(screen.queryByText("Load created node…")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("manage-created-nodes-menu"));
+    expect(screen.getByTestId("manage-created-nodes-toolbar")).toBeTruthy();
+    expect(screen.getByTestId("manage-created-nodes-export")).toBeTruthy();
+    expect(screen.getByTestId("manage-created-nodes-load")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("manage-created-nodes-export"));
+    expect(screen.getByTestId("export-created-node-modal")).toBeTruthy();
+    fireEvent.click(
+      within(screen.getByTestId("export-created-node-modal")).getByRole(
+        "button",
+        { name: "Cancel" },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("export-created-node-modal")).toBeNull(),
+    );
+
+    fireEvent.click(screen.getByTestId("manage-created-nodes-load"));
+    expect(screen.getByTestId("load-created-node-modal")).toBeTruthy();
   });
 });

@@ -113,6 +113,7 @@ function CanvasNodeFrameImpl({
   snapped,
   dying,
   born,
+  lineageFlash,
   onPointerDown,
   onContextMenu,
   children,
@@ -134,7 +135,8 @@ function CanvasNodeFrameImpl({
         (ripple ? " ripple" : "") +
         (snapped ? " snap" : "") +
         (dying ? " dying" : "") +
-        (born ? " born" : "")
+        (born ? " born" : "") +
+        (lineageFlash ? " lineage-flash" : "")
       }
       title={error ? "Error: " + error : warning || undefined}
       style={{

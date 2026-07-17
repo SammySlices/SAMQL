@@ -32,9 +32,7 @@ import { useNodeFlowViewport } from "./nodeflow/useNodeFlowViewport";
 import { findChildNode } from "./nodeflow/nodeFlowGraphCommands";
 import {
   loadCreatedNodes,
-  registerActiveEditingDefinitionGetter,
   registerActiveNodeFlowGraphGetter,
-  type CreatedNodeIcon,
 } from "../lib/createdNodes";
 
 export const NodeFlow: React.FC<{
@@ -55,7 +53,8 @@ export const NodeFlow: React.FC<{
   // a one-shot command (from sidebar/settings) to run save / save-as / open
   command?: {
     id: number;
-    action: "save" | "saveAs" | "open" | "exportLineage";
+    action: "save" | "saveAs" | "open" | "exportLineage" | "selectNode";
+    nodeId?: string;
   } | null;
   // node palette/toolbar visibility is owned by App so the Settings toggle and
   // the in-canvas button stay in sync
@@ -65,6 +64,8 @@ export const NodeFlow: React.FC<{
   toolsTablesOpen?: boolean;
   onToolsTablesOpenChange?: (open: boolean) => void;
   onOpenLoad?: () => void;
+  /** Open App-level JSON Field Explorer from Tools & Tables. */
+  onOpenJsonFieldExplorer?: () => void;
   /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
   denseMode?: boolean;
 }> = ({
@@ -84,6 +85,7 @@ export const NodeFlow: React.FC<{
   toolsTablesOpen,
   onToolsTablesOpenChange,
   onOpenLoad,
+  onOpenJsonFieldExplorer,
   denseMode = false,
 }) => {
   // Keep densify() aligned with App Settings before Scene paints (also syncs
@@ -136,8 +138,10 @@ export const NodeFlow: React.FC<{
     dyingIds,
     dyingEdgeIds,
     bornId,
+    lineageFlashId,
     fireRipple,
     fireBorn,
+    fireLineageFlash,
     withImplosion,
     withEdgeRetract,
   } = useNodeFlowAnimations();
@@ -174,6 +178,7 @@ export const NodeFlow: React.FC<{
     nodeFileModal,
     setNodeFileModal,
     graphForRun,
+    fullGraph,
     activeTabName,
     switchTab,
     addTab,
@@ -183,7 +188,6 @@ export const NodeFlow: React.FC<{
     undo,
     redo,
     openGraphInNewTab,
-    activeEditingDefinitionId,
     refreshUsernodesFromDefinition,
     stripUsernodesByDefinitionId,
     onPickNodeFile,
@@ -216,21 +220,30 @@ export const NodeFlow: React.FC<{
     return () => registerActiveNodeFlowGraphGetter(null);
   }, []);
 
+  const highlightNode = useCallback(
+    (nodeId: string) => {
+      if (!nodeId) return;
+      const node =
+        nodesRef.current.find((n) => n.id === nodeId) ||
+        findChildNode(nodesRef.current, nodeId)?.child ||
+        null;
+      setSelId(nodeId);
+      setSelIds([nodeId]);
+      fireLineageFlash(nodeId);
+      if (node && typeof node.x === "number" && typeof node.y === "number") {
+        panTo(node.x + 90, node.y + 40);
+      }
+    },
+    [fireLineageFlash, panTo],
+  );
+
+  const lastSelectCmd = useRef(0);
   useEffect(() => {
-    registerActiveEditingDefinitionGetter(() => {
-      const id = activeEditingDefinitionId();
-      if (!id) return null;
-      const catalog = loadCreatedNodes().find((item) => item.id === id);
-      const tab = tabs.find((item) => item.id === activeTabId);
-      const icon = (catalog?.icon || "Sparkle") as CreatedNodeIcon;
-      return {
-        id,
-        name: catalog?.name || tab?.name || "Created node",
-        icon,
-      };
-    });
-    return () => registerActiveEditingDefinitionGetter(null);
-  }, [activeEditingDefinitionId, activeTabId, tabs]);
+    if (!command || command.id === lastSelectCmd.current) return;
+    if (command.action !== "selectNode" || !command.nodeId) return;
+    lastSelectCmd.current = command.id;
+    highlightNode(command.nodeId);
+  }, [command, highlightNode]);
 
   useEffect(() => {
     const onUpdated = (event: Event) => {
@@ -542,6 +555,7 @@ export const NodeFlow: React.FC<{
         tables={tables}
         onRefreshTables={onTablesChanged}
         onOpenLoad={onOpenLoad}
+        onOpenJsonFieldExplorer={onOpenJsonFieldExplorer}
         palette={paletteModel}
       />
 
@@ -584,6 +598,7 @@ export const NodeFlow: React.FC<{
           ripple={ripple}
           snapId={snapId}
           bornId={bornId}
+          lineageFlashId={lineageFlashId}
           chartData={chartData}
           patchNode={scenePatchNode}
           ensureChartFor={sceneEnsureChartFor}
@@ -658,6 +673,8 @@ export const NodeFlow: React.FC<{
         height={previewHeight}
         setHeight={setPreviewHeight}
         onClose={() => setPreview(null)}
+        getLineageGraph={fullGraph}
+        onHighlightNode={highlightNode}
       />
 
       {browseFolder && sel && (sel.type === "output" || sel.type === "directory" || sel.type === "appendfolder") && (

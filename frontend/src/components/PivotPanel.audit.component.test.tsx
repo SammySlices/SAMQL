@@ -148,4 +148,57 @@ describe("PivotPanel — audit fixes", () => {
     // it must no longer be a chip in rows
     expect(within(rowsTile).queryByText("g")).toBeNull();
   });
+
+  it("summarize popover has dialog role, focuses on open, and restores focus on Escape (S5)", async () => {
+    pivotMock.mockResolvedValue({
+      columns: ["g", "sum(bal)"],
+      rows: [["a", 1]],
+      row_count: 1,
+    });
+    render(
+      <PivotPanel
+        tables={[]}
+        result={{ id: "r1", columns: ["g", "bal"] }}
+        onToast={vi.fn()}
+      />,
+    );
+
+    dropField("bal", ".pv-tile.pv-values");
+    const chip = await screen.findByRole("button", { name: /sum of bal/i });
+    chip.focus();
+    fireEvent.click(chip);
+
+    const dialog = await screen.findByRole("dialog", { name: /summarize bal/i });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(document.activeElement).toBe(dialog.querySelector("button"));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(chip);
+  });
+
+  it("filter popover restores focus to the invoking chip on backdrop close (S5)", async () => {
+    pivotMock.mockResolvedValue({
+      columns: ["g", "sum(bal)"],
+      rows: [["a", 1]],
+      row_count: 1,
+    });
+    render(
+      <PivotPanel
+        tables={[]}
+        result={{ id: "r1", columns: ["g", "bal"] }}
+        onToast={vi.fn()}
+      />,
+    );
+
+    dropField("g", ".pv-tile.pv-filters");
+    const chip = await screen.findByRole("button", { name: /g/i });
+    chip.focus();
+    fireEvent.click(chip);
+
+    await screen.findByRole("dialog", { name: /filter: g/i });
+    fireEvent.mouseDown(document.querySelector(".pv-pop-back")!);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(chip);
+  });
 });

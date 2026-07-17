@@ -323,4 +323,27 @@ describe("SqlAssistant", () => {
     expect(onInsert).not.toHaveBeenCalled();
     expect(onLoad).not.toHaveBeenCalled();
   });
+
+  it("surfaces which DuckDB job is blocking when the engine is busy", async () => {
+    (api.assistantStatus as any).mockResolvedValue({
+      available: true,
+      pack_ok: true,
+      duckdb_busy: true,
+      duckdb_busy_op: {
+        kind: "load",
+        target: "trades.csv",
+        summary: "Loading trades.csv",
+      },
+    });
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("sql-assistant-fab"));
+    await waitFor(() => {
+      expect(screen.getByTestId("sql-assistant-duckdb-busy")).toHaveTextContent(
+        /Waiting:\s*Loading trades\.csv/i,
+      );
+    });
+    expect(screen.getByTestId("sql-assistant-duckdb-busy")).toHaveTextContent(
+      /Activity/i,
+    );
+  });
 });

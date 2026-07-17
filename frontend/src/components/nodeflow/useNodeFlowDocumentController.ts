@@ -18,10 +18,13 @@ import {
 } from "../../lib/nodeFlowModel";
 import { persistNodeFlowSnapshot } from "../../lib/nodeFlowPersistence";
 import { serializeGraph } from "../../lib/nodegraph";
-import { wfEnvelope, parseWfFile } from "../../lib/workflowFile";
+import { wfEnvelope, parseWfFile, wfKindSurface } from "../../lib/workflowFile";
 import {
   applyCreatedNodeToGraph,
+  parseCreatedNodeFile,
   stripCreatedNodeFromGraph,
+  updateCreatedNodeDefinition,
+  upsertCreatedNode,
   type CreatedNodeDefinition,
 } from "../../lib/createdNodes";
 import type { DeleteConfirmState, NodeMenuState } from "./NodeFlowMenus";
@@ -53,12 +56,19 @@ interface UseNodeFlowDocumentControllerOptions {
     title: string,
     message?: string,
   ) => void;
-  loadRequest?: { id: number; name: string; graph: unknown } | null;
+  loadRequest?: {
+    id: number;
+    name: string;
+    graph: unknown;
+    savedWorkflowName?: string;
+    savedFilePath?: string;
+  } | null;
   onLoadConsumed?: () => void;
   onWorkflowsChanged?: () => void;
   command?: {
     id: number;
-    action: "save" | "saveAs" | "open" | "exportLineage";
+    action: "save" | "saveAs" | "open" | "exportLineage" | "selectNode";
+    nodeId?: string;
   } | null;
   onDocumentStatus?: (text: string) => void;
 }
@@ -502,6 +512,10 @@ export function useNodeFlowDocumentController({
       (tabs.find((tab) => tab.id === activeTabRef.current)?.name || "").trim(),
     [tabs],
   );
+  const activeTab = useCallback(
+    () => tabs.find((tab) => tab.id === activeTabRef.current) || null,
+    [tabs],
+  );
 
   const exportLineage = useCallback(async () => {
     const graph = fullGraph();
@@ -518,31 +532,85 @@ export function useNodeFlowDocumentController({
   }, [fullGraph, onToast]);
 
   const saveWorkflow = useCallback(async () => {
-    const name = activeTabName();
+    const tab = activeTab();
+    const graph = fullGraph();
+    if (tab?.editingDefinitionId) {
+      // Workspace Save overwrites the open Created Node by stable id (no duplicate).
+      const result = updateCreatedNodeDefinition(
+        tab.editingDefinitionId,
+        graph.nodes,
+        graph.edges,
+      );
+      if (!result.ok) {
+        onToast("error", "Save failed", result.error);
+        return;
+      }
+      onToast(
+        "ok",
+        "Node saved",
+        `"${result.definition.name}" updated (${result.definition.inputs.length} in · ${result.definition.outputs.length} out).`,
+      );
+      return;
+    }
+    const name = tab?.savedWorkflowName || tab?.name.trim() || "";
     if (!name) return;
     try {
-      const result = await api.workflowSave(name, fullGraph(), "node");
+      if (tab?.savedFilePath) {
+        const result = await api.saveFile(
+          tab.savedFilePath,
+          wfEnvelope("node", tab.name, graph),
+        );
+        if (result.error) {
+          onToast("error", "Save failed", result.error);
+          return;
+        }
+        onToast("ok", "Workflow saved", result.name || tab.savedFilePath);
+        return;
+      }
+      const result = await api.workflowSave(name, graph, "node");
       if (result.error) {
         onToast("error", "Save failed", result.error);
         return;
       }
+      setTabs((current) =>
+        current.map((item) =>
+          item.id === tab?.id
+            ? {
+                ...item,
+                savedWorkflowName: result.name || name,
+                savedFilePath: undefined,
+              }
+            : item,
+        ),
+      );
       onToast("ok", "Workflow saved", name);
       onWorkflowsChanged?.();
     } catch (error: any) {
       onToast("error", "Save failed", error.message || String(error));
     }
-  }, [activeTabName, fullGraph, onToast, onWorkflowsChanged]);
+  }, [activeTab, fullGraph, onToast, onWorkflowsChanged]);
 
   const openGraphInNewTab = useCallback(
     (
       graphLike: { nodes?: NbNode[]; edges?: any[] },
       requestedName: string,
-      options?: { editingDefinitionId?: string },
+      options?: {
+        editingDefinitionId?: string;
+        savedWorkflowName?: string;
+        savedFilePath?: string;
+      },
     ) => {
       const editingDefinitionId = options?.editingDefinitionId?.trim() || "";
-      if (editingDefinitionId) {
+      const savedWorkflowName = options?.savedWorkflowName?.trim() || "";
+      const savedFilePath = options?.savedFilePath?.trim() || "";
+      if (editingDefinitionId || savedWorkflowName || savedFilePath) {
         const existing = tabs.find(
-          (tab) => tab.editingDefinitionId === editingDefinitionId,
+          (tab) =>
+            (editingDefinitionId &&
+              tab.editingDefinitionId === editingDefinitionId) ||
+            (savedWorkflowName &&
+              tab.savedWorkflowName === savedWorkflowName) ||
+            (savedFilePath && tab.savedFilePath === savedFilePath),
         );
         if (existing) {
           if (existing.id !== activeTabRef.current) {
@@ -579,6 +647,8 @@ export function useNodeFlowDocumentController({
           {
             id,
             name,
+            ...(savedWorkflowName ? { savedWorkflowName } : {}),
+            ...(savedFilePath ? { savedFilePath } : {}),
             ...(editingDefinitionId ? { editingDefinitionId } : {}),
           },
         ];
@@ -743,7 +813,10 @@ export function useNodeFlowDocumentController({
     lastLoadReq.current = loadRequest.id;
     const graph = loadRequest.graph as { nodes?: NbNode[]; edges?: any[] };
     if (graph && (graph.nodes || graph.edges)) {
-      openGraphInNewTab(graph, loadRequest.name);
+      openGraphInNewTab(graph, loadRequest.name, {
+        savedWorkflowName: loadRequest.savedWorkflowName,
+        savedFilePath: loadRequest.savedFilePath,
+      });
       onToast("ok", "Workflow loaded", loadRequest.name);
     }
     onLoadConsumed?.();
@@ -764,7 +837,20 @@ export function useNodeFlowDocumentController({
           const result = await api.saveFile(path, content);
           if (requestSeq !== openFileSeqRef.current) return;
           if (result.error) onToast("error", "Save failed", result.error);
-          else onToast("ok", "Saved", result.name || path);
+          else {
+            setTabs((current) =>
+              current.map((tab) =>
+                tab.id === activeTabRef.current
+                  ? {
+                      ...tab,
+                      savedFilePath: result.path || path,
+                      savedWorkflowName: undefined,
+                    }
+                  : tab,
+              ),
+            );
+            onToast("ok", "Saved", result.name || path);
+          }
           return;
         }
         const result = await api.openFile(path);
@@ -777,24 +863,41 @@ export function useNodeFlowDocumentController({
           /\.samql\.json$|\.json$/i,
           "",
         );
+        try {
+          const created = parseCreatedNodeFile(JSON.parse(result.content));
+          if (created.ok) {
+            upsertCreatedNode(created.definition);
+            onToast(
+              "ok",
+              "Created node loaded",
+              `"${created.definition.name}" is in the palette.`,
+            );
+            return;
+          }
+        } catch {
+          // Not JSON / not a created-node export — fall through to workflow parsing.
+        }
         const envelope = parseWfFile(result.content);
         if (envelope?.kind === "node") {
           openGraphInNewTab(
             envelope.payload as { nodes?: NbNode[]; edges?: any[] },
             envelope.name || baseName,
+            { savedFilePath: result.path || path },
           );
           onToast("ok", "Workflow loaded", envelope.name || baseName);
         } else if (envelope) {
           onToast(
             "warn",
             "Not a node workflow",
-            `That looks like a ${envelope.kind} workflow — open it from the ${
-              envelope.kind === "ide" ? "SQL editor" : "Journal"
-            }.`,
+            `That looks like a ${envelope.kind} workflow — open it from the ${wfKindSurface(envelope.kind)}.`,
           );
         } else {
           try {
-            openGraphInNewTab(parseNodeFlowGraph(JSON.parse(result.content)), baseName);
+            openGraphInNewTab(
+              parseNodeFlowGraph(JSON.parse(result.content)),
+              baseName,
+              { savedFilePath: result.path || path },
+            );
             onToast("ok", "Workflow loaded", baseName);
           } catch {
             onToast("error", "Open failed", "Not a node workflow file.");
@@ -816,6 +919,7 @@ export function useNodeFlowDocumentController({
     else if (command.action === "saveAs") setNodeFileModal({ mode: "save" });
     else if (command.action === "open") setNodeFileModal({ mode: "open" });
     else if (command.action === "exportLineage") void exportLineage();
+    // selectNode is handled by NodeFlow (selection + pan live there)
   }, [command, exportLineage, saveWorkflow]);
 
   return {

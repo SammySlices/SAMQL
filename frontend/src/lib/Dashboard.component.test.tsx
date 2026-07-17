@@ -26,6 +26,8 @@ const apiMock = vi.hoisted(() => ({
   workflowsList: vi.fn(async () => ({ workflows: [] as { name: string; kind?: string }[] })),
   workflowLoad: vi.fn(async (..._args: unknown[]) => ({}) as Record<string, unknown>),
   workflowSave: vi.fn(async () => ({})),
+  openFile: vi.fn(async (..._args: unknown[]) => ({}) as Record<string, unknown>),
+  saveFile: vi.fn(async (..._args: unknown[]) => ({}) as Record<string, unknown>),
   nodeflowRun: vi.fn(),
   nodeflowChart: vi.fn(),
   nodeflowReconcile: vi.fn(),
@@ -76,6 +78,28 @@ vi.mock("../components/DataGrid", () => ({
 }));
 vi.mock("../components/ChartView", () => ({
   ChartView: () => <div data-testid="mock-chart" />,
+}));
+vi.mock("../components/LoadDataModal", () => ({
+  FileBrowser: ({
+    onPick,
+    onClose,
+  }: {
+    onPick: (path: string) => void;
+    onClose: () => void;
+  }) => (
+    <div data-testid="mock-file-browser">
+      <button
+        type="button"
+        data-testid="mock-file-pick"
+        onClick={() => onPick("C:/boards/pack.samql.json")}
+      >
+        Pick
+      </button>
+      <button type="button" data-testid="mock-file-close" onClick={onClose}>
+        Close
+      </button>
+    </div>
+  ),
 }));
 
 function samqlGraph(upstreamType = "browse") {
@@ -725,6 +749,27 @@ describe("Dashboard", () => {
     expect(config.scrollWidth).toBeLessThanOrEqual(config.clientWidth + 1);
   });
 
+  it("keeps header height in config only — no live header resize handle", async () => {
+    seedWorkspace();
+    render(<Dashboard onToast={() => undefined} />);
+    const widget = screen.getByTestId("dashboard-widget-w1");
+    expect(widget.querySelector(".dash-widget-head")).toBeTruthy();
+    expect(widget.querySelector(".dash-header-resize")).toBeNull();
+    expect(document.querySelectorAll(".dash-header-resize")).toHaveLength(0);
+
+    openWidgetConfig("w1");
+    const config = screen.getByTestId("dashboard-config");
+    expect(within(config).getByText("Header height")).toBeTruthy();
+    const heightSlider = within(config).getByRole("slider");
+    fireEvent.change(heightSlider, { target: { value: "48" } });
+    await waitFor(() => {
+      const head = screen
+        .getByTestId("dashboard-widget-w1")
+        .querySelector(".dash-widget-head") as HTMLElement;
+      expect(head.style.height).toBe("48px");
+    });
+  });
+
   it("places text grab + resize below the header area", async () => {
     render(<Dashboard onToast={() => undefined} />);
     clickDashboardMoreItem("dashboard-add-text");
@@ -861,6 +906,92 @@ describe("Dashboard", () => {
       expect(save).toHaveBeenCalled();
     });
     expect(toast).toHaveBeenCalledWith("ok", "Exported", expect.any(String));
+  });
+
+  it("opens a dashboard file via command Open and sets save identity", async () => {
+    seedWorkspace();
+    const toast = vi.fn();
+    const consumed = vi.fn();
+    const ws = emptyDashboardWorkspace();
+    ws.dashboards[0].id = "from-disk";
+    ws.dashboards[0].name = "From Disk";
+    ws.activeId = "from-disk";
+    const { wfEnvelope } = await import("./workflowFile");
+    apiMock.openFile.mockResolvedValue({
+      content: wfEnvelope("dashboard", "Board Pack", ws),
+      name: "pack.samql.json",
+      path: "C:/boards/pack.samql.json",
+    });
+    render(
+      <Dashboard
+        onToast={toast}
+        command={{ id: 13, action: "open" }}
+        onCommandConsumed={consumed}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("mock-file-browser")).toBeTruthy());
+    expect(consumed).toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("mock-file-pick"));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith("ok", "Dashboard loaded", "Board Pack"),
+    );
+    expect(loadDashboardWorkspace().savedName).toBe("Board Pack");
+    expect(loadDashboardWorkspace().dashboards[0].name).toBe("From Disk");
+  });
+
+  it("Save As opens the file browser and writes a dashboard envelope", async () => {
+    seedWorkspace((ws) => {
+      ws.savedName = "Board Pack";
+    });
+    const toast = vi.fn();
+    apiMock.saveFile.mockResolvedValue({
+      ok: true,
+      name: "pack.samql.json",
+      path: "C:/boards/pack.samql.json",
+    });
+    render(
+      <Dashboard
+        onToast={toast}
+        command={{ id: 15, action: "saveAs" }}
+        onCommandConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("mock-file-browser")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("mock-file-pick"));
+    await waitFor(() =>
+      expect(apiMock.saveFile).toHaveBeenCalledWith(
+        "C:/boards/pack.samql.json",
+        expect.stringContaining('"kind": "dashboard"'),
+      ),
+    );
+    expect(toast).toHaveBeenCalledWith("ok", "Saved", "pack.samql.json");
+  });
+
+  it("rejects a non-dashboard workflow file from Open", async () => {
+    seedWorkspace();
+    const toast = vi.fn();
+    const { wfEnvelope } = await import("./workflowFile");
+    apiMock.openFile.mockResolvedValue({
+      content: wfEnvelope("journal", "Daily", { doc: "x" }),
+      name: "daily.samql.json",
+      path: "C:/journals/daily.samql.json",
+    });
+    render(
+      <Dashboard
+        onToast={toast}
+        command={{ id: 14, action: "open" }}
+        onCommandConsumed={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("mock-file-browser")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("mock-file-pick"));
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        "warn",
+        "Not a dashboard file",
+        expect.stringContaining("journal"),
+      ),
+    );
   });
 
   it("applies loadRequest workspace and soft-loads referenced node workflows", async () => {

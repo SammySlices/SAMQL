@@ -47,6 +47,7 @@ describe("Dense NodeFlow", () => {
       snapped: false,
       dying: false,
       born: false,
+      lineageFlash: false,
       denseMode: false,
       renderVersion: "g1",
       chartVersion: null,

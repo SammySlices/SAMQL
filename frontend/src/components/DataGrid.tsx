@@ -11,6 +11,8 @@ import {
   looksStructy,
   runAfterPaint,
 } from "../lib/prettyStruct";
+import { ExportResultsCtxItem } from "./ExportResultsMenu";
+import type { ExportFormatOption } from "../lib/resultExportFormats";
 
 /** Only the most recently selected grid responds to Ctrl/Cmd+C. */
 let copyOwnerToken = 0;
@@ -22,6 +24,11 @@ interface Props {
   descending: boolean;
   onSort: (col: string) => void;
   onColumnContextMenu?: (col: string, x: number, y: number) => void;
+  /** Open column lineage for a cell (row/cell right-click only — not headers). */
+  onShowLineage?: (
+    col: string,
+    ctx?: { rowIndex: number; value: Cell },
+  ) => void;
   // Lazy paging: fetch the next chunk of rows when the user scrolls near
   // the bottom. `hasMore` is true while loaded rows < total_rows.
   onLoadMore?: () => void;
@@ -29,6 +36,7 @@ interface Props {
   loadingMore?: boolean;
   // export the result this grid is showing (right-click menu)
   onExportResults?: (fmt: string) => void;
+  exportFormats?: ExportFormatOption[];
   // Full-value fetch context: when present, expanding a TRUNCATED cell pulls
   // its complete value from the server (same sort/filter view this grid is
   // showing; the grid's row index is the absolute view index because lazy
@@ -79,10 +87,12 @@ const DataGridImpl: React.FC<Props> = ({
   descending,
   onSort,
   onColumnContextMenu,
+  onShowLineage,
   onLoadMore,
   hasMore,
   loadingMore,
   onExportResults,
+  exportFormats,
   cellFetch,
   onContentMetrics,
 }) => {
@@ -209,9 +219,13 @@ const DataGridImpl: React.FC<Props> = ({
   const dragging = useRef(false);
   const selMode = useRef<"cell" | "row">("cell");
   const copyOwnerRef = useRef(0);
-  const [cellMenu, setCellMenu] = useState<{ x: number; y: number } | null>(
-    null,
-  );
+  const [cellMenu, setCellMenu] = useState<{
+    x: number;
+    y: number;
+    col: string;
+    rowIndex: number;
+    value: Cell;
+  } | null>(null);
   // Expandable viewer for a struct / JSON cell. Position lives in useWinDrag
   // (viewport-centered on open); never paint raw text before pretty-print.
   const [viewer, setViewer] = useState<{
@@ -447,7 +461,13 @@ const DataGridImpl: React.FC<Props> = ({
       selMode.current = "cell";
       setSel({ aR: idx, aC: ci, fR: idx, fC: ci });
     }
-    setCellMenu({ x: e.clientX, y: e.clientY });
+    setCellMenu({
+      x: e.clientX,
+      y: e.clientY,
+      col: cols[ci],
+      rowIndex: rowBase + idx,
+      value: rows[idx]?.[ci] ?? null,
+    });
   };
 
   // Ctrl/Cmd+C works even when focus left the grid (common in dashboard widgets).
@@ -565,15 +585,17 @@ const DataGridImpl: React.FC<Props> = ({
                 key={c}
                 className="gh-cell"
                 data-column={c}
+                data-testid="grid-col-header"
                 style={{ width: colWidth(c) }}
                 onClick={() => onSort(c)}
                 onContextMenu={(e) => {
                   if (onColumnContextMenu) {
                     e.preventDefault();
+                    e.stopPropagation();
                     onColumnContextMenu(c, e.clientX, e.clientY);
                   }
                 }}
-                title={`Sort by ${c}  ·  right-click to change type`}
+                title={`Sort by ${c}  ·  right-click for column menu`}
               >
                 <span
                   style={{
@@ -762,26 +784,35 @@ const DataGridImpl: React.FC<Props> = ({
             >
               Copy with headers
             </button>
-            {onExportResults && (
+            {onExportResults && exportFormats && exportFormats.length > 0 && (
+              <>
+                <div className="sep" />
+                <ExportResultsCtxItem
+                  testId="grid-export-results"
+                  showIcon={false}
+                  formats={exportFormats}
+                  onExport={(fmt) => {
+                    onExportResults(fmt);
+                    setCellMenu(null);
+                  }}
+                />
+              </>
+            )}
+            {onShowLineage && cellMenu.col && (
               <>
                 <div className="sep" />
                 <button
                   type="button"
+                  data-testid="show-column-lineage"
                   onClick={() => {
-                    onExportResults("csv");
+                    onShowLineage(cellMenu.col, {
+                      rowIndex: cellMenu.rowIndex,
+                      value: cellMenu.value,
+                    });
                     setCellMenu(null);
                   }}
                 >
-                  Export results (CSV)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onExportResults("json");
-                    setCellMenu(null);
-                  }}
-                >
-                  Export results (JSON)
+                  Show lineage
                 </button>
               </>
             )}

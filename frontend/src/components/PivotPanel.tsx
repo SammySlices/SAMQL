@@ -21,12 +21,25 @@ import type {
   PivotAgg,
   Cell,
 } from "../lib/types";
+import {
+  defaultPivotAgg,
+  fieldRole,
+  groupColumnsByRole,
+  inferColumnTypes,
+  roleLabel,
+  shortFieldType,
+  type FieldRole,
+} from "../lib/fieldRoles";
 import { Icon } from "./Icon";
 
 // ---- field drawer source --------------------------------------------------
 interface ResultSource {
   id: string;
   columns: string[];
+  /** Optional SQL / inferred types keyed by column name. */
+  columnTypes?: Record<string, string> | null;
+  /** Sample rows used to infer types when columnTypes is absent. */
+  sampleRows?: Cell[][] | null;
 }
 
 interface Props {
@@ -165,6 +178,20 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
       (c) => c.name,
     );
   }, [source, result, tables]);
+  const sourceTypes = useMemo(() => {
+    if (source === RESULT_SRC) {
+      if (result?.columnTypes && Object.keys(result.columnTypes).length) {
+        return result.columnTypes;
+      }
+      return inferColumnTypes(result?.columns ?? [], result?.sampleRows);
+    }
+    const cols = tables.find((t) => t.name === source)?.columns ?? [];
+    const out: Record<string, string> = {};
+    for (const c of cols) {
+      if (c.type) out[c.name] = c.type;
+    }
+    return out;
+  }, [source, result, tables]);
   const sourceEngine = useMemo(
     () => tables.find((t) => t.name === source)?.engine,
     [source, tables],
@@ -181,6 +208,7 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
   const [filters, setFilters] = useState<FilterItem[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [fieldQuery, setFieldQuery] = useState("");
+  const [roleFilter, setRoleFilter] = useState<"all" | FieldRole>("all");
 
   // editing popovers
   const [valEdit, setValEdit] = useState<{ id: number; x: number; y: number } | null>(
@@ -189,18 +217,47 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
   const [filEdit, setFilEdit] = useState<{ id: number; x: number; y: number } | null>(
     null,
   );
+  const valPopTrigger = useRef<HTMLElement | null>(null);
+  const filPopTrigger = useRef<HTMLElement | null>(null);
+  const valPopRef = useRef<HTMLDivElement | null>(null);
+  const filPopRef = useRef<HTMLDivElement | null>(null);
+  const closeValEdit = useCallback((restoreFocus = true) => {
+    const trigger = valPopTrigger.current;
+    valPopTrigger.current = null;
+    setValEdit(null);
+    if (restoreFocus && trigger && document.contains(trigger)) trigger.focus();
+  }, []);
+  const closeFilEdit = useCallback((restoreFocus = true) => {
+    const trigger = filPopTrigger.current;
+    filPopTrigger.current = null;
+    setFilEdit(null);
+    if (restoreFocus && trigger && document.contains(trigger)) trigger.focus();
+  }, []);
+  const focusPopover = useCallback((root: HTMLDivElement | null) => {
+    if (!root) return;
+    const focusable = root.querySelector<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    (focusable || root).focus();
+  }, []);
+  useLayoutEffect(() => {
+    if (valEdit) focusPopover(valPopRef.current);
+  }, [valEdit, focusPopover]);
+  useLayoutEffect(() => {
+    if (filEdit) focusPopover(filPopRef.current);
+  }, [filEdit, focusPopover]);
   // Escape closes whichever editing popover is open (no full modal needed).
   useEffect(() => {
     if (!valEdit && !filEdit) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setValEdit(null);
-        setFilEdit(null);
+        if (valEdit) closeValEdit();
+        else if (filEdit) closeFilEdit();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [valEdit, filEdit]);
+  }, [valEdit, filEdit, closeValEdit, closeFilEdit]);
 
   const [data, setData] = useState<PivotResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -251,6 +308,8 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
       setExpired(false);
       setValEdit(null);
       setFilEdit(null);
+      valPopTrigger.current = null;
+      filPopTrigger.current = null;
     }
   }, [srcId]);
 
@@ -315,7 +374,11 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     const field = fieldOf(p);
     if (!field) return;
     setValues((prev) => {
-      const item: ValueItem = { id: nextId(), field, agg: "sum" };
+      const item: ValueItem = {
+        id: nextId(),
+        field,
+        agg: defaultPivotAgg(sourceTypes[field]),
+      };
       const at = atIndex == null ? prev.length : Math.min(atIndex, prev.length);
       const copy = [...prev];
       copy.splice(at, 0, item);
@@ -490,9 +553,13 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     ...values.map((v) => v.field).filter((f): f is string => !!f),
     ...filters.map((f) => f.field),
   ]);
-  const fieldList = sourceCols.filter((c) =>
-    c.toLowerCase().includes(fieldQuery.trim().toLowerCase()),
-  );
+  const fieldList = sourceCols.filter((c) => {
+    if (!c.toLowerCase().includes(fieldQuery.trim().toLowerCase())) return false;
+    if (roleFilter === "all") return true;
+    return fieldRole(sourceTypes[c]) === roleFilter;
+  });
+  const fieldGroups = groupColumnsByRole(fieldList, sourceTypes);
+  const hasTypedFields = Object.keys(sourceTypes).length > 0;
 
   const nDims = rows.length;
 
@@ -777,19 +844,96 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
               value={fieldQuery}
               onChange={(e) => setFieldQuery(e.target.value)}
             />
+            {hasTypedFields && (
+              <div className="pv-role-filters" role="group" aria-label="Field type filter">
+                {(
+                  [
+                    ["all", "All"],
+                    ["dimension", "Dim"],
+                    ["measure", "Num"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={
+                      "pv-role-chip" + (roleFilter === id ? " on" : "")
+                    }
+                    onClick={() => setRoleFilter(id)}
+                    title={
+                      id === "all"
+                        ? "Show every field"
+                        : id === "dimension"
+                          ? "Show dimensions (text, date, bool…)"
+                          : "Show measures (numeric)"
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="pv-field-list">
-              {fieldList.map((f) => (
-                <div
-                  key={f}
-                  className={"pv-field" + (usedAxis.has(f) ? " used" : "")}
-                  draggable
-                  onDragStart={(e) => startDrag(e, { field: f, from: "drawer" })}
-                  title="Drag into a tile"
-                >
-                  <span className="pv-grip">⋮⋮</span>
-                  {f}
-                </div>
-              ))}
+              {(hasTypedFields
+                ? (
+                    [
+                      ["dimension", fieldGroups.dimensions],
+                      ["measure", fieldGroups.measures],
+                      ["unknown", fieldGroups.other],
+                    ] as [FieldRole, string[]][]
+                  ).flatMap(([role, items]) =>
+                    items.length
+                      ? [
+                          <div key={`sec-${role}`} className="pv-field-section">
+                            {roleLabel(role)}
+                          </div>,
+                          ...items.map((f) => (
+                            <div
+                              key={f}
+                              className={
+                                "pv-field" +
+                                (usedAxis.has(f) ? " used" : "") +
+                                (fieldRole(sourceTypes[f]) === "measure"
+                                  ? " pv-field-measure"
+                                  : " pv-field-dim")
+                              }
+                              draggable
+                              onDragStart={(e) =>
+                                startDrag(e, { field: f, from: "drawer" })
+                              }
+                              title={`${f}${sourceTypes[f] ? ` · ${sourceTypes[f]}` : ""}\nDrag into a tile`}
+                            >
+                              <span className="pv-grip">⋮⋮</span>
+                              <span className="pv-field-name">{f}</span>
+                              <span
+                                className={
+                                  "pv-ftype" +
+                                  (fieldRole(sourceTypes[f]) === "measure"
+                                    ? " measure"
+                                    : " dim")
+                                }
+                              >
+                                {shortFieldType(sourceTypes[f])}
+                              </span>
+                            </div>
+                          )),
+                        ]
+                      : [],
+                  )
+                : fieldList.map((f) => (
+                    <div
+                      key={f}
+                      className={"pv-field" + (usedAxis.has(f) ? " used" : "")}
+                      draggable
+                      onDragStart={(e) =>
+                        startDrag(e, { field: f, from: "drawer" })
+                      }
+                      title="Drag into a tile"
+                    >
+                      <span className="pv-grip">⋮⋮</span>
+                      {f}
+                    </div>
+                  )))}
               {fieldList.length === 0 && (
                 <div className="pv-tile-hint">No matching fields.</div>
               )}
@@ -826,9 +970,10 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
                 >
                   <button
                     className="pv-chip-label as-btn"
-                    onClick={(e) =>
-                      setFilEdit({ id: f.id, x: e.clientX, y: e.clientY })
-                    }
+                    onClick={(e) => {
+                      filPopTrigger.current = e.currentTarget;
+                      setFilEdit({ id: f.id, x: e.clientX, y: e.clientY });
+                    }}
                     title="Edit filter"
                   >
                     {filterLabel(f)}
@@ -848,19 +993,19 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
             {Tile(
               "cols",
               "Columns",
-              "Drop fields here (stack for sub-columns)",
+              "Dimensions for columns (text / date / bool…)",
               cols.map((f, i) => axisChip("cols", f, i)),
             )}
             {Tile(
               "rows",
               "Rows",
-              "Drop fields here (stack for sub-rows)",
+              "Dimensions for rows (text / date / bool…)",
               rows.map((f, i) => axisChip("rows", f, i)),
             )}
             {Tile(
               "values",
               "Summarize",
-              "Drop fields here to aggregate",
+              "Measures to aggregate (numeric preferred)",
               values.map((v, i) => (
                 <div
                   key={v.id}
@@ -886,9 +1031,10 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
                 >
                   <button
                     className="pv-chip-label as-btn"
-                    onClick={(e) =>
-                      setValEdit({ id: v.id, x: e.clientX, y: e.clientY })
-                    }
+                    onClick={(e) => {
+                      valPopTrigger.current = e.currentTarget;
+                      setValEdit({ id: v.id, x: e.clientX, y: e.clientY });
+                    }}
                     title="Choose summary"
                   >
                     {aggLabel(v)}
@@ -1059,8 +1205,13 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
           if (!v) return null;
           return (
             <>
-              <div className="pv-pop-back" onMouseDown={() => setValEdit(null)} />
+              <div className="pv-pop-back" onMouseDown={() => closeValEdit()} />
               <div
+                ref={valPopRef}
+                role="dialog"
+                aria-modal="true"
+                aria-label={`Summarize ${v.field ?? "rows"}`}
+                tabIndex={-1}
                 className="pv-pop"
                 style={{
                   left: Math.min(valEdit.x, window.innerWidth - 230),
@@ -1079,7 +1230,7 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
                           x.id === v.id ? { ...x, agg: a.value } : x,
                         ),
                       );
-                      setValEdit(null);
+                      closeValEdit();
                     }}
                   >
                     {a.label}
@@ -1102,8 +1253,13 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
             );
           return (
             <>
-              <div className="pv-pop-back" onMouseDown={() => setFilEdit(null)} />
+              <div className="pv-pop-back" onMouseDown={() => closeFilEdit()} />
               <div
+                ref={filPopRef}
+                role="dialog"
+                aria-modal="true"
+                aria-label={`Filter: ${f.field}`}
+                tabIndex={-1}
                 className="pv-pop pv-pop-filter"
                 style={{
                   left: Math.min(filEdit.x || 80, window.innerWidth - 280),
@@ -1164,7 +1320,7 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
                   />
                 )}
                 <div className="pv-pop-actions">
-                  <button className="btn ghost sm" onClick={() => setFilEdit(null)}>
+                  <button className="btn ghost sm" onClick={() => closeFilEdit()}>
                     Done
                   </button>
                 </div>
@@ -1191,5 +1347,9 @@ export const PivotPanel = React.memo(
   (a, b) =>
     a.tables === b.tables &&
     (a.result?.id ?? null) === (b.result?.id ?? null) &&
-    samePivotCols(a.result?.columns, b.result?.columns),
+    samePivotCols(a.result?.columns, b.result?.columns) &&
+    a.result?.sampleRows === b.result?.sampleRows &&
+    (a.result?.columnTypes === b.result?.columnTypes ||
+      JSON.stringify(a.result?.columnTypes ?? null) ===
+        JSON.stringify(b.result?.columnTypes ?? null)),
 );

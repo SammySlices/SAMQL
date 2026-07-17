@@ -266,4 +266,33 @@ describe("DataGrid DOM behavior", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("gamma"));
   });
 
+  it("exposes Show lineage on cell context menu only (not header)", () => {
+    const onColumnContextMenu = vi.fn();
+    const onShowLineage = vi.fn();
+    mount(page([[1, "alpha"]]), { onColumnContextMenu, onShowLineage });
+
+    const header = screen.getAllByTestId("grid-col-header").find(
+      (el) => el.getAttribute("data-column") === "value",
+    ) as HTMLElement;
+    fireEvent.contextMenu(header);
+    expect(onColumnContextMenu).toHaveBeenCalledWith(
+      "value",
+      expect.any(Number),
+      expect.any(Number),
+    );
+    expect(screen.queryByTestId("show-column-lineage")).toBeNull();
+
+    const cell = screen.getByTestId("result-grid").querySelector(
+      '[data-column="value"][data-row-index="0"]',
+    ) as HTMLElement;
+    fireEvent.contextMenu(cell);
+    const showLineage = screen.getByTestId("show-column-lineage");
+    expect(showLineage).toHaveTextContent("Show lineage");
+    fireEvent.click(showLineage);
+    expect(onShowLineage).toHaveBeenCalledWith("value", {
+      rowIndex: 0,
+      value: "alpha",
+    });
+  });
+
 });

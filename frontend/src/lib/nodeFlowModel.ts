@@ -431,7 +431,13 @@ export function serializeNodeFlowGraph(
 
 export interface NodeFlowTabsFile {
   version: number;
-  tabs: Array<{ id: string; name: string; editingDefinitionId?: string }>;
+  tabs: Array<{
+    id: string;
+    name: string;
+    savedWorkflowName?: string;
+    savedFilePath?: string;
+    editingDefinitionId?: string;
+  }>;
   activeTabId: string;
   migratedFrom?: number;
 }
@@ -463,6 +469,15 @@ function validateNodeFlowTabsFile(value: any): asserts value is NodeFlowTabsFile
     ) {
       throw new Error("NodeFlow tab state contains an invalid editing definition id.");
     }
+    if (
+      tab.savedWorkflowName !== undefined &&
+      typeof tab.savedWorkflowName !== "string"
+    ) {
+      throw new Error("NodeFlow tab state contains an invalid saved workflow name.");
+    }
+    if (tab.savedFilePath !== undefined && typeof tab.savedFilePath !== "string") {
+      throw new Error("NodeFlow tab state contains an invalid saved file path.");
+    }
     if (ids.has(tab.id))
       throw new Error(`NodeFlow tab state contains duplicate tab id “${tab.id}”.`);
     ids.add(tab.id);
@@ -484,7 +499,13 @@ export function parseNodeFlowTabs(input: any): NodeFlowTabsFile {
 }
 
 export function serializeNodeFlowTabs(
-  tabs: Array<{ id: string; name: string; editingDefinitionId?: string }>,
+  tabs: Array<{
+    id: string;
+    name: string;
+    savedWorkflowName?: string;
+    savedFilePath?: string;
+    editingDefinitionId?: string;
+  }>,
   activeTabId: string,
 ): NodeFlowTabsFile {
   return {
@@ -492,6 +513,10 @@ export function serializeNodeFlowTabs(
     tabs: tabs.map((tab) => ({
       id: tab.id,
       name: tab.name,
+      ...(tab.savedWorkflowName
+        ? { savedWorkflowName: tab.savedWorkflowName }
+        : {}),
+      ...(tab.savedFilePath ? { savedFilePath: tab.savedFilePath } : {}),
       ...(tab.editingDefinitionId
         ? { editingDefinitionId: tab.editingDefinitionId }
         : {}),
@@ -780,6 +805,8 @@ export interface CanvasNodeMemoState {
   snapped: boolean;
   dying: boolean;
   born: boolean;
+  /** White glow when lineage modal highlights this node. */
+  lineageFlash: boolean;
   /** Dense NodeFlow layout flag — module densify() is not visible to React.memo. */
   denseMode: boolean;
   renderVersion: string;
@@ -802,6 +829,7 @@ export function sameCanvasNodeMemoState(
     a.snapped === b.snapped &&
     a.dying === b.dying &&
     a.born === b.born &&
+    a.lineageFlash === b.lineageFlash &&
     a.denseMode === b.denseMode &&
     a.renderVersion === b.renderVersion &&
     a.chartVersion === b.chartVersion &&

@@ -2,12 +2,26 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-16.628
+Current build:   2026-07-17.629
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-17.629  (v2.16.4)
+
+OPEN/SAVE WORKSPACE ROUTING + SETTINGS/UI POLISH + COLUMN LINEAGE.
+Generic Open/Save/Save As section routes saved nodes, journals,
+dashboards, queries, and workflows to the correct surface and tab.
+Settings: Load a Table rename, JSON Field Explorer under Tools,
+Open/Save section, About above Clear, Storage & Engine consolidation,
+Visual/Toolbar toggles. Dashboard: header height only in Configure
+(no live drag/glow). Dropdown menus use theme light-green highlight.
+Column lineage modal, typed pivot/chart pickers, Ctrl+S overwrite save,
+and related NodeFlow/results polish. Bump identity and refresh
+samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-16.628  (v2.16.4)

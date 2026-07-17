@@ -149,8 +149,8 @@ export const LoadThresholdsPanel: React.FC<{
         const meta = fields[key];
         if (!meta) return null;
         return (
-          <label key={key} title={meta.help}>
-            <span style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          <label key={key} className="threshold-field" title={meta.help}>
+            <span className="threshold-field-head">
               <span>
                 {meta.label}
                 <span className="faint"> ({meta.unit})</span>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import {
   applySelectColumnsReconcile,
@@ -8,6 +8,14 @@ import {
   reconcileSelectFields,
 } from "../../lib/selectFields";
 import { reconcilePivotFields } from "../../lib/pivotFields";
+import {
+  fingerprintColumnReqs,
+  getNodeflowColsCache,
+  nodeflowColsCacheKey,
+  setNodeflowColsCache,
+} from "../../lib/nodeflowColumnsCache";
+import { runAfterPaint } from "../../lib/prettyStruct";
+import { staleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
 import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import type { NodeFlowInspectorContext } from "./NodeFlowInspector";
 
@@ -31,6 +39,7 @@ export type ManagedInspectorKey =
   | "fxRefs"
   | "fxSetExpr"
   | "inspCols"
+  | "inspColsProbing"
   | "inspectorDocked"
   | "inspectorHost"
   | "nodes"
@@ -50,6 +59,7 @@ export type ManagedInspectorKey =
   | "setSorts"
   | "setWindows"
   | "showTables"
+  | "staleColRefs"
   | "toggleInArray"
   | "updateField";
 
@@ -94,7 +104,9 @@ export function useNodeFlowInspectorController({
   const childCtx = (_id: string | null) => childSelection;
   // upstream columns for the select / join inspectors -----------------------
   const [inspCols, setInputColumns] = useState<Record<string, string[]>>({});
-  // transient draft for the API node's password field (never stored in config)
+  // True while a column probe is in flight after select/graph change. Distinguishes
+  // "still loading fields" from "genuinely unwired / empty upstream".
+  const [inspColsProbing, setInspColsProbing] = useState(false);
   // Clear the cached input columns only when the SELECTED node changes, so a
   // freshly selected node never briefly shows the previous node's columns.
   // Editing the current node's own config must NOT clear them: doing that
@@ -102,9 +114,16 @@ export function useNodeFlowInspectorController({
   // controls, the select fields) on each keystroke, which read as a flicker.
   useEffect(() => {
     setInputColumns({});
+    const ports = selectedNode ? PORTS[selectedNode.type]?.inputs || [] : [];
+    setInspColsProbing(ports.length > 0);
+    // Only re-clear when the selected node id changes — not on every config patch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, selId]);
   useEffect(() => {
-    if (!sel) return;
+    if (!sel) {
+      setInspColsProbing(false);
+      return;
+    }
     // a child of a group: resolve EACH input port the way the backend group
     // does -- an explicit binding to one of the group's own inputs wins; the
     // first port otherwise comes from the step above it (or the group's primary
@@ -115,7 +134,10 @@ export function useNodeFlowInspectorController({
     const cctx = childCtx(selId);
     if (cctx) {
       const inPorts = PORTS[sel.type]?.inputs || [];
-      if (!inPorts.length) return;
+      if (!inPorts.length) {
+        setInspColsProbing(false);
+        return;
+      }
       const grp = nodes.find((n) => n.id === cctx.groupId);
       const binds = ((grp?.config.bindings || {}) as any)[sel.id] || {};
       const groupReqs: { port: string; node: string; fromPort: string }[] = [];
@@ -134,39 +156,68 @@ export function useNodeFlowInspectorController({
           stepAbovePort = port;
         }
       }
+      if (!groupReqs.length && !stepAbovePort) {
+        setInputColumns({});
+        setInspColsProbing(false);
+        return;
+      }
+      const fp = fingerprintColumnReqs(
+        groupReqs,
+        stepAbovePort ? `step:${stepAbovePort}@${cctx.index}` : "",
+      );
+      const cacheKey = nodeflowColsCacheKey(
+        graphSig,
+        sel.id,
+        "group-child",
+        fp,
+      );
+      const cached = getNodeflowColsCache(cacheKey);
+      if (cached) {
+        setInputColumns(cached);
+        setInspColsProbing(false);
+        return;
+      }
+      setInspColsProbing(true);
       let cancelled = false;
-      (async () => {
-        const out: Record<string, string[]> = {};
-        try {
-          await Promise.all([
-            (async () => {
-              if (!groupReqs.length) return;
-              const r = await api.nodeflowColumnsBatch(
-                graphForApi(),
-                groupReqs.map((q) => ({ node: q.node, port: q.fromPort })),
-              );
-              (r.results || []).forEach((res, i) => {
-                if (res && res.columns && groupReqs[i])
-                  out[groupReqs[i].port] = res.columns;
-              });
-            })(),
-            (async () => {
-              if (!stepAbovePort) return;
-              const r = await api.nodeflowColumns(
-                partialGroupGraph(cctx.groupId, cctx.index),
-                cctx.groupId,
-                "out",
-              );
-              if (r.columns) out[stepAbovePort] = r.columns;
-            })(),
-          ]);
-        } catch {
-          /* ignore */
-        }
-        if (!cancelled) setInputColumns(out);
-      })();
+      const cancelPaint = runAfterPaint(() => {
+        (async () => {
+          const out: Record<string, string[]> = {};
+          try {
+            await Promise.all([
+              (async () => {
+                if (!groupReqs.length) return;
+                const r = await api.nodeflowColumnsBatch(
+                  graphForApi(),
+                  groupReqs.map((q) => ({ node: q.node, port: q.fromPort })),
+                );
+                (r.results || []).forEach((res, i) => {
+                  if (res && res.columns && groupReqs[i])
+                    out[groupReqs[i].port] = res.columns;
+                });
+              })(),
+              (async () => {
+                if (!stepAbovePort) return;
+                const r = await api.nodeflowColumns(
+                  partialGroupGraph(cctx.groupId, cctx.index),
+                  cctx.groupId,
+                  "out",
+                );
+                if (r.columns) out[stepAbovePort] = r.columns;
+              })(),
+            ]);
+          } catch {
+            /* ignore */
+          }
+          if (!cancelled) {
+            setNodeflowColsCache(cacheKey, out);
+            setInputColumns(out);
+            setInspColsProbing(false);
+          }
+        })();
+      });
       return () => {
         cancelled = true;
+        cancelPaint();
       };
     }
     // every input port this node actually has, read straight from the port
@@ -174,36 +225,56 @@ export function useNodeFlowInspectorController({
     // fetched column keys always match what each inspector reads by port name.
     // Nodes with no inputs resolve to [] and skip the fetch below.
     const wantPorts = PORTS[sel.type]?.inputs || [];
-    if (!wantPorts.length) return;
+    if (!wantPorts.length) {
+      setInspColsProbing(false);
+      return;
+    }
+    // resolve each wanted input port to the upstream (node, port) feeding it,
+    // then fetch all their columns in a single batched request
+    const reqs: { port: string; node: string; fromPort: string }[] = [];
+    for (const port of wantPorts) {
+      const e = edges.find((x) => x.to.node === sel.id && x.to.port === port);
+      if (e) reqs.push({ port, node: e.from.node, fromPort: e.from.port });
+    }
+    if (!reqs.length) {
+      setInputColumns({});
+      setInspColsProbing(false);
+      return;
+    }
+    const fp = fingerprintColumnReqs(reqs);
+    const cacheKey = nodeflowColsCacheKey(graphSig, sel.id, "canvas", fp);
+    const cached = getNodeflowColsCache(cacheKey);
+    if (cached) {
+      setInputColumns(cached);
+      setInspColsProbing(false);
+      return;
+    }
+    setInspColsProbing(true);
     let cancelled = false;
-    (async () => {
-      // resolve each wanted input port to the upstream (node, port) feeding it,
-      // then fetch all their columns in a single batched request
-      const reqs: { port: string; node: string; fromPort: string }[] = [];
-      for (const port of wantPorts) {
-        const e = edges.find((x) => x.to.node === sel.id && x.to.port === port);
-        if (e) reqs.push({ port, node: e.from.node, fromPort: e.from.port });
-      }
-      if (!reqs.length) {
-        if (!cancelled) setInputColumns({});
-        return;
-      }
-      const out: Record<string, string[]> = {};
-      try {
-        const r = await api.nodeflowColumnsBatch(
-          graphForApi(),
-          reqs.map((q) => ({ node: q.node, port: q.fromPort })),
-        );
-        (r.results || []).forEach((res, i) => {
-          if (res && res.columns && reqs[i]) out[reqs[i].port] = res.columns;
-        });
-      } catch {
-        /* ignore */
-      }
-      if (!cancelled) setInputColumns(out);
-    })();
+    const cancelPaint = runAfterPaint(() => {
+      (async () => {
+        const out: Record<string, string[]> = {};
+        try {
+          const r = await api.nodeflowColumnsBatch(
+            graphForApi(),
+            reqs.map((q) => ({ node: q.node, port: q.fromPort })),
+          );
+          (r.results || []).forEach((res, i) => {
+            if (res && res.columns && reqs[i]) out[reqs[i].port] = res.columns;
+          });
+        } catch {
+          /* ignore */
+        }
+        if (!cancelled) {
+          setNodeflowColsCache(cacheKey, out);
+          setInputColumns(out);
+          setInspColsProbing(false);
+        }
+      })();
+    });
     return () => {
       cancelled = true;
+      cancelPaint();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, selId, graphSig]);
@@ -311,6 +382,11 @@ export function useNodeFlowInspectorController({
     if (changed) patch(sel.id, p);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, inspCols, selId]);
+
+  const staleColRefs = useMemo(() => {
+    if (!sel) return [];
+    return staleNodeflowColumnRefs(sel.type, sel.config || {}, inspCols);
+  }, [sel, inspCols]);
 
   const seedSelectFields = () => {
     if (sel && inspCols.in)
@@ -598,7 +674,8 @@ export function useNodeFlowInspectorController({
                     <option value="count">count</option>
                   </select>
                   <button
-                    className="btn sm"
+                    className="btn ghost icon xbtn"
+                    title="Remove"
                     onClick={() => {
                       const cur = [...(sel.config.reduce_aggs || [])];
                       cur.splice(idx, 1);
@@ -656,6 +733,7 @@ export function useNodeFlowInspectorController({
     fxRefs,
     fxSetExpr,
     inspCols,
+    inspColsProbing,
     inspectorDocked,
     inspectorHost,
     nodes,
@@ -675,6 +753,7 @@ export function useNodeFlowInspectorController({
     setSorts,
     setWindows,
     showTables,
+    staleColRefs,
     toggleInArray,
     updateField,
   };

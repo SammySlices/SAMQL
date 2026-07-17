@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { api } from "../lib/api";
 import type { MemInfo } from "../lib/types";
 import { Modal } from "./Modal";
+import { EngineTuningPanel } from "./EngineTuningPanel";
 import { FlowCachePanel } from "./FlowCacheModal";
 import { LoadThresholdsPanel } from "./LoadThresholdsPanel";
 
@@ -13,7 +14,12 @@ type ToastFn = (
 
 type StorageReport = Awaited<ReturnType<typeof api.storageReport>>;
 
-export type StorageMemoryTab = "storage" | "cache" | "loads" | "jsonflatten";
+export type StorageMemoryTab =
+  | "storage"
+  | "cache"
+  | "loads"
+  | "jsonflatten"
+  | "engine";
 
 /** JSON load / flatten controls surfaced on the "JSON & flatten" sub-tab. */
 const JSON_FLATTEN_FIELDS = [
@@ -54,15 +60,20 @@ export const StorageMemoryModal: React.FC<{
 
   return (
     <Modal
-      title="Storage & memory"
+      title="Storage & Engine"
       onClose={onClose}
-      wide={tab === "cache" || tab === "loads" || tab === "jsonflatten"}
+      wide={
+        tab === "cache" ||
+        tab === "loads" ||
+        tab === "jsonflatten" ||
+        tab === "engine"
+      }
       testId="storage-memory-modal"
     >
       <div
         className="storage-memory-tabs"
         role="tablist"
-        aria-label="Storage and memory sections"
+        aria-label="Storage and engine sections"
         style={{
           display: "flex",
           gap: 4,
@@ -79,6 +90,17 @@ export const StorageMemoryModal: React.FC<{
           onClick={() => setTab("storage")}
         >
           Storage
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "engine"}
+          data-testid="engine-tuning-tab"
+          className={"btn sm" + (tab === "engine" ? " primary" : " ghost")}
+          onClick={() => setTab("engine")}
+          title="DuckDB memory limit and thread count for this session"
+        >
+          Engine
         </button>
         <button
           type="button"
@@ -117,6 +139,8 @@ export const StorageMemoryModal: React.FC<{
 
       {tab === "cache" ? (
         <FlowCachePanel embedded onToast={onToast} />
+      ) : tab === "engine" ? (
+        <EngineTuningPanel onToast={onToast} />
       ) : tab === "loads" ? (
         <LoadThresholdsPanel onToast={onToast} />
       ) : tab === "jsonflatten" ? (

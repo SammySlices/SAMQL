@@ -251,7 +251,7 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   },
   sqlserver: {
     title: "SQL Server",
-    what: "Runs a query against SQL Server with the same connection settings as Load Data (Windows / alternate Windows / SQL login, ODBC driver, encrypt, timeouts). Saved passwords stay in the OS secret store — never in the workflow — so Dashboard widgets can re-run unattended.",
+    what: "Runs a query against SQL Server with the same connection settings as Load a Table (Windows / alternate Windows / SQL login, ODBC driver, encrypt, timeouts). Saved passwords stay in the OS secret store — never in the workflow — so Dashboard widgets can re-run unattended.",
     use: "Fill the connection form (or pick a saved mssql profile), tick Save password when needed, enter a SELECT, then Fetch. NodeFlow Run / Dashboard auto-fetch using the stored profile + password.",
   },
   sharepoint: {

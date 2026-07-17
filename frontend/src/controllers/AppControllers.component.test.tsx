@@ -17,6 +17,7 @@ const apiMock = vi.hoisted(() => ({
   workflowSave: vi.fn(),
   workflowLoad: vi.fn(),
   workflowDelete: vi.fn(),
+  saveFile: vi.fn(),
   mssqlDisconnect: vi.fn(),
   page: vi.fn(),
   cancelQuery: vi.fn(),
@@ -56,6 +57,8 @@ beforeEach(() => {
   apiMock.history.mockResolvedValue([]);
   apiMock.saved.mockResolvedValue([]);
   apiMock.workflowsList.mockResolvedValue({ workflows: [] });
+  apiMock.workflowSave.mockResolvedValue({ ok: true });
+  apiMock.saveFile.mockResolvedValue({ ok: true });
   apiMock.cancelQuery.mockResolvedValue({});
   apiMock.loadProgress.mockResolvedValue({ loaded: [] });
 });
@@ -177,6 +180,7 @@ describe("Phase 5 App controllers", () => {
         askConfirm: vi.fn(),
         refreshWorkflows: vi.fn(),
         edTabsRef: tabsRef,
+        setEdTabs: vi.fn(),
         activeIdRef: activeRef,
         loadSqlIntoEditor: loadSql,
       }),
@@ -207,6 +211,7 @@ describe("Phase 5 App controllers", () => {
         askConfirm: vi.fn(),
         refreshWorkflows: vi.fn(),
         edTabsRef: tabsRef,
+        setEdTabs: vi.fn(),
         activeIdRef: activeRef,
         loadSqlIntoEditor: vi.fn(),
       }),
@@ -229,8 +234,24 @@ describe("Phase 5 App controllers", () => {
     expect(result.current.dashboardCmd).toMatchObject({ action: "save" });
     act(() => result.current.activeSaveAs());
     expect(result.current.dashboardCmd).toMatchObject({ action: "saveAs" });
+    // Unified Open always uses the App-level file picker (ideFile), which
+    // routes by detected document kind via openWorkflowContent.
     act(() => result.current.activeOpen());
-    expect(result.current.dashboardCmd).toMatchObject({ action: "open" });
+    expect(result.current.ideFile).toMatchObject({ mode: "open" });
+
+    act(() => result.current.switchView("ide"));
+    act(() => result.current.activeOpen());
+    expect(result.current.ideFile).toMatchObject({ mode: "open" });
+
+    act(() => result.current.switchView("notebook"));
+    act(() => result.current.activeOpen());
+    expect(result.current.ideFile).toMatchObject({ mode: "open" });
+    expect(result.current.journalCmd).toBeNull();
+
+    act(() => result.current.switchView("nodeflow"));
+    act(() => result.current.activeOpen());
+    expect(result.current.ideFile).toMatchObject({ mode: "open" });
+    expect(result.current.nodeCmd).toBeNull();
 
     apiMock.workflowLoad.mockResolvedValue({
       graph: {
@@ -244,6 +265,246 @@ describe("Phase 5 App controllers", () => {
     });
     expect(result.current.view).toBe("dashboard");
     expect(result.current.dashboardLoad?.name).toBe("From List");
+  });
+
+  it.each([
+    {
+      label: "query",
+      content: () => wfEnvelope("ide", "Q1", { sql: "select 42" }),
+      view: "ide" as const,
+      check: (
+        r: { journalLoad: unknown; nodeLoad: unknown; dashboardLoad: unknown },
+        loadSql: ReturnType<typeof vi.fn>,
+      ) => {
+        expect(loadSql).toHaveBeenCalledWith("select 42");
+        expect(r.journalLoad).toBeNull();
+        expect(r.nodeLoad).toBeNull();
+        expect(r.dashboardLoad).toBeNull();
+      },
+    },
+    {
+      label: "journal",
+      content: () => wfEnvelope("journal", "Daily", { doc: "journal-doc" }),
+      view: "notebook" as const,
+      check: (r: { journalLoad: unknown }) => {
+        expect(r.journalLoad).toMatchObject({ name: "Daily", doc: "journal-doc" });
+      },
+    },
+    {
+      label: "node workflow",
+      content: () =>
+        wfEnvelope("node", "Flow", { nodes: [{ id: "a" }], edges: [] }),
+      view: "nodeflow" as const,
+      check: (r: { nodeLoad: unknown }) => {
+        expect(r.nodeLoad).toMatchObject({
+          name: "Flow",
+          graph: expect.objectContaining({ nodes: [{ id: "a" }] }),
+        });
+      },
+    },
+    {
+      label: "dashboard",
+      content: () =>
+        wfEnvelope("dashboard", "Board", {
+          version: 2,
+          activeId: "d1",
+          dashboards: [{ id: "d1", name: "Main", widgets: [] }],
+        }),
+      view: "dashboard" as const,
+      check: (r: { dashboardLoad: unknown }) => {
+        expect(r.dashboardLoad).toMatchObject({ name: "Board" });
+      },
+    },
+  ])(
+    "openWorkflowContent routes $label to the $view surface",
+    ({ content, view, check }) => {
+      const loadSql = vi.fn();
+      const tabsRef = createRef<EdTab[]>() as React.MutableRefObject<EdTab[]>;
+      const activeRef = createRef<string>() as React.MutableRefObject<string>;
+      tabsRef.current = [{ id: "one", title: "One", sql: "" }];
+      activeRef.current = "one";
+      const { result } = renderHook(() =>
+        useWorkspaceController({
+          viewKey: "samql.test.view",
+          toast,
+          askConfirm: vi.fn(),
+          refreshWorkflows: vi.fn(),
+          edTabsRef: tabsRef,
+          setEdTabs: vi.fn(),
+          activeIdRef: activeRef,
+          loadSqlIntoEditor: loadSql,
+        }),
+      );
+
+      act(() =>
+        result.current.openWorkflowContent(content(), `${view}.samql.json`),
+      );
+      expect(result.current.view).toBe(view);
+      check(result.current, loadSql);
+    },
+  );
+
+  it("openWorkflowContent loads a created-node export into NodeFlow", () => {
+    const tabsRef = createRef<EdTab[]>() as React.MutableRefObject<EdTab[]>;
+    const activeRef = createRef<string>() as React.MutableRefObject<string>;
+    tabsRef.current = [{ id: "one", title: "One", sql: "" }];
+    activeRef.current = "one";
+    const { result } = renderHook(() =>
+      useWorkspaceController({
+        viewKey: "samql.test.view",
+        toast,
+        askConfirm: vi.fn(),
+        refreshWorkflows: vi.fn(),
+        edTabsRef: tabsRef,
+        setEdTabs: vi.fn(),
+        activeIdRef: activeRef,
+        loadSqlIntoEditor: vi.fn(),
+      }),
+    );
+
+    const payload = JSON.stringify({
+      format: "samql-created-node",
+      version: 1,
+      node: {
+        id: "cn-1",
+        name: "Scaler",
+        icon: "Sparkle",
+        graph: {
+          nodes: [
+            { id: "di", type: "dyn_input", x: 0, y: 0, config: {} },
+            { id: "do", type: "dyn_output", x: 80, y: 0, config: {} },
+          ],
+          edges: [
+            {
+              id: "e1",
+              from: { node: "di", port: "out" },
+              to: { node: "do", port: "in" },
+            },
+          ],
+        },
+        inputs: [{ id: "in", label: "in" }],
+        outputs: [{ id: "out", label: "out" }],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+
+    act(() =>
+      result.current.openWorkflowContent(payload, "scaler.created.json"),
+    );
+    expect(result.current.view).toBe("nodeflow");
+    expect(toast).toHaveBeenCalledWith(
+      "ok",
+      "Created node loaded",
+      expect.stringContaining("Scaler"),
+    );
+  });
+
+  it("activeSaveAs dispatches Save As for the active surface", () => {
+    const tabsRef = createRef<EdTab[]>() as React.MutableRefObject<EdTab[]>;
+    const activeRef = createRef<string>() as React.MutableRefObject<string>;
+    tabsRef.current = [{ id: "one", title: "One", sql: "" }];
+    activeRef.current = "one";
+    const { result } = renderHook(() =>
+      useWorkspaceController({
+        viewKey: "samql.test.view",
+        toast,
+        askConfirm: vi.fn(),
+        refreshWorkflows: vi.fn(),
+        edTabsRef: tabsRef,
+        setEdTabs: vi.fn(),
+        activeIdRef: activeRef,
+        loadSqlIntoEditor: vi.fn(),
+      }),
+    );
+
+    act(() => result.current.switchView("ide"));
+    act(() => result.current.activeSaveAs());
+    expect(result.current.ideFile).toMatchObject({ mode: "save" });
+
+    act(() => result.current.switchView("notebook"));
+    act(() => result.current.activeSaveAs());
+    expect(result.current.journalCmd).toMatchObject({ action: "saveAs" });
+
+    act(() => result.current.switchView("nodeflow"));
+    act(() => result.current.activeSaveAs());
+    expect(result.current.nodeCmd).toMatchObject({ action: "saveAs" });
+
+    act(() => result.current.switchView("dashboard"));
+    act(() => result.current.activeSaveAs());
+    expect(result.current.dashboardCmd).toMatchObject({ action: "saveAs" });
+  });
+
+  it("IDE Save reuses workflow and file identities", async () => {
+    const tabsRef = createRef<EdTab[]>() as React.MutableRefObject<EdTab[]>;
+    const activeRef = createRef<string>() as React.MutableRefObject<string>;
+    tabsRef.current = [
+      {
+        id: "one",
+        title: "Renamed tab",
+        sql: "select 1",
+        savedWorkflowName: "Original query",
+      },
+    ];
+    activeRef.current = "one";
+    const { result } = renderHook(() =>
+      useWorkspaceController({
+        viewKey: "samql.test.view",
+        toast,
+        askConfirm: vi.fn(),
+        refreshWorkflows: vi.fn(),
+        edTabsRef: tabsRef,
+        setEdTabs: vi.fn(),
+        activeIdRef: activeRef,
+        loadSqlIntoEditor: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.saveIdeWorkflow();
+    });
+    expect(apiMock.workflowSave).toHaveBeenCalledWith(
+      "Original query",
+      { sql: "select 1" },
+      "ide",
+    );
+
+    apiMock.workflowSave.mockClear();
+    tabsRef.current = [
+      {
+        ...tabsRef.current[0],
+        savedWorkflowName: undefined,
+        savedFilePath: "C:/flows/query.samql.json",
+      },
+    ];
+    await act(async () => {
+      await result.current.saveIdeWorkflow();
+    });
+    expect(apiMock.saveFile).toHaveBeenCalledWith(
+      "C:/flows/query.samql.json",
+      expect.stringContaining('"kind": "ide"'),
+    );
+    expect(apiMock.workflowSave).not.toHaveBeenCalled();
+
+    apiMock.saveFile.mockClear();
+    tabsRef.current = [
+      {
+        id: "two",
+        title: "Untitled",
+        sql: "select 2",
+      },
+    ];
+    activeRef.current = "two";
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("Brand new");
+    await act(async () => {
+      await result.current.saveIdeWorkflow();
+    });
+    expect(apiMock.workflowSave).toHaveBeenCalledWith(
+      "Brand new",
+      { sql: "select 2" },
+      "ide",
+    );
+    prompt.mockRestore();
   });
 
   it("background controller starts loads, closes the modal, and reports completion", async () => {

@@ -134,7 +134,7 @@ FIELDS = {
         "unit": "MB",
         "label": "Drag-drop upload ceiling",
         "help": "Largest multipart upload accepted. Larger files should use "
-                "Load Data → File (path). 0 disables the ceiling.",
+                "Load a Table → File (path). 0 disables the ceiling.",
         "zero_means": "unlimited uploads",
     },
     "filecache_gb": {

@@ -23,7 +23,7 @@ type ToastFn = (
   msg?: string,
 ) => void;
 
-/** Settings menu entries for Dashboard export / load / manager. */
+/** Settings menu entry for Dashboard Manager (load/export live in manager). */
 export function useDashboardSettings(
   onToast: ToastFn,
   onLoaded?: () => void,
@@ -36,15 +36,19 @@ export function useDashboardSettings(
   const fileRef = useRef<HTMLInputElement>(null);
   const { ui: confirmUi, ask: askConfirm } = useConfirmPop();
 
+  const syncManagerDraft = () => {
+    const ws = loadDashboardWorkspace();
+    setDraft(ws);
+    setSelectedId(ws.activeId || ws.dashboards[0]?.id || null);
+  };
+
   useEffect(() => {
     if (!managerOpen) {
       setDraft(null);
       setSelectedId(null);
       return;
     }
-    const ws = loadDashboardWorkspace();
-    setDraft(ws);
-    setSelectedId(ws.activeId || ws.dashboards[0]?.id || null);
+    syncManagerDraft();
   }, [managerOpen]);
 
   const persistDraft = (next: DashboardWorkspace, toastMsg?: string) => {
@@ -68,22 +72,6 @@ export function useDashboardSettings(
       >
         <Icon.LayoutGrid size={13} /> Dashboard Manager…
       </button>
-      <button
-        onClick={() => {
-          closeSettings();
-          setExportOpen(true);
-        }}
-      >
-        <Icon.Download size={13} /> Export dashboard…
-      </button>
-      <button
-        onClick={() => {
-          closeSettings();
-          setLoadOpen(true);
-        }}
-      >
-        <Icon.Upload size={13} /> Load dashboard…
-      </button>
     </>
   );
 
@@ -98,7 +86,8 @@ export function useDashboardSettings(
         >
           <p className="nb2-note">
             Reorder boards in the dashboard dropdown, rename them, or delete
-            ones you no longer need. Changes apply immediately.
+            ones you no longer need. Export or load a dashboard bundle here.
+            Changes apply immediately.
           </p>
           <div className="dash-mgr" data-testid="dashboard-manager">
             <div className="dash-mgr-list">
@@ -192,7 +181,7 @@ export function useDashboardSettings(
                       </button>
                       <button
                         type="button"
-                        className="btn sm ghost"
+                        className="btn sm ghost icon xbtn"
                         data-testid={`dashboard-manager-delete-${d.id}`}
                         title={
                           draft.dashboards.length <= 1
@@ -225,7 +214,7 @@ export function useDashboardSettings(
                           );
                         }}
                       >
-                        <Icon.Trash size={14} />
+                        ×
                       </button>
                     </div>
                   </div>
@@ -233,6 +222,22 @@ export function useDashboardSettings(
               })}
             </div>
             <div className="nb2-prev-row" style={{ marginTop: 14 }}>
+              <button
+                type="button"
+                className="btn ghost"
+                data-testid="dashboard-manager-export"
+                onClick={() => setExportOpen(true)}
+              >
+                <Icon.Download size={13} /> Export Dashboard
+              </button>
+              <button
+                type="button"
+                className="btn ghost"
+                data-testid="dashboard-manager-load"
+                onClick={() => setLoadOpen(true)}
+              >
+                <Icon.Upload size={13} /> Load Dashboard
+              </button>
               <button
                 type="button"
                 className="btn ghost"
@@ -337,6 +342,7 @@ export function useDashboardSettings(
                 saveDashboardWorkspace(imported.workspace);
                 onToast("ok", "Dashboard loaded", file.name);
                 setLoadOpen(false);
+                if (managerOpen) syncManagerDraft();
                 onLoaded?.();
               } catch (err: any) {
                 onToast(

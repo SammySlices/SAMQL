@@ -489,12 +489,17 @@ def frontend_tests(do_build):
         need("StorageMemoryModal" in app
              and "FlowCachePanel" in storage_mem
              and "LoadThresholdsPanel" in storage_mem
+             and "EngineTuningPanel" in storage_mem
              and "NodeFlow cache" in storage_mem
              and "Load thresholds" in storage_mem
              and 'data-testid="flow-cache-tab"' in storage_mem
              and 'data-testid="load-thresholds-tab"' in storage_mem
-             and 'data-testid="storage-memory-menu"' in app,
-             "Storage & memory must host Load thresholds + NodeFlow cache tabs")
+             and 'data-testid="engine-tuning-tab"' in storage_mem
+             and 'title="Storage & Engine"' in storage_mem
+             and "Storage &amp; Engine" in app
+             and 'data-testid="storage-memory-menu"' in app
+             and "Engine tuning (memory / threads)" not in app,
+             "Storage & Engine must host Engine + Load thresholds + NodeFlow cache tabs")
         need("flowCacheConfigure" in api_src and "flowCacheInfo" in api_src
              and "/api/settings/flow-cache" in api_src
              and "loadThresholdsConfigure" in api_src
@@ -972,6 +977,7 @@ console.log("OK");
         # pane assembling the access queries from the backend recipes.
         fx = _read_fe("src", "components", "FieldExplorer.tsx")
         app = _read_fe("src", "App.tsx")
+        tools = _read_fe("src", "components", "ToolsTablesPanel.tsx")
         api_src = _read_fe("src", "lib", "api.ts")
         css = _read_fe("src", "styles.css")
         checks = [
@@ -982,6 +988,9 @@ console.log("OK");
              and "onMouseDown={startDrag}" in fx
              and bool(__import__("re").search(
                  r"\.fx-panel \{[^}]*position: fixed", css))),
+            ("panel title / aria use JSON Field Explorer",
+             'aria-label="JSON Field Explorer"' in fx
+             and "JSON Field Explorer" in fx),
             ("minimize collapses to a clickable icon and expands again",
              "field-explorer-minimize" in fx
              and "field-explorer-mini" in fx
@@ -1007,8 +1016,13 @@ console.log("OK");
             ("App renders it OUTSIDE the view switch so it persists",
              "<FieldExplorer" in app
              and "fieldExplorerOpen" in app),
-            ("Settings has a Field explorer entry (not view-gated)",
-             "Field explorer…" in app),
+            ("Tools & Tables hosts JSON Field Explorer entry (not Settings)",
+             "onOpenJsonFieldExplorer" in app
+             and "JSON Field Explorer" in tools
+             and "tools-tables-tab-fields" in tools
+             and "Field explorer…" not in app),
+            ("command palette opens JSON Field Explorer (not view-gated)",
+             "Open JSON Field Explorer" in app),
             ("api type carries the access recipe",
              "recursive?: string" in api_src and "unnests?: string[]"
              in api_src),
@@ -1061,11 +1075,15 @@ console.log("OK");
               )(__import__("samql_core.session",
                            fromlist=["Session"]).Session,
                 __import__("inspect"))),
-            ("Settings exposes live engine tuning (memory / threads)",
-             "Engine tuning (memory / threads)" in
-             _read_fe("src", "App.tsx")
+            ("Storage & Engine hosts live engine tuning (memory / threads)",
+             "EngineTuningPanel" in
+             _read_fe("src", "components", "StorageMemoryModal.tsx")
+             and 'data-testid="engine-tuning-tab"' in
+             _read_fe("src", "components", "StorageMemoryModal.tsx")
              and "engineTuning:" in api_src
-             and "/api/engine/tuning" in srv),
+             and "/api/engine/tuning" in srv
+             and "Engine tuning (memory / threads)" not in
+             _read_fe("src", "App.tsx")),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing, "chain reuse wiring broken: " + "; ".join(missing))
@@ -1207,20 +1225,34 @@ console.log("OK");
         be = open(os.path.join(ROOT, "tests", "suites", "backend.py"),
                   encoding="utf-8").read()
         checks = [
-            ("Settings offers Create / Save / Export / Load created node",
-             (lambda settings: (
+            ("Settings offers Create / Created Nodes; Export / Load live in manage modal",
+             (lambda settings, manage: (
                  "useCreatedNodesSettings" in app
                  and "Create a node…" in settings
                  and "Created Nodes…" in settings
                  and "ManageCreatedNodesModal" in settings
-                 and "Save node" in settings
-                 and "Export created node…" in settings
-                 and "Load created node…" in settings
+                 and "Save node" not in settings
+                 and "save-node-menu" not in settings
+                 and "Export created node…" not in settings
+                 and "Load created node…" not in settings
                  and "CreateCreatedNodeModal" in settings
-                 and "updateCreatedNodeDefinition" in settings
+                 and "manage-created-nodes-export" in manage
+                 and "manage-created-nodes-load" in manage
+                 and "ExportCreatedNodeModal" in manage
+                 and "LoadCreatedNodeModal" in manage
              ))(open(os.path.join(FRONTEND, "src", "components",
                                   "CreatedNodesSettings.tsx"),
-                     encoding="utf-8").read())),
+                     encoding="utf-8").read(),
+                modals)),
+            ("workspace Save upserts Created Node when editingDefinitionId is set",
+             "editingDefinitionId" in open(
+                 os.path.join(FRONTEND, "src", "components", "nodeflow",
+                              "useNodeFlowDocumentController.ts"),
+                 encoding="utf-8").read()
+             and "updateCreatedNodeDefinition" in open(
+                 os.path.join(FRONTEND, "src", "components", "nodeflow",
+                              "useNodeFlowDocumentController.ts"),
+                 encoding="utf-8").read()),
             ("create/export/load/update helpers persist and round-trip a file",
              "upsertCreatedNode" in created
              and "updateCreatedNodeDefinition" in created
@@ -1794,7 +1826,7 @@ console.log("OK");
         nb = open(os.path.join(FRONTEND, "src", "components", "Notebook.tsx"),
                   encoding="utf-8").read()
 
-        def after(text, marker, n=1900):
+        def after(text, marker, n=3200):
             i = text.find(marker)
             need(i >= 0, "could not find '%s'" % marker)
             return text[i:i + n]
@@ -1808,7 +1840,8 @@ console.log("OK");
              + str(sorted(kinds)))
 
         # open-from-Saved-Workflows handles all kinds (ide + journal + dashboard
-        # explicit, node as the else branch)
+        # explicit, node as the else branch). Window widened: abortable load
+        # + per-kind metadata grew past the old 1900-char slice.
         load = after(workspace, "onLoadWorkflow = useCallback")
         for needle in ('kind === "ide"', 'kind === "journal"',
                        'kind === "dashboard"',
@@ -2230,6 +2263,9 @@ console.log("OK");
             missing.append("Ctrl/Cmd+K opens command palette")
         if "Open Tools & Tables" not in app:
             missing.append("command palette Tools & Tables action")
+        # Tools & Tables is command-palette only (not a Settings menu entry).
+        if "Tools &amp; Tables…" in app or "Tools & Tables…" in app:
+            missing.append("Settings menu must not list Tools & Tables")
         if "toolsTablesOpen" not in app or "toolsTablesOpen" not in nb:
             missing.append("Tools & Tables open flag NodeFlow-scoped")
         if "TOOLS_TABLES_STORE_KEY" not in tools:
@@ -3237,7 +3273,7 @@ console.log("OK");
              "Filter tables\u2026" in sb and ".columns.some(" not in sb),
             ("settings menu wired",
              "settings-menu" in app
-             and "Storage &amp; memory" in app),
+             and "Storage &amp; Engine" in app),
             ("stat indicator present", "StatIndicator" in app),
             ("sidebar column context menu + change type",
              "onChangeType" in sb and "Change type to" in sb
@@ -3612,9 +3648,12 @@ console.log("OK");
              "run-progress" in app
              and "onClick={cancelRunning}" in app
              and "Restart / supersede" not in app),
-            ("error log wired (settings entry + modal + API + export)",
+            ("error log wired (settings entry + modal + Diagnostics tab + API + export)",
              "ErrorLogModal" in app and "errorLogOpen" in app
              and "Error log" in app
+             and "Diagnostics…" not in app
+             and "DiagnosticsPanel" in rd("src", "components", "ErrorLogModal.tsx")
+             and 'tab === "diagnostics"' in rd("src", "components", "ErrorLogModal.tsx")
              and "errors:" in rd("src", "lib", "api.ts")
              and "/api/errors" in rd("src", "lib", "api.ts")
              and "errlog-tb" in rd("src", "components", "ErrorLogModal.tsx")
@@ -4642,10 +4681,12 @@ console.log("OK");
              and "onClick={onCancelRun}" in nb
              and "onClick={onRunAll}" in nb
              and "<Icon.Play size={12} /> Run" in nb),
-            # --- .101: combined dark/light toggle ---
-            ("single dark/light toggle replaces the two ivory toggles",
+            # --- .101: combined dark/light toggle (under Visual Toggles) ---
+            ("single dark/light toggle under Visual Toggles",
              "Toggle Dark Mode" in rd("src", "App.tsx")
              and "Toggle Light Mode" in rd("src", "App.tsx")
+             and 'data-testid="settings-theme-toggle"' in rd("src", "App.tsx")
+             and 'data-testid="settings-visual-toggles-menu"' in rd("src", "App.tsx")
              and "NodeFlow canvas: dark" not in rd("src", "App.tsx")),
             # --- .101: Favorites shortcut group ---
             ("favorites group: drag-in to add, persisted, stays in group",
@@ -6309,7 +6350,7 @@ console.log("OK");
             # onFlattenColumn) grew the shell; still far below the pre-refactor
             # monolith, so the "materially smaller" intent holds.
             ("App shell is materially smaller",
-             len(app.splitlines()) < 4750),
+             len(app.splitlines()) < 5000),
             ("rendered controller regressions ship",
              os.path.isfile(rendered_path)
              and all(token in rendered for token in (

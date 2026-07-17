@@ -79,10 +79,11 @@ beforeEach(() => {
 });
 
 describe("useDashboardSettings", () => {
-  it("exports the workspace bundle to Downloads", async () => {
+  it("exports the workspace bundle to Downloads from Dashboard Manager", async () => {
     const toast = vi.fn();
     render(<Harness onToast={toast} />);
-    fireEvent.click(screen.getByText(/export dashboard/i));
+    fireEvent.click(screen.getByTestId("settings-dashboard-manager"));
+    fireEvent.click(screen.getByTestId("dashboard-manager-export"));
     fireEvent.click(screen.getByRole("button", { name: /export to downloads/i }));
     await waitFor(async () => {
       const { saveToDownloads } = await import("./api");
@@ -94,17 +95,33 @@ describe("useDashboardSettings", () => {
     expect(toast).toHaveBeenCalledWith("ok", "Exported", expect.any(String));
   });
 
-  it("loads a bundle file and invokes onLoaded", async () => {
+  it("does not expose standalone Settings Load/Export dashboard entries", () => {
+    const toast = vi.fn();
+    render(<Harness onToast={toast} />);
+    const menu = screen.getByTestId("menu");
+    expect(menu.querySelectorAll("button").length).toBe(1);
+    expect(screen.getByTestId("settings-dashboard-manager")).toBeTruthy();
+    expect(menu.textContent || "").not.toMatch(/load dashboard/i);
+    expect(menu.textContent || "").not.toMatch(/export dashboard/i);
+    fireEvent.click(screen.getByTestId("settings-dashboard-manager"));
+    expect(screen.getByTestId("dashboard-manager-export")).toBeTruthy();
+    expect(screen.getByTestId("dashboard-manager-load")).toBeTruthy();
+  });
+
+  it("loads a bundle from Dashboard Manager and invokes onLoaded", async () => {
     const toast = vi.fn();
     const onLoaded = vi.fn();
     render(<Harness onToast={toast} onLoaded={onLoaded} />);
-    fireEvent.click(screen.getByText(/load dashboard/i));
+    fireEvent.click(screen.getByTestId("settings-dashboard-manager"));
+    fireEvent.click(screen.getByTestId("dashboard-manager-load"));
+    expect(screen.getByRole("dialog", { name: /load dashboard/i })).toBeTruthy();
     const input = document.querySelector(
       'input[type="file"]',
     ) as HTMLInputElement;
     expect(input).toBeTruthy();
     const ws = emptyDashboardWorkspace();
     ws.dashboards[0].id = "from-file";
+    ws.dashboards[0].name = "From File";
     ws.activeId = "from-file";
     const file = new File(
       [
@@ -131,6 +148,9 @@ describe("useDashboardSettings", () => {
       "Dashboard loaded",
       "pack.samql-dashboard.json",
     );
+    await waitFor(() => {
+      expect(screen.getByTestId("dashboard-manager-name-from-file")).toBeTruthy();
+    });
   });
 
   it("opens Dashboard Manager and reorders / renames / deletes boards", async () => {

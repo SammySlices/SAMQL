@@ -20,6 +20,9 @@ export type NodeFlowPreview =
       rows: unknown[][];
       total: number;
       limited?: boolean;
+      /** Terminal node whose output this preview shows (for column lineage). */
+      sourceNodeId?: string;
+      sourcePort?: string;
     }
   | { kind: "chart"; title: string; data: ChartData }
   | {
@@ -479,6 +482,8 @@ export function useNodeFlowExecutionController({
         rows: (r.rows || []).slice(0, 200),
         total: r.total_rows || 0,
         limited: !!r.preview_limited,
+        sourceNodeId: runNode,
+        sourcePort: runPort,
       };
       setPreview(pv);
       previewCache.current.set(cacheKey, pv);
@@ -539,6 +544,8 @@ export function useNodeFlowExecutionController({
         columns: r.columns || [],
         rows: (r.rows || []).slice(0, 200),
         total: r.total_rows || 0,
+        sourceNodeId: runNode,
+        sourcePort: "out",
       });
       finishRun(id, r, `${(r.total_rows || 0).toLocaleString()} rows`);
       return { ok: true };
@@ -614,6 +621,8 @@ export function useNodeFlowExecutionController({
           columns: lastGood.columns || [],
           rows: (lastGood.rows || []).slice(0, 200),
           total: lastGood.total_rows || 0,
+          sourceNodeId: lastGood.node || n?.id,
+          sourcePort: "out",
         });
       }
       finishRun(id, 

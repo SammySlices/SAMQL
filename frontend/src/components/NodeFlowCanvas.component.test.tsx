@@ -32,6 +32,62 @@ describe("NodeFlow canvas components", () => {
     expect(onDelete).toHaveBeenCalledWith("w1");
   });
 
+  it("applies lineage-flash class for white glow highlight", () => {
+    const onPointerDown = vi.fn();
+    const onContextMenu = vi.fn();
+    const { rerender } = render(
+      <CanvasNodeFrame
+        node={inputNode}
+        index={0}
+        selected
+        dropHover={false}
+        error={undefined}
+        warning={undefined}
+        ripple={false}
+        snapped={false}
+        dying={false}
+        born={false}
+        lineageFlash={false}
+        denseMode={false}
+        renderVersion="g1"
+        chartVersion={0}
+        childSelection={null}
+        onPointerDown={onPointerDown}
+        onContextMenu={onContextMenu}
+      >
+        <span>node body</span>
+      </CanvasNodeFrame>,
+    );
+
+    expect(screen.getByTestId("nodeflow-node")).not.toHaveClass("lineage-flash");
+
+    rerender(
+      <CanvasNodeFrame
+        node={inputNode}
+        index={0}
+        selected
+        dropHover={false}
+        error={undefined}
+        warning={undefined}
+        ripple={false}
+        snapped={false}
+        dying={false}
+        born={false}
+        lineageFlash
+        denseMode={false}
+        renderVersion="g1"
+        chartVersion={0}
+        childSelection={null}
+        onPointerDown={onPointerDown}
+        onContextMenu={onContextMenu}
+      >
+        <span>node body</span>
+      </CanvasNodeFrame>,
+    );
+
+    expect(screen.getByTestId("nodeflow-node")).toHaveClass("lineage-flash");
+  });
+
   it("gives every connector a directional running-glow overlay", () => {
     const { container } = render(
       <WireLayer
@@ -141,6 +197,7 @@ describe("NodeFlow canvas components", () => {
         snapped={false}
         dying={false}
         born={false}
+        lineageFlash={false}
         denseMode={false}
         renderVersion="g1"
         chartVersion={0}

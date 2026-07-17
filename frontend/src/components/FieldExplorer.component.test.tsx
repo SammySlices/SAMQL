@@ -181,6 +181,7 @@ describe("FieldExplorer shred steering", () => {
       expect(api.tableFields).toHaveBeenCalledWith(
         "duckdb",
         "highly_nested_trades",
+        expect.any(AbortSignal),
       ),
     );
   });
@@ -750,7 +751,11 @@ describe("FieldExplorer no-table state", () => {
     expect(screen.queryByTestId("fx-no-table")).toBeNull();
     expect(screen.getByTestId("fx-sel-bar")).toBeTruthy();
     await waitFor(() =>
-      expect(api.tableFields).toHaveBeenCalledWith("duckdb", "orders"),
+      expect(api.tableFields).toHaveBeenCalledWith(
+        "duckdb",
+        "orders",
+        expect.any(AbortSignal),
+      ),
     );
   });
 });
