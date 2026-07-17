@@ -18,6 +18,8 @@ import { staleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
 import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import type { NodeFlowInspectorContext } from "./NodeFlowInspector";
 
+const EMPTY_INSP_COLS: Record<string, string[]> = {};
+
 export type ManagedInspectorKey =
   | "buildFilterCond"
   | "childSelCtx"
@@ -102,17 +104,43 @@ export function useNodeFlowInspectorController({
   const sel = selectedNode;
   const childCtx = (_id: string | null) => childSelection;
   // upstream columns for the select / join inspectors -----------------------
-  const [inspCols, setInputColumns] = useState<Record<string, string[]>>({});
+  // Raw probe result + the node id they belong to. Derived `inspCols` is empty
+  // whenever ownership does not match the current selection so a Select
+  // reconcile never applies a sibling / previously-selected node's schema
+  // (which used to seed false missing-field tombstones on switch/add).
+  const [inspColsRaw, setInspColsRaw] = useState<Record<string, string[]>>({});
+  const [inspColsOwnedBy, setInspColsOwnedBy] = useState<string | null>(null);
+  const inspCols = useMemo(() => {
+    if (inspColsOwnedBy != null && inspColsOwnedBy === selId) return inspColsRaw;
+    return EMPTY_INSP_COLS;
+  }, [inspColsOwnedBy, selId, inspColsRaw]);
   // True while a column probe is in flight after select/graph change. Distinguishes
   // "still loading fields" from "genuinely unwired / empty upstream".
-  const [inspColsProbing, setInspColsProbing] = useState(false);
+  const [inspColsProbingRaw, setInspColsProbing] = useState(false);
+  const selHasInputPorts = !!(
+    selectedNode && (PORTS[selectedNode.type]?.inputs || []).length
+  );
+  // Ownership mismatch means we have not published columns for this selection
+  // yet — treat as probing so the UI does not flash "Connect an input".
+  const inspColsProbing =
+    inspColsOwnedBy !== selId && selHasInputPorts
+      ? true
+      : inspColsProbingRaw;
+  const publishInspCols = (nodeId: string, cols: Record<string, string[]>) => {
+    setInspColsOwnedBy(nodeId);
+    setInspColsRaw(cols);
+  };
+  const clearInspCols = () => {
+    setInspColsOwnedBy(null);
+    setInspColsRaw({});
+  };
   // Clear the cached input columns only when the SELECTED node changes, so a
   // freshly selected node never briefly shows the previous node's columns.
   // Editing the current node's own config must NOT clear them: doing that
   // blanked every column-derived list (the replace-keys checkboxes, the reduce
   // controls, the select fields) on each keystroke, which read as a flicker.
   useEffect(() => {
-    setInputColumns({});
+    clearInspCols();
     const ports = selectedNode ? PORTS[selectedNode.type]?.inputs || [] : [];
     setInspColsProbing(ports.length > 0);
     // Only re-clear when the selected node id changes — not on every config patch.
@@ -156,7 +184,7 @@ export function useNodeFlowInspectorController({
         }
       }
       if (!groupReqs.length && !stepAbovePort) {
-        setInputColumns({});
+        clearInspCols();
         setInspColsProbing(false);
         return;
       }
@@ -172,12 +200,13 @@ export function useNodeFlowInspectorController({
       );
       const cached = getNodeflowColsCache(cacheKey);
       if (cached) {
-        setInputColumns(cached);
+        publishInspCols(sel.id, cached);
         setInspColsProbing(false);
         return;
       }
       setInspColsProbing(true);
       let cancelled = false;
+      const probedId = sel.id;
       const cancelPaint = runAfterPaint(() => {
         (async () => {
           const out: Record<string, string[]> = {};
@@ -209,7 +238,7 @@ export function useNodeFlowInspectorController({
           }
           if (!cancelled) {
             setNodeflowColsCache(cacheKey, out);
-            setInputColumns(out);
+            publishInspCols(probedId, out);
             setInspColsProbing(false);
           }
         })();
@@ -236,7 +265,7 @@ export function useNodeFlowInspectorController({
       if (e) reqs.push({ port, node: e.from.node, fromPort: e.from.port });
     }
     if (!reqs.length) {
-      setInputColumns({});
+      clearInspCols();
       setInspColsProbing(false);
       return;
     }
@@ -244,12 +273,13 @@ export function useNodeFlowInspectorController({
     const cacheKey = nodeflowColsCacheKey(graphSig, sel.id, "canvas", fp);
     const cached = getNodeflowColsCache(cacheKey);
     if (cached) {
-      setInputColumns(cached);
+      publishInspCols(sel.id, cached);
       setInspColsProbing(false);
       return;
     }
     setInspColsProbing(true);
     let cancelled = false;
+    const probedId = sel.id;
     const cancelPaint = runAfterPaint(() => {
       (async () => {
         const out: Record<string, string[]> = {};
@@ -266,7 +296,7 @@ export function useNodeFlowInspectorController({
         }
         if (!cancelled) {
           setNodeflowColsCache(cacheKey, out);
-          setInputColumns(out);
+          publishInspCols(probedId, out);
           setInspColsProbing(false);
         }
       })();
@@ -351,12 +381,15 @@ export function useNodeFlowInspectorController({
 
   // Same soft reconcile for the selected Select from its inspector column
   // cache (covers group-child Selects and the moment columns first arrive).
-  // Only runs once upstream columns are known, so a momentarily-disconnected
-  // node doesn't get its fields wiped. Missing sources stay as tombstones.
+  // Only runs once upstream columns are known *for this node*, so a
+  // momentarily-disconnected node doesn't get its fields wiped, and switching
+  // selection never applies a sibling Select's upstream schema. Missing
+  // sources stay as tombstones.
   useEffect(() => {
     if (
       !sel ||
       sel.type !== "select" ||
+      inspColsOwnedBy !== sel.id ||
       !inspCols.in ||
       !inspCols.in.length
     )
@@ -366,7 +399,7 @@ export function useNodeFlowInspectorController({
     const next = reconcileSelectFields(cols, cur);
     if (fieldsDiffer(next, cur)) patch(sel.id, { fields: next });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey, inspCols, selId]);
+  }, [scopeKey, inspCols, inspColsOwnedBy, selId]);
 
   // Pivot: do NOT auto-drop missing row/col/value refs on schema refresh.
   // Missing refs stay until the user edits them or a successful rerun prunes

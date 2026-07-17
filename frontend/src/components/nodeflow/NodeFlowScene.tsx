@@ -100,7 +100,6 @@ interface NodeFlowSceneProps {
   groupReorder: (groupId: string, from: number, to: number) => void;
   extractChildToCanvas: (groupId: string, childId: string) => void;
   startNodeDrag: (event: React.PointerEvent, node: NbNode) => void;
-  onInspectorOpen?: () => void;
   startNodeResize: (event: React.PointerEvent, node: NbNode) => void;
   startWire: (event: React.PointerEvent, node: NbNode, port: string) => void;
   setHoveredInput: (nodeId: string, port: string | null) => void;
@@ -156,7 +155,6 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   groupReorder,
   extractChildToCanvas,
   startNodeDrag,
-  onInspectorOpen,
   startNodeResize,
   startWire,
   setHoveredInput,
@@ -346,11 +344,13 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             chartVersion={chartVersionByNode[node.id] ?? null}
             childSelection={childSelection}
             onPointerDown={(event, currentNode) => {
-              // Whole-node press: drag if moved past threshold; quick click
-              // opens inspector (via startNodeDrag → onInspectorOpen).
+              // Whole-node press: drag if moved past threshold; left quick
+              // click opens inspector (via startNodeDrag → onInspectorOpen).
               startNodeDrag(event, currentNode);
             }}
             onContextMenu={(event, currentNode) => {
+              // Right-click: select + node menu only. Do not open the
+              // inspector/config drawer (that is left-click quick-click).
               event.preventDefault();
               event.stopPropagation();
               const currentSelection = selectedIdsRef.current || [];
@@ -361,7 +361,6 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
                 setSelectedId(currentNode.id);
                 setSelectedIds([currentNode.id]);
               }
-              onInspectorOpen?.();
               setNodeMenu({
                 x: event.clientX,
                 y: event.clientY,

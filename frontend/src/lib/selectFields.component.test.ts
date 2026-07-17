@@ -351,4 +351,79 @@ describe("select fields follow upstream Input table changes", () => {
     ];
     expect(applySelectColumnsReconcile(nodes, { sel: ["a", "b"] })).toBe(nodes);
   });
+
+  it("reconciles disconnected Select chains independently (no cross-stream schema)", () => {
+    const nodes = [
+      {
+        id: "sel-a",
+        type: "select",
+        config: {
+          fields: [
+            { name: "a1", keep: true },
+            { name: "a2", keep: true },
+          ],
+        },
+      },
+      {
+        id: "sel-b",
+        type: "select",
+        config: {
+          fields: [
+            { name: "b1", keep: true },
+            { name: "b2", keep: true },
+          ],
+        },
+      },
+    ];
+    // Only stream A’s upstream schema changed — B must be untouched.
+    const next = applySelectColumnsReconcile(nodes, {
+      "sel-a": ["a1", "a3"],
+    });
+    expect(next[0].config.fields).toEqual([
+      { name: "a1", keep: true },
+      { name: "a2", keep: true },
+      { name: "a3", keep: true },
+    ]);
+    expect(next[1]).toBe(nodes[1]);
+    expect(next[1].config.fields).toEqual([
+      { name: "b1", keep: true },
+      { name: "b2", keep: true },
+    ]);
+  });
+
+  it("lists each wired Select against its own upstream only", () => {
+    expect(
+      listWiredSelectUpstreams(
+        [
+          { id: "in-a", type: "input" },
+          { id: "in-b", type: "input" },
+          { id: "sel-a", type: "select" },
+          { id: "sel-b", type: "select" },
+        ],
+        [
+          {
+            to: { node: "sel-a", port: "in" },
+            from: { node: "in-a", port: "out" },
+          },
+          {
+            to: { node: "sel-b", port: "in" },
+            from: { node: "in-b", port: "out" },
+          },
+        ],
+      ),
+    ).toEqual([
+      {
+        selectId: "sel-a",
+        kind: "canvas",
+        upstreamNode: "in-a",
+        upstreamPort: "out",
+      },
+      {
+        selectId: "sel-b",
+        kind: "canvas",
+        upstreamNode: "in-b",
+        upstreamPort: "out",
+      },
+    ]);
+  });
 });

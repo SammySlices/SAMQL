@@ -613,7 +613,6 @@ export const NodeFlow: React.FC<{
           groupReorder={sceneGroupReorder}
           extractChildToCanvas={sceneExtractChild}
           startNodeDrag={startNodeDrag}
-          onInspectorOpen={() => onSelectionChange?.(true)}
           startNodeResize={startNodeResize}
           startWire={startWire}
           setHoveredInput={setHoveredInput}

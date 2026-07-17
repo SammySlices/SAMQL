@@ -4228,17 +4228,17 @@ def backend_tests(datadir, csv_path, json_path):
         spec = open(os.path.join(BACKEND, "samql.spec"),
                     encoding="utf-8").read()
         for dep in ("duckdb", "pyarrow", "sqlglot", "openpyxl", "ijson",
-                    "orjson", "tzdata"):
+                    "orjson", "tzdata", "pytz"):
             need(dep in req, "the manifest lists " + dep)
         checks = [
             ("both builds install the full optional manifest",
              "pip install -r" in ps and "requirements-optional" in ps
              and "pip install -r" in sh and "requirements-optional" in sh),
             ("both builds HARD-VERIFY the full load stack",
-             '"duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata"'
+             '"duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata", "pytz"'
              in ps
              and "exit 1" in ps
-             and "for mod in duckdb pyarrow pandas sqlglot openpyxl ijson orjson tzdata"
+             and "for mod in duckdb pyarrow pandas sqlglot openpyxl ijson orjson tzdata pytz"
              in sh),
             ("both builds install core backend/requirements.txt (orjson)",
              "backend/requirements.txt" in ps.replace("\\", "/")
@@ -4247,6 +4247,7 @@ def backend_tests(datadir, csv_path, json_path):
             ("PyInstaller refuses an incomplete load stack",
              'REQUIRED = ["duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "orjson"'
              in spec
+             and '"ijson", "tzdata", "pytz"]' in spec
              and "refusing to package an incomplete app" in spec),
             ("probes are stderr-free (PS 5.1 Stop+redirect immunity, "
              "the on-box build failure)",
@@ -4259,6 +4260,31 @@ def backend_tests(datadir, csv_path, json_path):
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing, "build deps wiring broken: " + "; ".join(missing))
+
+    def t_duckdb_timestamptz_pytz():
+        # DuckDB's Python bindings hard-require pytz when converting
+        # TIMESTAMPTZ to Python (current_timestamp / NOW() / tz columns).
+        # Without it, NodeFlow and query fetch raise
+        # "Required module 'pytz' failed to import". Packaging must list
+        # and collect pytz; runtime must import it when DuckDB is present.
+        req = open(os.path.join(ROOT, "requirements-optional.txt"),
+                   encoding="utf-8").read()
+        need(any(ln.strip() == "pytz" for ln in req.splitlines()),
+             "requirements-optional.txt installs pytz")
+        spec = open(os.path.join(BACKEND, "samql.spec"),
+                    encoding="utf-8").read()
+        need('"pytz"' in spec and '"tzdata", "pytz"]' in spec,
+             "samql.spec REQUIRES pytz (collect_all + refuse if missing)")
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb not installed")
+        import importlib.util as _ilu
+        need(_ilu.find_spec("pytz") is not None,
+             "pytz is importable alongside DuckDB")
+        import duckdb as _ddb
+        row = _ddb.connect().execute("SELECT current_timestamp").fetchone()
+        need(row is not None and row[0] is not None,
+             "DuckDB TIMESTAMPTZ fetch succeeds with pytz installed")
 
     def t_build_exe_payload_parity():
         # SamQL.exe and SamQL-AppWindow.exe must leave the build with the
@@ -37127,6 +37153,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_socket_hygiene),
         (".389: builds install + VERIFY the full dependency set",
          t_build_deps),
+        ("deps: DuckDB TIMESTAMPTZ fetch requires pytz (packaged + importable)",
+         t_duckdb_timestamptz_pytz),
         ("build: SamQL.exe + SamQL-AppWindow share payload, verify, and signing",
          t_build_exe_payload_parity),
         (".384: post-run cleanup script (guards, flags, measurement)",

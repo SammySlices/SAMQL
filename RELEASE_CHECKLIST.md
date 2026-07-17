@@ -5,7 +5,7 @@ A green development build is not enough: identity, saved-data compatibility,
 the exact source manifest, Microsoft Edge behavior, and both source transports
 must all be verified.
 
-Current release identity (must match everywhere): **v2.16.4 / build 2026-07-17.635**,
+Current release identity (must match everywhere): **v2.16.4 / build 2026-07-17.636**,
 **357** managed source files.
 
 ## 1. Confirm one release identity
@@ -68,7 +68,7 @@ the packaging Python and hard-fail if the critical load/export stack cannot
 import. That stack now includes:
 
 - **duckdb**, **pyarrow**, **pandas**, **sqlglot**, **openpyxl**, **ijson**,
-  **orjson**, **tzdata** (required)
+  **orjson**, **tzdata**, **pytz** (required; DuckDB TIMESTAMPTZ fetch)
 - **msal**, **requests** (SharePoint sign-in; bundled when present)
 - **requests-negotiate-sspi** / **pyodbc** / **pywin32** (Windows)
 - **pywebview** + **pythonnet** (native AppWindow)

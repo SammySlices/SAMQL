@@ -113,15 +113,17 @@ else:
     )
 
 # ---- required load/export stack (must be present for distribution) ----
-# tzdata / pytz are included because pyarrow and pandas import them
-# *dynamically* to handle timezone-aware timestamps, so PyInstaller's static
-# analysis misses them -- which is why a frozen build could report "pytz not
-# installed" on a query with TIMESTAMP WITH TIME ZONE columns even though it
-# was installed in the build environment.
+# tzdata is the IANA database for zoneinfo on Windows / frozen builds.
+# pytz is REQUIRED (not optional): DuckDB's Python bindings hard-import it
+# when converting TIMESTAMPTZ / TIMESTAMP WITH TIME ZONE to Python objects
+# (current_timestamp, NOW(), tz-aware columns). Missing pytz yields
+# "Required module 'pytz' failed to import" on NodeFlow / query fetch.
+# PyInstaller's static analysis also misses lazy tz imports from pyarrow /
+# pandas, so collect_all must bundle both packages explicitly.
 # pandas is required so Python nodes get a real DataFrame as `df`.
 REQUIRED = ["duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "orjson",
-            "ijson", "tzdata"]
-OPTIONAL = REQUIRED + ["pyodbc", "pytz", "msal", "requests",
+            "ijson", "tzdata", "pytz"]
+OPTIONAL = REQUIRED + ["pyodbc", "msal", "requests",
                        "requests_negotiate_sspi"]
 _missing_required = [pkg for pkg in REQUIRED
                      if importlib.util.find_spec(pkg) is None]

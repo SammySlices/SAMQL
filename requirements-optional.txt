@@ -14,7 +14,10 @@
 #   ijson    -- streaming JSON for large nested loads
 #   openpyxl -- .xlsx / .xlsm read + write
 #   sqlglot  -- SQL dialect niceties / validation
-#   tzdata   -- timezone data for TIMESTAMP WITH TIME ZONE in frozen builds
+#   tzdata   -- IANA timezone data for zoneinfo / frozen Windows builds
+#   pytz     -- REQUIRED by DuckDB's Python bindings for TIMESTAMPTZ
+#               (current_timestamp, NOW(), timestamp-with-tz columns);
+#               without it fetch raises "Required module 'pytz' failed to import"
 #   pywebview -- native desktop window (SamQL-AppWindow); falls back to browser
 #   pyodbc   -- SQL Server connector (Windows builds)
 #   pywin32  -- Windows auth / DPAPI helpers used with SQL Server + secrets
@@ -37,6 +40,7 @@ ijson
 openpyxl
 sqlglot
 tzdata
+pytz
 pywebview
 msal
 requests

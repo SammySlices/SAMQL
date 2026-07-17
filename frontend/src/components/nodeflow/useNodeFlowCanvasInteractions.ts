@@ -399,7 +399,10 @@ export function useNodeFlowCanvasInteractions(
       } else if (drag?.mode === "node") {
         const wasDrag = !!drag.moved;
         delete document.documentElement.dataset.samqlNfDrag;
-        if (!wasDrag) {
+        // Left quick-click only: right-click never starts a node drag
+        // (startNodeDrag returns on button === 2), but still ignore
+        // secondary-button ups so inspector open stays left-click only.
+        if (!wasDrag && event.button !== 2) {
           current.onInspectorOpen?.();
         }
         if (drag.ids.length === 1) {

@@ -20,6 +20,8 @@ orjson>=3.9.0
 # sqlglot        # SQL formatting and cross-dialect transpilation
 # openpyxl       # .xlsx export
 # ijson          # streaming parser for very large JSON arrays (lower memory)
+# tzdata         # IANA tz database (zoneinfo on Windows / frozen builds)
+# pytz           # DuckDB TIMESTAMPTZ → Python (required by DuckDB bindings)
 # pyodbc         # connect to Microsoft SQL Server
 # pywebview      # open SamQL in a native desktop window instead of a tab
 #

@@ -217,6 +217,51 @@ describe("NodeFlow canvas components", () => {
     expect(onPointerDown).toHaveBeenCalledTimes(1);
   });
 
+  it("routes right-click to contextmenu without treating it as inspector open", () => {
+    const onPointerDown = vi.fn();
+    const onContextMenu = vi.fn((e: React.MouseEvent) => {
+      e.preventDefault();
+    });
+    const onInspectorOpen = vi.fn();
+    render(
+      <CanvasNodeFrame
+        node={inputNode}
+        index={0}
+        selected
+        dropHover={false}
+        error={undefined}
+        warning={undefined}
+        ripple={false}
+        snapped={false}
+        dying={false}
+        born={false}
+        lineageFlash={false}
+        denseMode={false}
+        renderVersion="g1"
+        chartVersion={0}
+        childSelection={null}
+        onPointerDown={(e, n) => {
+          // Mirror startNodeDrag: ignore secondary button.
+          if (e.button === 2) return;
+          onPointerDown(e, n);
+        }}
+        onContextMenu={(e, n) => {
+          // Mirror Scene: menu only — never open inspector.
+          onContextMenu(e, n);
+        }}
+      >
+        <span>node body</span>
+      </CanvasNodeFrame>,
+    );
+
+    const node = screen.getByTestId("nodeflow-node");
+    fireEvent.pointerDown(node, { button: 2 });
+    fireEvent.contextMenu(node);
+    expect(onPointerDown).not.toHaveBeenCalled();
+    expect(onContextMenu).toHaveBeenCalledTimes(1);
+    expect(onInspectorOpen).not.toHaveBeenCalled();
+  });
+
   it("exposes minimap collapse and pan behavior", () => {
     const onToggle = vi.fn();
     const onPan = vi.fn();

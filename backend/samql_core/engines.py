@@ -392,12 +392,12 @@ def _arrow_batch_tuples(batch):
     cols = list(batch.columns)
     if cols:
         # A TIMESTAMP WITH TIME ZONE column makes pyarrow attach tzinfo on
-        # to_pylist(), which lazily imports a Python tz database (pytz /
-        # tzdata / zoneinfo). That import can fail at runtime -- famously in
-        # a frozen PyInstaller build, where pytz is installed in the dev
-        # environment but not bundled, since pyarrow imports it dynamically.
-        # Drop the tz first (values are already UTC instants): a metadata-
-        # only cast that yields naive datetimes and needs no tz database.
+        # to_pylist(), which can touch a Python tz database. Separately,
+        # DuckDB's native fetch path hard-requires pytz for TIMESTAMPTZ
+        # (bundled via requirements-optional / samql.spec REQUIRED). Drop
+        # the tz here first (values are already UTC instants): a metadata-
+        # only cast that yields naive datetimes and needs no tz database
+        # on the Arrow fast-path.
         try:
             import pyarrow as _pa
             import pyarrow.types as _pat

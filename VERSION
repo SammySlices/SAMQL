@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-17.635
+Current build:   2026-07-17.636
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-17.636  (v2.16.4)
+
+PYTZ REQUIRED; NODEFLOW INSPCOLS OWNERSHIP; RIGHT-CLICK NO CONFIG.
+pytz is required in the load/export stack for DuckDB TIMESTAMPTZ fetch.
+NodeFlow inspector columns are owned by the selected node so stream
+probes do not cross-contaminate Select missing-field state. Right-click
+opens the node menu only (does not open inspector/config). Refresh
+samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-17.635  (v2.16.4)

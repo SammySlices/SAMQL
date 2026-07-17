@@ -288,7 +288,7 @@ if ($LASTEXITCODE -ne 0) {
 # CRITICAL load/export stack -- a binary without these fails on first use or
 # silently falls back to SQLite (the on-box openpyxl incident, 2026-07-02).
 $critical = @(
-  "duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata"
+  "duckdb", "pyarrow", "pandas", "sqlglot", "openpyxl", "ijson", "orjson", "tzdata", "pytz"
 )
 foreach ($m in $critical) {
   & $py -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$m') else 1)"

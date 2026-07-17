@@ -47,7 +47,7 @@ EXPECT both commands to pass before any executable packaging begins.
      EXPECT: npm run build succeeds and frontend\dist\index.html +
      assets\ exist (build.ps1 / samql.spec refuse a placeholder UI).
      EXPECT: critical imports OK including duckdb, pyarrow, pandas,
-     sqlglot, openpyxl, ijson, orjson, tzdata. Optional: msal,
+     sqlglot, openpyxl, ijson, orjson, tzdata, pytz. Optional: msal,
      requests, requests-negotiate-sspi (SharePoint sign-in / Windows
      Integrated), pyodbc, pywebview.
      EXPECT: "embedding application icon" IF backend\samql.ico is

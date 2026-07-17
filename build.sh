@@ -199,7 +199,7 @@ if ! "$PY" -c "import webview, webview.platforms.edgechromium, clr" >/dev/null 2
   echo ""
 fi
 # CRITICAL load/export stack must import or the build stops.
-for mod in duckdb pyarrow pandas sqlglot openpyxl ijson orjson tzdata; do
+for mod in duckdb pyarrow pandas sqlglot openpyxl ijson orjson tzdata pytz; do
   if ! "$PY" -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$mod') else 1)"; then
     echo "    *** critical dependency '$mod' is not importable after" \
          "install -- the packaged app would break. Fix the environment" \
@@ -207,7 +207,7 @@ for mod in duckdb pyarrow pandas sqlglot openpyxl ijson orjson tzdata; do
     exit 1
   fi
 done
-echo "    OK: load stack importable (duckdb, pyarrow, pandas, sqlglot, openpyxl, ijson, orjson, tzdata)"
+echo "    OK: load stack importable (duckdb, pyarrow, pandas, sqlglot, openpyxl, ijson, orjson, tzdata, pytz)"
 if "$PY" -c "import duckdb" >/dev/null 2>&1; then
   echo "    OK: DuckDB is available -- the executable will use DuckDB by default."
 fi

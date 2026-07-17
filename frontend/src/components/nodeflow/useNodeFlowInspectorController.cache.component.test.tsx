@@ -159,4 +159,344 @@ describe("useNodeFlowInspectorController column probe cache", () => {
     });
     expect(nodeflowColumnsBatch.mock.calls.length).toBeGreaterThan(afterFirst);
   });
+
+  it("does not seed a newly selected Select from a sibling Select's upstream cols", async () => {
+    // Two disconnected inputs + two Selects each wired to one input.
+    // Switching selection must not reconcile the bottom Select against the
+    // top Select's inspCols (that left false missing-field tombstones).
+    const nodes: NbNode[] = [
+      { id: "in-top", type: "input", x: 0, y: 0, config: { table: "top" } },
+      { id: "in-bot", type: "input", x: 0, y: 80, config: { table: "bot" } },
+      {
+        id: "sel-top",
+        type: "select",
+        x: 120,
+        y: 0,
+        config: { fields: [], label: "select" },
+      },
+      {
+        id: "sel-bot",
+        type: "select",
+        x: 120,
+        y: 80,
+        config: { fields: [], label: "select" },
+      },
+    ];
+    const edges: NbEdge[] = [
+      {
+        id: "e-top",
+        from: { node: "in-top", port: "out" },
+        to: { node: "sel-top", port: "in" },
+      },
+      {
+        id: "e-bot",
+        from: { node: "in-bot", port: "out" },
+        to: { node: "sel-bot", port: "in" },
+      },
+    ];
+    const colsByNode: Record<string, string[]> = {
+      "in-top": ["alpha", "beta"],
+      "in-bot": ["gamma", "delta"],
+    };
+    nodeflowColumnsBatch.mockImplementation(async (_graph: unknown, reqs: any[]) => ({
+      results: (reqs || []).map((q: any) => ({
+        node: q.node,
+        port: q.port || "out",
+        columns: colsByNode[q.node] || [],
+      })),
+    }));
+
+    const patch = vi.fn((id: string, config: Record<string, any>) => {
+      const n = nodes.find((x) => x.id === id);
+      if (n) n.config = { ...n.config, ...config };
+    });
+
+    const { result, rerender } = renderHook(
+      (props: { selectedId: string | null; graphSig: string }) => {
+        const sel =
+          props.selectedId == null
+            ? null
+            : nodes.find((n) => n.id === props.selectedId) || null;
+        return useNodeFlowInspectorController({
+          scopeKey: "test",
+          nodes: nodes.map((n) => ({ ...n, config: { ...n.config } })),
+          edges,
+          selectedId: props.selectedId,
+          selectedNode: sel
+            ? { ...sel, config: { ...(sel.config || {}) } }
+            : null,
+          childSelection: null,
+          graphSig: props.graphSig,
+          graphForApi: () => ({ nodes, edges }),
+          partialGroupGraph: () => ({ nodes, edges }),
+          patch,
+          runtime,
+        });
+      },
+      {
+        initialProps: {
+          selectedId: "sel-top" as string | null,
+          graphSig: "sig-sibling-1",
+        },
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current.inspCols.in).toEqual(["alpha", "beta"]);
+    });
+
+    act(() => {
+      rerender({ selectedId: "sel-bot", graphSig: "sig-sibling-1" });
+    });
+
+    // Immediately after switch: must not expose top Select's columns.
+    expect(result.current.inspCols.in).toBeUndefined();
+    expect(result.current.inspColsProbing).toBe(true);
+
+    await waitFor(() => {
+      expect(result.current.inspCols.in).toEqual(["gamma", "delta"]);
+      expect(result.current.inspColsProbing).toBe(false);
+    });
+
+    const botPatches = patch.mock.calls.filter((c) => c[0] === "sel-bot");
+    for (const [, cfg] of botPatches) {
+      const names = (cfg.fields || []).map((f: any) => f.name);
+      expect(names).not.toContain("alpha");
+      expect(names).not.toContain("beta");
+    }
+
+    // Bottom Select ends with only its own upstream columns — no false missing.
+    const bot = nodes.find((n) => n.id === "sel-bot")!;
+    const botNames = (bot.config.fields || []).map((f: any) => f.name);
+    expect(botNames).toEqual(["gamma", "delta"]);
+
+    // Changing top input headers (graphSig bump while bottom selected) must
+    // not mark bottom Select fields missing / inject top columns.
+    colsByNode["in-top"] = ["alpha", "beta", "new_top_only"];
+    patch.mockClear();
+    act(() => {
+      rerender({ selectedId: "sel-bot", graphSig: "sig-sibling-2" });
+    });
+    await waitFor(() => {
+      expect(result.current.inspCols.in).toEqual(["gamma", "delta"]);
+    });
+    const botAfterTopChange = nodes.find((n) => n.id === "sel-bot")!;
+    expect((botAfterTopChange.config.fields || []).map((f: any) => f.name)).toEqual(
+      ["gamma", "delta"],
+    );
+    for (const [, cfg] of patch.mock.calls.filter((c) => c[0] === "sel-bot")) {
+      const names = (cfg.fields || []).map((f: any) => f.name);
+      expect(names).not.toContain("new_top_only");
+      expect(names).not.toContain("alpha");
+    }
+  });
+
+  it("disconnected Summarize/Sort chains: InputA change does not mark B-chain missing", async () => {
+    // InputA→SelectA→SummarizeA / SortA  and  InputB→SelectB
+    // Changing A headers while B is selected must leave B-chain configs and
+    // B's inspCols untouched (no false missing from A's schema).
+    const nodes: NbNode[] = [
+      { id: "in-a", type: "input", x: 0, y: 0, config: { table: "a" } },
+      { id: "in-b", type: "input", x: 0, y: 120, config: { table: "b" } },
+      {
+        id: "sel-a",
+        type: "select",
+        x: 120,
+        y: 0,
+        config: {
+          fields: [
+            { name: "region", keep: true },
+            { name: "amount", keep: true },
+          ],
+          label: "sel-a",
+        },
+      },
+      {
+        id: "sum-a",
+        type: "summarize",
+        x: 260,
+        y: 0,
+        config: {
+          group_by: ["region"],
+          aggs: [{ col: "amount", fn: "sum", as: "total" }],
+          label: "sum-a",
+        },
+      },
+      {
+        id: "sort-a",
+        type: "sort",
+        x: 400,
+        y: 0,
+        config: {
+          sorts: [{ col: "region", dir: "asc" }],
+          label: "sort-a",
+        },
+      },
+      {
+        id: "sel-b",
+        type: "select",
+        x: 120,
+        y: 120,
+        config: {
+          fields: [
+            { name: "sku", keep: true },
+            { name: "qty", keep: true },
+          ],
+          label: "sel-b",
+        },
+      },
+      {
+        id: "sort-b",
+        type: "sort",
+        x: 260,
+        y: 120,
+        config: {
+          sorts: [{ col: "sku", dir: "asc" }],
+          label: "sort-b",
+        },
+      },
+    ];
+    const edges: NbEdge[] = [
+      {
+        id: "e1",
+        from: { node: "in-a", port: "out" },
+        to: { node: "sel-a", port: "in" },
+      },
+      {
+        id: "e2",
+        from: { node: "sel-a", port: "out" },
+        to: { node: "sum-a", port: "in" },
+      },
+      {
+        id: "e3",
+        from: { node: "sum-a", port: "out" },
+        to: { node: "sort-a", port: "in" },
+      },
+      {
+        id: "e4",
+        from: { node: "in-b", port: "out" },
+        to: { node: "sel-b", port: "in" },
+      },
+      {
+        id: "e5",
+        from: { node: "sel-b", port: "out" },
+        to: { node: "sort-b", port: "in" },
+      },
+    ];
+    const colsByNode: Record<string, string[]> = {
+      "in-a": ["region", "amount"],
+      "in-b": ["sku", "qty"],
+      "sel-a": ["region", "amount"],
+      "sum-a": ["region", "total"],
+      "sel-b": ["sku", "qty"],
+    };
+    nodeflowColumnsBatch.mockImplementation(async (_graph: unknown, reqs: any[]) => ({
+      results: (reqs || []).map((q: any) => ({
+        node: q.node,
+        port: q.port || "out",
+        columns: colsByNode[q.node] || [],
+      })),
+    }));
+
+    const patch = vi.fn((id: string, config: Record<string, any>) => {
+      const n = nodes.find((x) => x.id === id);
+      if (n) n.config = { ...n.config, ...config };
+    });
+    const snapshot = (id: string) =>
+      JSON.parse(JSON.stringify(nodes.find((n) => n.id === id)!.config));
+
+    const { result, rerender } = renderHook(
+      (props: { selectedId: string | null; graphSig: string }) => {
+        const sel =
+          props.selectedId == null
+            ? null
+            : nodes.find((n) => n.id === props.selectedId) || null;
+        return useNodeFlowInspectorController({
+          scopeKey: "test",
+          nodes: nodes.map((n) => ({ ...n, config: { ...n.config } })),
+          edges,
+          selectedId: props.selectedId,
+          selectedNode: sel
+            ? { ...sel, config: { ...(sel.config || {}) } }
+            : null,
+          childSelection: null,
+          graphSig: props.graphSig,
+          graphForApi: () => ({ nodes, edges }),
+          partialGroupGraph: () => ({ nodes, edges }),
+          patch,
+          runtime,
+        });
+      },
+      {
+        initialProps: {
+          selectedId: "sort-b" as string | null,
+          graphSig: "iso-1",
+        },
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current.inspCols.in).toEqual(["sku", "qty"]);
+      expect(result.current.staleColRefs).toEqual([]);
+    });
+
+    const beforeB = {
+      sel: snapshot("sel-b"),
+      sort: snapshot("sort-b"),
+    };
+    const beforeA = {
+      sel: snapshot("sel-a"),
+      sum: snapshot("sum-a"),
+      sort: snapshot("sort-a"),
+    };
+
+    // Shrink InputA headers — A-chain Select should gain missing tombstones
+    // via wired-batch; B-chain must stay identical while sort-b is selected.
+    colsByNode["in-a"] = ["region"];
+    colsByNode["sel-a"] = ["region"];
+    patch.mockClear();
+    act(() => {
+      rerender({ selectedId: "sort-b", graphSig: "iso-2" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.inspCols.in).toEqual(["sku", "qty"]);
+      expect(result.current.staleColRefs).toEqual([]);
+    });
+
+    expect(snapshot("sel-b")).toEqual(beforeB.sel);
+    expect(snapshot("sort-b")).toEqual(beforeB.sort);
+    // Wired-batch may refresh sel-a from in-a; amount becomes a missing tombstone.
+    await waitFor(() => {
+      const fields = (nodes.find((n) => n.id === "sel-a")!.config.fields ||
+        []) as { name: string }[];
+      expect(fields.map((f) => f.name)).toEqual(
+        expect.arrayContaining(["region", "amount"]),
+      );
+    });
+    // Summarize/Sort on A are not auto-wiped by schema refresh alone.
+    expect(snapshot("sum-a")).toEqual(beforeA.sum);
+    expect(snapshot("sort-a")).toEqual(beforeA.sort);
+
+    // Selecting sum-a after A shrink: missing amount shows for A only.
+    act(() => {
+      rerender({ selectedId: "sum-a", graphSig: "iso-2" });
+    });
+    await waitFor(() => {
+      expect(result.current.inspCols.in).toEqual(["region"]);
+      expect(result.current.staleColRefs.some((r) => r.columns.includes("amount")))
+        .toBe(true);
+    });
+
+    // Back to sort-b: no cross-bleed of A's missing refs.
+    act(() => {
+      rerender({ selectedId: "sort-b", graphSig: "iso-2" });
+    });
+    await waitFor(() => {
+      expect(result.current.inspCols.in).toEqual(["sku", "qty"]);
+      expect(result.current.staleColRefs).toEqual([]);
+    });
+    expect(snapshot("sel-b")).toEqual(beforeB.sel);
+    expect(snapshot("sort-b")).toEqual(beforeB.sort);
+  });
 });
