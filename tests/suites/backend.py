@@ -37380,8 +37380,39 @@ def backend_tests(datadir, csv_path, json_path):
              "unrelated drop must not bump flow epoch")
         need(corr.get("write_sql_global_counts") is True,
              "write SQL still clears counts globally")
+        need(corr.get("scoped_count_api_style") is True,
+             "API-style scoped refresh keeps unrelated counts")
         need(corr.get("nested_sorted_wire_bounded") is True,
              "nested sorted page wire stays bounded")
+
+    def t_scoped_counts_api_hdfs_source():
+        # Post-653 audit #2: API/HDFS/iterator/folder loads must not wipe the
+        # whole sidebar COUNT cache. HDFS must not re-clear after load_file.
+        sess = open(os.path.join(BACKEND, "samql_core", "session.py"),
+                    encoding="utf-8").read()
+        need("def _refresh_scoped_counts(self, specs):" in sess,
+             "scoped count refresh helper exists")
+        hdfs_i = sess.index("def hdfs_load_file")
+        hdfs_j = sess.index("\n    def ", hdfs_i + 1)
+        hdfs = sess[hdfs_i:hdfs_j]
+        need("self._invalidate_counts()" not in hdfs,
+             "hdfs_load_file must not globally clear counts after load_file")
+        need("load_file already scoped" in hdfs,
+             "hdfs documents that load_file already scoped counts")
+        for name in ("def run_iterator", "def _run_iterator_container",
+                     "def run_while", "def load_api", "def fetch_api_node",
+                     "def load_directory_file", "def load_folder_files"):
+            i = sess.index(name)
+            j = sess.index("\n    def ", i + 1)
+            body = sess[i:j]
+            need("_refresh_scoped_counts" in body
+                 or (name == "def hdfs_load_file"),
+                 "%s must refresh counts with scope" % name)
+            if name != "def load_api":
+                # load_api only has the helper call; still no bare clear.
+                pass
+            need("self._invalidate_counts()" not in body,
+                 "%s must not bare-clear the count cache" % name)
 
     def t_perf_audit_high_harness():
         # Single filter COUNT, deep sorted snap page, flow cache vs unrelated drop.
@@ -37548,6 +37579,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_perf_high_fixes_harness),
         ("perf-medium fixes harness (deferred sort + scoped counts; self-test)",
          t_perf_medium_fixes_harness),
+        ("scoped counts: API/HDFS/iterator/folder do not wipe sidebar cache",
+         t_scoped_counts_api_hdfs_source),
         ("perf audit high defects harness (filter COUNT / deep snap / flow)",
          t_perf_audit_high_harness),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",
