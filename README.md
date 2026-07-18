@@ -558,7 +558,7 @@ results can't pile up unbounded memory. The memory indicator (top-right)
 shows live usage, and **Free unused memory** drops cached results and their
 sorted copies and hands memory back to the OS without touching loaded tables.
 On RAM-tight machines, set `low_memory_mode: true` in the config file
-(`~/.json_csv_sql_explorer`): SQLite runs disk-backed, DuckDB takes a 1 GB
+(`~/.samql`): SQLite runs disk-backed, DuckDB takes a 1 GB
 limit, and results spill sooner.
 
 Set `duckdb_on_disk: true` to make DuckDB use a temporary on-disk database
@@ -672,11 +672,12 @@ Fully implemented end to end:
 
 ## Where your data lives
 
-SamQL keeps its config, query history, and saved queries in
-`~/.json_csv_sql_explorer` — the same location the original app used, so an
-existing setup carries over. Loaded tables live in an in-memory/temporary
-SQLite database and are cleared when the server stops (or via **Clear** in
-the top bar).
+SamQL keeps its config, query history, saved queries, and connection
+profiles in `~/.samql`. Existing installs under
+`~/.json_csv_sql_explorer` are copied once into `~/.samql` on first
+launch. Override with `SAMQL_CONFIG_DIR` for tests or isolated instances.
+Loaded tables live in an in-memory/temporary SQLite database and are
+cleared when the server stops (or via **Clear** in the top bar).
 
 Everything runs locally. The server binds to `127.0.0.1` and nothing leaves
 your machine unless you explicitly fetch a remote API or connect to a

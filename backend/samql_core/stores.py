@@ -1,7 +1,8 @@
 """Persistence stores: app config, query history, saved queries, and
-schema signatures. All JSON-file backed under ~/.json_csv_sql_explorer
-(kept identical to the original SamQL on-disk layout so an existing
-install's history/saved queries carry over).
+schema signatures. JSON-file backed under ``~/.samql`` (canonical), with
+a one-time copy from the legacy ``~/.json_csv_sql_explorer`` layout so
+existing installs keep history, saved queries, connection profiles, and
+secrets. Override with ``SAMQL_CONFIG_DIR`` for tests / multi-instance.
 
 This module is GUI-free and lifted directly from the original
 single-file application.
@@ -9,12 +10,90 @@ single-file application.
 import datetime as _dt
 import json
 import os
+import shutil
 from pathlib import Path
 
-APP_CONFIG_DIRNAME = ".json_csv_sql_explorer"
+# Canonical durable config dir (SamQL-branded). Legacy name kept for
+# one-time migration and docs that mention the original on-disk layout.
+APP_CONFIG_DIRNAME = ".samql"
+LEGACY_APP_CONFIG_DIRNAME = ".json_csv_sql_explorer"
+_MIGRATION_MARKER = ".migrated_from_json_csv_sql_explorer"
 KEYRING_SERVICE_SQL = "json_csv_sql_explorer_sql"
 KEYRING_SERVICE_API = "json_csv_sql_explorer_api"
 KEYRING_API_USER = "default"
+
+
+def app_config_dir(dirname=None):
+    """Resolve the durable SamQL config directory.
+
+    Precedence:
+    1. ``SAMQL_CONFIG_DIR`` env — absolute isolation for tests / multi-instance
+    2. Explicit ``dirname`` that is neither canonical nor legacy — custom
+       home subdirectory (or absolute path)
+    3. ``~/.samql``, creating it and one-time copying from
+       ``~/.json_csv_sql_explorer`` when the new dir is missing or empty
+    """
+    env = (os.environ.get("SAMQL_CONFIG_DIR") or "").strip()
+    if env:
+        path = Path(env).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    if dirname is not None and dirname not in (
+            APP_CONFIG_DIRNAME, LEGACY_APP_CONFIG_DIRNAME):
+        path = Path(dirname)
+        if not path.is_absolute():
+            path = Path.home() / dirname
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    return _ensure_canonical_config_dir()
+
+
+def _ensure_canonical_config_dir():
+    dest = Path.home() / APP_CONFIG_DIRNAME
+    legacy = Path.home() / LEGACY_APP_CONFIG_DIRNAME
+    try:
+        dest_exists = dest.is_dir()
+        dest_empty = dest_exists and not any(dest.iterdir())
+        if dest_exists and not dest_empty:
+            return dest
+        if legacy.is_dir() and (not dest_exists or dest_empty):
+            dest.mkdir(parents=True, exist_ok=True)
+            _migrate_legacy_config(legacy, dest)
+            return dest
+        dest.mkdir(parents=True, exist_ok=True)
+        return dest
+    except Exception:
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return dest
+
+
+def _migrate_legacy_config(legacy, dest):
+    """Copy legacy durable files into ``dest`` without overwriting."""
+    try:
+        for item in legacy.iterdir():
+            target = dest / item.name
+            if target.exists():
+                continue
+            try:
+                if item.is_dir():
+                    shutil.copytree(item, target)
+                elif item.is_file():
+                    shutil.copy2(item, target)
+            except Exception:
+                pass
+        marker = dest / _MIGRATION_MARKER
+        if not marker.exists():
+            marker.write_text(
+                "migrated from %s\n" % legacy, encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _replace_retry(tmp, dst, tries=6, delay=0.025):
@@ -144,8 +223,8 @@ def _load_json_container(path, expected_type):
 
 
 class ConfigStore:
-    def __init__(self, dirname=APP_CONFIG_DIRNAME, filename="config.json"):
-        self.path = Path.home() / dirname / filename
+    def __init__(self, dirname=None, filename="config.json"):
+        self.path = app_config_dir(dirname) / filename
         self.data = {}
         self._load()
 
@@ -167,8 +246,8 @@ class QueryHistoryStore:
     MAX_ENTRIES = 200
     RETENTION_DAYS = 30          # history older than this is dropped
 
-    def __init__(self, dirname=APP_CONFIG_DIRNAME, filename="history.json"):
-        self.path = Path.home() / dirname / filename
+    def __init__(self, dirname=None, filename="history.json"):
+        self.path = app_config_dir(dirname) / filename
         self.entries = []
         self._load()
 
@@ -253,7 +332,7 @@ class QueryHistoryStore:
 class SavedQueryStore(QueryHistoryStore):
     RETENTION_DAYS = None        # saved queries never expire
 
-    def __init__(self, dirname=APP_CONFIG_DIRNAME, filename="saved.json"):
+    def __init__(self, dirname=None, filename="saved.json"):
         super().__init__(dirname, filename)
 
     def upsert(self, name, sql, tags=None):
@@ -325,8 +404,8 @@ class WorkflowStore:
     MAX_ENTRIES = 400
     KINDS = ("ide", "journal", "node", "dashboard")
 
-    def __init__(self, dirname=APP_CONFIG_DIRNAME, filename="workflows.json"):
-        self.path = Path.home() / dirname / filename
+    def __init__(self, dirname=None, filename="workflows.json"):
+        self.path = app_config_dir(dirname) / filename
         self.entries = []
         self._load()
 
@@ -431,17 +510,18 @@ class WorkflowStore:
 class LoadManifestStore:
     """Remembers the CURRENT session's restorable loads for the next launch.
 
-    Stored as a JSON list under ~/.json_csv_sql_explorer/session_manifest.json.
-    This is a session snapshot, not an unbounded load history: callers rewrite
-    it to match currently loaded tables so a restart never replays orphaned
-    older files. Only stable, re-readable sources belong here -- transient
-    uploads and credential-bearing connections (SQL Server) are left out.
+    Stored as a JSON list under the durable config dir
+    (``session_manifest.json``). This is a session snapshot, not an
+    unbounded load history: callers rewrite it to match currently loaded
+    tables so a restart never replays orphaned older files. Only stable,
+    re-readable sources belong here -- transient uploads and
+    credential-bearing connections (SQL Server) are left out.
     """
     MAX_ENTRIES = 300
 
-    def __init__(self, dirname=APP_CONFIG_DIRNAME,
+    def __init__(self, dirname=None,
                  filename="session_manifest.json"):
-        self.path = Path.home() / dirname / filename
+        self.path = app_config_dir(dirname) / filename
         self.entries = []
         self._load()
 

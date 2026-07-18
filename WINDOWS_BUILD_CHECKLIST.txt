@@ -140,11 +140,12 @@ EXPECT both commands to pass before any executable packaging begins.
 5.1  AV interference: the first exe launch after a rebuild is the AV
      scan window -- expect a one-time multi-second delay, not a hang;
      os.replace retries in the cache layer absorb the file locks.
-5.2  Roaming profile: ~\.json_csv_sql_explorer (config, history,
-     manifest) follows the profile; %TEMP%\samql (logs, filecache)
-     does not. After a Citrix session move, EXPECT tables to
-     auto-restore from the manifest and the filecache to rebuild
-     cold -- both are designed behaviors, not faults.
+5.2  Roaming profile: ~\.samql (config, history, connection profiles,
+     manifest; migrated once from ~\.json_csv_sql_explorer) follows the
+     profile; %TEMP%\samql (logs, filecache) does not. After a Citrix
+     session move, EXPECT tables to auto-restore from the manifest and
+     the filecache to rebuild cold -- both are designed behaviors, not
+     faults.
 5.3  Firewall prompt: first cold start may prompt for 127.0.0.1
      loopback; allow. No inbound rule is needed beyond loopback.
 

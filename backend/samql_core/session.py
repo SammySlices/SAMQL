@@ -853,9 +853,9 @@ class Session:
         self._flow_cache_registry = FlowCache(
             self.flow_cache_max, self.flow_cache_bytes_max,
             self._flow_cache_drop_table)
-        _pf_dir = os.environ.get("SAMQL_PERSISTENT_FLOW_CACHE_DIR") or os.path.join(
-            os.path.expanduser("~"), ".json_csv_sql_explorer",
-            "nodeflow_cache")
+        from .stores import app_config_dir
+        _pf_dir = os.environ.get("SAMQL_PERSISTENT_FLOW_CACHE_DIR") or str(
+            app_config_dir() / "nodeflow_cache")
         self._persistent_flow_cache_registry = PersistentFlowCache(
             _pf_dir,
             self.persistent_flow_cache_mb_configured * 1024 * 1024,

@@ -17,7 +17,7 @@ from __future__ import annotations
 __version__ = "2.16.4"
 # Iteration / build label. Bump the trailing sequence each delivered round so
 # the exact build can be confirmed in the UI (top bar) and the source bundle.
-BUILD = "2026-07-18.656"
+BUILD = "2026-07-18.657"
 APP_NAME = "SamQL"
 
 # ---- session orchestration -----------------------------------------
@@ -35,6 +35,8 @@ from .stores import (
     QueryHistoryStore,
     SavedQueryStore,
     APP_CONFIG_DIRNAME,
+    LEGACY_APP_CONFIG_DIRNAME,
+    app_config_dir,
     KEYRING_SERVICE_SQL,
     KEYRING_SERVICE_API,
     atomic_write_json,
@@ -88,7 +90,7 @@ __all__ = [
     "Session", "json_safe",
     "DUCKDB_TARGET", "LOCAL_TARGET", "DISPLAY_LIMIT",
     "ConfigStore", "QueryHistoryStore", "SavedQueryStore",
-    "APP_CONFIG_DIRNAME",
+    "APP_CONFIG_DIRNAME", "LEGACY_APP_CONFIG_DIRNAME", "app_config_dir",
     "KEYRING_SERVICE_SQL", "KEYRING_SERVICE_API",
     "DBManager", "DuckDBManager", "HAS_DUCKDB", "HAS_PYARROW",
     "load_file", "load_csv", "load_json", "load_parquet",
