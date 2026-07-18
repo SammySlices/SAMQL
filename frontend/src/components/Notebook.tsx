@@ -75,6 +75,8 @@ interface Props {
   onDialectChange?: (d: string) => void;
   onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
   onTablesMaybeChanged?: () => void;
+  /** Apply Session data_epoch from mutation responses before tables poll. */
+  onDataEpoch?: (epoch: number) => void;
   // a one-shot request from the sidebar to open a saved (kind=journal) workflow
   loadRequest?: {
     id: number;
@@ -225,6 +227,7 @@ export const Notebook: React.FC<Props> = ({
   onDialectChange,
   onToast,
   onTablesMaybeChanged,
+  onDataEpoch,
   loadRequest,
   onLoadConsumed,
   onWorkflowsChanged,
@@ -952,6 +955,8 @@ export const Notebook: React.FC<Props> = ({
           page: { columns: [], rows: [], total_rows: 0 },
           elapsedMs: res.elapsed_ms ?? null,
         });
+        const ep = Number((res as { data_epoch?: number }).data_epoch);
+        if (Number.isFinite(ep)) onDataEpoch?.(ep);
         onTablesMaybeChanged?.();
         discardRid(prevRid); // a non-SELECT supersedes any prior result
         return null;
@@ -977,7 +982,11 @@ export const Notebook: React.FC<Props> = ({
           );
         // a pure read can't have changed the catalog; skip the recount storm
         // during Run-all. Anything not explicitly "read" still refreshes.
-        if ((res as any).stmt_kind !== "read") onTablesMaybeChanged?.();
+        if ((res as any).stmt_kind !== "read") {
+          const ep2 = Number((res as { data_epoch?: number }).data_epoch);
+          if (Number.isFinite(ep2)) onDataEpoch?.(ep2);
+          onTablesMaybeChanged?.();
+        }
         if (prevRid && prevRid !== res.result_id) discardRid(prevRid);
         return res.result_id;
       }
@@ -1704,6 +1713,10 @@ export const Notebook: React.FC<Props> = ({
   const exportCell = async (id: string, fmt: string) => {
     const cell = cellsRef.current.find((c) => c.id === id);
     if (!cell || !cell.resultId) return;
+    if (staleById[id]) {
+      onToast("warn", "Data changed", "Re-run the cell before exporting.");
+      return;
+    }
     try {
       const exp = await exportResultToFile(cell.resultId, fmt, {
         sortCol: cell.sortCol,

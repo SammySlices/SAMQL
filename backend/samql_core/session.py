@@ -2177,7 +2177,8 @@ class Session:
         ``_data_epoch`` so IDE/Journal/NodeFlow clients refuse retained
         snapshots. Volatile flow fingerprints salt that epoch, so entries
         kept across a bump can never hit — they only orphan temp tables.
-        Clear the flow cache whenever the epoch advances.
+        Clear the flow cache whenever the epoch advances, and reclaim
+        unpinned result snapshots from older epochs.
         """
         touched = []
         if keys is None:
@@ -2198,6 +2199,41 @@ class Session:
             self._data_epoch += 1
             if hasattr(self, "_flow_cache"):
                 self._flow_cache_clear()
+            self._reclaim_stale_results()
+
+    def _reclaim_stale_results(self):
+        """Close unpinned result snapshots whose data_epoch no longer matches.
+
+        Live checks already refuse them; reclaiming frees parquet/slots so
+        frequent mutations do not pile dead stores until ordinary eviction.
+        Pinned Journal-reuse results are left alone until pins release.
+        """
+        try:
+            cur = int(getattr(self, "_data_epoch", 0) or 0)
+        except Exception:
+            cur = 0
+        with self._lock:
+            for rid in list(self._results_order):
+                if self._reuse_pins.get(rid):
+                    continue
+                cr = self._results.get(rid)
+                if cr is None:
+                    if rid in self._results_order:
+                        self._results_order.remove(rid)
+                    continue
+                try:
+                    got = int(getattr(cr, "data_epoch"))
+                except Exception:
+                    got = -1
+                if got == cur:
+                    continue
+                self._results.pop(rid, None)
+                if rid in self._results_order:
+                    self._results_order.remove(rid)
+                try:
+                    cr.close()
+                except Exception:
+                    pass
 
     def _note_flow_source_tables(self, graph):
         """Record input table names from a graph that may populate flow cache.
@@ -7108,7 +7144,9 @@ class Session:
             return {"columns": [], "rows": [], "total_rows": 0,
                     "result_id": None, "elapsed_ms": int(elapsed * 1000),
                     "engine": engine_kind, "statement": "ok",
-                    "truncated": False}
+                    "truncated": False,
+                    "stmt_kind": stmt_kind,
+                    "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
 
         rid = self._cache_result(cols, rows, total, original_sql, first_target,
                                  engine_kind, data_epoch=epoch0)
@@ -10257,7 +10295,8 @@ class Session:
         self._invalidate_profiles()
         self._invalidate_counts(
             keys=self._count_keys_for_tables(engine, old, new))
-        return {"ok": True, "name": new}
+        return {"ok": True, "name": new,
+                "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
 
     def drop_table(self, engine, name):
         eng = self.duckdb if engine == "duckdb" else self.db
@@ -10278,7 +10317,8 @@ class Session:
         self._invalidate_counts(
             keys=self._count_keys_for_tables(engine, name))
         self._schedule_cleanup(full=True)
-        return {"ok": True}
+        return {"ok": True,
+                "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
 
     def _cleanup_temp_source(self, src):
         """Delete a dropped table/view's backing file *iff* SamQL had streamed
@@ -10425,8 +10465,9 @@ class Session:
             # IDE/Journal refuse retained snapshots that predate this write.
             self._invalidate_profiles()
             self._invalidate_counts(
-                keys=self._count_keys_for_tables(engine_kind, name))
-            return {"name": name, "columns": cols, "engine": engine_kind}
+            keys=self._count_keys_for_tables(engine_kind, name))
+            return {"name": name, "columns": cols, "engine": engine_kind,
+                    "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
         except Exception as e:
             if _is_interrupt(e) or self._run_is_cancelled(query_id):
                 return {"cancelled": True}
@@ -10500,7 +10541,8 @@ class Session:
         self._invalidate_profiles()
         self._prime_count(kind, tname, n)
         return {"ok": True, "table": tname, "rows": n, "engine": kind,
-                "columns": list(eng.table_columns.get(tname, cols))}
+                "columns": list(eng.table_columns.get(tname, cols)),
+                "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
 
     def change_column_type(self, engine, table, col, new_type, query_id=None):
         eng = self.duckdb if engine == "duckdb" else self.db
@@ -10518,7 +10560,8 @@ class Session:
         self._invalidate_profiles()
         self._invalidate_counts(
             keys=self._count_keys_for_tables(engine, table))
-        return {"ok": bool(ok)}
+        return {"ok": bool(ok),
+                "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
 
     def clear_all(self, clear_manifest=False):
         self.db.drop_all()
@@ -13432,6 +13475,7 @@ class Session:
                             "tables": [{"name": tname, "rows": n,
                                         "columns": cols_now, "engine": engine}]}],
                 "tables": [],
+                "data_epoch": int(getattr(self, "_data_epoch", 0) or 0),
             }
         except Exception as e:
             if _is_interrupt(e) or self._run_is_cancelled(query_id):

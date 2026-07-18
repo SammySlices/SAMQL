@@ -213,6 +213,7 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
               testId="notebook-export-results"
               formats={backendResultExportFormats(props.features)}
               onExport={props.onExport}
+              disabled={!!props.stale}
             />
           </>
         )}
