@@ -3,6 +3,7 @@
 .github/workflows/windows-browser.yml
 ARCHITECTURE.md
 BENCHMARKS.md
+BETA_CHANNEL.md
 Clean-SamQL.ps1
 DESIGN_iterator_dynamic_nodes.md
 DISTRIBUTION.md

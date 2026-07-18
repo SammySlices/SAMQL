@@ -17,6 +17,33 @@ double-click **SamQL-AppWindow.exe**.
 
 ---
 
+## Release channels (stable vs beta)
+
+| Channel | Git branch | GitHub Release tag | GitHub “Latest” | Use for |
+|---------|------------|--------------------|-----------------|---------|
+| **Stable** | `master` | `app-<build>` e.g. `app-2026-07-17.639` | Yes | Colleagues / production AppWindow |
+| **Beta** | `beta` | `app-beta-<build>` e.g. `app-beta-2026-07-18.641` | **No** (mark **prerelease**) | Dogfood / soak of audit+perf fixes |
+
+### Beta channel workflow
+
+1. Land risky or soak-worthy work on **`beta`** (or merge a feature PR into `beta` first).
+2. Bump identity + refresh `samql_txt/` on `beta` like any product commit.
+3. On a Windows build machine: `.\build.ps1` from a clean `beta` checkout.
+4. Publish GitHub Release:
+   - Tag: `app-beta-<build>` (must match `RELEASE_MANIFEST.json` / `BUILD`)
+   - Title: `SamQL AppWindow beta <build>`
+   - Check **Set as a pre-release** (must **not** replace stable Latest)
+   - Assets: `SamQL-AppWindow.zip` and/or `SamQL-AppWindow-Assistant.zip`
+5. After soak, merge `beta` → `master` and cut a normal stable `app-<build>` Latest release.
+
+Stable releases stay on `master` with tags `app-<build>` marked Latest. Never
+point Latest at an `app-beta-*` tag.
+
+Feature branches such as `cursor/beta-bb92` are temporary PR branches; the
+durable dogfood line is **`beta`**.
+
+---
+
 ## Complete source delivery (decoded + APHEX)
 
 Before an executable build or source handoff, verify one coherent tree and

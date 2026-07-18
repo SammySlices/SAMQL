@@ -5,8 +5,12 @@ A green development build is not enough: identity, saved-data compatibility,
 the exact source manifest, Microsoft Edge behavior, and both source transports
 must all be verified.
 
-Current release identity (must match everywhere): **v2.16.4 / build 2026-07-17.639**,
-**362** managed source files.
+Current **stable** release identity on `master` (must match everywhere for a
+Latest cut): **v2.16.4 / build 2026-07-17.639**, **362** managed source files.
+
+Current **beta** channel tip on branch `beta`: see `BETA_CHANNEL.md` and
+`RELEASE_MANIFEST.json` on that branch (prerelease tags `app-beta-<build>` —
+never GitHub Latest).
 
 ## 1. Confirm one release identity
 
