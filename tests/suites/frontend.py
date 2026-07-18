@@ -6070,6 +6070,7 @@ console.log("OK");
              "renderVersionByNode" in render_model
              and "incomingByNode" in render_model
              and "dashboardSourceIdsByNode" in render_model
+             and "patchNodeFlowRenderModelForDirtyNodes" in render_model
              and "renderVersion={renderModel.renderVersionByNode[node.id]"
                  in scene
              and "graphVersion" not in scene),

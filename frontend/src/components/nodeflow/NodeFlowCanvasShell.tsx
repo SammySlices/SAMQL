@@ -1,5 +1,10 @@
-import React from "react";
-import { canvasWorldSize, type NbNode } from "../../lib/nodeFlowModel";
+import React, { useRef } from "react";
+import {
+  canvasWorldSize,
+  canvasWorldSizeExpandOnly,
+  isNodeFlowPointerDragging,
+  type NbNode,
+} from "../../lib/nodeFlowModel";
 import { wirePath } from "../../lib/nodegraph";
 import {
   NodeMinimap,
@@ -68,7 +73,13 @@ export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
   renderedNodeCount,
   children,
 }: NodeFlowCanvasShellProps) {
-  const world = canvasWorldSize(nodes);
+  const worldRef = useRef(canvasWorldSize(nodes));
+  const measured = canvasWorldSize(nodes);
+  // Mid-drag: expand-only so nodes aren't clipped without shrink thrash.
+  worldRef.current = isNodeFlowPointerDragging()
+    ? canvasWorldSizeExpandOnly(worldRef.current, nodes)
+    : measured;
+  const world = worldRef.current;
   return (
     <div className="nb2-canvas-col">
       <div

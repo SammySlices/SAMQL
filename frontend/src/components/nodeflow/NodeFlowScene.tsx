@@ -31,6 +31,8 @@ import type { NodeFlowMarquee } from "./useNodeFlowCanvasInteractions";
 import type { NodeFlowViewportRect } from "./useNodeFlowViewport";
 import {
   buildNodeFlowRenderModel,
+  dirtyNodeIdsFromIdentity,
+  patchNodeFlowRenderModelForDirtyNodes,
   selectVisibleCanvasNodes,
   selectVisibleCanvasWires,
 } from "./nodeFlowRenderModel";
@@ -171,10 +173,41 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   const nextChartObjectId = useRef(1);
 
   // densify() reads html.nb-dense / module flag; denseMode prop busts Scene memo.
-  const renderModel = useMemo(
-    () => buildNodeFlowRenderModel(nodes, edges, denseMode),
-    [nodes, edges, denseMode],
-  );
+  // Drag/resize only change node object identity for moved cards — patch those
+  // wires instead of rebuilding O(edges) geometry every RAF.
+  const renderModelCacheRef = useRef<{
+    nodes: NbNode[];
+    edges: NbEdge[];
+    denseMode: boolean;
+    model: ReturnType<typeof buildNodeFlowRenderModel>;
+  } | null>(null);
+  const renderModel = useMemo(() => {
+    const prev = renderModelCacheRef.current;
+    if (prev && prev.edges === edges && prev.denseMode === denseMode) {
+      const dirty = dirtyNodeIdsFromIdentity(prev.nodes, nodes);
+      if (dirty && dirty.size === 0) return prev.model;
+      if (dirty && dirty.size > 0 && dirty.size < nodes.length) {
+        const patched = patchNodeFlowRenderModelForDirtyNodes(
+          prev.model,
+          nodes,
+          edges,
+          dirty,
+        );
+        if (patched) {
+          renderModelCacheRef.current = {
+            nodes,
+            edges,
+            denseMode,
+            model: patched,
+          };
+          return patched;
+        }
+      }
+    }
+    const model = buildNodeFlowRenderModel(nodes, edges, denseMode);
+    renderModelCacheRef.current = { nodes, edges, denseMode, model };
+    return model;
+  }, [nodes, edges, denseMode]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const forcedNodeIds = useMemo(() => {
     const ids = new Set(selectedIds);

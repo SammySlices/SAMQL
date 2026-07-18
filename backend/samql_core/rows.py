@@ -527,9 +527,11 @@ class ParquetResultStore:
         self._n = None
         self._closed = False
         # Materialized sort/filter snapshots (path -> ParquetResultStore).
-        # First sorted/filtered page pays one COPY; later pages use
-        # file_row_number ranges on the snapshot instead of TopN/OFFSET.
+        # First sorted/filtered page is served via TopN; a background COPY
+        # builds the snapshot so later pages use file_row_number ranges.
         self._snap_cache = {}
+        # In-flight deferred views keyed like _snap_cache (singleflight).
+        self._pending_snaps = {}
 
     def parquet_path(self):
         """The backing parquet file -- exports and save-as-table copy
@@ -574,8 +576,9 @@ class ParquetResultStore:
 
     _STABLE_ORDER = 'ORDER BY "__rn"'
 
-    def _fetch(self, order, limit, offset):
-        if order == self._STABLE_ORDER:
+    def _fetch(self, order, limit, offset, where="", params=None):
+        w = ("WHERE %s " % where) if where else ""
+        if order == self._STABLE_ORDER and not where:
             # FAST PATH (stall fix, on-box 2026-07-02): "__rn" is a
             # synthesized expression, so ORDER BY it defeats pruning and a
             # 200-row page ran a TopN across EVERY row group of a giant
@@ -589,11 +592,12 @@ class ParquetResultStore:
                    f"WHERE file_row_number >= {int(offset)} "
                    f"AND file_row_number < {int(offset) + int(limit)} "
                    f"ORDER BY file_row_number")
+            params = None
         else:
-            # a USER sort is a genuine TopN over the data -- unavoidable
+            # a USER sort (and/or filter) is a genuine TopN over the data
             sql = (f"SELECT {self._collist()} FROM {self._src()} "
-                   f"{order} LIMIT {int(limit)} OFFSET {int(offset)}")
-        cur = self._run(sql)
+                   f"{w}{order} LIMIT {int(limit)} OFFSET {int(offset)}")
+        cur = self._run(sql, params)
         try:
             rows = [tuple(r) for r in cur.fetchall()]
         finally:
@@ -606,7 +610,7 @@ class ParquetResultStore:
         # the synthesized __rn source so the grid never shows a blank page
         # for a non-empty result.
         if (not rows and limit > 0 and order == self._STABLE_ORDER
-                and offset < len(self)):
+                and not where and offset < len(self)):
             sql = (f"SELECT {self._collist()} FROM {self._src()} "
                    f"{order} LIMIT {int(limit)} OFFSET {int(offset)}")
             cur = self._run(sql)
@@ -796,17 +800,29 @@ class ParquetResultStore:
             pass
         return snap
 
+    def _deferred_snap_view(self, key, order, *, where="", params=None,
+                            total=None):
+        """Return a view that serves TopN pages until a snap is ready."""
+        hit = self._snap_cache.get(key)
+        if hit is not None and not getattr(hit, "_closed", False):
+            return hit
+        pending = getattr(self, "_pending_snaps", None)
+        if pending is None:
+            self._pending_snaps = pending = {}
+        view = pending.get(key)
+        if view is not None and not getattr(view, "_closed", False):
+            return view
+        view = _LazySnapView(
+            self, key, order, where=where, params=params, total=total)
+        pending[key] = view
+        return view
+
     def sorted_view(self, col_ix, descending=False):
         col = str(self._cols[col_ix]).replace('"', '""')
         order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"}, '
                  f'"__rn"')
         key = ("sort", int(col_ix), bool(descending))
-        hit = self._snap_cache.get(key)
-        if hit is not None and not getattr(hit, "_closed", False):
-            return hit
-        snap = self._materialize_snapshot(order)
-        self._snap_cache[key] = snap
-        return snap
+        return self._deferred_snap_view(key, order, total=len(self))
 
     def filtered_view(self, terms, sort_ix=None, descending=False):
         if sort_ix is None:
@@ -823,9 +839,9 @@ class ParquetResultStore:
         # Empty filter → just sorted snapshot (or self for stable order).
         if not where and order == 'ORDER BY "__rn"':
             return self
-        snap = self._materialize_snapshot(order, where=where, params=params)
-        self._snap_cache[key] = snap
-        return snap
+        total = self._count_where(where, params) if where else len(self)
+        return self._deferred_snap_view(
+            key, order, where=where, params=params, total=total)
 
     def count_view(self, terms):
         where, params = self._where(terms)
@@ -841,12 +857,150 @@ class ParquetResultStore:
             except Exception:
                 pass
         self._snap_cache = {}
+        for view in list(getattr(self, "_pending_snaps", {}).values()):
+            try:
+                view._closed = True
+            except Exception:
+                pass
+        self._pending_snaps = {}
         if not getattr(self, "_owns_path", True):
             return   # borrowed source file: never ours to delete
         try:
             os.unlink(self._path)
         except Exception:
             pass
+
+
+class _LazySnapView:
+    """Serve first sort/filter pages via TopN; build Parquet snap in background.
+
+    Exact ``len()`` / ``total_rows`` stay exact. Later pages use the snap's
+    ``file_row_number`` ranges once COPY finishes. Sticky cancel still
+    interrupts the COPY via the engine cancel flag.
+    """
+
+    def __init__(self, store, key, order, *, where="", params=None, total=None):
+        import threading
+        self._store = store
+        self._key = key
+        self._order = order
+        self._where = where or ""
+        self._params = list(params) if params else None
+        self._total = total
+        self._snap = None
+        self._closed = False
+        self._lock = threading.Lock()
+        self._started = False
+
+    def __len__(self):
+        if self._snap is not None and not getattr(self._snap, "_closed", False):
+            return len(self._snap)
+        if self._total is not None:
+            return int(self._total)
+        return len(self._store)
+
+    def _kickoff(self):
+        import threading
+        if self._started or self._closed:
+            return
+        with self._lock:
+            if self._started or self._closed:
+                return
+            self._started = True
+
+        def _build():
+            try:
+                if self._closed or getattr(self._store, "_closed", False):
+                    return
+                snap = self._store._materialize_snapshot(
+                    self._order, where=self._where, params=self._params)
+                if self._closed or getattr(self._store, "_closed", False):
+                    try:
+                        snap.close()
+                    except Exception:
+                        pass
+                    return
+                with self._lock:
+                    self._snap = snap
+                    cache = getattr(self._store, "_snap_cache", None)
+                    if cache is not None:
+                        cache[self._key] = snap
+                    pending = getattr(self._store, "_pending_snaps", None)
+                    if isinstance(pending, dict):
+                        pending.pop(self._key, None)
+            except Exception:
+                with self._lock:
+                    self._started = False
+                pending = getattr(self._store, "_pending_snaps", None)
+                if isinstance(pending, dict):
+                    pending.pop(self._key, None)
+
+        threading.Thread(target=_build, daemon=True, name="samql-qv-snap").start()
+
+    def _slice(self, item):
+        snap = self._snap
+        if snap is not None and not getattr(snap, "_closed", False):
+            return snap[item]
+        n = len(self)
+        if isinstance(item, slice):
+            start, stop, step = item.indices(n)
+            if start >= stop:
+                self._kickoff()
+                return []
+            if (step or 1) != 1:
+                self._kickoff()
+                rows = []
+                for j in range(start, stop, step):
+                    chunk = self._store._fetch(
+                        self._order, 1, j,
+                        where=self._where, params=self._params)
+                    if chunk:
+                        rows.append(chunk[0])
+                return rows
+            rows = self._store._fetch(
+                self._order, stop - start, start,
+                where=self._where, params=self._params)
+            self._kickoff()
+            return rows
+        ix = int(item)
+        if ix < 0:
+            ix += n
+        if ix < 0 or ix >= n:
+            raise IndexError(item)
+        rows = self._store._fetch(
+            self._order, 1, ix, where=self._where, params=self._params)
+        self._kickoff()
+        if not rows:
+            raise IndexError(item)
+        return rows[0]
+
+    def __getitem__(self, item):
+        return self._slice(item)
+
+    def __iter__(self):
+        snap = self._snap
+        if snap is not None and not getattr(snap, "_closed", False):
+            return iter(snap)
+        self._kickoff()
+        where = self._where
+        params = self._params
+        order = self._order
+        store = self._store
+        w = ("WHERE %s " % where) if where else ""
+        sql = f"SELECT {store._collist()} FROM {store._src()} {w}{order}"
+        cur = store._run(sql, params)
+        try:
+            while True:
+                rows = cur.fetchmany(5000)
+                if not rows:
+                    return
+                for r in rows:
+                    yield tuple(r)
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
 
 
 class _ParquetSortedView:
@@ -865,9 +1019,7 @@ class _ParquetSortedView:
 
 
 class _ParquetFilteredView:
-    """A filtered (and optionally sorted) projection over a Parquet result.
-    The WHERE + ORDER BY run inside DuckDB reading the Parquet directly, so
-    filtering a giant result never drains it through Python."""
+    """Legacy filtered view stub (unused after deferred snap path)."""
 
     def __init__(self, store, where, params, order):
         self._store = store
@@ -879,12 +1031,10 @@ class _ParquetFilteredView:
         return self._store._count_where(self._where, self._params)
 
     def __getitem__(self, item):
-        return self._store._slice_where(
-            item, self._where, self._params, self._order)
+        raise NotImplementedError("use ParquetResultStore.filtered_view")
 
     def __iter__(self):
-        return self._store._stream_where(
-            self._where, self._params, self._order)
+        raise NotImplementedError("use ParquetResultStore.filtered_view")
 
 
 def spill_rows(cur, threshold=200000, batch=10000):

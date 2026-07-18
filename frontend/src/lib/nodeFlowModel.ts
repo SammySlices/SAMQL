@@ -707,6 +707,28 @@ export function canvasWorldSize(nodes: NbNode[]): { w: number; h: number } {
   return { w: Math.ceil(maxX), h: Math.ceil(maxY) };
 }
 
+/**
+ * Mid-drag world size: expand only so a node dragged past the edge is not
+ * clipped, without thrashing shrink/grow every RAF. Callers recompute exact
+ * size when the drag ends.
+ */
+export function canvasWorldSizeExpandOnly(
+  prev: { w: number; h: number },
+  nodes: NbNode[],
+): { w: number; h: number } {
+  const next = canvasWorldSize(nodes);
+  return {
+    w: Math.max(prev.w, next.w),
+    h: Math.max(prev.h, next.h),
+  };
+}
+
+/** True while NodeFlow node drag/resize sets the shared chrome lock flag. */
+export function isNodeFlowPointerDragging(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.documentElement.dataset.samqlNfDrag === "1";
+}
+
 // How many input ports a node actually shows. Most nodes show their whole
 // static port list. A group shows only as many inputs as it needs: every
 // connected input plus one spare to wire next, capped at the five it supports

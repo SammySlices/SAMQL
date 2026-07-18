@@ -178,6 +178,103 @@ export function buildNodeFlowRenderModel(
   };
 }
 
+/**
+ * Patch wire endpoints (and port counts) for nodes whose object identity
+ * changed — typically a drag/resize RAF — without rebuilding every wire.
+ * Returns null when a full rebuild is required (edge list / membership change).
+ */
+export function patchNodeFlowRenderModelForDirtyNodes(
+  prev: NodeFlowRenderModel,
+  nodes: readonly NbNode[],
+  edges: readonly NbEdge[],
+  dirtyIds: ReadonlySet<string>,
+): NodeFlowRenderModel | null {
+  if (!dirtyIds.size) return prev;
+  if (nodes.length !== prev.nodeById.size) return null;
+
+  const nodeById = new Map<string, NbNode>();
+  const nodeIndexById = new Map<string, number>();
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    if (!prev.nodeById.has(node.id)) return null;
+    nodeById.set(node.id, node);
+    nodeIndexById.set(node.id, index);
+  }
+
+  // Incoming wiring is edge-owned; reuse when the edge list is unchanged.
+  const incomingByNode = prev.incomingByNode;
+  const incomingCountByNode = prev.incomingCountByNode;
+  const visibleInputCountByNode: Record<string, number> = {
+    ...prev.visibleInputCountByNode,
+  };
+  const renderVersionByNode = prev.renderVersionByNode;
+  const dashboardSourceIdsByNode = prev.dashboardSourceIdsByNode;
+
+  for (const id of dirtyIds) {
+    const node = nodeById.get(id);
+    if (!node) return null;
+    const incoming = incomingByNode[id] || [];
+    visibleInputCountByNode[id] = indexedVisibleInputCount(node, incoming);
+  }
+
+  const edgeById = new Map<string, NbEdge>();
+  for (const edge of edges) edgeById.set(edge.id, edge);
+
+  const wires: NodeFlowWire[] = prev.wires.map((wire) => {
+    if (!dirtyIds.has(wire.fromN) && !dirtyIds.has(wire.toN)) return wire;
+    const fromNode = nodeById.get(wire.fromN);
+    const toNode = nodeById.get(wire.toN);
+    if (!fromNode || !toNode) return wire;
+    const edge = edgeById.get(wire.id);
+    if (!edge) return wire;
+    const outputIndex = portsOf(fromNode).outputs.indexOf(edge.from.port);
+    const inputIndex = portsOf(toNode).inputs.indexOf(edge.to.port);
+    const start = portXY(fromNode, "out", outputIndex < 0 ? 0 : outputIndex);
+    const end = portXY(
+      toNode,
+      "in",
+      inputIndex < 0 ? 0 : inputIndex,
+      visibleInputCountByNode[toNode.id],
+    );
+    return {
+      id: wire.id,
+      ax: start.x,
+      ay: start.y,
+      bx: end.x,
+      by: end.y,
+      fromN: wire.fromN,
+      toN: wire.toN,
+    };
+  });
+
+  return {
+    nodeById,
+    nodeIndexById,
+    incomingByNode,
+    incomingCountByNode,
+    visibleInputCountByNode,
+    renderVersionByNode,
+    dashboardSourceIdsByNode,
+    wires,
+  };
+}
+
+/** Collect node ids whose object identity changed vs a prior nodes array. */
+export function dirtyNodeIdsFromIdentity(
+  prevNodes: readonly NbNode[] | null | undefined,
+  nodes: readonly NbNode[],
+): Set<string> | null {
+  if (!prevNodes || prevNodes.length !== nodes.length) return null;
+  const dirty = new Set<string>();
+  for (let index = 0; index < nodes.length; index += 1) {
+    const prev = prevNodes[index];
+    const next = nodes[index];
+    if (prev.id !== next.id) return null;
+    if (prev !== next) dirty.add(next.id);
+  }
+  return dirty;
+}
+
 export function nodeFlowViewBounds(
   viewport: NodeFlowViewport,
   zoom: number,
