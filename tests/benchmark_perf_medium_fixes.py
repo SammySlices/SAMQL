@@ -183,6 +183,17 @@ def run_suite(*, rows: int, work_dir: Path, self_test: bool) -> dict[str, Any]:
         if ("sqlite", "keep_a") in s2._count_cache:
             raise AssertionError("write SQL must globally invalidate counts")
         report["correctness"]["write_sql_global_counts"] = True
+
+        # API/folder-style scoped refresh must not wipe unrelated caches.
+        s2._count_cache[("sqlite", "keep_a")] = 11
+        s2._refresh_scoped_counts([
+            {"engine": "sqlite", "name": "api_touch", "rows": 2},
+        ])
+        if ("sqlite", "keep_a") not in s2._count_cache:
+            raise AssertionError("scoped API-style refresh cleared keep_a")
+        if s2._count_cache.get(("sqlite", "api_touch")) != 2:
+            raise AssertionError("scoped refresh did not prime api_touch")
+        report["correctness"]["scoped_count_api_style"] = True
     finally:
         s2.shutdown()
 

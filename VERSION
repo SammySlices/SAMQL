@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.653
+Current build:   2026-07-18.654
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.654  (v2.16.4)
+
+PERF: scoped sidebar counts for API/HDFS/iterator/folder loads.
+Add _refresh_scoped_counts; stop wiping the whole COUNT cache after known
+table mutations (API, HDFS no longer re-clears after load_file, iterators,
+directory/folder nodes, catalog import, flatten). Free-form write SQL and
+engine resets still clear globally. Tests + refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.653  (v2.16.4)

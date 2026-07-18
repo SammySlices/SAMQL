@@ -2089,13 +2089,50 @@ class Session:
         except Exception:
             pass
 
+    def _refresh_scoped_counts(self, specs):
+        """Invalidate + prime sidebar COUNT cache for known tables only.
+
+        ``specs`` — iterable of dicts with ``engine`` + ``name``/``table``
+        (optional ``rows``), and/or ``(engine, name[, rows])`` tuples.
+        Also accepts ``err_table``/``err_engine``/``err_rows`` on dicts for
+        API soft-fail error ports. Empty/unknown specs fall back to a
+        global clear (fail-safe for callers that thought they had tables).
+        """
+        keys = []
+        primes = []
+
+        def _add(eng, nm, rows=None):
+            if not eng or not nm:
+                return
+            keys.extend(self._count_keys_for_tables(eng, nm))
+            primes.append((eng, nm, rows))
+
+        for spec in specs or ():
+            try:
+                if isinstance(spec, dict):
+                    _add(spec.get("engine"),
+                         spec.get("name") or spec.get("table"),
+                         spec.get("rows"))
+                    _add(spec.get("err_engine") or spec.get("engine"),
+                         spec.get("err_table") or spec.get("err"),
+                         spec.get("err_rows"))
+                elif isinstance(spec, (tuple, list)) and len(spec) >= 2:
+                    _add(spec[0], spec[1],
+                         spec[2] if len(spec) > 2 else None)
+            except Exception:
+                continue
+        self._invalidate_counts(keys=keys or None)
+        for eng, nm, rows in primes:
+            if rows is not None:
+                self._prime_count(eng, nm, rows)
+
     def _invalidate_counts(self, keys=None):
         """Drop sidebar COUNT(*) cache entries after a mutation.
 
         ``keys`` — optional iterable of ``(engine_label, table_name)``. When
         given, only those entries are removed so unrelated large tables keep
         their cached counts. When omitted, the whole cache is cleared
-        (unknown / free-form write SQL, resets, iterators).
+        (unknown / free-form write SQL, engine resets).
 
         Flow-cache epoch: global clears always bump. Scoped clears bump only
         when the touched tables intersect tables known to feed the volatile
@@ -3139,31 +3176,12 @@ class Session:
                 pass
         self._invalidate_profiles()
         # Scope counts to tables this load touched; unrelated sidebar counts stay.
-        _count_keys = []
         try:
             items = loaded if isinstance(loaded, list) else [loaded]
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                eng = item.get("engine")
-                nm = item.get("name") or item.get("table")
-                if eng and nm:
-                    _count_keys.append((eng, nm))
+            self._refresh_scoped_counts(
+                item for item in items if isinstance(item, dict))
         except Exception:
-            _count_keys = []
-        self._invalidate_counts(keys=_count_keys or None)
-        try:
-            # loaders return a list of table descriptors (name/rows/engine).
-            items = loaded if isinstance(loaded, list) else [loaded]
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                self._prime_count(
-                    item.get("engine"),
-                    item.get("name") or item.get("table"),
-                    item.get("rows"))
-        except Exception:
-            pass
+            self._invalidate_counts()
         return loaded
 
     # extensions load_file knows how to read
@@ -5776,7 +5794,6 @@ class Session:
             return {"error": err_str(e)}
         self._unregister_run(query_id)
         self._invalidate_profiles()
-        self._invalidate_counts()
         rows = None
         if last_engine and passes:
             e = self.duckdb if last_engine == "duckdb" else self.db
@@ -5785,6 +5802,10 @@ class Session:
                 rows = int(r[0][0]) if r else None
             except Exception:
                 rows = None
+        if accum and last_engine:
+            self._refresh_scoped_counts([{
+                "engine": last_engine, "name": accum, "rows": rows,
+            }])
         ok = passes > 0 and (continue_on_error or not errors)
         return {"ok": ok, "passes": passes, "attempted": len(values),
                 "rows": rows, "table": accum if passes else None,
@@ -6034,7 +6055,6 @@ class Session:
             return {"error": err_str(e)}
         self._unregister_run(query_id)
         self._invalidate_profiles()
-        self._invalidate_counts()
         rows = None
         if last_engine and passes:
             e = self.duckdb if last_engine == "duckdb" else self.db
@@ -6043,6 +6063,10 @@ class Session:
                 rows = int(r[0][0]) if r else None
             except Exception:
                 rows = None
+        if accum and last_engine:
+            self._refresh_scoped_counts([{
+                "engine": last_engine, "name": accum, "rows": rows,
+            }])
         ok = passes > 0 and (continue_on_error or not errors)
         return {"ok": ok, "passes": passes, "attempted": total,
                 "rows": rows, "table": accum if passes else None,
@@ -6167,7 +6191,6 @@ class Session:
             return {"error": err_str(e)}
         self._unregister_run(query_id)
         self._invalidate_profiles()
-        self._invalidate_counts()
         rows = None
         if last_engine and iterations:
             e = self.duckdb if last_engine == "duckdb" else self.db
@@ -6176,6 +6199,10 @@ class Session:
                 rows = int(r[0][0]) if r else None
             except Exception:
                 rows = None
+        if accum and last_engine:
+            self._refresh_scoped_counts([{
+                "engine": last_engine, "name": accum, "rows": rows,
+            }])
         note = None
         if not converged and iterations >= max_iters:
             note = ("Stopped at the %d-iteration cap (no fixpoint reached)."
@@ -6396,7 +6423,7 @@ class Session:
         if not is_view:
             _rm()
         self._invalidate_profiles()
-        self._invalidate_counts()
+        # load_file already scoped+primed counts for the loaded tables.
         return {"ok": True, "tables": loaded, "all": self.tables_tree()}
 
     def _hdfs_fetch_to_file(self, remote_path, dest, chunk=65536,
@@ -10657,7 +10684,7 @@ class Session:
                     seen_nm.add(t.get("name"))
                     loaded.append(t)
             self._invalidate_profiles()
-            self._invalidate_counts()
+            self._refresh_scoped_counts(loaded)
             return {"ok": True, "tables": loaded, "all": self.tables_tree(),
                     "method": method, "key": key_used, "synthesized": synth}
         except loaders.LoadCancelled:
@@ -10834,7 +10861,7 @@ class Session:
                 except Exception:
                     pass
         self._invalidate_profiles()
-        self._invalidate_counts()
+        self._refresh_scoped_counts(loaded if isinstance(loaded, list) else [])
         return {"ok": True, "tables": loaded, "all": self.tables_tree(),
                 "method": "python", "key": None}
 
@@ -12969,7 +12996,7 @@ class Session:
             return res
         if isinstance(res, dict) and not res.get("error"):
             self._invalidate_profiles()
-            self._invalidate_counts()   # new data -> drop count + flow caches
+            self._refresh_scoped_counts(res.get("tables") or [])
         return res
 
     def preview_api(self, url, auth_user=None, auth_pass=None,
@@ -13181,7 +13208,7 @@ class Session:
         if not d or not d.get("name"):
             return {"error": "No readable data in that file."}
         self._dir_files[path] = (d["name"], d.get("engine", "sqlite"), mtime)
-        self._invalidate_counts()
+        self._refresh_scoped_counts([d])
         return {"ok": True, "table": d["name"],
                 "engine": d.get("engine", "sqlite"),
                 "columns": d.get("columns", []), "rows": d.get("rows")}
@@ -13330,7 +13357,9 @@ class Session:
             self._api_node_tables[node_id] = {
                 "table": None, "engine": None,
                 "err": en, "err_engine": eng_used}
-            self._invalidate_counts()
+            self._refresh_scoped_counts([{
+                "engine": eng_used, "err_table": en, "err_rows": 1,
+            }])
             return {"ok": True, "fetched": False, "error_captured": msg,
                     "status": status, "table": None, "columns": [], "rows": 0,
                     "err_table": en, "err_rows": 1, "url": src_url}
@@ -13360,7 +13389,10 @@ class Session:
             "table": root["name"], "engine": eng_name,
             "err": en, "err_engine": eng_used}
         self._invalidate_profiles()
-        self._invalidate_counts()
+        self._refresh_scoped_counts([{
+            "engine": eng_name, "name": root["name"], "rows": root.get("rows"),
+            "err_engine": eng_used, "err_table": en, "err_rows": 0,
+        }])
         return {"ok": True, "table": root["name"], "engine": eng_name,
                 "columns": root.get("columns", []), "rows": root.get("rows"),
                 "err_table": en, "err_rows": 0,
@@ -13421,7 +13453,9 @@ class Session:
                 self._unregister_run(query_id)
         self._api_node_tables[node_id] = {"table": tname, "engine": engine}
         self._invalidate_profiles()
-        self._invalidate_counts()
+        self._refresh_scoped_counts([{
+            "engine": engine, "name": tname, "rows": n,
+        }])
         eng = self.duckdb if engine == "duckdb" else self.db
         col_now = list((getattr(eng, "table_columns", {}) or {}).get(tname) or cols)
         return {
@@ -13968,7 +14002,9 @@ class Session:
                 except Exception:
                     pass
             self._folder_files[folder] = (name, eng_name, sig)
-            self._invalidate_counts()
+            self._refresh_scoped_counts([{
+                "engine": eng_name, "name": name, "rows": n,
+            }])
             return {"ok": True, "table": name, "engine": eng_name,
                     "columns": eng.table_columns.get(name, union_cols),
                     "rows": n, "files": len(temps)}
@@ -14054,7 +14090,9 @@ class Session:
                                                    source=src)
             engine = "sqlite"
         self._invalidate_profiles()
-        self._invalidate_counts()
+        self._refresh_scoped_counts([{
+            "engine": engine, "name": tname, "rows": n,
+        }])
         eng = self.get_duckdb() if engine == "duckdb" else self.db
         cols_now = eng.table_columns.get(tname, cols)
         return {
@@ -14152,7 +14190,17 @@ class Session:
             destination="duckdb")
         if isinstance(res, dict) and res.get("ok"):
             self._invalidate_profiles()
-            self._invalidate_counts()
+            specs = []
+            for block in res.get("loaded") or []:
+                if isinstance(block, dict):
+                    specs.extend(block.get("tables") or [])
+            if res.get("table"):
+                specs.append({
+                    "engine": res.get("engine"),
+                    "name": res.get("table"),
+                    "rows": res.get("rows"),
+                })
+            self._refresh_scoped_counts(specs)
         return res
 
     def flatten_json_to_csv_dir(self, json_path, out_dir, base_name=None,
