@@ -6494,7 +6494,8 @@ console.log("OK");
             ("WireLayer uses memo WireRow with a single wirePath",
              "const WireRow = React.memo" in canvas
              and canvas.count("wirePath(") == 1
-             and "Per-wire memo" in canvas),
+             and "Per-wire memo" in canvas
+             and "Ignore unstable dispatcher identity" in canvas),
             ("under-threshold cull returns the same array identity",
              "if (nodes.length <= threshold) return nodes as NbNode[];"
                  in render_model
@@ -6503,6 +6504,11 @@ console.log("OK");
              and "nodes.slice()" not in render_model
              and "wires.slice()" not in render_model
              and ").toBe(underThreshold)" in model_tests),
+            ("dirty patch is geometry-only so dashboard versions stay fresh",
+             "dirtyNodesAreGeometryOnly" in scene
+             and "export function dirtyNodesAreGeometryOnly" in render_model
+             and "treats position-only dirty nodes as geometry-only"
+                 in model_tests),
             ("preview and inspector resize coalesce via RAF",
              "startPointerDragRaf" in preview
              and "startPointerDragRaf" in inspector

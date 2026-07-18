@@ -1,4 +1,4 @@
-import React, { useMemo, useRef } from "react";
+import React, { useCallback, useMemo, useRef } from "react";
 import type { ChartData } from "../../lib/types";
 import {
   HEAD_H,
@@ -32,6 +32,7 @@ import type { NodeFlowViewportRect } from "./useNodeFlowViewport";
 import {
   buildNodeFlowRenderModel,
   dirtyNodeIdsFromIdentity,
+  dirtyNodesAreGeometryOnly,
   patchNodeFlowRenderModelForDirtyNodes,
   selectVisibleCanvasNodes,
   selectVisibleCanvasWires,
@@ -186,7 +187,14 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
     if (prev && prev.edges === edges && prev.denseMode === denseMode) {
       const dirty = dirtyNodeIdsFromIdentity(prev.nodes, nodes);
       if (dirty && dirty.size === 0) return prev.model;
-      if (dirty && dirty.size > 0 && dirty.size < nodes.length) {
+      // Position-only drag: patch wires. Config/type edits: full rebuild so
+      // dashboard cards see upstream chart source revisions.
+      if (
+        dirty &&
+        dirty.size > 0 &&
+        dirty.size < nodes.length &&
+        dirtyNodesAreGeometryOnly(prev.nodes, nodes, dirty)
+      ) {
         const patched = patchNodeFlowRenderModelForDirtyNodes(
           prev.model,
           nodes,
@@ -263,6 +271,15 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
     return result;
   }, [chartData, renderModel.dashboardSourceIdsByNode]);
 
+  const onSelectEdge = useCallback(
+    (id: string) => {
+      setSelectedEdge(id);
+      setSelectedId(null);
+      setSelectedIds([]);
+    },
+    [setSelectedEdge, setSelectedId, setSelectedIds],
+  );
+
   const pendingWireGeometry = useMemo(() => {
     if (!pendingWire) return null;
     const source = renderModel.nodeById.get(pendingWire.node);
@@ -335,11 +352,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
       dyingIds={dyingIds}
       dyingEdgeIds={dyingEdgeIds}
       selectedEdge={selectedEdge}
-      onSelectEdge={(id) => {
-        setSelectedEdge(id);
-        setSelectedId(null);
-        setSelectedIds([]);
-      }}
+      onSelectEdge={onSelectEdge}
       onDeleteEdge={deleteEdge}
       pendingWire={pendingWireGeometry}
       marquee={marquee}

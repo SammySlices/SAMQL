@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { NbEdge, NbNode } from "../../lib/nodeFlowModel";
 import {
   buildNodeFlowRenderModel,
+  dirtyNodesAreGeometryOnly,
   patchNodeFlowRenderModelForDirtyNodes,
   selectVisibleCanvasNodes,
   selectVisibleCanvasWires,
@@ -161,5 +162,23 @@ describe("NodeFlow render model", () => {
     expect(wireById.bc).not.toBe(prevById.bc);
     expect(wireById.ab.bx).not.toBe(prevById.ab.bx);
     expect(wireById.bc.ax).not.toBe(prevById.bc.ax);
+  });
+
+  it("treats position-only dirty nodes as geometry-only (config edits are not)", () => {
+    const nodes = [
+      node("a", 0, 0),
+      node("b", 240, 0, "select"),
+      node("dash", 480, 0, "dashboard"),
+    ];
+    const moved = nodes.map((item) =>
+      item.id === "b" ? { ...item, x: item.x + 40 } : item,
+    );
+    expect(dirtyNodesAreGeometryOnly(nodes, moved, new Set(["b"]))).toBe(true);
+    const edited = nodes.map((item) =>
+      item.id === "b"
+        ? { ...item, config: { ...item.config, label: "renamed" } }
+        : item,
+    );
+    expect(dirtyNodesAreGeometryOnly(nodes, edited, new Set(["b"]))).toBe(false);
   });
 });

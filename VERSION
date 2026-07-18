@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.651
+Current build:   2026-07-18.652
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.652  (v2.16.4)
+
+FIX: audit high — LIMIT zero-copy, wires, snap, filtered total.
+SELECT…LIMIT no longer zero-copies full Parquet (export/save safe). WireRow
+memo ignores unstable callbacks; dirty render patch is geometry-only so
+dashboard cards see chart config edits. Snap retry clears sticky _ready;
+snapshot COPY prefers a private cursor (no write_lock). DiskBackedRows
+honors filtered total=. Tests + refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.651  (v2.16.4)

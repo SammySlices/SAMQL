@@ -13,68 +13,77 @@ import {
 
 export type Wire = NodeFlowWire;
 
-const WireRow = React.memo(function WireRow({
-  w,
-  selected,
-  retracting,
-  glowing,
-  onSelect,
-  onDelete,
-}: {
-  w: Wire;
-  selected: boolean;
-  retracting: boolean;
-  glowing: boolean;
-  onSelect: (id: string) => void;
-  onDelete: (id: string) => void;
-}) {
-  // One Bezier string shared by hit / line / glow (was 3× wirePath per wire).
-  const d = wirePath(w.ax, w.ay, w.bx, w.by);
-  const mx = (w.ax + w.bx) / 2;
-  const my = (w.ay + w.by) / 2;
-  return (
-    <g
-      className={
-        "nb2-wire" + (selected ? " sel" : "") + (retracting ? " retract" : "")
-      }
-      data-testid={retracting ? "nodeflow-wire-retracting" : undefined}
-    >
-      <path
-        className="nb2-wire-hit"
-        d={d}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (retracting) return;
-          onSelect(w.id);
-        }}
-      />
-      <path className="nb2-wire-line" d={d} pathLength={1} />
-      <path
-        className={"nb2-wire-glow" + (glowing ? " active" : "")}
-        d={d}
-        pathLength={1}
-      />
+const WireRow = React.memo(
+  function WireRow({
+    w,
+    selected,
+    retracting,
+    glowing,
+    onSelect,
+    onDelete,
+  }: {
+    w: Wire;
+    selected: boolean;
+    retracting: boolean;
+    glowing: boolean;
+    onSelect: (id: string) => void;
+    onDelete: (id: string) => void;
+  }) {
+    // One Bezier string shared by hit / line / glow (was 3× wirePath per wire).
+    const d = wirePath(w.ax, w.ay, w.bx, w.by);
+    const mx = (w.ax + w.bx) / 2;
+    const my = (w.ay + w.by) / 2;
+    return (
       <g
-        className="nb2-wire-del"
-        transform={`translate(${mx},${my})`}
-        onMouseDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (retracting) return;
-          onDelete(w.id);
-        }}
+        className={
+          "nb2-wire" + (selected ? " sel" : "") + (retracting ? " retract" : "")
+        }
+        data-testid={retracting ? "nodeflow-wire-retracting" : undefined}
       >
-        <title>Delete connection</title>
-        <circle className="nb2-wire-del-hit" r="13" />
-        <circle className="nb2-wire-del-dot" r="9" />
         <path
-          className="nb2-wire-del-x"
-          d="M -3.2 -3.2 L 3.2 3.2 M 3.2 -3.2 L -3.2 3.2"
+          className="nb2-wire-hit"
+          d={d}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (retracting) return;
+            onSelect(w.id);
+          }}
         />
+        <path className="nb2-wire-line" d={d} pathLength={1} />
+        <path
+          className={"nb2-wire-glow" + (glowing ? " active" : "")}
+          d={d}
+          pathLength={1}
+        />
+        <g
+          className="nb2-wire-del"
+          transform={`translate(${mx},${my})`}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (retracting) return;
+            onDelete(w.id);
+          }}
+        >
+          <title>Delete connection</title>
+          <circle className="nb2-wire-del-hit" r="13" />
+          <circle className="nb2-wire-del-dot" r="9" />
+          <path
+            className="nb2-wire-del-x"
+            d="M -3.2 -3.2 L 3.2 3.2 M 3.2 -3.2 L -3.2 3.2"
+          />
+        </g>
       </g>
-    </g>
-  );
-});
+    );
+  },
+  // Ignore unstable dispatcher identity — Scene may recreate callbacks each
+  // render; wire geometry / selection flags are what matter for paint.
+  (prev, next) =>
+    prev.w === next.w &&
+    prev.selected === next.selected &&
+    prev.retracting === next.retracting &&
+    prev.glowing === next.glowing,
+);
 
 // Committed wires are pure geometry. Keeping them outside NodeFlow means
 // inspector/config state cannot make the SVG tree reconcile unnecessarily.
