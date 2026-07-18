@@ -18628,6 +18628,10 @@ def backend_tests(datadir, csv_path, json_path):
         need(r2 is not None and r2[0] == ["code"]
              and r2[1]._path == "C:/t/fc_a.parquet",
              "simple projection borrows the source parquet: %r" % (r2,))
+        need(zc(o, _Eng(), "SELECT * FROM sophis_trade LIMIT 10") is None,
+             "LIMIT must not zero-copy (export would escape the row cap)")
+        need(zc(o, _Eng(), "SELECT code FROM sophis_trade LIMIT 3") is None,
+             "projected LIMIT must not zero-copy either")
         for bad in ("SELECT * FROM sophis_trade WHERE 1=1",
                     "SELECT code AS c FROM sophis_trade",
                     "SELECT f(code) FROM sophis_trade",
@@ -18971,6 +18975,59 @@ def backend_tests(datadir, csv_path, json_path):
         need("WHERE file_row_number >= 0" in ran[-1]
              and "file_row_number < 50" in ran[-1],
              "after materialize, sorted pages use file_row_number ranges")
+
+    def t_audit_fix_high_snap_ready_and_filtered_total():
+        # Post-651 audit: failed snap must not leave _ready sticky; filtered
+        # DiskBackedRows views must honor total= (no per-page COUNT).
+        import threading as _th
+        from samql_core.rows import DiskBackedRows, _LazySnapView
+
+        store = DiskBackedRows(block=100)
+        store.extend([(i, "v%s" % i) for i in range(40)])
+        store._flush()
+        counts = {"n": 0}
+        real = store._count_where
+
+        def _counting(where, params):
+            counts["n"] += 1
+            return real(where, params)
+
+        store._count_where = _counting
+        terms = [(0, "equals", 7)]
+        view = store.filtered_view(terms, total=1)
+        eq(len(view), 1, "filtered view uses provided total")
+        _ = view[0:1]
+        eq(counts["n"], 0,
+           "slice with total= must not re-COUNT: %s" % counts["n"])
+
+        class _BoomStore:
+            _closed = False
+            _snap_cache = {}
+            _pending_snaps = {}
+
+            def _materialize_snapshot(self, order, where="", params=None):
+                raise RuntimeError("snap fail")
+
+        boom = _BoomStore()
+        view2 = _LazySnapView(
+            boom, ("sort", 0, False), 'ORDER BY "a"', total=10)
+        view2._kickoff()
+        need(view2._ready.wait(2.0), "failed build still signals ready")
+        need(view2._started is False, "failed build clears _started")
+        need(view2._snap is None, "failed build leaves no snap")
+        # Retry must clear ready so awaiters wait for the new generation.
+        cleared = []
+
+        class _Gate(_th.Event):
+            def clear(self):
+                cleared.append(1)
+                return super().clear()
+
+        view2._ready = _Gate()
+        view2._ready.set()  # poison like a prior failure
+        view2._kickoff()
+        need(cleared, "retry kickoff clears sticky _ready")
+        view2._ready.wait(2.0)
 
     def t_stall_escalation():
         # On-box 2026-07-02: a cancelled query stayed wedged in a native
@@ -38392,6 +38449,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_shred_preflight),
         (".387: store pages prune by file_row_number (the stall's root)",
          t_store_page_pruning),
+        ("audit fix high: snap _ready retry + filtered total=",
+         t_audit_fix_high_snap_ready_and_filtered_total),
         (".386: watchdog escalation re-fires cancels at stalled runs",
          t_stall_escalation),
         (".386: journal dependency gate (DAG-parallel, complete when all)",

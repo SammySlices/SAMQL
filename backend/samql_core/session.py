@@ -6998,22 +6998,15 @@ class Session:
                     return None  # unknown column → normal path / error there
                 cols.append(hit)
         lim_raw = m.groupdict().get("limit")
-        lim = None
         if lim_raw is not None:
-            try:
-                lim = max(0, int(lim_raw))
-            except Exception:
-                lim = None
+            # LIMIT must not zero-copy: the store still points at the full
+            # Parquet file, so export / save-as-table / iteration would escape
+            # the limit. Fall through to the normal COPY materializer.
+            return None
         from .rows import ParquetResultStore
         store = ParquetResultStore(engine, src, cols, owns_path=False)
-        if lim is not None and lim < total:
-            store._n = lim
-            store.capped = True
-            store.cap = lim
-            total = lim
-        else:
-            store._n = total
-            store.capped = False
+        store._n = total
+        store.capped = False
         return cols, store, total, "duckdb"
 
     def _exec_duckdb_parquet(self, engine, sql, query_id=None,

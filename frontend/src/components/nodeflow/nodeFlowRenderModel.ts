@@ -275,6 +275,25 @@ export function dirtyNodeIdsFromIdentity(
   return dirty;
 }
 
+/** True when dirty nodes only moved (same type + config ref). Config edits
+ *  must full-rebuild so dashboard render versions see chart source changes. */
+export function dirtyNodesAreGeometryOnly(
+  prevNodes: readonly NbNode[],
+  nodes: readonly NbNode[],
+  dirtyIds: ReadonlySet<string>,
+): boolean {
+  if (!dirtyIds.size) return true;
+  if (prevNodes.length !== nodes.length) return false;
+  for (let index = 0; index < nodes.length; index += 1) {
+    const next = nodes[index];
+    if (!dirtyIds.has(next.id)) continue;
+    const prev = prevNodes[index];
+    if (!prev || prev.id !== next.id) return false;
+    if (prev.type !== next.type || prev.config !== next.config) return false;
+  }
+  return true;
+}
+
 export function nodeFlowViewBounds(
   viewport: NodeFlowViewport,
   zoom: number,

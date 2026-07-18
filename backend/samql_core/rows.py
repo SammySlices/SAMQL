@@ -65,18 +65,21 @@ class _StoreFilteredView:
     DiskBackedRows store. The WHERE + ORDER BY run in SQLite, so filtering
     a giant result never drains it into Python."""
 
-    def __init__(self, store, where, params, order):
+    def __init__(self, store, where, params, order, total=None):
         self._store = store
         self._where = where
         self._params = list(params)
         self._order = order
+        self._total = None if total is None else int(total)
 
     def __len__(self):
+        if self._total is not None:
+            return self._total
         return self._store._count_where(self._where, self._params)
 
     def __getitem__(self, item):
         return self._store._select_where(
-            item, self._where, self._params, self._order)
+            item, self._where, self._params, self._order, total=self._total)
 
     def __iter__(self):
         return self._store._stream_where(
@@ -380,7 +383,7 @@ class DiskBackedRows:
                  else f"ORDER BY c{int(sort_ix)} "
                       f"{'DESC' if descending else 'ASC'}, i")
         where, params = self._where(terms)
-        return _StoreFilteredView(self, where, params, order)
+        return _StoreFilteredView(self, where, params, order, total=total)
 
     def count_view(self, terms):
         where, params = self._where(terms)
@@ -397,7 +400,7 @@ class DiskBackedRows:
                 f"SELECT COUNT(*) FROM r WHERE {where}", params)
             return int(cur.fetchone()[0])
 
-    def _select_where(self, item, where, params, order):
+    def _select_where(self, item, where, params, order, total=None):
         self._flush()
         with self._lock:
             if self._ncols is None:
@@ -407,7 +410,8 @@ class DiskBackedRows:
             cols = ", ".join(f"c{i}" for i in range(self._ncols))
             wsql = (" WHERE " + where) if where else ""
             if isinstance(item, slice):
-                n = self._count_where(where, params)
+                n = (int(total) if total is not None
+                     else self._count_where(where, params))
                 idxs = range(*item.indices(n))
                 if not len(idxs):
                     return []
@@ -437,7 +441,9 @@ class DiskBackedRows:
                 return out
             ix = int(item)
             if ix < 0:
-                ix += self._count_where(where, params)
+                n = (int(total) if total is not None
+                     else self._count_where(where, params))
+                ix += n
             cur = self._conn.execute(
                 f"SELECT {cols} FROM r{wsql} {order} LIMIT 1 OFFSET ?",
                 (*params, ix))
@@ -773,24 +779,44 @@ class ParquetResultStore:
                % (self._collist(), self._src(), w, order, fwd))
         eng = self._engine
         cancel = getattr(eng, "_cancel", None)
-        # Prefer a write lock so SET + COPY are atomic vs other writers.
+        # Prefer a private cursor so SET + COPY do not hold write_lock and
+        # stall loads/DDL. Fall back to the locked main connection.
+        own_cur = None
+        exec_conn = eng.conn
         lock = getattr(eng, "write_lock", None)
-        ctx = lock if lock is not None else nullcontext()
-        with ctx:
+        if getattr(eng, "concurrent_reads", True):
             try:
-                eng.conn.execute("SET preserve_insertion_order = true")
+                own_cur = eng.conn.cursor()
+                exec_conn = own_cur
+                lock = None
             except Exception:
-                pass
-            try:
-                with _ExecKeepalive(eng.conn, cancel, threading.get_ident(),
-                                    interval=0.25):
-                    if params:
-                        eng.conn.execute(sql, list(params))
-                    else:
-                        eng.conn.execute(sql)
-            finally:
+                own_cur = None
+                exec_conn = eng.conn
+                lock = getattr(eng, "write_lock", None)
+        ctx = lock if lock is not None else nullcontext()
+        try:
+            with ctx:
                 try:
-                    eng.conn.execute("SET preserve_insertion_order = false")
+                    exec_conn.execute("SET preserve_insertion_order = true")
+                except Exception:
+                    pass
+                try:
+                    with _ExecKeepalive(exec_conn, cancel, threading.get_ident(),
+                                        interval=0.25):
+                        if params:
+                            exec_conn.execute(sql, list(params))
+                        else:
+                            exec_conn.execute(sql)
+                finally:
+                    try:
+                        exec_conn.execute(
+                            "SET preserve_insertion_order = false")
+                    except Exception:
+                        pass
+        finally:
+            if own_cur is not None:
+                try:
+                    own_cur.close()
                 except Exception:
                     pass
         snap = ParquetResultStore(eng, path, self._cols, owns_path=True)
@@ -916,6 +942,9 @@ class _LazySnapView:
             if self._started or self._closed:
                 return
             self._started = True
+            # A prior failed build left _ready set; clear so awaiters wait for
+            # this generation instead of returning immediately.
+            self._ready.clear()
 
         def _build():
             try:
