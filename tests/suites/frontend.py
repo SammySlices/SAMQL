@@ -1067,10 +1067,12 @@ console.log("OK");
              "const composeForRun" in nb and "planChainReuse(" in nb
              and "lastSqlCellByGroup(" in nb),
             ("freshness delegates to the lib predicate (capped-never-fresh "
-             "is a harness case now)",
-             "cellIsFresh(" in nb and "result_capped" in nb),
+             "is a harness case now; data_epoch blocks silent parquet reuse)",
+             "cellIsFresh(" in nb and "result_capped" in nb
+             and "dataEpoch" in nb and "ranDataEpoch" in nb),
             ("staleness key stays the canonical composition",
-             "ranCompiledSql: composed" in nb),
+             "ranCompiledSql: composed" in nb
+             and "ranDataEpoch: dataEpoch" in nb),
             ("one retry on reuse_stale with full inlining",
              "reuse_stale" in nb),
             ("api.query carries the reuse map",
@@ -4611,13 +4613,15 @@ console.log("OK");
              and "nb2-wfbar" not in nb
              and "nb2-tabbar-actions" in nb),
             # --- .93: output-arrow preview is cached ---
-            ("preview results are cached (LRU, signature-keyed)",
+            ("preview results are cached (LRU, signature+epoch-keyed)",
              "previewCache" in nb
-             and 'graphSig + "::" + node.id + "::" + port' in nb
+             and 'graphSig + "::" + dataEpoch + "::" + node.id + "::" + port'
+                 in nb
              and "(cached)" in nb),
-            ("preview cache is bounded + cleared on tab switch",
+            ("preview cache is bounded + cleared on tab switch / data epoch",
              "previewCache.current.size > 12" in nb
-             and "previewCache.current.clear()" in nb),
+             and "previewCache.current.clear()" in nb
+             and "previewEpochRef" in nb),
             # --- .93: resizable chart/dashboard nodes ---
             ("chart/dashboard nodes are resizable",
              "startNodeResize" in nb and "nb2-node-resize" in nb
@@ -6181,6 +6185,8 @@ console.log("OK");
                  "cancelAllRuns(ids)", "runDepth.current",
                  "previousTabRef.current === activeTabId",
                  "previewCache.current.clear()",
+                 "previewEpochRef",
+                 'graphSig + "::" + dataEpoch + "::" + node.id + "::" + port',
              ))),
             ("document lifecycle owns tabs, history, autosave, and files",
              all(token in documents for token in (

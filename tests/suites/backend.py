@@ -16620,6 +16620,12 @@ def backend_tests(datadir, csv_path, json_path):
             ("the retry path routes through the guard too",
              ".then(apply)" in catalog
              and "api.tables().then(apply)" in catalog),
+            ("catalog refresh tracks session data_epoch for stale-cache guards",
+             "setDataEpoch(snapshot.data_epoch)" in catalog
+             and "data_epoch" in _fe("src", "lib", "api.ts")
+             and '"data_epoch"' in open(
+                 os.path.join(ROOT, "backend", "server.py"),
+                 encoding="utf-8").read()),
         ]
         nb = _fe("src", "components", "Notebook.tsx")
         act = _fe("src", "components", "ActivityShared.tsx")
@@ -26566,6 +26572,54 @@ def backend_tests(datadir, csv_path, json_path):
                 eq(s2.flow_cache_info()["size"], 0, "nothing is cached when disabled")
             finally:
                 s2.shutdown()
+        finally:
+            s.shutdown()
+
+    def t_flow_cache_skips_nondeterministic():
+        # Random sample / unstable SQL must not freeze the first materialisation
+        # in the volatile flow cache for the rest of the data epoch.
+        from samql_core.session import LOCAL_TARGET
+        s = _fresh_session()
+        try:
+            s.flow_cache = True
+            s._flow_cache_clear()
+            s.run_query(
+                "CREATE TABLE rnd_src AS SELECT 1 AS id UNION ALL SELECT 2 "
+                "UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 "
+                "UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8",
+                target=LOCAL_TARGET)
+            eng, _ = s._engine_obj(LOCAL_TARGET)
+            g = {"nodes": [
+                {"id": "n1", "type": "input",
+                 "config": {"table": "rnd_src"}},
+                {"id": "n2", "type": "sample",
+                 "config": {"mode": "random", "n": 3, "label": "s"}},
+                {"id": "n3", "type": "output",
+                 "config": {"label": "out"}}],
+                 "edges": [
+                    {"from": {"node": "n1", "port": "out"},
+                     "to": {"node": "n2", "port": "in"}},
+                    {"from": {"node": "n2", "port": "out"},
+                     "to": {"node": "n3", "port": "in"}}]}
+            need(s._graph_has_nondeterministic_ops(g, eng),
+                 "random sample is non-deterministic")
+            r1 = s.run_nodeflow(g, "n3", "out")
+            need(not r1.get("error"), "first random sample runs: %s"
+                 % r1.get("error"))
+            info1 = s.flow_cache_info()
+            # Fingerprints must stay empty for this graph (gate disables cache).
+            # Hits staying 0 across a second run is the user-visible guarantee.
+            hits_before = info1.get("hits") or 0
+            size_before = info1.get("size") or 0
+            r2 = s.run_nodeflow(g, "n3", "out")
+            need(not r2.get("error"), "second random sample runs: %s"
+                 % r2.get("error"))
+            info2 = s.flow_cache_info()
+            eq(info2.get("hits") or 0, hits_before,
+               "non-deterministic sample must not hit volatile flow cache")
+            # Size should not grow from fingerprint materialisations either.
+            need((info2.get("size") or 0) <= size_before + 0,
+                 "non-deterministic sample should not populate flow cache")
         finally:
             s.shutdown()
 
@@ -38135,6 +38189,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_flow_cache_incremental),
         ("flow cache: a data write invalidates (never stale)",
          t_flow_cache_invalidation),
+        ("flow cache: non-deterministic sample skips volatile cache",
+         t_flow_cache_skips_nondeterministic),
         ("flow cache: eviction stays within the cap, results correct",
          t_flow_cache_eviction),
         ("flow cache: blocking join checkpoint reused on downstream edit",

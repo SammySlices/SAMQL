@@ -123,6 +123,26 @@ describe("Journal dependency optimization", () => {
     expect(plan.waves).toEqual([["a"]]);
   });
 
+  it("never reuses a result from an older data epoch", () => {
+    const cells = [
+      fresh("a", "cell1", "SELECT 1", "A", { ranDataEpoch: 3 }),
+      fresh("b", "cell2", "SELECT * FROM cell1", "B", { ranDataEpoch: 3 }),
+    ];
+    const plan = planJournalRunAll(cells, [], { a: "A", b: "B" }, {}, 4);
+    expect(plan.reusedIds).toEqual([]);
+    expect(plan.runIds).toEqual(["a", "b"]);
+  });
+
+  it("reuses results that still match the current data epoch", () => {
+    const cells = [
+      fresh("a", "cell1", "SELECT 1", "A", { ranDataEpoch: 7 }),
+      fresh("b", "cell2", "SELECT * FROM cell1", "B", { ranDataEpoch: 7 }),
+    ];
+    const plan = planJournalRunAll(cells, [], { a: "A", b: "B" }, {}, 7);
+    expect(plan.reusedIds).toEqual(["a", "b"]);
+    expect(plan.runIds).toEqual([]);
+  });
+
   it("tracks chart and reconcile dependencies with the same graph", () => {
     const cells: ChainCell[] = [
       sql("a", "left", "SELECT 1 AS id"),

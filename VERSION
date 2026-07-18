@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.662
+Current build:   2026-07-18.663
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.663  (v2.16.4)
+
+FIX: stale-cache guards for IDE/Journal/NodeFlow. Expose session
+data_epoch on /api/tables; Journal chain-reuse requires matching
+ranDataEpoch; NodeFlow preview cache keys+clears on epoch; volatile
+flow cache skips external sources and nondeterministic ops (random
+sample, unstable funcs, python). Tests + refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.662  (v2.16.4)

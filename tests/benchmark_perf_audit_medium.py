@@ -157,8 +157,9 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
             encoding="utf-8")
         report["correctness"]["filebrowser_disables_volatile_cache"] = (
             '_graph_has_types(' in src
-            and '("filebrowser",)' in src
-            and "use_volatile_cache = False" in src)
+            and '"filebrowser"' in src
+            and "use_volatile_cache = False" in src
+            and "_graph_has_nondeterministic_ops" in src)
     finally:
         s.shutdown()
 

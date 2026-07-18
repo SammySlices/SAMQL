@@ -63,6 +63,8 @@ interface Props {
   appVersion?: string;
   appBuild?: string;
   tables: TableInfo[];
+  /** Backend Session._data_epoch from the latest /api/tables poll. */
+  dataEpoch?: number;
   target: string;
   // change the active engine (Auto-route / SQLite / DuckDB). Shared with the
   // SQL editor: the Journal runs its cells on this same target.
@@ -216,6 +218,7 @@ export const Notebook: React.FC<Props> = ({
   appVersion,
   appBuild,
   tables,
+  dataEpoch = 0,
   target,
   onTargetChange,
   dialect,
@@ -771,14 +774,15 @@ export const Notebook: React.FC<Props> = ({
   compiledRef.current = compiledById;
 
   // A cell whose parquet result can stand in for its SQL: it ran, isn't
-  // stale against the canonical composition, and wasn't capped (.349 -- a
-  // capped store is not the full answer). Shared by chain reuse and
-  // reconcile input staging.
+  // stale against the canonical composition, wasn't capped (.349 -- a
+  // capped store is not the full answer), and still matches the session
+  // data epoch (so an UPDATE/reload cannot silently reuse old parquet).
   const isCellFresh = (c: RunCell) =>
     cellIsFresh(
       c,
       compiledRef.current[c.id],
       !!(c.page as any)?.result_capped,
+      dataEpoch,
     );
 
   // R1 (chain reuse): compose the SQL to SEND for a run. The canonical
@@ -921,6 +925,7 @@ export const Notebook: React.FC<Props> = ({
           error: null,
           ranOnce: true,
           ranCompiledSql: composed,
+          ranDataEpoch: dataEpoch,
           resultId: null,
           page: { columns: [], rows: [], total_rows: 0 },
           elapsedMs: res.elapsed_ms ?? null,
@@ -934,6 +939,7 @@ export const Notebook: React.FC<Props> = ({
           error: null,
           ranOnce: true,
           ranCompiledSql: composed,
+          ranDataEpoch: dataEpoch,
           resultId: res.result_id,
           queryId, // .520: page fetches ride the run id (cancellable send)
           page: res,
@@ -986,6 +992,7 @@ export const Notebook: React.FC<Props> = ({
       groupsRef.current,
       compiledRef.current,
       cappedById,
+      dataEpoch,
     );
     setRunningAll(true);
     // Fresh cells are already complete at the start: their full parquet result

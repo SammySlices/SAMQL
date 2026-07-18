@@ -474,7 +474,12 @@ export const api = {
     }),
 
   tables: () =>
-    jsonFetch<{ tables: TableInfo[] }>("/api/tables").then((d) => d.tables),
+    jsonFetch<{ tables: TableInfo[]; data_epoch?: number }>("/api/tables").then(
+      (d) => ({
+        tables: d.tables || [],
+        data_epoch: Number.isFinite(d.data_epoch) ? Number(d.data_epoch) : 0,
+      }),
+    ),
   /** Persist Loaded-tables drag order for the current session. */
   reorderTables: (order: { engine: string; name: string }[]) =>
     jsonFetch<{ ok: boolean; order?: string[] }>("/api/tables/reorder", {

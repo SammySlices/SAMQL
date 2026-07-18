@@ -2504,6 +2504,65 @@ class Session:
                         return False
         return True
 
+    def _graph_has_nondeterministic_ops(self, graph, eng=None):
+        """True when the session flow cache must not freeze this graph.
+
+        Unlike ``_persistent_graph_is_deterministic`` (DuckDB-metadata-first,
+        fail-closed when metadata is missing), this gate is used for the
+        *volatile* cache which also runs on SQLite. Structural checks always
+        apply; engine unstable-function metadata is used when available, and a
+        small fallback denylist covers common random/time helpers otherwise.
+        """
+        temporal = re.compile(
+            r"\b(?:current_date|current_time|current_timestamp|localtime|"
+            r"localtimestamp|transaction_timestamp|statement_timestamp|"
+            r"clock_timestamp)\b", re.IGNORECASE)
+        call_re = re.compile(
+            r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_]"
+            r"[A-Za-z0-9_]*)?)\s*\(")
+        fallback_unstable = {
+            "random", "randn", "uuid", "gen_random_uuid", "now", "getdate",
+            "sysdate", "rand",
+        }
+        unstable = None
+        if eng is not None and hasattr(eng, "unstable_function_names"):
+            try:
+                unstable = set(eng.unstable_function_names() or ())
+            except Exception:
+                # Metadata uncertainty must not freeze a volatile result.
+                return True
+        check_names = unstable if unstable is not None else fallback_unstable
+
+        def _walk(nodes):
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                typ = str(node.get("type") or "").lower()
+                cfg = node.get("config") or {}
+                if typ == "sample" and str(
+                        cfg.get("mode") or "head").lower() == "random":
+                    return True
+                # Python / free-form side effects are never safe to freeze.
+                if typ == "python":
+                    return True
+                for text in self._persistent_graph_strings(cfg):
+                    if temporal.search(text):
+                        return True
+                    for match in call_re.finditer(text):
+                        name = match.group(1).split(".")[-1].lower()
+                        if name in check_names:
+                            return True
+                if typ in ("group", "iterator"):
+                    if _walk(cfg.get("children")):
+                        return True
+                elif typ == "usernode":
+                    inner = cfg.get("graph") or {}
+                    if isinstance(inner, dict) and _walk(inner.get("nodes")):
+                        return True
+            return False
+
+        return _walk((graph or {}).get("nodes"))
+
     def _persistent_flow_salt(self, graph, engine_target):
         """Return a stable source salt, or ``None`` for a volatile graph.
 
@@ -4203,12 +4262,22 @@ class Session:
         # (no caching) when the cache is off or fingerprinting fails.
         use_volatile_cache = bool(
             getattr(self, "flow_cache", False) and _engine_override is None)
-        # Filebrowser reads disk globs at run time; config text is stable while
-        # files change. Volatile fingerprints would reuse stale materialisations
-        # (persistent cache already skips these graphs).
+        # Filebrowser / remote sources can change without a data-epoch bump
+        # (config text stays stable). Non-deterministic SQL/sample/python would
+        # likewise freeze the first materialisation for the epoch. Persistent
+        # cache already skips these; keep the session cache equally safe.
         if use_volatile_cache and self._graph_has_types(
-                graph, ("filebrowser",)):
+                graph, ("filebrowser", "apinode", "sqlserver",
+                        "sharepoint", "webscrape")):
             use_volatile_cache = False
+        if use_volatile_cache:
+            try:
+                eng_for_det, _ = self._engine_obj(engine_target)
+                if self._graph_has_nondeterministic_ops(graph, eng_for_det):
+                    use_volatile_cache = False
+            except Exception:
+                # Uncertainty must not make a cached result less safe.
+                use_volatile_cache = False
         fps = {}
         if use_volatile_cache:
             try:

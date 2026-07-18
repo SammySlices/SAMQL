@@ -885,6 +885,8 @@ export default function App() {
   const {
     tables,
     setTables,
+    dataEpoch,
+    setDataEpoch,
     history,
     setHistory,
     saved,
@@ -2559,6 +2561,7 @@ export default function App() {
     try {
       await api.clearAll();
       setTables([]);
+      setDataEpoch(0);
       setResTabs([]);
       setActiveResId(null);
       setEdTabs((ts) => ts.map((t) => ({ ...t, liveResId: undefined })));
@@ -3193,6 +3196,7 @@ export default function App() {
               appVersion={health?.version}
               appBuild={(health as any)?.build}
               tables={tables}
+              dataEpoch={dataEpoch}
               target={target}
               onTargetChange={setTarget}
               dialect={dialect}
@@ -3229,7 +3233,7 @@ export default function App() {
                 <div className="view-loading">Loading NodeFlow…</div>
               }
             >
-              <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} snap={nodeSnap} />
+              <NodeFlow tables={tables} dataEpoch={dataEpoch} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} snap={nodeSnap} />
             </Suspense>
           ) : view === "dashboard" ? (
             <Suspense
