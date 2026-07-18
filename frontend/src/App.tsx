@@ -947,42 +947,78 @@ export default function App() {
     rerunExpiredResultRef,
   } = useResultController(toast, LAZY_CHUNK);
 
-  // Latest-data wins: when catalog content mutates, mark IDE result tabs stale
-  // and drop row payloads so prior grids cannot look current. Backend page()
-  // also expires snapshots whose data_epoch no longer matches.
+  // Latest-data wins: when catalog content mutates, mark IDE tabs stale and
+  // drop retained payloads so prior grids/reports cannot look current.
   useEffect(() => {
     setResTabs((tabs) => {
       let changed = false;
       const next = tabs.map((tab) => {
-        if (tab.kind !== "result" || !tab.resultId) return tab;
-        if (tab.ranDataEpoch === dataEpoch) {
-          if (!tab.dataStale) return tab;
+        if (tab.kind === "result" && tab.resultId) {
+          if (tab.ranDataEpoch === dataEpoch) {
+            if (!tab.dataStale) return tab;
+            changed = true;
+            return { ...tab, dataStale: false };
+          }
+          if (
+            tab.dataStale &&
+            (tab.page?.rows?.length ?? 0) === 0 &&
+            (tab.page?.total_rows ?? 0) === 0
+          ) {
+            return tab;
+          }
           changed = true;
-          return { ...tab, dataStale: false };
+          return {
+            ...tab,
+            dataStale: true,
+            page: tab.page
+              ? {
+                  ...tab.page,
+                  rows: [],
+                  total_rows: 0,
+                }
+              : tab.page,
+          };
         }
-        if (
-          tab.dataStale &&
-          (tab.page?.rows?.length ?? 0) === 0 &&
-          (tab.page?.total_rows ?? 0) === 0
-        ) {
-          return tab;
+        if (tab.kind === "profile") {
+          if (!tab.profile && !tab.profileLoading) return tab;
+          if (tab.ranDataEpoch === dataEpoch) {
+            if (!tab.dataStale) return tab;
+            changed = true;
+            return { ...tab, dataStale: false };
+          }
+          if (tab.dataStale && !tab.profile) return tab;
+          changed = true;
+          return {
+            ...tab,
+            dataStale: true,
+            profile: null,
+            profileLoading: false,
+          };
         }
-        changed = true;
-        return {
-          ...tab,
-          dataStale: true,
-          page: tab.page
-            ? {
-                ...tab.page,
-                rows: [],
-                total_rows: 0,
-              }
-            : tab.page,
-        };
+        if (tab.kind === "recon") {
+          if (!tab.recon) return tab;
+          if (tab.ranDataEpoch === dataEpoch) {
+            if (!tab.dataStale) return tab;
+            changed = true;
+            return { ...tab, dataStale: false };
+          }
+          if (tab.dataStale) return tab;
+          changed = true;
+          return { ...tab, dataStale: true };
+        }
+        return tab;
       });
       return changed ? next : tabs;
     });
   }, [dataEpoch, setResTabs]);
+
+  const applyDataEpoch = useCallback(
+    (value: unknown) => {
+      const n = Number(value);
+      if (Number.isFinite(n)) setDataEpoch(n);
+    },
+    [setDataEpoch],
+  );
 
   const { ui: confirmUi, ask: askConfirm } = useConfirmPop();
 
@@ -1280,6 +1316,7 @@ export default function App() {
           setOkMessage(
             `Statement executed on ${res.engine}. ${res.elapsed_ms ?? 0} ms.`,
           );
+          applyDataEpoch((res as { data_epoch?: number }).data_epoch);
           refreshTables();
         } else {
           // SELECT result -> bind to the tab that started this run.
@@ -1363,7 +1400,10 @@ export default function App() {
             setActiveResId(nid);
           }
           // a pure read can't have changed the catalog; skip the recount
-          if ((res as any).stmt_kind !== "read") refreshTables();
+          if ((res as any).stmt_kind !== "read") {
+            applyDataEpoch((res as { data_epoch?: number }).data_epoch);
+            refreshTables();
+          }
         }
         ranOk = true;
         return res;
@@ -1409,6 +1449,7 @@ export default function App() {
       readOnly,
       refreshHistory,
       refreshTables,
+      applyDataEpoch,
       resTabsRef,
       runsNow,
       setActiveResId,
@@ -1980,7 +2021,12 @@ export default function App() {
     fmt: string,
   ) => {
     setOutputOpen(false);
-    if (!r) return;
+    if (!r || r.dataStale) {
+      if (r?.dataStale) {
+        toast("warn", "Data changed", "Re-run before exporting.");
+      }
+      return;
+    }
     try {
       if (r.kind === "result") {
         if (!r.resultId) return;
@@ -2035,6 +2081,7 @@ export default function App() {
   // Export button lights up for profile + reconcile tabs too, not just queries).
   const canExport = (r: ResultTab | null | undefined) =>
     !!r &&
+    !r.dataStale &&
     (r.kind === "result"
       ? !!r.resultId
       : r.kind === "recon"
@@ -2099,7 +2146,14 @@ export default function App() {
       setResTabs((rs) =>
         rs.map((r) =>
           r.id === id
-            ? { ...r, profile: p, profileLoading: false, profileQueryId: undefined }
+            ? {
+                ...r,
+                profile: p,
+                profileLoading: false,
+                profileQueryId: undefined,
+                ranDataEpoch: dataEpoch,
+                dataStale: false,
+              }
             : r,
         ),
       );
@@ -2170,7 +2224,14 @@ export default function App() {
       setResTabs((rs) =>
         rs.map((r) =>
           r.id === id
-            ? { ...r, profile: p, profileLoading: false, profileQueryId: undefined }
+            ? {
+                ...r,
+                profile: p,
+                profileLoading: false,
+                profileQueryId: undefined,
+                ranDataEpoch: dataEpoch,
+                dataStale: false,
+              }
             : r,
         ),
       );
@@ -2351,6 +2412,8 @@ export default function App() {
         recon: report,
         reconSpec: spec,
         pinned: true,
+        ranDataEpoch: dataEpoch,
+        dataStale: false,
       },
     ]);
     setActiveResId(id);
@@ -2489,6 +2552,7 @@ export default function App() {
       if ((r as any).error) toast("error", "Rename failed", (r as any).error);
       else {
         toast("ok", "Renamed", `${oldName} → ${next}`);
+        applyDataEpoch((r as { data_epoch?: number }).data_epoch);
         refreshTables();
       }
     } catch (e: any) {
@@ -2506,11 +2570,12 @@ export default function App() {
   };
   const reallyDrop = async (engine: EngineKind, name: string) => {
     try {
-      await api.dropTable(engine, name);
+      const r = await api.dropTable(engine, name);
       toast("ok", "Dropped", name);
+      applyDataEpoch((r as { data_epoch?: number }).data_epoch);
       // close any profile tab for the dropped table
       setResTabs((rs) =>
-        rs.filter((r) => !(r.kind === "profile" && r.profileTable === name)),
+        rs.filter((x) => !(x.kind === "profile" && x.profileTable === name)),
       );
       refreshTables();
     } catch (e: any) {
@@ -2538,14 +2603,18 @@ export default function App() {
   ) => {
     let ok = 0;
     const failed: string[] = [];
+    let lastEpoch: number | undefined;
     for (const it of items) {
       try {
-        await api.dropTable(it.engine, it.name);
+        const r = await api.dropTable(it.engine, it.name);
+        const ep = Number((r as { data_epoch?: number }).data_epoch);
+        if (Number.isFinite(ep)) lastEpoch = ep;
         ok++;
       } catch {
         failed.push(it.name);
       }
     }
+    if (lastEpoch != null) applyDataEpoch(lastEpoch);
     const dropped = new Set(items.map((i) => i.name));
     setResTabs((rs) =>
       rs.filter(
@@ -3250,6 +3319,7 @@ export default function App() {
               onDialectChange={setDialect}
               onToast={toast}
               onTablesMaybeChanged={refreshTables}
+              onDataEpoch={applyDataEpoch}
               loadRequest={journalLoad}
               onLoadConsumed={() => setJournalLoad(null)}
               onWorkflowsChanged={refreshWorkflows}
@@ -3264,6 +3334,7 @@ export default function App() {
             open={fieldExplorerOpen}
             onClose={() => setFieldExplorerOpen(false)}
             tables={tables}
+            dataEpoch={dataEpoch}
             onToast={toast}
             onTablesChanged={refreshTables}
             onShred={onShredColumn}
@@ -3778,6 +3849,16 @@ export default function App() {
                 </div>
               )}
               <span className="spacer" />
+              {activeRes?.dataStale && !activeResultTab?.dataStale && (
+                <span
+                  className="chip"
+                  data-testid="result-data-stale-chip"
+                  title="Loaded tables changed since this tab ran. Re-run to refresh."
+                  style={{ color: "#c98a2b" }}
+                >
+                  Data changed — re-run
+                </span>
+              )}
               {activeResultTab?.page && (
                 <>
                   {activeResultTab.page.engine && (
@@ -3964,6 +4045,11 @@ export default function App() {
                   );
                 })()
               ) : activeRes?.kind === "recon" ? (
+                activeRes.dataStale ? (
+                  <div className="result-data-stale-panel faint">
+                    Data changed — re-run reconcile.
+                  </div>
+                ) : (
                 <ReconReport
                   report={activeRes.recon!}
                   spec={activeRes.reconSpec!}
@@ -4012,7 +4098,13 @@ export default function App() {
                     }
                   }}
                 />
+                )
               ) : activeRes?.kind === "profile" ? (
+                activeRes.dataStale ? (
+                  <div className="result-data-stale-panel faint">
+                    Data changed — re-profile.
+                  </div>
+                ) : (
                 <Profiler
                   profile={activeRes.profile ?? null}
                   loading={!!activeRes.profileLoading}
@@ -4023,6 +4115,7 @@ export default function App() {
                       : undefined
                   }
                 />
+                )
               ) : activeResultTab ? (
                 (activeResultTab.view ?? "grid") === "chart" ? (
                   activeResultTab.dataStale ? (

@@ -1477,7 +1477,7 @@ export const api = {
     }),
 
   renameTable: (engine: string, oldName: string, newName: string) =>
-    jsonFetch<{ ok?: boolean; name?: string; error?: string }>(
+    jsonFetch<{ ok?: boolean; name?: string; error?: string; data_epoch?: number }>(
       "/api/table/rename",
       {
         method: "POST",
@@ -1486,7 +1486,7 @@ export const api = {
     ),
 
   dropTable: (engine: string, name: string) =>
-    jsonFetch<{ ok: boolean }>("/api/table/drop", {
+    jsonFetch<{ ok: boolean; data_epoch?: number }>("/api/table/drop", {
       method: "POST",
       body: JSON.stringify({ engine, name }),
     }),

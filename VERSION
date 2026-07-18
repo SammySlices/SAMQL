@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.668
+Current build:   2026-07-18.669
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.669  (v2.16.4)
+
+FIX: remaining latest-data-wins residuals — reclaim epoch-expired
+result stores; echo data_epoch on writes/drop/rename; FE applyEpoch
+before tables poll; profile/recon stale clear; Field Explorer soft
+preview clear; block export while dataStale. Harness pins. Refresh
+samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.668  (v2.16.4)

@@ -279,6 +279,14 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
             s._data_epoch > ep)
         report["correctness"]["materialize_expires_prior_result"] = (
             s.page(rid, 0, 5).get("error") == "result expired")
+        # Epoch bump reclaims the store from `_results` (not only live-check).
+        report["correctness"]["epoch_bump_reclaims_results"] = (
+            rid not in s._results)
+        w = s.run_query(
+            "INSERT INTO mat_src VALUES (%d)" % (n + 99),
+            target=DUCKDB_TARGET)
+        report["correctness"]["write_response_data_epoch"] = (
+            int(w.get("data_epoch") or -1) == int(s._data_epoch))
     finally:
         s.shutdown()
 
@@ -293,6 +301,10 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
     sql_cell = (
         ROOT / "frontend" / "src" / "components" / "notebook"
         / "SqlNotebookCell.tsx").read_text(encoding="utf-8")
+    fe = (ROOT / "frontend" / "src" / "components"
+          / "FieldExplorer.tsx").read_text(encoding="utf-8")
+    session_py = (ROOT / "backend" / "samql_core"
+                  / "session.py").read_text(encoding="utf-8")
     exec_ctrl = (
         ROOT / "frontend" / "src" / "components" / "nodeflow"
         / "useNodeFlowExecutionController.ts").read_text(encoding="utf-8")
@@ -315,6 +327,24 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         and "Data changed — re-run to chart" in app
         and "nb-out-stale" in sql_cell
         and "Data changed — re-run to" in sql_cell)
+    report["correctness"]["fe_profile_recon_stale"] = (
+        'tab.kind === "profile"' in app
+        and 'tab.kind === "recon"' in app
+        and "Data changed — re-profile" in app
+        and "Data changed — re-run reconcile" in app)
+    report["correctness"]["fe_export_blocks_stale"] = (
+        "!r.dataStale" in app
+        and "disabled={!!props.stale}" in sql_cell
+        and "staleById[id]" in notebook)
+    report["correctness"]["fe_field_explorer_soft_clear"] = (
+        "dataEpoch" in fe
+        and "setPreviewSample(null)" in fe
+        and "feEpochRef" in fe)
+    report["correctness"]["fe_apply_data_epoch"] = (
+        "applyDataEpoch" in app and "onDataEpoch" in notebook)
+    report["correctness"]["be_reclaim_stale_results"] = (
+        "def _reclaim_stale_results" in session_py
+        and "self._reclaim_stale_results()" in session_py)
     report["correctness"]["fe_nodeflow_epoch_clears"] = (
         "previewEpochRef" in exec_ctrl
         and "setPreview(null)" in exec_ctrl

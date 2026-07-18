@@ -45,6 +45,8 @@ interface Props {
   open: boolean;
   onClose: () => void;
   tables: TableInfo[];
+  /** Soft-invalidate preview samples when session data mutates. */
+  dataEpoch?: number;
   onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
   onTablesChanged?: () => void;
   onShred?: (
@@ -156,6 +158,7 @@ export const FieldExplorer: React.FC<Props> = ({
   open,
   onClose,
   tables,
+  dataEpoch = 0,
   onToast,
   onTablesChanged,
   onShred,
@@ -337,6 +340,20 @@ export const FieldExplorer: React.FC<Props> = ({
     return reloadFields(src.engine, src.table, src.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey, open]);
+
+  // Latest-data wins: soft-clear preview samples when tables mutate without
+  // forcing a full rediscovery (discovery stays discovery-only).
+  const feEpochRef = useRef(dataEpoch);
+  useEffect(() => {
+    if (feEpochRef.current === dataEpoch) return;
+    feEpochRef.current = dataEpoch;
+    if (!open) return;
+    setPreviewSample(null);
+    setPreviewErr(null);
+    setValidatedAccess(null);
+    setValidatedFirstSql(null);
+    setValidatedAllSql(null);
+  }, [dataEpoch, open]);
 
   // Closing the Field Explorer modal cancels in-flight nested discovery
   // (AbortController + backend query_id), matching Stop semantics.
