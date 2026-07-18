@@ -2274,6 +2274,14 @@ body.editor-ivory .code textarea.ta::placeholder {
   text-overflow: ellipsis;
   color: var(--text);
 }
+/* Horizontal virtualization pads — keep scrollWidth exact, no interaction. */
+.gh-cell.grid-col-spacer,
+.gc-cell.grid-col-spacer {
+  padding: 0;
+  border: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
 .gc-cell.num {
   text-align: right;
   color: #add6ff;

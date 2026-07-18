@@ -53,6 +53,11 @@ const ROW_H = 28;
 const OVERSCAN = 12;
 const DEFAULT_W = 150;
 const ROWNUM_W = 56;
+/** Virtualize data columns only past this count (small grids stay simple). */
+const COL_VIRT_MIN_COLS = 64;
+/** And only when the table is materially wider than the viewport. */
+const COL_VIRT_MIN_BODY_PX = 6000;
+const COL_OVERSCAN_PX = 600;
 const EMPTY_ROWS: Cell[][] = [];
 /** Fixed value-inspector size — reserved so Loading… → pretty does not resize/flicker. */
 const VIEWER_W = 520;
@@ -81,6 +86,43 @@ function fmtCell(v: Cell): { text: string; cls: string } {
   return { text: String(v), cls: "" };
 }
 
+/** Prefix sums of column widths: prefix[i] = sum of widths of cols[0..i). */
+function buildColPrefix(
+  cols: readonly string[],
+  widthOf: (c: string) => number,
+): number[] {
+  const prefix = new Array<number>(cols.length + 1);
+  prefix[0] = 0;
+  for (let i = 0; i < cols.length; i += 1) {
+    prefix[i + 1] = prefix[i] + widthOf(cols[i]);
+  }
+  return prefix;
+}
+
+/** First column index whose right edge is > leftPx (0-based). */
+function colIndexAtOrAfter(prefix: readonly number[], leftPx: number): number {
+  let lo = 0;
+  let hi = prefix.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (prefix[mid] <= leftPx) lo = mid + 1;
+    else hi = mid;
+  }
+  return Math.max(0, lo - 1);
+}
+
+/** Exclusive end column index whose left edge is < rightPx. */
+function colIndexBefore(prefix: readonly number[], rightPx: number): number {
+  let lo = 0;
+  let hi = prefix.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (prefix[mid] < rightPx) lo = mid + 1;
+    else hi = mid;
+  }
+  return Math.max(0, lo);
+}
+
 const DataGridImpl: React.FC<Props> = ({
   page,
   sortCol,
@@ -99,9 +141,13 @@ const DataGridImpl: React.FC<Props> = ({
   useRenderCount("DataGrid");
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
   // .460: the row-number rail only shadows once you scroll sideways.
   const [hScrolled, setHScrolled] = useState(false);
   const [viewH, setViewH] = useState(400);
+  const [viewW, setViewW] = useState(
+    typeof window !== "undefined" ? window.innerWidth || 1000 : 1000,
+  );
   const [widths, setWidths] = useState<Record<string, number>>({});
 
   const cols = page.columns;
@@ -154,10 +200,15 @@ const DataGridImpl: React.FC<Props> = ({
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setViewH(el.clientHeight));
+    const measure = () => {
+      setViewH(el.clientHeight);
+      setViewW(el.clientWidth || viewW);
+    };
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    setViewH(el.clientHeight);
+    measure();
     return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const total = rows.length;
@@ -173,9 +224,54 @@ const DataGridImpl: React.FC<Props> = ({
   }, [start, end, rows]);
 
   const colWidth = (c: string) => widths[c] ?? DEFAULT_W;
-  const bodyWidth =
-    ROWNUM_W + cols.reduce((acc, c) => acc + colWidth(c), 0);
+  const colPrefix = useMemo(
+    () => buildColPrefix(cols, colWidth),
+    // widths + cols identity drive prefix; colWidth closes over widths.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cols, widths],
+  );
+  const bodyWidth = ROWNUM_W + (colPrefix[cols.length] || 0);
   const contentHeight = 32 + Math.max(1, rows.length) * ROW_H + 8;
+
+  const virtCols = useMemo(() => {
+    const n = cols.length;
+    if (
+      n < COL_VIRT_MIN_COLS ||
+      bodyWidth <= Math.max(viewW * 2, COL_VIRT_MIN_BODY_PX)
+    ) {
+      return {
+        active: false,
+        start: 0,
+        end: n,
+        leftPad: 0,
+        rightPad: 0,
+        items: cols.map((c, ci) => ({ c, ci })),
+      };
+    }
+    // Column coords are relative to the data area (after the sticky rownum).
+    const dataScroll = Math.max(0, scrollLeft);
+    const dataView = Math.max(1, viewW - ROWNUM_W);
+    const leftPx = Math.max(0, dataScroll - COL_OVERSCAN_PX);
+    const rightPx = dataScroll + dataView + COL_OVERSCAN_PX;
+    let cStart = colIndexAtOrAfter(colPrefix, leftPx);
+    let cEnd = colIndexBefore(colPrefix, rightPx);
+    cStart = Math.max(0, Math.min(cStart, n - 1));
+    cEnd = Math.max(cStart + 1, Math.min(cEnd, n));
+    const leftPad = colPrefix[cStart] || 0;
+    const rightPad = (colPrefix[n] || 0) - (colPrefix[cEnd] || 0);
+    const items: { c: string; ci: number }[] = [];
+    for (let ci = cStart; ci < cEnd; ci += 1) {
+      items.push({ c: cols[ci], ci });
+    }
+    return {
+      active: true,
+      start: cStart,
+      end: cEnd,
+      leftPad,
+      rightPad,
+      items,
+    };
+  }, [cols, colPrefix, bodyWidth, viewW, scrollLeft]);
 
   useEffect(() => {
     onContentMetrics?.({ widthPx: bodyWidth, heightPx: contentHeight });
@@ -567,18 +663,30 @@ const DataGridImpl: React.FC<Props> = ({
       onScroll={(e) => {
         const el = e.target as HTMLDivElement;
         setScrollTop(el.scrollTop);
+        setScrollLeft(el.scrollLeft);
         // .460: the row-number rail only casts a shadow once you have
         // actually scrolled sideways.
         setHScrolled(el.scrollLeft > 0);
         maybeLoadMore(el);
       }}
     >
-      <div className="grid-inner" style={{ width: bodyWidth }}>
+      <div
+        className="grid-inner"
+        style={{ width: bodyWidth }}
+        data-col-virt={virtCols.active ? "1" : "0"}
+      >
         <div className="grid-head">
           <div className="gh-cell rownum" style={{ width: ROWNUM_W }}>
             #
           </div>
-          {cols.map((c) => {
+          {virtCols.active && virtCols.leftPad > 0 && (
+            <div
+              className="gh-cell grid-col-spacer"
+              aria-hidden="true"
+              style={{ width: virtCols.leftPad }}
+            />
+          )}
+          {virtCols.items.map(({ c }) => {
             const active = sortCol === c;
             return (
               <div
@@ -617,6 +725,13 @@ const DataGridImpl: React.FC<Props> = ({
               </div>
             );
           })}
+          {virtCols.active && virtCols.rightPad > 0 && (
+            <div
+              className="gh-cell grid-col-spacer"
+              aria-hidden="true"
+              style={{ width: virtCols.rightPad }}
+            />
+          )}
         </div>
 
         <div
@@ -638,7 +753,14 @@ const DataGridImpl: React.FC<Props> = ({
               >
                 {rowBase + idx + 1}
               </div>
-              {cols.map((c, ci) => {
+              {virtCols.active && virtCols.leftPad > 0 && (
+                <div
+                  className="gc-cell grid-col-spacer"
+                  aria-hidden="true"
+                  style={{ width: virtCols.leftPad }}
+                />
+              )}
+              {virtCols.items.map(({ c, ci }) => {
                 const f = fmtCell(row[ci]);
                 const truncated = TRUNC_RE.test(f.text);
                 const nested = looksStructy(f.text) || truncated;
@@ -705,6 +827,13 @@ const DataGridImpl: React.FC<Props> = ({
                   </div>
                 );
               })}
+              {virtCols.active && virtCols.rightPad > 0 && (
+                <div
+                  className="gc-cell grid-col-spacer"
+                  aria-hidden="true"
+                  style={{ width: virtCols.rightPad }}
+                />
+              )}
             </div>
           ))}
           {loadingMore && (

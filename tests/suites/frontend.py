@@ -709,7 +709,9 @@ def frontend_tests(do_build):
         for marker in (
             "data-ready", "notebook-sql-editor", "pre-migration-backup",
             "debounces editor persistence", "responses complete out of order",
-            "virtualizes a large result", "stale full-value response",
+            "virtualizes a large result", "virtualizes wide column sets",
+            "keeps column virtualization off for narrow grids",
+            "stale full-value response",
             "two consecutive misses", "traps forward and backward Tab",
             "scoped cancel", "NodeFlow canvas components",
             "updated result id", "NodeFlow persistence",
@@ -4400,6 +4402,8 @@ console.log("OK");
         def rd(*p):
             return open(os.path.join(FRONTEND, *p), encoding="utf-8").read()
         dg = rd("src", "components", "DataGrid.tsx")
+        dg_test = rd("src", "components", "DataGrid.component.test.tsx")
+        css = rd("src", "styles.css")
         app = rd("src", "App.tsx")
         api_src = rd("src", "lib", "api.ts")
         checks = [
@@ -4410,6 +4414,29 @@ console.log("OK");
             ("App has lazy loader", "loadMoreRows" in app),
             ("App wires onLoadMore to grid", "onLoadMore=" in app),
             ("api.page accepts columns", "columns?: string[]" in api_src),
+            # Row virtualization (unchanged posture)
+            ("row virt ROW_H", "const ROW_H" in dg),
+            ("row virt OVERSCAN", "const OVERSCAN" in dg),
+            ("row virt scrollTop", "setScrollTop" in dg),
+            # Column virtualization for very wide result sets
+            ("col virt min cols", "COL_VIRT_MIN_COLS" in dg),
+            ("col virt min body px", "COL_VIRT_MIN_BODY_PX" in dg),
+            ("col virt overscan", "COL_OVERSCAN_PX" in dg),
+            ("col virt scrollLeft", "setScrollLeft" in dg),
+            ("col virt window", "virtCols" in dg),
+            ("col virt marker", "data-col-virt" in dg),
+            ("col virt prefix sums", "buildColPrefix" in dg),
+            ("col virt binary search", "colIndexAtOrAfter" in dg
+             and "colIndexBefore" in dg),
+            ("col virt spacers", "grid-col-spacer" in dg
+             and "grid-col-spacer" in css),
+            ("col virt component tests",
+             "virtualizes wide column sets" in dg_test
+             and "renders later columns after horizontal scroll" in dg_test
+             and "copies all columns from a selected row even when many"
+                 " are unmounted" in dg_test
+             and "keeps column virtualization off for narrow grids"
+                 in dg_test),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing, "lazy-scroll wiring missing: " + ", ".join(missing))
