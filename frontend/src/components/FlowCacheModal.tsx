@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api, type FlowCacheInfo } from "../lib/api";
+import { clearRunAllParallelHint } from "../lib/runAllConcurrency";
 import { Modal } from "./Modal";
 
 type ToastFn = (
@@ -85,6 +86,8 @@ export const FlowCachePanel: React.FC<{
     setError("");
     try {
       const next = await api.flowCacheConfigure(opts);
+      // Run-all caches parallel_nodeflows; invalidate after any configure.
+      clearRunAllParallelHint();
       applyInfo(next);
       return next;
     } catch (e: any) {

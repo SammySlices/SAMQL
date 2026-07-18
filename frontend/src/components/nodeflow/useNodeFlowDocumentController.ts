@@ -331,7 +331,7 @@ export function useNodeFlowDocumentController({
     const timer = window.setTimeout(() => {
       if (histPrevRef.current) {
         histPastRef.current.push(histPrevRef.current);
-        if (histPastRef.current.length > 80) histPastRef.current.shift();
+        if (histPastRef.current.length > 40) histPastRef.current.shift();
         histFutureRef.current = [];
         refreshHistory();
       }

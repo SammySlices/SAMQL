@@ -74,11 +74,10 @@ export const NodeFlowCanvasShell = React.memo(function NodeFlowCanvasShell({
   children,
 }: NodeFlowCanvasShellProps) {
   const worldRef = useRef(canvasWorldSize(nodes));
-  const measured = canvasWorldSize(nodes);
-  // Mid-drag: expand-only so nodes aren't clipped without shrink thrash.
+  // One full scan: expand-only mid-drag, exact size when idle.
   worldRef.current = isNodeFlowPointerDragging()
     ? canvasWorldSizeExpandOnly(worldRef.current, nodes)
-    : measured;
+    : canvasWorldSize(nodes);
   const world = worldRef.current;
   return (
     <div className="nb2-canvas-col">

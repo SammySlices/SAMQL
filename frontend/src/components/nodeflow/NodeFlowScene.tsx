@@ -239,6 +239,8 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   );
 
   const chartVersionByNode = useMemo(() => {
+    // Do not depend on the full ``nodes`` array — drag would re-scan every RAF.
+    // Chart versions follow chartData; dashboards follow wired chart sources.
     const result: Record<string, unknown> = {};
     const objectId = (value: object | undefined): number => {
       if (!value) return 0;
@@ -248,17 +250,18 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
       chartObjectIds.current.set(value, created);
       return created;
     };
-    for (const node of nodes) {
-      if (node.type === "chart") {
-        result[node.id] = chartData[node.id] || null;
-      } else if (node.type === "dashboard") {
-        result[node.id] = (renderModel.dashboardSourceIdsByNode[node.id] || [])
-          .map((sourceId) => `${sourceId}:${objectId(chartData[sourceId])}`)
-          .join("|");
-      }
+    for (const id of Object.keys(chartData)) {
+      result[id] = chartData[id] || null;
+    }
+    for (const [dashId, sourceIds] of Object.entries(
+      renderModel.dashboardSourceIdsByNode,
+    )) {
+      result[dashId] = (sourceIds || [])
+        .map((sourceId) => `${sourceId}:${objectId(chartData[sourceId])}`)
+        .join("|");
     }
     return result;
-  }, [chartData, nodes, renderModel.dashboardSourceIdsByNode]);
+  }, [chartData, renderModel.dashboardSourceIdsByNode]);
 
   const pendingWireGeometry = useMemo(() => {
     if (!pendingWire) return null;

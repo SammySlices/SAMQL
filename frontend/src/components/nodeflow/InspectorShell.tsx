@@ -1,6 +1,6 @@
 import React from "react";
 import { createPortal } from "react-dom";
-import { startPointerDrag } from "../../lib/pointerDrag";
+import { startPointerDragRaf } from "../../lib/pointerDrag";
 
 export const InspectorShell: React.FC<{
   host: HTMLElement | null | undefined;
@@ -40,7 +40,7 @@ export const InspectorShell: React.FC<{
               const cap = Math.max(320, window.innerWidth - 120);
               onResize(Math.max(280, Math.min(cap, startW + dx)));
             };
-            startPointerDrag({ onMove });
+            startPointerDragRaf({ onMove });
           }}
         />
       )}

@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.650
+Current build:   2026-07-18.651
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.651  (v2.16.4)
+
+PERF: frontend backlog — marquee/wire/RAF/run-all/history.
+Marquee caches hit boxes + skips same-id setSelectedIds; under-threshold
+nodes/wires keep array identity; WireRow memo + single wirePath; preview/
+inspector resize via startPointerDragRaf; cache parallel_nodeflows for Run
+all (clear on Flow Cache save); mid-drag world/minimap freeze; chartVersion
+deps drop full nodes; history cap 40. Tests + refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.650  (v2.16.4)

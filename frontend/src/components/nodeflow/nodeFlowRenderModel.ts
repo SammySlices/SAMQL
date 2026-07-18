@@ -324,9 +324,11 @@ export function selectVisibleCanvasNodes(
   denseMode = false,
 ): NbNode[] {
   void denseMode;
-  if (nodes.length <= threshold) return nodes.slice();
+  // Under the large-graph threshold, return the same array identity so
+  // Scene/WireLayer memo can skip when nothing else changed.
+  if (nodes.length <= threshold) return nodes as NbNode[];
   const bounds = nodeFlowViewBounds(viewport, zoom, overscanPx);
-  if (!bounds) return nodes.slice();
+  if (!bounds) return nodes as NbNode[];
   return nodes.filter(
     (node) =>
       forcedIds.has(node.id) ||
@@ -349,9 +351,9 @@ export function selectVisibleCanvasWires(
   threshold = LARGE_GRAPH_WIRE_THRESHOLD,
   overscanPx = LARGE_GRAPH_OVERSCAN_PX,
 ): NodeFlowWire[] {
-  if (wires.length <= threshold) return wires.slice();
+  if (wires.length <= threshold) return wires as NodeFlowWire[];
   const bounds = nodeFlowViewBounds(viewport, zoom, overscanPx);
-  if (!bounds) return wires.slice();
+  if (!bounds) return wires as NodeFlowWire[];
 
   // The Bezier control points extend about 46 canvas units beyond each endpoint.
   // Keep a little extra margin so a curve crossing the viewport is not clipped

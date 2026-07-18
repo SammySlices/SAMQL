@@ -5,7 +5,7 @@ import {
   readLastProfileName,
 } from "./namedProfiles";
 import { buildLoadForm } from "./loadForm";
-import { startPointerDrag } from "./pointerDrag";
+import { startPointerDrag, startPointerDragRaf } from "./pointerDrag";
 import { buildReconcileRequest } from "./reconcileRequest";
 
 describe("phase-2 shared utilities", () => {
@@ -80,6 +80,26 @@ describe("phase-2 shared utilities", () => {
     cancelTarget.dispatchEvent(new Event("pointerup"));
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("coalesces pointer moves to one RAF flush for startPointerDragRaf", () => {
+    vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame"] });
+    const target = new EventTarget();
+    const onMove = vi.fn();
+    const onEnd = vi.fn();
+    startPointerDragRaf({ target, onMove, onEnd });
+
+    target.dispatchEvent(new Event("pointermove"));
+    target.dispatchEvent(new Event("pointermove"));
+    expect(onMove).not.toHaveBeenCalled();
+    vi.runOnlyPendingTimers();
+    expect(onMove).toHaveBeenCalledTimes(1);
+
+    target.dispatchEvent(new Event("pointermove"));
+    target.dispatchEvent(new Event("pointerup"));
+    expect(onMove).toHaveBeenCalledTimes(2);
+    expect(onEnd).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
   });
 
   it("builds identical reconcile detail payloads for IDE and Journal", () => {

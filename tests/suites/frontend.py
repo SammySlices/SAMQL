@@ -4679,7 +4679,8 @@ console.log("OK");
              "runDepth" in nb
              and "let CONCURRENCY =" in nb
              and "Promise.all(Array.from({ length: CONCURRENCY" in nb
-             and "if (info.parallel_nodeflows) CONCURRENCY = 1" in nb),
+             and "getRunAllParallelNodeflows" in nb
+             and "CONCURRENCY = 1" in nb),
             # --- .101: join single out port + buttons removed ---
             ("join exposes three outputs with L/R preview buttons (no mode select)",
              'join: { inputs: ["left", "right"], outputs: ["left_only", "inner", "right_only"] }'
@@ -6438,12 +6439,15 @@ console.log("OK");
             ("pointer helper owns move/up/cancel cleanup",
              'removeEventListener("pointercancel"' in pointer
              and 'addEventListener("pointercancel"' in pointer
-             and "if (!active) return" in pointer),
+             and "if (!active) return" in pointer
+             and "export function startPointerDragRaf" in pointer
+             and "requestAnimationFrame(flush)" in pointer),
             ("migrated surfaces no longer duplicate window drag cleanup",
              all('window.addEventListener("pointermove"' not in src
                  for src in migrated.values())),
             ("NodeFlow uses helper for local drags but keeps its mounted canvas listener",
-             nodeflow.count("startPointerDrag({") >= 3
+             (nodeflow.count("startPointerDrag({")
+              + nodeflow.count("startPointerDragRaf({")) >= 2
              and nodeflow.count('window.addEventListener("pointermove"') == 1),
             ("behavioral component regression ships",
              os.path.isfile(os.path.join(FRONTEND, "src", "lib",
@@ -6451,6 +6455,76 @@ console.log("OK");
         ]
         missing = [name for name, ok in checks if not ok]
         need(not missing, "phase-2 utility consolidation broken: "
+             + "; ".join(missing))
+
+    def t_frontend_perf_backlog():
+        # Post-650 canvas/UI backlog: marquee identity, wire memo, RAF resize,
+        # run-all parallel hint cache, mid-drag world/minimap, history cap.
+        def rd(*parts):
+            return open(os.path.join(FRONTEND, *parts), encoding="utf-8").read()
+
+        interactions = rd("src", "components", "nodeflow",
+                          "useNodeFlowCanvasInteractions.ts")
+        canvas = rd("src", "components", "NodeFlowCanvas.tsx")
+        render_model = rd("src", "components", "nodeflow",
+                          "nodeFlowRenderModel.ts")
+        preview = rd("src", "components", "nodeflow",
+                     "NodeFlowPreviewDrawer.tsx")
+        inspector = rd("src", "components", "nodeflow", "InspectorShell.tsx")
+        pointer = rd("src", "lib", "pointerDrag.ts")
+        nodegraph = rd("src", "lib", "nodegraph.ts")
+        run_all = rd("src", "lib", "runAllConcurrency.ts")
+        execution = rd("src", "components", "nodeflow",
+                       "useNodeFlowExecutionController.ts")
+        flow_cache = rd("src", "components", "FlowCacheModal.tsx")
+        scene = rd("src", "components", "nodeflow", "NodeFlowScene.tsx")
+        shell = rd("src", "components", "nodeflow", "NodeFlowCanvasShell.tsx")
+        documents = rd("src", "components", "nodeflow",
+                       "useNodeFlowDocumentController.ts")
+        model_tests = rd("src", "components", "nodeflow",
+                         "nodeFlowRenderModel.component.test.ts")
+        run_all_tests = rd("src", "lib",
+                           "runAllConcurrency.component.test.ts")
+        util_tests = rd("src", "lib", "refactorUtilities.component.test.ts")
+        checks = [
+            ("marquee caches boxes and skips same-id selection updates",
+             "sameIdList" in interactions
+             and "drag.boxes" in interactions
+             and "export function sameIdList" in nodegraph),
+            ("WireLayer uses memo WireRow with a single wirePath",
+             "const WireRow = React.memo" in canvas
+             and canvas.count("wirePath(") == 1
+             and "Per-wire memo" in canvas),
+            ("under-threshold cull returns the same array identity",
+             "if (nodes.length <= threshold) return nodes as NbNode[];"
+                 in render_model
+             and "if (wires.length <= threshold) return wires as NodeFlowWire[];"
+                 in render_model
+             and "nodes.slice()" not in render_model
+             and "wires.slice()" not in render_model
+             and ").toBe(underThreshold)" in model_tests),
+            ("preview and inspector resize coalesce via RAF",
+             "startPointerDragRaf" in preview
+             and "startPointerDragRaf" in inspector
+             and "export function startPointerDragRaf" in pointer
+             and "coalesces pointer moves to one RAF flush" in util_tests),
+            ("run-all caches parallel_nodeflows and clears on configure",
+             "getRunAllParallelNodeflows" in execution
+             and "clearRunAllParallelHint" in flow_cache
+             and "export async function getRunAllParallelNodeflows" in run_all
+             and "fetches once within the TTL" in run_all_tests),
+            ("mid-drag world/minimap avoid redundant O(n) rescans",
+             "canvasWorldSizeExpandOnly" in shell
+             and "freeze world bounds" in canvas
+             and "One full scan" in shell),
+            ("chartVersionByNode ignores full nodes array; history cap is 40",
+             "Do not depend on the full ``nodes`` array" in scene
+             and "}, [chartData, renderModel.dashboardSourceIdsByNode]);"
+                 in scene
+             and "histPastRef.current.length > 40" in documents),
+        ]
+        missing = [name for name, ok in checks if not ok]
+        need(not missing, "frontend perf backlog broken: "
              + "; ".join(missing))
 
     for name, fn in [
@@ -6470,6 +6544,8 @@ console.log("OK");
          t_refactor_phase3_component_decomposition),
         ("refactor phase 2: shared persistence/load/drag/reconcile utilities",
          t_refactor_phase2_shared_utilities),
+        ("frontend perf backlog: marquee/wire/RAF/run-all/history canvas wins",
+         t_frontend_perf_backlog),
         ("multipart cancellation + ReconReport hook order",
          t_form_fetch_and_recon_hook_order),
         ("API capability, JSON ceiling, shared transport, lint/e2e, cache budget",

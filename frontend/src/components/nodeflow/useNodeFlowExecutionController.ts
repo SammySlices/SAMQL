@@ -13,6 +13,7 @@ import {
   applyMissingRefPruneToNodes,
   columnProbeReqsForNodes,
 } from "../../lib/pruneNodeflowMissingAfterRun";
+import { getRunAllParallelNodeflows } from "../../lib/runAllConcurrency";
 import { cancelAllRuns, cancelOne, isCancelledError, registerRun, unregisterRun } from "../../lib/runController";
 import type { ChartData } from "../../lib/types";
 import type { NodeFlowSnapshot } from "./useNodeFlowDocumentController";
@@ -1777,10 +1778,13 @@ export function useNodeFlowExecutionController({
     };
     // Cap frontend Run-all concurrency when the backend already parallelizes
     // DuckDB branch workers — stacking both pools oversubscribes CPU/RAM.
+    // Cache the parallel_nodeflows flag briefly so Run all is not gated on a
+    // fresh flowCacheInfo RTT every click.
     let CONCURRENCY = Math.min(3, runList.length || 1);
     try {
-      const info = await api.flowCacheInfo();
-      if (info.parallel_nodeflows) CONCURRENCY = 1;
+      if (await getRunAllParallelNodeflows(() => api.flowCacheInfo())) {
+        CONCURRENCY = 1;
+      }
     } catch {
       /* keep default pool */
     }

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { startPointerDrag } from "../../lib/pointerDrag";
+import { startPointerDragRaf } from "../../lib/pointerDrag";
 import type { Cell, ResultPage } from "../../lib/types";
 import type { ColumnLineageOpenArgs } from "../../lib/columnLineage";
 import { ChartView } from "../ChartView";
@@ -88,7 +88,7 @@ export const NodeFlowPreviewDrawer = React.memo(
             event.preventDefault();
             const startY = event.clientY;
             const startHeight = height;
-            startPointerDrag({
+            startPointerDragRaf({
               onMove: (moveEvent) => {
                 const delta = startY - moveEvent.clientY;
                 const cap = Math.max(160, window.innerHeight - 260);
