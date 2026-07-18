@@ -35107,9 +35107,16 @@ def backend_tests(datadir, csv_path, json_path):
              and "self.write_lock.release()" in sc,
              "sync_catalog's flag-off path probes without parking and "
              "releases in finally")
-        need("_catalog_lock" in sc and "execute_read" in sc,
-             "sync_catalog has a concurrent path (no write_lock) guarded by "
-             "the catalog lock")
+        # Incremental sync (656+): concurrent work lives in _duck_sync_catalog
+        # (use_read=True → execute_read), then reconciles under _catalog_lock.
+        need("_duck_sync_catalog" in sc and "use_read=True" in sc,
+             "sync_catalog concurrent path delegates to _duck_sync_catalog")
+        dsc = inspect.getsource(DuckDBManager._duck_sync_catalog)
+        need("_catalog_lock" in dsc and "use_read" in dsc,
+             "incremental duck sync reconciles under the catalog lock")
+        fetch = inspect.getsource(DuckDBManager._duck_fetch_catalog_lists)
+        need("execute_read" in fetch,
+             "catalog list fetch uses execute_read on the concurrent path")
         ct = inspect.getsource(DuckDBManager._column_types_raw)
         need('hasattr(self, "execute_read")' in ct and "execute_read(" in ct,
              "schema reads try a separate cursor UNCONDITIONALLY (never queue "
@@ -37637,8 +37644,11 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         need("def _duck_sync_catalog" in eng,
              "incremental duck catalog helper exists")
-        i = eng.index("def _duck_sync_catalog")
-        j = eng.index("\n    def ", i + 1)
+        # Helpers were split (fetch/describe/sync); assert across that block.
+        i = eng.index("def _duck_fetch_catalog_lists")
+        j = eng.find("\nclass ", i)
+        if j < 0:
+            j = len(eng)
         body = eng[i:j]
         need("information_schema.columns" in body,
              "lists columns before selective DESCRIBE")
@@ -37670,6 +37680,9 @@ def backend_tests(datadir, csv_path, json_path):
             duck.sync_catalog()
             eq(n["d"], 0, "unchanged sync skips DESCRIBE")
             n["d"] = 0
+            # Dirty-skip (659+): force a reconcile so tables_tree is exercised
+            # without implying every poll DESCRIBEs.
+            s._mark_catalog_dirty()
             names = [t["name"] for t in s.tables_tree()]
             need("inc_a" in names and "inc_b" in names, "tables visible")
             eq(n["d"], 0, "tables_tree does not re-DESCRIBE warm types")
@@ -37946,6 +37959,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_duck_sync_catalog_incremental_source),
         ("perf audit high defects harness (filter COUNT / deep snap / flow)",
          t_perf_audit_high_harness),
+        ("perf audit medium defects harness (COUNT lock / catalog / filebrowser)",
+         t_perf_audit_medium_harness),
+        ("catalog dirty-skip + SQLite warm PRAGMA (source)",
+         t_catalog_dirty_skip_source),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",
          t_stress_cancel_reclaim_harness),
         ("cache/memory pressure reclaim harness (self-test; full opt-in)",

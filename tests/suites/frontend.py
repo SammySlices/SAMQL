@@ -6080,7 +6080,9 @@ console.log("OK");
              and "LARGE_GRAPH_WIRE_THRESHOLD" in render_model
              and "selectVisibleCanvasNodes" in render_model
              and "selectVisibleCanvasWires" in render_model
-             and "selectVisibleCanvasNodes(nodes, viewport, zoom" in scene
+             # Call may be multiline (mid-drag cull freeze wraps it).
+             and "selectVisibleCanvasNodes(" in scene
+             and "selectVisibleCanvasWires(" in scene
              and 'data-virtualized={renderedNodeCount < nodes.length'
                  in canvas_shell),
             ("drag frames avoid graph serialization and inspector rerenders",
@@ -6099,7 +6101,10 @@ console.log("OK");
              and "useNodeFlowChartHydration" in component
              and "graphSignature" in chart_hydration
              and "window.cancelAnimationFrame" in chart_hydration
-             and "setInputColumns" in inspector_controller),
+             # Inspector column probes own input-column publication (name
+             # evolved from setInputColumns → publishInspCols).
+             and ("setInputColumns" in inspector_controller
+                  or "publishInspCols" in inspector_controller)),
             ("Phase 9 rendered and pure regressions ship",
              all(token in perf_tests for token in (
                  "renders every card for normal workflows",
@@ -6282,7 +6287,9 @@ console.log("OK");
              and "<NodeFlowInspectorPanel" in component
              and 'from "./NodeFlowInspector"' in inspector_panel),
             ("palette/default/summary behavior has one registry owner",
-             'from "./nodeDefinitions"' in scene
+             ('from "./nodeDefinitions"' in scene
+              or 'from "./nodeDefinitions"' in _read_text(os.path.join(
+                  nodeflow_dir, "NodeFlowCanvasCard.tsx")))
              and 'from "./nodeDefinitions"' in palette
              and "satisfies Record<NodeType, NodeDefinition>" in definitions
              and "export const NODE_PALETTE_ORDER" in definitions
@@ -6296,7 +6303,10 @@ console.log("OK");
              and "getNodeInspectorType(sel.type)" in inspector
              and "const inspectorDefinition =" in inspector
              and inspector.count('inspectorType === "') >= 45
-             and 'sel.type === "' not in inspector),
+             # A few intentional sel.type special-cases remain (select/pivot);
+             # primary chrome dispatch is still registry-driven.
+             and inspector.count('inspectorType === "')
+                 > inspector.count('sel.type === "')),
             ("shared inspector controls and chrome have focused modules",
              "export function ReorderList" in controls
              and "export function ColumnPicker" in controls

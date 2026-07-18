@@ -2,12 +2,20 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.659
+Current build:   2026-07-18.660
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.660  (v2.16.4)
+
+TEST: suite pins for audit medium + obsolete brittle assertions.
+Register audit-medium harness; update phase 6/9, duck incremental, and
+concurrent sync_catalog source guards after helper splits / memo cards.
+Refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.659  (v2.16.4)
