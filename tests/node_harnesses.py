@@ -1305,6 +1305,7 @@ console.log("OK");
 _NODEGRAPH_HARNESS = r"""
 import {
   wirePath, marqueeHits, nearestPort, clampPointToBox, serializeGraph,
+  stripCosmeticNodeConfig, serializeGraphForExecution, executionGraphSignature,
 } from "./nodegraph.mjs";
 
 function assert(c, m) { if (!c) { console.error("FAIL: " + m); process.exit(1); } }
@@ -1380,6 +1381,62 @@ eq(g.nodes, [
 ], "node positions + extra fields stripped");
 eq(g.edges, [{ from: { node: "n1", port: "out" }, to: { node: "n2", port: "in" } }],
   "edges keep only from/to");
+
+// ---- executionGraphSignature: cosmetics ignored; fields/renames matter ----
+eq(stripCosmeticNodeConfig({
+  table: "t", fields: [{ name: "a", keep: true, rename: "A" }],
+  bodyW: 220, bodyH: 160, label: "Select", style: { theme: "dark" },
+  collapsed: false,
+}), {
+  table: "t", fields: [{ name: "a", keep: true, rename: "A" }],
+}, "stripCosmetic drops bodyW/label/style/collapsed only");
+
+const edgesExec = [
+  { from: { node: "sel", port: "out" }, to: { node: "out", port: "in" } },
+];
+const baseCfg = {
+  table: "t",
+  fields: [{ name: "a", keep: true, rename: "A" }],
+  bodyW: 220, bodyH: 160, label: "Select", style: { theme: "dark" },
+  collapsed: false,
+};
+const nodesCosmeticA = [
+  { id: "sel", type: "select", config: baseCfg },
+  { id: "out", type: "output", config: { table: "x" } },
+];
+const nodesCosmeticB = [
+  { id: "sel", type: "select", config: {
+    ...baseCfg, bodyW: 400, bodyH: 300, label: "UI", style: { theme: "light" },
+    collapsed: true,
+  } },
+  nodesCosmeticA[1],
+];
+eq(executionGraphSignature(nodesCosmeticA, edgesExec),
+   executionGraphSignature(nodesCosmeticB, edgesExec),
+   "cosmetic-only config must not change execution signature");
+assert(
+  executionGraphSignature(nodesCosmeticA, edgesExec) !==
+  executionGraphSignature([
+    { id: "sel", type: "select", config: {
+      ...baseCfg, fields: [{ name: "a", keep: true, rename: "Alpha" }],
+    } },
+    nodesCosmeticA[1],
+  ], edgesExec),
+  "field rename must change execution signature (missing-fields / reconcile)");
+assert(
+  executionGraphSignature(nodesCosmeticA, edgesExec) !==
+  executionGraphSignature([
+    { id: "sel", type: "select", config: {
+      ...baseCfg, fields: [{ name: "a", keep: false, rename: "A" }],
+    } },
+    nodesCosmeticA[1],
+  ], edgesExec),
+  "Select keep=false must change execution signature");
+const execGraph = serializeGraphForExecution(nodesCosmeticA, edgesExec);
+assert(!("bodyW" in execGraph.nodes[0].config)
+  && !("label" in execGraph.nodes[0].config)
+  && execGraph.nodes[0].config.fields[0].rename === "A",
+  "serializeGraphForExecution keeps fields, drops cosmetics");
 
 console.log("OK");
 """

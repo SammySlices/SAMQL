@@ -329,6 +329,7 @@ requirements-optional.txt
 requirements-test.txt
 tests/benchmark_cache_memory_pressure.py
 tests/benchmark_nested_ndjson.py
+tests/benchmark_perf_high_fixes.py
 tests/benchmark_workloads.py
 tests/fixtures.py
 tests/fixtures/highly_nested_trades.json

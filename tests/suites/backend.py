@@ -37156,6 +37156,50 @@ def backend_tests(datadir, csv_path, json_path):
         need(len(corr.get("field_explorer_names") or []) >= 20,
              "Field Explorer surfaced nested/array fields")
 
+    def t_perf_high_fixes_harness():
+        # Hostile nested structures against bounded page encode, Field Explorer
+        # mid/end key-union (late heterogeneous keys), and sticky-cancel FE
+        # survival. Opt-in larger pads via the script without --self-test.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        script = os.path.join(ROOT, "tests", "benchmark_perf_high_fixes.py")
+        need(os.path.isfile(script),
+             "perf-high fixes benchmark harness is bundled")
+        out = os.path.join(DATADIR, "benchmark-perf-high-fixes-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "perf-high fixes self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "perf-high report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "perf-high self-test ok flag")
+        corr = result.get("correctness") or {}
+        need(corr.get("page_cap_bounded") is True,
+             "bounded nested page encode")
+        need(corr.get("page_total_rows_exact") is True,
+             "exact total_rows preserved under display cap")
+        need(corr.get("page_wire_bounded") is True,
+             "paged wire JSON stays bounded")
+        need(corr.get("discovery_only") is True,
+             "Field Explorer stays discovery-only")
+        need(corr.get("fe_heterogeneous_ok") is True,
+             "late heterogeneous keys found via mid/end probes")
+        need(corr.get("sticky_cancel_cleared") is True,
+             "FE clears sticky engine cancel")
+        need(len(corr.get("fe_hostile_names") or []) >= 15,
+             "hostile FE surfaced nested names")
+
     def t_stress_cancel_reclaim_harness():
         # Stall / cancel / reclaim stress suite (tests/stress_cancel_reclaim.py).
         # Default CI runs --self-test: recursive CTE + tiny nested NDJSON, with
@@ -37281,6 +37325,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_workload_benchmark_harness),
         ("hostile nested NDJSON perf harness (self-test; full 2GiB/3M opt-in)",
          t_hostile_nested_ndjson_perf_harness),
+        ("perf-high fixes hostile nested harness (self-test; larger pads opt-in)",
+         t_perf_high_fixes_harness),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",
          t_stress_cancel_reclaim_harness),
         ("cache/memory pressure reclaim harness (self-test; full opt-in)",
