@@ -20512,10 +20512,14 @@ def backend_tests(datadir, csv_path, json_path):
             skip("duckdb not installed")
 
         def _recipe_sqls(table, acc):
-            first = "SELECT %s FROM \"%s\"" % (acc["first"], table)
-            all_sql = "SELECT %s FROM \"%s\"%s" % (
-                acc["sel"], table,
-                "".join(", " + u for u in (acc.get("unnests") or [])))
+            from samql_core.diagnostics import field_access_sql
+            first = field_access_sql(table, acc, which="first")
+            # Preview recipes include LIMIT 50; execute tests need the full
+            # explode, so strip the trailing LIMIT for equivalence checks.
+            all_sql = field_access_sql(table, acc, which="all")
+            need(first and all_sql, "field_access_sql builds first/all")
+            if all_sql.upper().rstrip().endswith("LIMIT 50"):
+                all_sql = all_sql[: all_sql.upper().rfind("LIMIT 50")].rstrip()
             return first, all_sql
 
         def _fixing(fields):
@@ -20659,6 +20663,103 @@ def backend_tests(datadir, csv_path, json_path):
             need(prev.get("sample") == "test",
                  "preview sample is non-NULL: %r" % prev.get("sample"))
             need(prev.get("sql"), "preview returns validated SQL")
+        finally:
+            s.shutdown()
+
+    def t_field_explorer_unnest_cte_pipeline():
+        # CODE was wrong (slow): Field Explorer All-rows used comma-FROM
+        # UNNEST hops. CTE pipelines return the SAME exact rows/counts and
+        # are what field_access_sql emits now. Preserve shred/flatten paths.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        from samql_core.diagnostics import (
+            build_unnest_pipeline_sql, field_access_sql, parse_unnest_as_clause)
+
+        hop = parse_unnest_as_clause(
+            "UNNEST(from_json(json_extract(payload, '$.legs'), '[\"JSON\"]')) "
+            "AS x1(e1)")
+        need(hop and hop[1] == "x1" and hop[2] == "e1",
+             "parse_unnest_as_clause handles nested from_json parens: %r" % (hop,))
+
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            duck.conn.execute("""
+                CREATE OR REPLACE TABLE fx_cte AS
+                SELECT i AS id,
+                  list_transform(range(0, 3), j -> {
+                    'leg_id': j,
+                    'cashflows': list_transform(range(0, 4), k -> {
+                      'amt': (i * 100 + j * 10 + k)::DOUBLE
+                    })
+                  }) AS legs
+                FROM range(0, 20) t(i)
+            """)
+            # Expected leaf count: 20 * 3 * 4 = 240
+            unnests = [
+                "UNNEST(legs) AS x1(e1)",
+                "UNNEST(e1.cashflows) AS x2(e2)",
+            ]
+            legacy = (
+                "SELECT e2.amt FROM fx_cte, UNNEST(legs) AS x1(e1), "
+                "UNNEST(e1.cashflows) AS x2(e2)")
+            pipeline = build_unnest_pipeline_sql(
+                "fx_cte", "e2.amt", unnests, limit=None)
+            need("WITH x1 AS" in pipeline and "x2 AS" in pipeline,
+                 "pipeline emits CTE hops: " + pipeline)
+            need("FROM fx_cte," not in pipeline and "FROM fx_cte ," not in pipeline,
+                 "pipeline must not use comma-FROM UNNEST: " + pipeline)
+            legacy_rows = sorted(
+                r[0] for r in duck.conn.execute(legacy).fetchall())
+            pipe_rows = sorted(
+                r[0] for r in duck.conn.execute(pipeline).fetchall())
+            eq(pipe_rows, legacy_rows,
+               "CTE pipeline matches comma-FROM UNNEST row-for-row")
+            eq(len(pipe_rows), 240, "full leaf count preserved")
+
+            acc = {"sel": "e2.amt", "unnests": unnests}
+            cnt_sql = field_access_sql("fx_cte", acc, which="count")
+            need(cnt_sql and "count(*)" in cnt_sql.lower()
+                 and "LIMIT" not in cnt_sql.upper(),
+                 "count recipe is unlimited: %r" % cnt_sql)
+            eq(int(duck.conn.execute(cnt_sql).fetchone()[0]), 240,
+               "exact count matches full explode")
+
+            # Opaque JSON multi-hop also stays exact under the CTE assembler.
+            rows = []
+            for i in range(5):
+                rows.append(json.dumps({
+                    "legs": [{"cashflows": [
+                        {"fixingdate": "d%d_%d" % (i, k)} for k in range(2)
+                    ]} for _ in range(2)]
+                }))
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE fx_cte_json AS "
+                "SELECT unnest(?)::JSON AS payload", [rows])
+            j_unnests = [
+                "UNNEST(from_json(json_extract(payload, '$.legs'), "
+                "'[\"JSON\"]')) AS x1(e1)",
+                "UNNEST(from_json(json_extract(e1, '$.cashflows'), "
+                "'[\"JSON\"]')) AS x2(e2)",
+            ]
+            j_legacy = (
+                "SELECT e2 ->> '$.fixingdate' FROM fx_cte_json, %s, %s"
+                % (j_unnests[0], j_unnests[1]))
+            j_pipe = build_unnest_pipeline_sql(
+                "fx_cte_json", "e2 ->> '$.fixingdate'", j_unnests)
+            j_legacy_rows = sorted(
+                r[0] for r in duck.conn.execute(j_legacy).fetchall())
+            j_pipe_rows = sorted(
+                r[0] for r in duck.conn.execute(j_pipe).fetchall())
+            eq(j_pipe_rows, j_legacy_rows,
+               "JSON CTE pipeline matches comma-FROM UNNEST")
+            eq(len(j_pipe_rows), 20, "JSON full explode count 5*2*2")
+            j_cnt = field_access_sql(
+                "fx_cte_json",
+                {"sel": "e2", "unnests": j_unnests},
+                which="count")
+            eq(int(duck.conn.execute(j_cnt).fetchone()[0]), 20,
+               "JSON exact count recipe")
         finally:
             s.shutdown()
 
@@ -38103,6 +38204,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_field_tree_skips_empty_array_prefix_rows),
         ("Field Explorer recipes execute on flatten-off JSON / JSON[] / STRUCT+JSON",
          t_field_explorer_recipes_execute),
+        ("Field Explorer UNNEST CTE pipeline matches comma-FROM (exact counts)",
+         t_field_explorer_unnest_cte_pipeline),
         ("Opaque JSON shred + nested-list flatten retain compound-key children",
          t_opaque_json_shred_and_nested_flatten),
         ("DuckDB load cancel aborts the JSON array pre-pass",

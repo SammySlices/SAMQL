@@ -1016,7 +1016,8 @@ console.log("OK");
              ("Peek one value" in fx or "First record" in fx)
              and "All rows" in fx
              and "recursive" in fx
-             and ("formatFieldSql" in fx or "acc.unnests" in fx)),
+             and ("formatFieldSql" in fx or "acc.unnests" in fx)
+             and "buildUnnestPipelineSql" in fx),
             ("copy buttons use the shared copyText helper",
              "copyText" in fx),
             ("App renders it OUTSIDE the view switch so it persists",

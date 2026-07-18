@@ -13,6 +13,7 @@ import importlib.util as _ilu
 import io
 import os
 import platform
+import re
 import time
 
 _REGISTRY = {}   # name -> {"fn", "label", "description", "params"}
@@ -785,8 +786,95 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
     return rows
 
 
+def parse_unnest_as_clause(clause):
+    """Parse ``UNNEST(<expr>) AS xN(eN)`` → ``(expr, alias, elem)`` or None.
+
+    ``expr`` may contain nested parentheses (``from_json(...)``), so this finds
+    the trailing ``) AS xN(eN)`` rather than using a single flat regex.
+    """
+    s = (clause or "").strip()
+    if not s:
+        return None
+    m = re.search(r"\)\s+AS\s+(x\d+)\((e\d+)\)\s*$", s, re.I)
+    if not m:
+        return None
+    head = s[: m.start()]
+    if not head.upper().startswith("UNNEST("):
+        return None
+    return head[len("UNNEST("):], m.group(1), m.group(2)
+
+
+def build_unnest_pipeline_sql(table, select_sql, unnests, limit=None,
+                              carry=None, pretty=False):
+    """Assemble a DuckDB UNNEST pipeline as WITH CTEs (not comma-FROM UNNEST).
+
+    Comma-FROM ``t, UNNEST(...), UNNEST(...)`` is correct for nested hops but
+    forces DuckDB to keep a wide intermediate and is several times slower than
+    a narrow CTE pipeline that unnests once per stage. Row counts stay exact.
+
+    ``carry`` is an optional list of ``(alias, expr)`` projected through every
+    CTE so multi-select outer scalars (empty unnest chain) repeat per exploded
+    row without ``SELECT t.*``.
+    """
+    tbl = '"%s"' % str(table).replace('"', '""')
+    hops = list(unnests or [])
+    carry = list(carry or [])
+    if not hops:
+        sql = "SELECT %s FROM %s" % (select_sql, tbl)
+        if limit is not None:
+            sql += " LIMIT %d" % int(limit)
+        return sql
+
+    parsed = []
+    for clause in hops:
+        got = parse_unnest_as_clause(clause)
+        if got is None:
+            # Fall back to legacy comma-FROM so an unexpected clause shape
+            # still runs rather than producing invalid CTE SQL.
+            joined = "".join(", " + u for u in hops)
+            sql = "SELECT %s FROM %s%s" % (select_sql, tbl, joined)
+            if limit is not None:
+                sql += " LIMIT %d" % int(limit)
+            return sql
+        parsed.append(got)
+
+    nl = "\n" if pretty else " "
+    ind = "  " if pretty else ""
+    ctes = []
+    prev = tbl
+    carry_cols = [a for a, _ in carry]
+    for i, (expr, alias, elem) in enumerate(parsed):
+        proj = []
+        if i == 0:
+            for a, e in carry:
+                proj.append("%s AS %s" % (e, a))
+        else:
+            proj.extend(carry_cols)
+        proj.append("UNNEST(%s) AS %s" % (expr, elem))
+        ctes.append(
+            "%s AS (%sSELECT %s%sFROM %s)"
+            % (alias, nl + ind if pretty else "",
+               (", " + nl + ind).join(proj) if pretty else ", ".join(proj),
+               nl + ind if pretty else " ",
+               prev))
+        prev = alias
+    body = (
+        "WITH %s%sSELECT %s%sFROM %s"
+        % (("," + nl).join(ctes), nl if pretty else " ",
+           select_sql, nl if pretty else " ", prev)
+    )
+    if limit is not None:
+        body += "%sLIMIT %d" % (nl if pretty else " ", int(limit))
+    return body
+
+
 def field_access_sql(table, access, which="first"):
-    """Build a runnable SELECT from a Field Explorer access recipe."""
+    """Build a runnable SELECT from a Field Explorer access recipe.
+
+    ``all`` uses a CTE UNNEST pipeline (exact same rows as comma-FROM UNNEST,
+    lower memory / faster). ``count`` returns an exact exploded row total with
+    no LIMIT and without projecting nested payloads.
+    """
     if not access:
         return None
     tbl = '"%s"' % str(table).replace('"', '""')
@@ -799,8 +887,19 @@ def field_access_sql(table, access, which="first"):
         expr = access.get("sel")
         if expr is None:
             return None
-        unnests = "".join(", " + u for u in (access.get("unnests") or []))
-        return "SELECT %s FROM %s%s LIMIT 50" % (expr, tbl, unnests)
+        return build_unnest_pipeline_sql(
+            table, expr, access.get("unnests") or [], limit=50)
+    if which == "count":
+        # Exact full cardinality: count pipeline rows, do not LIMIT.
+        unnests = access.get("unnests") or []
+        if not unnests:
+            expr = access.get("sel")
+            if expr is None:
+                return None
+            return "SELECT count(*) FROM %s" % tbl
+        inner = build_unnest_pipeline_sql(
+            table, "1", unnests, limit=None)
+        return "SELECT count(*) FROM (%s) AS _samql_cnt" % inner
     if which == "recursive":
         expr = access.get("recursive")
         if not expr:

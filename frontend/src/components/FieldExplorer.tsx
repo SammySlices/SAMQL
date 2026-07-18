@@ -549,6 +549,13 @@ export const FieldExplorer: React.FC<Props> = ({
     multiCompose?.sql ||
     validatedAllSql ||
     (acc ? formatFieldSql(src?.table || "table", acc, "all") : null);
+  // Exact exploded cardinality (no LIMIT) — CTE count, not a value materialize.
+  const countSql =
+    !multiCompose &&
+    acc &&
+    (acc.unnests || []).length > 0
+      ? formatFieldSql(src?.table || "table", acc, "count")
+      : null;
   const recSql =
     !multiCompose && acc
       ? formatFieldSql(src?.table || "table", acc, "recursive")
@@ -987,6 +994,12 @@ export const FieldExplorer: React.FC<Props> = ({
                       ? "All rows (explode array — small data)"
                       : "All rows",
                   allSql,
+                )}
+              {countSql &&
+                !multiCompose?.error &&
+                block(
+                  "Exact row count (full explode, no LIMIT)",
+                  countSql,
                 )}
               {multiCompose?.error && (
                 <div

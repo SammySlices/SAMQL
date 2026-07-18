@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.644
+Current build:   2026-07-18.645
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.645  (v2.16.4)
+
+UNNEST QUERY: CTE PIPELINE + EXACT COUNT RECIPE.
+Field Explorer All-rows / multi-select SQL uses a narrow WITH UNNEST CTE
+pipeline instead of comma-FROM UNNEST (same exact row counts; much less
+intermediate work). Add Exact row count recipe (count(*) over pipeline,
+no LIMIT). Shred/flatten remain preferred for huge nests. Refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.644  (v2.16.4)

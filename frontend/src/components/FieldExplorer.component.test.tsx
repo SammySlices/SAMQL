@@ -80,7 +80,7 @@ describe("FieldExplorer shred steering", () => {
       ok: true,
       sample: "preview-ok",
       sql: "SELECT json ->> '$.legs[0]' FROM \"orders\"",
-      all_sql: "SELECT json(e1) FROM \"orders\", UNNEST(...)",
+      all_sql: "SELECT json(e1)\nFROM (\nWITH x1 AS (SELECT UNNEST(...) AS e1 FROM \"orders\")\nSELECT json(e1) FROM x1\n)",
       access: arrayFieldTree.fields[1].access,
     } as any);
   });
