@@ -70,7 +70,7 @@ export const NodeFlow: React.FC<{
   onOpenLoad?: () => void;
   /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
   denseMode?: boolean;
-  /** Canvas grid snap while dragging (owned by App Settings → Visual). Default ON. */
+  /** Canvas grid snap while dragging (owned by App Settings → Visual). Default OFF. */
   snap?: boolean;
 }> = ({
   tables,
@@ -89,7 +89,7 @@ export const NodeFlow: React.FC<{
   onToolsTablesOpenChange,
   onOpenLoad,
   denseMode = false,
-  snap = true,
+  snap = false,
 }) => {
   // Keep densify() aligned with App Settings before Scene paints (also syncs
   // a lazy-chunk module copy if Rollup ever duplicates nodeFlowModel).

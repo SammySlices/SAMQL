@@ -1006,6 +1006,12 @@ console.log("OK");
              "api" in fx
              and "tableFields(" in fx
              and "columnFields(" not in fx),
+            ("closing Field Explorer cancels in-flight nested discovery",
+             "stopDiscovery" in fx
+             and "cancelQuery" in fx
+             and "openRef" in fx
+             and "next_after" in fx
+             and "[srcKey, open]" in fx),
             ("right pane assembles first / all-rows / recursive queries",
              ("Peek one value" in fx or "First record" in fx)
              and "All rows" in fx

@@ -45,7 +45,7 @@ vi.mock("../components/FieldExplorer", () => ({
 }));
 vi.mock("../components/NodeFlow", () => ({
   NodeFlow: ({ snap }: { snap?: boolean }) => (
-    <div data-testid="nodeflow-view" data-snap={snap === false ? "0" : "1"}>
+    <div data-testid="nodeflow-view" data-snap={snap ? "1" : "0"}>
       NodeFlow
     </div>
   ),
@@ -82,7 +82,7 @@ describe("Node Snap visual setting", () => {
     apiMock.tables.mockClear();
   });
 
-  it("defaults Node Snap ON and persists the preference", async () => {
+  it("defaults Node Snap OFF and persists the preference", async () => {
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -95,14 +95,8 @@ describe("Node Snap visual setting", () => {
     fireEvent.click(screen.getByTestId("settings-visual-toggles"));
     const toggle = screen.getByTestId("node-snap-toggle");
     expect(toggle).toHaveTextContent("Node Snap");
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
-    expect(localStorage.getItem("samql.nodeSnap")).toBe("1");
-
-    fireEvent.click(toggle);
-    await waitFor(() => {
-      expect(toggle).toHaveAttribute("aria-pressed", "false");
-      expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
-    });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
 
     fireEvent.click(toggle);
     await waitFor(() => {
@@ -110,10 +104,16 @@ describe("Node Snap visual setting", () => {
       expect(toggle).toHaveTextContent("Node Snap: on");
       expect(localStorage.getItem("samql.nodeSnap")).toBe("1");
     });
+
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(toggle).toHaveAttribute("aria-pressed", "false");
+      expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
+    });
   });
 
-  it("restores Node Snap off from localStorage on boot", async () => {
-    localStorage.setItem("samql.nodeSnap", "0");
+  it("restores Node Snap on from localStorage on boot", async () => {
+    localStorage.setItem("samql.nodeSnap", "1");
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -125,7 +125,7 @@ describe("Node Snap visual setting", () => {
     fireEvent.click(screen.getByTestId("settings-visual-toggles"));
     expect(screen.getByTestId("node-snap-toggle")).toHaveAttribute(
       "aria-pressed",
-      "false",
+      "true",
     );
   });
 });

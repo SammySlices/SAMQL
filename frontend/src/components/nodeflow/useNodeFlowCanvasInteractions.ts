@@ -90,7 +90,7 @@ interface UseNodeFlowCanvasInteractionsOptions {
     title: string,
     message?: string,
   ) => void;
-  /** Canvas grid snap while dragging (App Settings → Visual). Default ON. */
+  /** Canvas grid snap while dragging (App Settings → Visual). Default OFF. */
   snap?: boolean;
   /** Quick click (pointerup under drag threshold) opens the inspector drawer. */
   onInspectorOpen?: () => void;
@@ -111,13 +111,13 @@ export function useNodeFlowCanvasInteractions(
   const [groupHover, setGroupHover] = useState<string | null>(null);
   const [marquee, setMarquee] = useState<NodeFlowMarquee | null>(null);
   const [wireEnd, setWireEnd] = useState<{ x: number; y: number } | null>(null);
-  const snap = options.snap !== false;
+  const snap = options.snap === true;
   const snapRef = useRef(snap);
   const [snapId, setSnapId] = useState<string | null>(null);
   const snapTimer = useRef<number | null>(null);
 
   useEffect(() => {
-    snapRef.current = options.snap !== false;
+    snapRef.current = options.snap === true;
   }, [options.snap]);
 
   useEffect(

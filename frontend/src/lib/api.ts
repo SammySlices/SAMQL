@@ -518,12 +518,22 @@ export const api = {
       signal,
     }),
 
-  /** Unified Field Explorer tree: one loaded table → all columns + nests. */
-  tableFields: (engine: string, table: string, signal?: AbortSignal) =>
+  /** Unified Field Explorer tree: one loaded table → all columns + nests.
+   *  Optional ``after`` resumes after a top-level column; ``query_id`` lets
+   *  modal-close cancel further nested discovery (discovery-only). */
+  tableFields: (
+    engine: string,
+    table: string,
+    signal?: AbortSignal,
+    opts?: { after?: string | null; query_id?: string; budget_sec?: number },
+  ) =>
     jsonFetch<{
       ok?: boolean;
       error?: string;
       table?: string;
+      partial?: boolean;
+      next_after?: string | null;
+      cancelled?: boolean;
       fields: {
         depth: number;
         name: string;
@@ -549,7 +559,12 @@ export const api = {
       }[];
     }>(`/api/table/${encodeURIComponent(table)}/fields`, {
       method: "POST",
-      body: JSON.stringify({ engine }),
+      body: JSON.stringify({
+        engine,
+        after: opts?.after ?? undefined,
+        query_id: opts?.query_id,
+        budget_sec: opts?.budget_sec,
+      }),
       signal,
     }),
 

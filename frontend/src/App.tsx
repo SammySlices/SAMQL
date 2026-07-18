@@ -701,14 +701,14 @@ export default function App() {
       /* ignore */
     }
   }, [nodeFlowDense]);
-  // NodeFlow canvas grid snap while dragging. Default ON; Settings → Visual.
+  // NodeFlow canvas grid snap while dragging. Default OFF; Settings → Visual.
   const [nodeSnap, setNodeSnap] = useState(() => {
     try {
       const saved = window.localStorage?.getItem("samql.nodeSnap");
       if (saved != null) return saved === "1";
-      return true;
+      return false;
     } catch {
-      return true;
+      return false;
     }
   });
   useEffect(() => {

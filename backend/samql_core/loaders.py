@@ -633,8 +633,14 @@ def _duck_count(duck, name):
         return None
 
 
+def _progress_should_cancel(progress):
+    """Optional non-raising cancel probe attached to a load progress callback."""
+    sc = getattr(progress, "should_cancel", None) if progress else None
+    return sc if callable(sc) else None
+
+
 def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
-                      json_depth=None, force_ondisk=False):
+                      json_depth=None, force_ondisk=False, progress=None):
     """Load a file into DuckDB, choosing storage by size.
 
     A file at/above the on-disk threshold (SAMQL_ONDISK_MB) — or the hard
@@ -658,12 +664,15 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
     ``json_depth`` caps DuckDB nested-type expansion for JSON (flatten-off).
     ``force_ondisk`` prefers the Parquet-cache path even below the size floor
     (used when converting large nested JSON to a safer on-disk format).
+    ``progress.should_cancel`` (optional) is forwarded so Stop is honored
+    after conversion / write-lock waits and cancelled loads never attach.
     """
     from .engines import (_ondisk_min_bytes, _ondisk_hard_floor_bytes,
                           _json_ondisk_min_bytes, _is_interrupt,
                           ensure_json_engine_memory,
                           ensure_large_file_engine_memory)
     duck = session.get_duckdb()
+    cancel = _progress_should_cancel(progress)
     if kind == "json":
         ensure_json_engine_memory(duck, path)
     elif kind == "csv":
@@ -732,11 +741,13 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
     if big:
         try:
             if kind == "parquet":
+                if cancel and cancel():
+                    raise LoadCancelled()
                 name = duck.create_view_from_file(base_name, path, "parquet")
                 return _parquet_result(name, "parquet-view", json_depth)
             name = duck.load_file_to_parquet_view(
                 base_name, path, kind, delimiter=delimiter,
-                json_depth=json_depth)
+                json_depth=json_depth, cancel=cancel)
             return _parquet_result(name, "parquet-cache", json_depth)
         except LoadCancelled:
             raise
@@ -755,7 +766,7 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
                         % (json_depth, e))
                     name = duck.load_file_to_parquet_view(
                         base_name, path, kind, delimiter=delimiter,
-                        json_depth=0)
+                        json_depth=0, cancel=cancel)
                     return _parquet_result(name, "parquet-cache", 0)
                 except LoadCancelled:
                     raise
@@ -781,11 +792,12 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
                 % (path, e))
             name = duck.create_table_from_file(
                 base_name, path, kind, delimiter=delimiter,
-                json_depth=json_depth)
+                json_depth=json_depth, cancel=cancel)
             return _promote_table_to_parquet(name, json_depth)
     name = duck.create_table_from_file(base_name, path, kind,
                                        delimiter=delimiter,
-                                       json_depth=json_depth)
+                                       json_depth=json_depth,
+                                       cancel=cancel)
     return [{"name": name, "rows": _duck_count(duck, name),
              "columns": duck.table_columns.get(name, []), "engine": "duckdb",
              "json_depth": json_depth}]
@@ -895,7 +907,8 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
         return _load_into_duckdb(
             session, path, base_name, "json",
             json_depth=json_depth,
-            force_ondisk=force_ondisk)
+            force_ondisk=force_ondisk,
+            progress=progress)
 
     def _ondisk_for_size():
         thresh = _json_ondisk_min_bytes()
@@ -1090,7 +1103,8 @@ def load_file(session, path, destination="sqlite", base_name=None,
         # Small Parquet materializes into DuckDB storage (fast repeat queries);
         # a large one is viewed in place (columnar pushdown, bounded memory).
         # See _load_into_duckdb for the size split.
-        return _load_into_duckdb(session, path, base_name, "parquet")
+        return _load_into_duckdb(session, path, base_name, "parquet",
+                                 progress=progress)
     if ext in ("json", "ndjson", "jsonl"):
         # per-load override wins (the Load modal decides now); None keeps the
         # legacy session default for callers that don't say (folder appends,
@@ -1113,7 +1127,7 @@ def load_file(session, path, destination="sqlite", base_name=None,
     ndelim = _norm_delim(delimiter)
     if destination == "duckdb":
         return _load_into_duckdb(session, path, base_name, "csv",
-                                 delimiter=ndelim)
+                                 delimiter=ndelim, progress=progress)
     # Large CSV into SQLite thrash-queries and can OOM on analytics. When
     # DuckDB is available, auto-upgrade to the on-disk Parquet path so
     # multi-GB / multi-million-row CSVs still load. Only fail loud when
@@ -1134,7 +1148,8 @@ def load_file(session, path, destination="sqlite", base_name=None,
                 "[samql] CSV is %.0f MiB — using DuckDB on-disk Parquet "
                 "instead of SQLite\n" % (sz / (1024 * 1024.0)))
             return _load_into_duckdb(session, path, base_name, "csv",
-                                     delimiter=ndelim, force_ondisk=True)
+                                     delimiter=ndelim, force_ondisk=True,
+                                     progress=progress)
         raise RuntimeError(
             "This CSV is %.0f MiB — too large for SQLite, and DuckDB is "
             "not installed. Install duckdb (pip install duckdb) so SamQL "

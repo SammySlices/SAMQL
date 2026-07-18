@@ -214,9 +214,9 @@ describe("Settings View consolidations", () => {
     expect(motion).toHaveTextContent("Reduce motion");
     expect(dense).toHaveTextContent("Condensed NodeFlow");
     expect(snap).toHaveTextContent("Node Snap");
-    expect(snap).toHaveAttribute("aria-pressed", "true");
+    expect(snap).toHaveAttribute("aria-pressed", "false");
     expect(canvasColor).toHaveTextContent("Change Canvas Color");
-    expect(localStorage.getItem("samql.nodeSnap")).toBe("1");
+    expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
 
     fireEvent.click(theme);
     await waitFor(() => {
@@ -251,9 +251,9 @@ describe("Settings View consolidations", () => {
 
     fireEvent.click(snap);
     await waitFor(() => {
-      expect(snap).toHaveAttribute("aria-pressed", "false");
-      expect(snap).toHaveTextContent("Node Snap");
-      expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
+      expect(snap).toHaveAttribute("aria-pressed", "true");
+      expect(snap).toHaveTextContent("Node Snap: on");
+      expect(localStorage.getItem("samql.nodeSnap")).toBe("1");
     });
   });
 

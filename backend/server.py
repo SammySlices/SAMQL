@@ -1746,10 +1746,21 @@ class Api:
 
     @staticmethod
     def table_fields(s, m, body, ctx):
-        """Unified Field Explorer tree for one loaded table (all columns)."""
+        """Unified Field Explorer tree for one loaded table (all columns).
+
+        Body may include ``after`` (resume exclusive), ``query_id`` (Stop /
+        modal-close cancel), and optional ``budget_sec``. Discovery-only.
+        """
         b = body or {}
         name = unquote(m.group("name"))
-        return s.table_field_tree(b.get("engine", "duckdb"), name)
+        qid = b.get("query_id")
+        if qid:
+            _REQ_LOCAL.qid = qid
+        return s.table_field_tree(
+            b.get("engine", "duckdb"), name,
+            after=b.get("after"),
+            budget_sec=b.get("budget_sec"),
+            query_id=qid)
 
     @staticmethod
     def column_access_preview(s, m, body, ctx):

@@ -1432,6 +1432,137 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_parquet_view_cancel_honors_lock_wait():
+        # CODE was wrong: load_file_to_parquet_view cleared _cancel after
+        # acquiring write_lock, so Stop during the wait was lost and the load
+        # could still attach a view. Sticky clear is only at entry; a Stop
+        # during the wait must raise LoadCancelled and attach nothing.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        from samql_core.loaders import LoadCancelled
+        import threading
+        s = _fresh_session()
+        dd = tempfile.mkdtemp(prefix="samql_cxl_lock_")
+        try:
+            path = os.path.join(dd, "t.csv")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("a,b\n1,2\n3,4\n")
+            mgr = s.get_duckdb()
+            before = set(mgr.table_columns or {})
+            # Immediate job cancel: never attach.
+            raised = False
+            try:
+                mgr.load_file_to_parquet_view(
+                    "cxl_now", path, "csv", cancel=lambda: True)
+            except LoadCancelled:
+                raised = True
+            need(raised, "cancel()=True must raise LoadCancelled")
+            eq(set(mgr.table_columns or {}), before,
+               "immediate cancel must not attach a view")
+
+            result = {"err": None, "name": None}
+            ready = threading.Event()
+
+            def waiter():
+                ready.set()
+                try:
+                    result["name"] = mgr.load_file_to_parquet_view(
+                        "cxl_wait", path, "csv")
+                except Exception as e:
+                    result["err"] = e
+
+            need(mgr.write_lock.acquire(timeout=5),
+                 "test must hold write_lock to force waiter")
+            try:
+                th = threading.Thread(target=waiter, daemon=True)
+                th.start()
+                need(ready.wait(5), "waiter thread started")
+                time.sleep(0.15)  # reach write_lock wait
+                mgr.interrupt()   # Stop during wait
+            finally:
+                mgr.write_lock.release()
+            th.join(15)
+            need(isinstance(result["err"], LoadCancelled),
+                 "Stop during write_lock wait must raise LoadCancelled, "
+                 "got %r / name=%r" % (result["err"], result["name"]))
+            need(result["name"] is None, "cancelled load must not return a name")
+            need("cxl_wait" not in (mgr.table_columns or {}),
+                 "cancelled load must not attach cxl_wait")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            shutil.rmtree(dd, ignore_errors=True)
+
+    def t_field_tree_budget_resumes_nested_keys():
+        # CODE was wrong: after the wall budget, remaining nested columns were
+        # type-only stubs (permanent omit). Soft budget must return partial +
+        # next_after with deep keys already found; resume fills the rest.
+        # Discovery-only — no Parquet / table mutation.
+        if not feats.get("duckdb"):
+            skip("duckdb not available")
+        path = os.path.join(FRONTEND, "e2e", "fixtures",
+                            "highly_nested_trades.json")
+        need(os.path.isfile(path), "highly_nested_trades.json fixture missing")
+        s = _fresh_session()
+        try:
+            loaded = s.load_file(path, destination="duckdb",
+                                 flatten=False, shred=False)
+            name = loaded[0]["name"]
+            first = s.table_field_tree("duckdb", name, budget_sec=0.5)
+            need(first.get("ok") and not first.get("error"),
+                 "first chunk ok: %r" % first.get("error"))
+            notes = [str(f.get("note") or "") for f in (first.get("fields") or [])]
+            need(not any("type only" in n.lower() for n in notes),
+                 "budget must not emit type-only nested stubs: %r" % notes[:5])
+            acc = list(first.get("fields") or [])
+            after = first.get("next_after")
+            # Resume until complete (or a few chunks).
+            for _ in range(20):
+                if not first.get("partial") or not after:
+                    break
+                nxt = s.table_field_tree("duckdb", name, after=after,
+                                         budget_sec=2.0)
+                need(not nxt.get("error"), "resume ok: %r" % nxt.get("error"))
+                notes = [str(f.get("note") or "")
+                         for f in (nxt.get("fields") or [])]
+                need(not any("type only" in n.lower() for n in notes),
+                     "resume must not emit type-only stubs")
+                acc.extend(nxt.get("fields") or [])
+                after = nxt.get("next_after")
+                first = nxt
+            names = {f.get("name") for f in acc}
+            for must in ("tradeId", "terms", "counterparty", "legs"):
+                need(must in names,
+                     "resumable discovery must surface %r in %r"
+                     % (must, sorted(names)[:40]))
+
+            # Cancel mid-discovery: stop further columns, keep what was found.
+            calls = {"n": 0}
+            real = s.column_field_tree
+
+            def tracked(engine, table, column):
+                calls["n"] += 1
+                return real(engine, table, column)
+
+            s.column_field_tree = tracked  # type: ignore[method-assign]
+            try:
+                mid = s.table_field_tree(
+                    "duckdb", name, budget_sec=30.0,
+                    cancel=lambda: calls["n"] >= 1)
+            finally:
+                s.column_field_tree = real  # type: ignore[method-assign]
+            need(mid.get("cancelled") and mid.get("partial"),
+                 "cancel mid-discovery returns cancelled+partial: %r" % mid)
+            need(len(mid.get("fields") or []) >= 1,
+                 "cancel keeps already-found fields")
+            need(not any("type only" in str(f.get("note") or "").lower()
+                         for f in (mid.get("fields") or [])),
+                 "cancelled chunk has no type-only stubs")
+        finally:
+            s.shutdown()
+
     def t_field_access_recipes():
         # Every node in a column's field tree carries an ACCESS recipe: the
         # first-record [1]-path, the all-rows UNNEST chain, and (for arrays) the
@@ -13674,7 +13805,9 @@ def backend_tests(datadir, csv_path, json_path):
         # load_file_to_parquet_view: NDJSON rewrite must not sit inside write_lock
         idx = eng_src.find("def load_file_to_parquet_view")
         need(idx > 0, "load_file_to_parquet_view present")
-        body = eng_src[idx:idx + 3500]
+        # Window covers cancel-preamble + rewrite + COPY (grew with Stop-
+        # during-lock-wait guards); assertion is still rewrite-before-lock.
+        body = eng_src[idx:idx + 6500]
         need("_json_source_for_read(path)" in body
              and body.find("_json_source_for_read(path)")
              < body.find("with self.write_lock:"),
@@ -36782,6 +36915,162 @@ def backend_tests(datadir, csv_path, json_path):
             need(report["flow_preview"]["last"].get("preview") is True,
                  "flow benchmark uses bounded preview")
 
+    def t_hostile_nested_ndjson_perf_harness():
+        # Opt-in 2 GiB / 3M-explode suite lives in benchmark_nested_ndjson.py.
+        # Default CI only runs --self-test (tiny file, 2 records × 1500 = 3000
+        # leaf rows) so multi-GB loads stay out of the normal gate.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        gen = os.path.join(ROOT, "tests", "generate_hostile_nested_ndjson.py")
+        script = os.path.join(ROOT, "tests", "benchmark_nested_ndjson.py")
+        need(os.path.isfile(gen), "hostile NDJSON generator is bundled")
+        need(os.path.isfile(script),
+             "hostile nested NDJSON benchmark is bundled")
+        out = os.path.join(DATADIR, "benchmark-nested-ndjson-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        # Clear size overrides so --self-test keeps its tiny fixture.
+        env.pop("SAMQL_PERF_NDJSON_TARGET_BYTES", None)
+        env.pop("SAMQL_PERF_NDJSON_RECORDS", None)
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "hostile nested NDJSON self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "nested perf report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "nested perf self-test ok flag")
+        corr = result.get("correctness") or {}
+        need(corr.get("discovery_only") is True,
+             "Field Explorer must stay discovery-only")
+        need(corr.get("flatten_off_rows") == 2,
+             "self-test flatten-off keeps 2 source rows")
+        need(corr.get("exploded_leaf_rows") == 3000,
+             "self-test explode is 2×1500=3000, got %r"
+             % corr.get("exploded_leaf_rows"))
+        fan = result.get("fanout") or {}
+        eq(fan.get("fanout_per_record"), 1500, "documented per-record fan-out")
+        need(len(corr.get("field_explorer_names") or []) >= 20,
+             "Field Explorer surfaced nested/array fields")
+
+    def t_stress_cancel_reclaim_harness():
+        # Stall / cancel / reclaim stress suite (tests/stress_cancel_reclaim.py).
+        # Default CI runs --self-test: recursive CTE + tiny nested NDJSON, with
+        # cancel_return ≤ 500 ms and unwind ≤ 8 s across query/load/flatten/
+        # NodeFlow/journal/API/HDFS/chart/pivot/dashboard. Full hostile mode is
+        # opt-in via the script without --self-test (+ SAMQL_STALL_* env).
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        gen = os.path.join(ROOT, "tests", "generate_stall_workload.py")
+        script = os.path.join(ROOT, "tests", "stress_cancel_reclaim.py")
+        need(os.path.isfile(gen), "stall workload generator is bundled")
+        need(os.path.isfile(script), "stall cancel/reclaim stress suite bundled")
+        out = os.path.join(DATADIR, "stress-cancel-reclaim-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        env.pop("SAMQL_STALL_NDJSON_TARGET_BYTES", None)
+        env.pop("SAMQL_STALL_NDJSON_RECORDS", None)
+        env.pop("SAMQL_PERF_NDJSON_TARGET_BYTES", None)
+        env.pop("SAMQL_PERF_NDJSON_RECORDS", None)
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "stall cancel/reclaim self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "stall stress report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "stall stress self-test ok flag: %r"
+             % result.get("errors"))
+        surfaces = {s.get("surface"): s for s in (result.get("surfaces") or [])
+                    if isinstance(s, dict)}
+        for must in ("query", "load", "flattening", "nodeflow", "journal",
+                     "api_load", "hdfs", "chart", "pivot", "dashboard"):
+            need(must in surfaces, "missing surface %r in report" % must)
+            need(surfaces[must].get("ok") or surfaces[must].get("skipped"),
+                 "surface %r not ok: %r" % (must, surfaces[must]))
+        # Cancel latency evidence for the recursive-CTE query surface.
+        q = surfaces.get("query") or {}
+        need(q.get("cancel_return_ms", 9999) <= 500,
+             "query cancel_return_ms within self-test budget: %r" % q)
+        need(q.get("fresh_query_ok"), "sticky cancel cleared after query cancel")
+        hdfs = surfaces.get("hdfs") or {}
+        need(hdfs.get("hdfs_temps_left") == [],
+             "HDFS cancel reclaimed staging temps: %r" % hdfs)
+
+    def t_cache_memory_pressure_harness():
+        # Cache / memory pressure + reclaim suite
+        # (tests/benchmark_cache_memory_pressure.py). Default CI runs
+        # --self-test: tiny fixtures, result-budget override, cancel +
+        # free_memory / drop / filecache.sweep. Full aggressive mode is
+        # opt-in via the script without --self-test (+ SAMQL_CACHE_PRESSURE_*).
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        gen = os.path.join(ROOT, "tests", "generate_cache_pressure_workload.py")
+        script = os.path.join(ROOT, "tests",
+                              "benchmark_cache_memory_pressure.py")
+        need(os.path.isfile(gen), "cache pressure generator is bundled")
+        need(os.path.isfile(script),
+             "cache/memory pressure benchmark is bundled")
+        out = os.path.join(DATADIR, "benchmark-cache-memory-pressure-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        for k in ("SAMQL_CACHE_PRESSURE_TARGET_BYTES",
+                  "SAMQL_CACHE_PRESSURE_FILES",
+                  "SAMQL_CACHE_PRESSURE_RECORDS",
+                  "SAMQL_CACHE_PRESSURE_MAX_TABLES",
+                  "SAMQL_CACHE_PRESSURE_RESULTS_GB",
+                  "SAMQL_CACHE_PRESSURE_SKIP_SHRED"):
+            env.pop(k, None)
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "cache/memory pressure self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "cache pressure report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "cache pressure self-test ok flag: %r"
+             % result.get("errors"))
+        phases = {p.get("phase"): p for p in (result.get("phases") or [])
+                  if isinstance(p, dict)}
+        for must in ("filecache_loads", "result_stores", "cancel_reclaim",
+                     "explicit_reclaim"):
+            need(must in phases, "missing phase %r in report" % must)
+            need(phases[must].get("ok") or phases[must].get("skipped"),
+                 "phase %r not ok: %r" % (must, phases[must]))
+        reclaim = phases.get("explicit_reclaim") or {}
+        checks = reclaim.get("checks") or {}
+        need(checks.get("duck_tables_zero"),
+             "reclaim must drop duck tables: %r" % reclaim)
+        need(checks.get("cached_results_le_1"),
+             "reclaim must trim cached results: %r" % reclaim)
+        audit = result.get("audit") or {}
+        need(audit.get("filecache_survives_session") is True,
+             "audit must note persistent filecache")
+
     cases = [
         ("import & version", t_import),
         ("optional features report", t_features),
@@ -36795,6 +37084,12 @@ def backend_tests(datadir, csv_path, json_path):
         ("fast preview + period delta node", t_fast_preview_and_period_delta),
         ("repeatable DuckDB workload benchmark harness",
          t_workload_benchmark_harness),
+        ("hostile nested NDJSON perf harness (self-test; full 2GiB/3M opt-in)",
+         t_hostile_nested_ndjson_perf_harness),
+        ("stall cancel/reclaim stress harness (self-test; full opt-in)",
+         t_stress_cancel_reclaim_harness),
+        ("cache/memory pressure reclaim harness (self-test; full opt-in)",
+         t_cache_memory_pressure_harness),
         ("paging (offset/limit)", t_paging),
         ("sort descending", t_sort),
         ("notebook chained CTE query", t_notebook_chained_cte),
@@ -37109,6 +37404,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_column_field_tree),
         ("field explorer: flatten-off highly nested JSON is one table-rooted tree",
          t_field_explorer_table_rooted_highly_nested),
+        ("load cancel: Stop during write_lock wait does not attach a view",
+         t_parquet_view_cancel_honors_lock_wait),
+        ("field explorer: budget resumes nested keys (no type-only omit)",
+         t_field_tree_budget_resumes_nested_keys),
         ("memory: the DuckDB memory probe never blocks on the engine",
          t_memory_probe_never_blocks),
         ("field explorer: per-node access recipes ([1] path + UNNEST chain)",

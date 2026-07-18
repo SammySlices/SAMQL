@@ -23,6 +23,7 @@ vi.mock("../lib/api", () => ({
     shredPlan: vi.fn(),
     tableRootIdOptions: vi.fn(),
     tableRootIdStats: vi.fn(),
+    cancelQuery: vi.fn(() => Promise.resolve({ ok: true })),
   },
   copyText: vi.fn(() => Promise.resolve()),
 }));
@@ -182,6 +183,7 @@ describe("FieldExplorer shred steering", () => {
         "duckdb",
         "highly_nested_trades",
         expect.any(AbortSignal),
+        expect.objectContaining({ query_id: expect.any(String) }),
       ),
     );
   });
@@ -755,7 +757,128 @@ describe("FieldExplorer no-table state", () => {
         "duckdb",
         "orders",
         expect.any(AbortSignal),
+        expect.objectContaining({ query_id: expect.any(String) }),
       ),
+    );
+  });
+});
+
+describe("FieldExplorer modal close cancels nested discovery", () => {
+  beforeEach(() => {
+    localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
+    vi.mocked(api.cancelQuery).mockClear();
+    vi.mocked(api.tableFields).mockReset();
+    vi.mocked(api.columnAccessPreview).mockResolvedValue({ ok: false } as any);
+  });
+
+  it("aborts fetch and cancelQuery when the panel closes mid-discovery", async () => {
+    let resolveFields: ((v: unknown) => void) | null = null;
+    const pending = new Promise((resolve) => {
+      resolveFields = resolve;
+    });
+    vi.mocked(api.tableFields).mockImplementation(
+      (_e, _t, signal?: AbortSignal) => {
+        return new Promise((resolve, reject) => {
+          const onAbort = () => reject(new DOMException("aborted", "AbortError"));
+          signal?.addEventListener("abort", onAbort, { once: true });
+          void pending.then((v) => {
+            signal?.removeEventListener("abort", onAbort);
+            if (signal?.aborted) {
+              reject(new DOMException("aborted", "AbortError"));
+              return;
+            }
+            resolve(v as any);
+          });
+        });
+      },
+    );
+
+    const { rerender } = render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(api.tableFields).toHaveBeenCalled());
+    const signal = vi.mocked(api.tableFields).mock.calls[0][2] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+
+    rerender(
+      <FieldExplorer
+        open={false}
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(signal.aborted).toBe(true));
+    await waitFor(() =>
+      expect(api.cancelQuery).toHaveBeenCalledWith(
+        expect.stringMatching(/^fe-fields-/),
+      ),
+    );
+    // Unblock the hanging promise so the test does not leak.
+    resolveFields?.({ fields: [] });
+  });
+
+  it("resumes with after when a chunk returns partial + next_after", async () => {
+    vi.mocked(api.tableFields)
+      .mockResolvedValueOnce({
+        fields: [
+          {
+            depth: 1,
+            name: "a",
+            type: "JSON",
+            kind: "struct",
+            column: "a",
+            path: "a",
+            access: { first: "a", sel: "a", unnests: [] },
+          },
+        ],
+        partial: true,
+        next_after: "a",
+      } as any)
+      .mockResolvedValueOnce({
+        fields: [
+          {
+            depth: 1,
+            name: "b",
+            type: "JSON",
+            kind: "struct",
+            column: "b",
+            path: "b",
+            access: { first: "b", sel: "b", unnests: [] },
+          },
+        ],
+        partial: false,
+      } as any);
+
+    const twoCols: TableInfo[] = [
+      {
+        engine: "duckdb",
+        name: "wide",
+        source: "wide.json",
+        row_count: 2,
+        columns: [
+          { name: "a", type: "JSON", hint: "json" },
+          { name: "b", type: "JSON", hint: "json" },
+        ],
+      },
+    ];
+    render(
+      <FieldExplorer open onClose={vi.fn()} tables={twoCols} onToast={vi.fn()} />,
+    );
+    await screen.findByText("a");
+    await screen.findByText("b");
+    await waitFor(() => expect(api.tableFields).toHaveBeenCalledTimes(2));
+    expect(api.tableFields).toHaveBeenNthCalledWith(
+      2,
+      "duckdb",
+      "wide",
+      expect.any(AbortSignal),
+      expect.objectContaining({ after: "a", query_id: expect.any(String) }),
     );
   });
 });

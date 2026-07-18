@@ -497,7 +497,12 @@ def _is_interrupt(exc):
     """True if an exception came from a query being interrupted/cancelled."""
     name = exc.__class__.__name__.lower()
     s = str(exc).lower()
-    return ("interrupt" in name or "interrupt" in s or "cancel" in s)
+    # DuckDB sometimes surfaces a Stop as OperationalError("not an error")
+    # after interrupt(); treat that as a cancel so journal/IDE runs report
+    # cancelled instead of a spurious failure.
+    return ("interrupt" in name or "interrupt" in s or "cancel" in s
+            or s.strip() == "not an error"
+            or s.endswith(": not an error"))
 
 
 def _rename_row_vars(row, rename):
@@ -1402,7 +1407,8 @@ class Session:
                 return sampled
         return {"type": raw, "fields": rows}
 
-    def table_field_tree(self, engine, table):
+    def table_field_tree(self, engine, table, after=None, budget_sec=None,
+                         cancel=None, query_id=None):
         """Unified Field Explorer tree for one loaded table.
 
         Flatten-off JSON often expands to several top-level columns on a
@@ -1412,6 +1418,13 @@ class Session:
         field underneath. Each row carries ``column`` (owning top-level name)
         so preview / shred stay column-scoped while multi-select spans the
         whole table.
+
+        Discovery-only (never mutates Parquet / table contents). A soft wall
+        budget may return ``partial`` + ``next_after`` so the UI can paint
+        already-found nested keys and resume remaining columns — never a
+        permanent type-only omit for unscanned nests. ``cancel`` /
+        ``query_id`` stop further sampling (Field Explorer modal close).
+        ``after`` resumes exclusive after that top-level column name.
         """
         mgr = self.duckdb if engine == "duckdb" else self.db
         if mgr is None or not hasattr(mgr, "_column_types_raw"):
@@ -1424,26 +1437,56 @@ class Session:
             return {"fields": [], "error": "No columns."}
 
         out = []
-        # Discovery-only wall budget: after this, remaining columns get a
-        # type-only row (no deep sample / OFFSET probes) so Field Explorer
-        # can paint instead of blocking the API thread on wide nested tables.
-        try:
-            budget = float(os.environ.get("SAMQL_FIELD_TREE_BUDGET_SEC") or 3.0)
-        except Exception:
-            budget = 3.0
+        # Soft wall budget for first paint / resume chunks. Remaining columns
+        # are left for a follow-up call (next_after) — not type-only stubs.
+        if budget_sec is None:
+            try:
+                budget = float(os.environ.get("SAMQL_FIELD_TREE_BUDGET_SEC")
+                               or 3.0)
+            except Exception:
+                budget = 3.0
+        else:
+            try:
+                budget = float(budget_sec)
+            except Exception:
+                budget = 3.0
         budget = max(0.5, min(budget, 30.0))
         t0 = time.monotonic()
         partial = False
+        cancelled = False
+        next_after = None
+        last_done = None
+        resume_after = after if isinstance(after, str) and after else None
+        if resume_after and resume_after not in raw_cols:
+            resume_after = None
+        skipping = bool(resume_after)
+
+        def _cancelled():
+            if cancel and cancel():
+                return True
+            if query_id and self._run_is_cancelled(query_id):
+                return True
+            return False
+
         for col, typ in raw_cols.items():
-            q = self._fe_quote_select_ident(col)
-            deep = (time.monotonic() - t0) < budget
-            if deep:
-                sub = self.column_field_tree(engine, table, col)
-                nested = list(sub.get("fields") or [])
-            else:
+            if skipping:
+                if col == resume_after:
+                    skipping = False
+                continue
+            if _cancelled():
+                cancelled = True
                 partial = True
-                nested = []
-                sub = {"fields": [], "type": typ or ""}
+                next_after = last_done
+                break
+            # Budget only stops *before* starting another column once at
+            # least one column has been fully deep-sampled this call.
+            if last_done is not None and (time.monotonic() - t0) >= budget:
+                partial = True
+                next_after = last_done
+                break
+            q = self._fe_quote_select_ident(col)
+            sub = self.column_field_tree(engine, table, col)
+            nested = list(sub.get("fields") or [])
             if nested:
                 root_kind = "struct"
                 tu = (typ or "").strip().upper()
@@ -1469,25 +1512,22 @@ class Session:
                     row["column"] = col
                     out.append(row)
             else:
-                note = ("Sample budget reached — type only; reopen Field "
-                        "Explorer or select this column later for nested keys."
-                        if partial and not deep and (
-                            (typ or "").upper().find("STRUCT") >= 0
-                            or (typ or "").upper() in ("JSON", "JSON[]")
-                            or (typ or "").endswith("[]"))
-                        else None)
                 out.append({
                     "depth": 1,
                     "name": col,
                     "type": typ or "",
-                    "kind": "scalar" if not note else "struct",
+                    "kind": "scalar",
                     "path": col,
-                    "note": note,
+                    "note": None,
                     "column": col,
                     "access": {"first": q, "sel": q, "unnests": []},
                 })
+            last_done = col
+            # Cancel is checked at the top of the next iteration so a finished
+            # column's nested keys are kept (modal-close stops further search).
         return {"ok": True, "fields": out, "table": table,
-                "partial": partial}
+                "partial": partial, "next_after": next_after,
+                "cancelled": cancelled}
 
     # Live-cell field discovery: how many rows to pull when DESCRIBE stops at
     # opaque JSON (flatten-off maximum_depth). Kept modest — union of shapes,
@@ -9921,7 +9961,10 @@ class Session:
             return resident * os.sysconf("SC_PAGE_SIZE")
         except Exception:
             pass
-        # Windows: WorkingSetSize via psapi / kernel32
+        # Windows: WorkingSetSize via psapi / kernel32.
+        # Set argtypes/restype explicitly — without them, modern CPython
+        # (e.g. 3.14) can pass arguments wrong and GetProcessMemoryInfo
+        # returns FALSE, leaving memory_usage() stuck at 0 forever.
         try:
             import ctypes
             from ctypes import wintypes
@@ -9939,18 +9982,26 @@ class Session:
                             ("PeakPagefileUsage", ctypes.c_size_t)]
             c = _PMC()
             c.cb = ctypes.sizeof(c)
-            k = ctypes.windll.kernel32
-            h = k.GetCurrentProcess()
+            h = ctypes.windll.kernel32.GetCurrentProcess()
             ok = False
             try:
-                ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-                    h, ctypes.byref(c), c.cb)
+                psapi = ctypes.WinDLL("psapi")
+                psapi.GetProcessMemoryInfo.argtypes = [
+                    wintypes.HANDLE, ctypes.POINTER(_PMC), wintypes.DWORD]
+                psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+                ok = bool(psapi.GetProcessMemoryInfo(
+                    h, ctypes.byref(c), c.cb))
             except Exception:
                 ok = False
             if not ok:
                 try:
-                    ok = k.K32GetProcessMemoryInfo(
-                        h, ctypes.byref(c), c.cb)
+                    k = ctypes.WinDLL("kernel32", use_last_error=True)
+                    k.K32GetProcessMemoryInfo.argtypes = [
+                        wintypes.HANDLE, ctypes.POINTER(_PMC),
+                        wintypes.DWORD]
+                    k.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+                    ok = bool(k.K32GetProcessMemoryInfo(
+                        h, ctypes.byref(c), c.cb))
                 except Exception:
                     ok = False
             if ok:
@@ -11218,11 +11269,20 @@ class Session:
                     else self.db)
         except Exception:
             eng0 = None
+        # Same sticky-_cancel trap as profile/page: a prior Stop left the
+        # engine Event SET and BeatDaemon would auto-abort this chart.
+        self._clear_stale_engine_cancel(eng0, except_qid=qid)
         self._register_run(
             qid, eng0, kind="chart", surface="chart",
             label=str(spec.get("table") or spec.get("result_id") or "result"))
         try:
+            if self._run_is_cancelled(qid):
+                return {"error": "interrupted", "cancelled": True}
             return self._chart_data_inner(spec, qid)
+        except Exception as e:
+            if _is_interrupt(e) or self._run_is_cancelled(qid):
+                return {"error": "interrupted", "cancelled": True}
+            raise
         finally:
             self._end_run_keep_cancel(qid)
 
@@ -11631,11 +11691,20 @@ class Session:
                     else self.db)
         except Exception:
             eng0 = None
+        # Clear sticky engine cancel from a prior Stop/load (same as chart/
+        # profile/page) so BeatDaemon does not auto-abort this pivot.
+        self._clear_stale_engine_cancel(eng0, except_qid=qid)
         self._register_run(qid, eng0, kind="pivot", surface="pivot",
                            label=str(spec.get("table")
                                      or spec.get("result_id") or "result"))
         try:
+            if self._run_is_cancelled(qid):
+                return {"error": "interrupted", "cancelled": True}
             return self._pivot_inner(spec, qid)
+        except Exception as e:
+            if _is_interrupt(e) or self._run_is_cancelled(qid):
+                return {"error": "interrupted", "cancelled": True}
+            raise
         finally:
             # Keep the cancelled flag so a late cancel is still reported as
             # cancel (mid-send abort via _REQ_LOCAL).

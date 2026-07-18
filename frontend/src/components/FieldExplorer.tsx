@@ -211,10 +211,14 @@ export const FieldExplorer: React.FC<Props> = ({
   // user already switched sources (or tables refreshed under the same key).
   const srcKeyRef = useRef(srcKey);
   srcKeyRef.current = srcKey;
+  const openRef = useRef(open);
+  openRef.current = open;
   // Monotonic fetch id so an older in-flight tableFields cannot overwrite a
   // newer result (same srcKey) — that looked like nested keys "reverting"
   // to a hollow JSON/(element) placeholder.
   const fieldsFetchGen = useRef(0);
+  // Backend query_id for the in-flight nested discovery chunk loop.
+  const discoveryQidRef = useRef<string | null>(null);
 
   const primaryColumn = (row: FieldRow | null | undefined) =>
     row?.column || row?.name || "";
@@ -228,6 +232,13 @@ export const FieldExplorer: React.FC<Props> = ({
     };
     if (isEl) setClosedEls(flip);
     else setOpenFields(flip);
+  };
+
+  const stopDiscovery = (engine?: string, table?: string) => {
+    const qid = discoveryQidRef.current;
+    discoveryQidRef.current = null;
+    if (engine && table) abortTableFieldsDiscovery(engine, table);
+    if (qid) void api.cancelQuery(qid).catch(() => {});
   };
 
   const reloadFields = (engine: string, table: string, key: string) => {
@@ -245,29 +256,62 @@ export const FieldExplorer: React.FC<Props> = ({
     setShredInfo(null);
     // Abort competing Sidebar column samples for this table, then own the slot.
     const ctrl = startTableFieldsDiscovery(engine, table);
+    const discoveryId = `fe-fields-${Date.now().toString(36)}-${gen}`;
+    discoveryQidRef.current = discoveryId;
     // Defer fetch until after paint so opening FE shows loading, not a dead UI.
+    // Soft budget chunks resume via after/next_after so nested keys already
+    // found are kept; closing the modal cancels further search.
     const cancelPaint = runAfterPaint(() => {
-      api
-        .tableFields(engine, table, ctrl.signal)
-        .then((r) => {
-          if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
-          if (ctrl.signal.aborted) return;
-          setFields((r.fields || []) as FieldRow[]);
-        })
-        .catch(() => {
-          if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
-          if (ctrl.signal.aborted) return;
-          setFields([]);
-        })
-        .finally(() => {
+      void (async () => {
+        let after: string | null | undefined = null;
+        let acc: FieldRow[] = [];
+        try {
+          while (
+            !ctrl.signal.aborted &&
+            gen === fieldsFetchGen.current &&
+            key === srcKeyRef.current &&
+            openRef.current
+          ) {
+            const r = await api.tableFields(engine, table, ctrl.signal, {
+              after: after || undefined,
+              query_id: discoveryId,
+            });
+            if (
+              gen !== fieldsFetchGen.current ||
+              key !== srcKeyRef.current ||
+              ctrl.signal.aborted ||
+              !openRef.current
+            ) {
+              return;
+            }
+            const chunk = (r.fields || []) as FieldRow[];
+            acc = after ? acc.concat(chunk) : chunk;
+            setFields(acc);
+            if (r.cancelled || !r.partial || !r.next_after) break;
+            after = r.next_after;
+          }
+        } catch {
+          if (
+            gen !== fieldsFetchGen.current ||
+            key !== srcKeyRef.current ||
+            ctrl.signal.aborted
+          ) {
+            return;
+          }
+          if (!acc.length) setFields([]);
+        } finally {
+          if (discoveryQidRef.current === discoveryId) {
+            discoveryQidRef.current = null;
+          }
           if (gen === fieldsFetchGen.current && key === srcKeyRef.current) {
             setBusy(false);
           }
-        });
+        }
+      })();
     });
     return () => {
       cancelPaint();
-      abortTableFieldsDiscovery(engine, table);
+      stopDiscovery(engine, table);
     };
   };
   const initPos = {
@@ -282,14 +326,24 @@ export const FieldExplorer: React.FC<Props> = ({
   }, [sources, srcKey]);
 
   useEffect(() => {
-    if (!src) {
+    if (!open || !src) {
       setFields(null);
       setShredInfo(null);
       return;
     }
     return reloadFields(src.engine, src.table, src.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [srcKey]);
+  }, [srcKey, open]);
+
+  // Closing the Field Explorer modal cancels in-flight nested discovery
+  // (AbortController + backend query_id), matching Stop semantics.
+  useEffect(() => {
+    if (open) return;
+    const eng = src?.engine;
+    const tbl = src?.table;
+    stopDiscovery(eng, tbl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   // Clear stale fields if the selected source disappears without srcKey
   // changing (e.g. its table was removed/renamed on a tables refresh), so

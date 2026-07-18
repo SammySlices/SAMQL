@@ -2972,7 +2972,7 @@ class DuckDBManager:
         return dst, True, dst
 
     def create_table_from_file(self, name, path, kind, delimiter=None,
-                               json_depth=None):
+                               json_depth=None, cancel=None):
         """Materialize a file into a real DuckDB table.
 
         Unlike a file-backed view (which re-parses the source on every
@@ -2992,7 +2992,13 @@ class DuckDBManager:
         ``json_depth`` (JSON only) caps DuckDB nested-type expansion
         (``maximum_depth``). Used by flatten-off loads so deep nesting
         stays as JSON instead of exploding into STRUCTs.
+
+        ``cancel`` (optional callable -> bool) is the load-job Stop flag.
+        Sticky ``_cancel`` from a *prior* Stop is cleared once at entry;
+        a Stop that lands while waiting for the lock is honored and must
+        not attach a table.
         """
+        from .loaders import LoadCancelled
         # CONCURRENT LOADS (on-box 2026-07-02: a second load queued behind
         # a running conversion for its whole duration). A cursor is its own
         # connection; DuckDB's MVCC takes two writers to DIFFERENT tables,
@@ -3015,11 +3021,25 @@ class DuckDBManager:
                 lock_ctx = self.write_lock
         final = self.reserve_table_name(name)
         cleanup = None
+        landed = False
         try:
+          # Fresh load: clear sticky cancel from a prior Stop once. Do NOT
+          # clear again after lock wait — that erased Stop during the wait.
+          self._cancel.clear()
+
+          def _cancelled():
+              if cancel and cancel():
+                  return True
+              try:
+                  return bool(self._cancel.is_set())
+              except Exception:
+                  return False
+
+          if _cancelled():
+              raise LoadCancelled()
           # NDJSON rewrite is filesystem-only; keep it outside write_lock so a
           # large array rewrite does not serialize the whole engine when
           # concurrent_reads is off (NullCtx path was already unlocked).
-          self._cancel.clear()
           fwd = sqlutil.sql_path(path)
           mem_mb = self._applied_resource_memory_mb
           if kind == "parquet":
@@ -3032,16 +3052,20 @@ class DuckDBManager:
                   maximum_depth=json_depth)
           else:  # csv / delimited text
               readers = _csv_readers(fwd, delimiter)
+          if _cancelled():
+              raise LoadCancelled()
           with lock_ctx:
-            # Fresh load: clear any cancel left set by a previous one so it
-            # can't abort this read before it starts (after lock wait).
-            self._cancel.clear()
+            # Honor Stop that landed while waiting for the lock.
+            if _cancelled():
+                raise LoadCancelled()
             try:
                 with _ExecKeepalive(self.conn, self._cancel,
                                     threading.get_ident()):
                     last = None
                     for rdr in readers:
                         try:
+                            if _cancelled():
+                                raise LoadCancelled()
                             exec_conn.execute(
                                 f'DROP TABLE IF EXISTS "{final}"')
                             exec_conn.execute(
@@ -3060,10 +3084,20 @@ class DuckDBManager:
                                 cols = self._maybe_expand_json_struct(final)
                             cols = _rewrite_columns_sanitized(
                                 exec_conn, final, cols)
+                            if _cancelled():
+                                try:
+                                    exec_conn.execute(
+                                        f'DROP TABLE IF EXISTS "{final}"')
+                                except Exception:
+                                    pass
+                                raise LoadCancelled()
                             self.table_columns[final] = cols
                             self._types_cache_drop(final)
                             self.table_sources[final] = path
+                            landed = True
                             return final
+                        except LoadCancelled:
+                            raise
                         except Exception as e:
                             # A cancel interrupts the running read. Do NOT fall
                             # through to the tolerant reader -- that would quietly
@@ -3095,6 +3129,23 @@ class DuckDBManager:
             if cleanup:
                 try:
                     os.unlink(cleanup)
+                except Exception:
+                    pass
+            # CTAS partial: last-reader rewrite failure / cancel after CREATE
+            # must not leave an orphan table under the reserved name.
+            if not landed:
+                try:
+                    exec_conn.execute(f'DROP TABLE IF EXISTS "{final}"')
+                except Exception:
+                    pass
+                for reg in ("table_columns", "table_sources", "view_backing",
+                            "table_origins"):
+                    try:
+                        getattr(self, reg, {}).pop(final, None)
+                    except Exception:
+                        pass
+                try:
+                    self._types_cache_drop(final)
                 except Exception:
                     pass
             self.release_table_name(final)
@@ -3229,7 +3280,8 @@ class DuckDBManager:
         cooperative flag, and the optional ``cancel`` pre-check catches a stop
         that lands first. On cancel or failure the partial cache is removed and
         the exception propagates (the caller may fall back to an in-memory
-        load).
+        load). A cancelled same-file waiter must not attach a newly cached
+        view after ``conversion_lock`` / ``write_lock`` wait.
 
         ``json_depth`` (JSON only) is included in the file-cache key so a
         shallow flatten-off conversion never collides with a full nested one.
@@ -3237,6 +3289,24 @@ class DuckDBManager:
         from .loaders import LoadCancelled
         from . import tmputil
         from . import filecache
+        # Fresh load: clear sticky cancel from a prior Stop once. Do NOT
+        # clear again after lock waits — that erased Stop during the wait
+        # and let cancelled waiters attach tables/views.
+        try:
+            self._cancel.clear()
+        except Exception:
+            pass
+
+        def _cancelled():
+            if cancel and cancel():
+                return True
+            try:
+                return bool(self._cancel.is_set())
+            except Exception:
+                return False
+
+        if _cancelled():
+            raise LoadCancelled()
         # Persistent conversion cache: if this exact file (path+size+mtime,
         # same reader) was converted before -- even by a previous app run --
         # attach the existing Parquet and skip the whole parse. The key
@@ -3249,14 +3319,20 @@ class DuckDBManager:
             if filecache.enabled() else None
         hit = filecache.lookup(fc_key)
         if hit:
+            if _cancelled():
+                raise LoadCancelled()
             final = self.create_view_from_file(name, hit, "parquet")
             DuckDBManager._remember_origin(self, final, path)
             return final
         # Single-flight per cache key (acquire before write_lock). A waiter
         # re-looks up after the leader commits instead of duplicating COPY.
         with filecache.conversion_lock(fc_key):
+            if _cancelled():
+                raise LoadCancelled()
             hit = filecache.lookup(fc_key)
             if hit:
+                if _cancelled():
+                    raise LoadCancelled()
                 final = self.create_view_from_file(name, hit, "parquet")
                 DuckDBManager._remember_origin(self, final, path)
                 return final
@@ -3270,7 +3346,6 @@ class DuckDBManager:
                 # NDJSON rewrite is pure filesystem work — do it outside write_lock
                 # so concurrent reads / peeks / cancel bookkeeping are not blocked
                 # for the whole multi-GB stream rewrite. COPY still takes the lock.
-                self._cancel.clear()
                 fwd = sqlutil.sql_path(path)
                 if kind == "parquet":
                     readers = [f"read_parquet('{fwd}')"]
@@ -3283,13 +3358,11 @@ class DuckDBManager:
                         maximum_depth=json_depth)
                 else:  # csv / delimited text
                     readers = _csv_readers(fwd, delimiter)
-                if cancel and cancel():
+                if _cancelled():
                     raise LoadCancelled()
                 with self.write_lock:
-                    # Drop sticky cancel again after waiting for the lock so a
-                    # prior Stop cannot auto-abort this COPY via BeatDaemon.
-                    self._cancel.clear()
-                    if cancel and cancel():
+                    # Honor Stop that landed while waiting for the lock.
+                    if _cancelled():
                         raise LoadCancelled()
                     # Try every reader (typed → tolerant), same ladder as CTAS.
                     # A single first-reader failure used to abort the whole
@@ -3303,16 +3376,14 @@ class DuckDBManager:
                                     os.unlink(cache)
                             except OSError:
                                 pass
-                            if cancel and cancel():
+                            if _cancelled():
                                 raise LoadCancelled()
                             with _ExecKeepalive(self.conn, self._cancel,
                                                 threading.get_ident()):
                                 exec_copy_parquet(
                                     self.conn,
                                     "SELECT * FROM %s" % reader, cfwd,
-                                    should_cancel=(
-                                        lambda: bool(cancel and cancel())
-                                        or self._cancel.is_set()),
+                                    should_cancel=_cancelled,
                                     interrupt_fn=getattr(
                                         self.conn, "interrupt", None))
                             copied = True
@@ -3340,6 +3411,12 @@ class DuckDBManager:
                         os.unlink(cleanup)
                     except OSError:
                         pass
+            if _cancelled():
+                try:
+                    os.unlink(cache)
+                except OSError:
+                    pass
+                raise LoadCancelled()
             if fc_key:
                 try:
                     # publish atomically so a crash mid-COPY never leaves a half
@@ -3357,6 +3434,12 @@ class DuckDBManager:
                         _sh.copyfile(cache, fallback)
                         filecache.abort(cache)
                     cache = fallback
+            if _cancelled():
+                try:
+                    os.unlink(cache)
+                except OSError:
+                    pass
+                raise LoadCancelled()
             # Expose the cache as a query-in-place view (reuses the parquet path).
             # Keep the ORIGINAL file path so diagnostics / nested field trees can
             # still sniff JSON after table_sources points at the Parquet cache.
