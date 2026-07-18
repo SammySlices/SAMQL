@@ -49,6 +49,16 @@ export function marqueeHits(boxes: Box[], rect: MarqueeRect): string[] {
     .map((b) => b.id);
 }
 
+/** True when two id lists are the same length and order (marquee hit order). */
+export function sameIdList(a: readonly string[], b: readonly string[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 export interface PortPoint {
   node: string;
   port: string;

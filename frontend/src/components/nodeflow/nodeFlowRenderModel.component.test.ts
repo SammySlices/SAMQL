@@ -66,7 +66,22 @@ describe("NodeFlow render model", () => {
     );
 
     expect(visible.map((item) => item.id)).toEqual(["n0", "n1", "n2", "n3", "n129"]);
-    expect(selectVisibleCanvasNodes(nodes.slice(0, 10), { x: 0, y: 0, w: 1, h: 1 }, 1, new Set(), 120, 0)).toHaveLength(10);
+    const underThreshold = nodes.slice(0, 10);
+    expect(
+      selectVisibleCanvasNodes(underThreshold, { x: 0, y: 0, w: 1, h: 1 }, 1, new Set(), 120, 0),
+    ).toBe(underThreshold);
+    const underWire = Array.from({ length: 10 }, (_, index) => ({
+      id: `w${index}`,
+      ax: 0,
+      ay: 0,
+      bx: 10,
+      by: 10,
+      fromN: `a${index}`,
+      toN: `b${index}`,
+    }));
+    expect(
+      selectVisibleCanvasWires(underWire, { x: 0, y: 0, w: 1, h: 1 }, 1, new Set(), null, 220, 0),
+    ).toBe(underWire);
   });
 
   it("builds a four-thousand-node render model without quadratic edge scans", () => {

@@ -1304,7 +1304,7 @@ console.log("OK");
 
 _NODEGRAPH_HARNESS = r"""
 import {
-  wirePath, marqueeHits, nearestPort, clampPointToBox, serializeGraph,
+  wirePath, marqueeHits, sameIdList, nearestPort, clampPointToBox, serializeGraph,
   stripCosmeticNodeConfig, serializeGraphForExecution, executionGraphSignature,
 } from "./nodegraph.mjs";
 
@@ -1340,6 +1340,14 @@ eq(marqueeHits(boxes, { x0: 50, y0: 0, x1: 60, y1: 10 }), ["a"],
 eq(marqueeHits(boxes, { x0: 500, y0: 500, x1: 510, y1: 510 }), [],
   "no boxes far away");
 eq(marqueeHits([], { x0: 0, y0: 0, x1: 10, y1: 10 }), [], "no boxes -> empty");
+
+// ---- sameIdList: marquee skip setSelectedIds when membership unchanged ----
+const ids = ["a", "c"];
+assert(sameIdList(ids, ids), "same reference");
+assert(sameIdList(["a", "c"], ["a", "c"]), "equal contents");
+assert(!sameIdList(["a", "c"], ["a"]), "length differs");
+assert(!sameIdList(["a", "c"], ["c", "a"]), "order matters for hit lists");
+assert(sameIdList([], []), "empty lists");
 
 // ---- nearestPort: closest input within tolerance --------------------------
 const ports = [

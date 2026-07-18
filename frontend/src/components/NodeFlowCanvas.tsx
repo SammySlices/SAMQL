@@ -13,8 +13,73 @@ import {
 
 export type Wire = NodeFlowWire;
 
+const WireRow = React.memo(function WireRow({
+  w,
+  selected,
+  retracting,
+  glowing,
+  onSelect,
+  onDelete,
+}: {
+  w: Wire;
+  selected: boolean;
+  retracting: boolean;
+  glowing: boolean;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  // One Bezier string shared by hit / line / glow (was 3× wirePath per wire).
+  const d = wirePath(w.ax, w.ay, w.bx, w.by);
+  const mx = (w.ax + w.bx) / 2;
+  const my = (w.ay + w.by) / 2;
+  return (
+    <g
+      className={
+        "nb2-wire" + (selected ? " sel" : "") + (retracting ? " retract" : "")
+      }
+      data-testid={retracting ? "nodeflow-wire-retracting" : undefined}
+    >
+      <path
+        className="nb2-wire-hit"
+        d={d}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (retracting) return;
+          onSelect(w.id);
+        }}
+      />
+      <path className="nb2-wire-line" d={d} pathLength={1} />
+      <path
+        className={"nb2-wire-glow" + (glowing ? " active" : "")}
+        d={d}
+        pathLength={1}
+      />
+      <g
+        className="nb2-wire-del"
+        transform={`translate(${mx},${my})`}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (retracting) return;
+          onDelete(w.id);
+        }}
+      >
+        <title>Delete connection</title>
+        <circle className="nb2-wire-del-hit" r="13" />
+        <circle className="nb2-wire-del-dot" r="9" />
+        <path
+          className="nb2-wire-del-x"
+          d="M -3.2 -3.2 L 3.2 3.2 M 3.2 -3.2 L -3.2 3.2"
+        />
+      </g>
+    </g>
+  );
+});
+
 // Committed wires are pure geometry. Keeping them outside NodeFlow means
 // inspector/config state cannot make the SVG tree reconcile unnecessarily.
+// Per-wire memo: dirty-wire patch preserves object identity for stationary
+// wires so only moved endpoints re-render.
 export const WireLayer = React.memo(function WireLayer({
   wires,
   selectedId,
@@ -38,59 +103,20 @@ export const WireLayer = React.memo(function WireLayer({
   return (
     <svg className="nb2-wires">
       {wires.map((w) => {
-        const sel = w.id === selectedId;
         const retracting =
           !!dyingEdges?.has(w.id) ||
           !!(dying && (dying.has(w.fromN) || dying.has(w.toN)));
         const glowing = runningNodeIds == null || runningNodeIds.has(w.toN);
-        const mx = (w.ax + w.bx) / 2;
-        const my = (w.ay + w.by) / 2;
         return (
-          <g
+          <WireRow
             key={w.id}
-            className={
-              "nb2-wire" + (sel ? " sel" : "") + (retracting ? " retract" : "")
-            }
-            data-testid={retracting ? "nodeflow-wire-retracting" : undefined}
-          >
-            <path
-              className="nb2-wire-hit"
-              d={wirePath(w.ax, w.ay, w.bx, w.by)}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (retracting) return;
-                onSelect(w.id);
-              }}
-            />
-            <path
-              className="nb2-wire-line"
-              d={wirePath(w.ax, w.ay, w.bx, w.by)}
-              pathLength={1}
-            />
-            <path
-              className={"nb2-wire-glow" + (glowing ? " active" : "")}
-              d={wirePath(w.ax, w.ay, w.bx, w.by)}
-              pathLength={1}
-            />
-            <g
-              className="nb2-wire-del"
-              transform={`translate(${mx},${my})`}
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (retracting) return;
-                onDelete(w.id);
-              }}
-            >
-              <title>Delete connection</title>
-              <circle className="nb2-wire-del-hit" r="13" />
-              <circle className="nb2-wire-del-dot" r="9" />
-              <path
-                className="nb2-wire-del-x"
-                d="M -3.2 -3.2 L 3.2 3.2 M 3.2 -3.2 L -3.2 3.2"
-              />
-            </g>
-          </g>
+            w={w}
+            selected={w.id === selectedId}
+            retracting={retracting}
+            glowing={glowing}
+            onSelect={onSelect}
+            onDelete={onDelete}
+          />
         );
       })}
     </svg>
@@ -202,56 +228,45 @@ export const NodeMinimap = React.memo(function NodeMinimap({
   const MM_W = 172;
   const MM_H = 116;
   const PAD = 60;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const n of nodes) {
-    minX = Math.min(minX, n.x);
-    minY = Math.min(minY, n.y);
-    maxX = Math.max(maxX, n.x + nodeWidth(n));
-    maxY = Math.max(maxY, n.y + nodeHeight(n));
-  }
   const z = zoom || 1;
   const vx = viewport.x / z;
   const vy = viewport.y / z;
   const vw = viewport.w / z;
   const vh = viewport.h / z;
-  minX = Math.min(minX, vx) - PAD;
-  minY = Math.min(minY, vy) - PAD;
-  maxX = Math.max(maxX, vx + vw) + PAD;
-  maxY = Math.max(maxY, vy + vh) + PAD;
-  const liveScale = Math.min(
-    MM_W / Math.max(1, maxX - minX),
-    MM_H / Math.max(1, maxY - minY),
-  );
-  // Mid-drag: expand-only frozen bounds/scale (avoid shrink thrash every RAF).
   const dragging = isNodeFlowPointerDragging();
+  // Mid-drag: freeze world bounds (no O(n) rescan). Node rects still use live
+  // positions so the dragged card moves on the minimap.
   if (!dragging || !boundsRef.current) {
-    boundsRef.current = { minX, minY, maxX, maxY, scale: liveScale };
-  } else {
-    const prev = boundsRef.current;
-    const nextMinX = Math.min(prev.minX, minX);
-    const nextMinY = Math.min(prev.minY, minY);
-    const nextMaxX = Math.max(prev.maxX, maxX);
-    const nextMaxY = Math.max(prev.maxY, maxY);
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const n of nodes) {
+      minX = Math.min(minX, n.x);
+      minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + nodeWidth(n));
+      maxY = Math.max(maxY, n.y + nodeHeight(n));
+    }
+    minX = Math.min(minX, vx) - PAD;
+    minY = Math.min(minY, vy) - PAD;
+    maxX = Math.max(maxX, vx + vw) + PAD;
+    maxY = Math.max(maxY, vy + vh) + PAD;
     boundsRef.current = {
-      minX: nextMinX,
-      minY: nextMinY,
-      maxX: nextMaxX,
-      maxY: nextMaxY,
+      minX,
+      minY,
+      maxX,
+      maxY,
       scale: Math.min(
-        prev.scale,
-        MM_W / Math.max(1, nextMaxX - nextMinX),
-        MM_H / Math.max(1, nextMaxY - nextMinY),
+        MM_W / Math.max(1, maxX - minX),
+        MM_H / Math.max(1, maxY - minY),
       ),
     };
   }
   const frozen = boundsRef.current;
-  minX = frozen.minX;
-  minY = frozen.minY;
-  maxX = frozen.maxX;
-  maxY = frozen.maxY;
+  const minX = frozen.minX;
+  const minY = frozen.minY;
+  const maxX = frozen.maxX;
+  const maxY = frozen.maxY;
   const scale = frozen.scale;
   const tx = (cx: number) => (cx - minX) * scale;
   const ty = (cy: number) => (cy - minY) * scale;

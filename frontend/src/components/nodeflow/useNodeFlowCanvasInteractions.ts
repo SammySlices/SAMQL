@@ -10,6 +10,7 @@ import {
   clampPointToBox,
   marqueeHits,
   nearestPort,
+  sameIdList,
 } from "../../lib/nodegraph";
 import {
   CHART_BODY_H,
@@ -73,6 +74,8 @@ type MarqueeDrag = {
   x0: number;
   y0: number;
   ids: string[];
+  /** Hit-test boxes built once at marquee start (nodes don't move mid-marquee). */
+  boxes: { id: string; x: number; y: number; w: number; h: number }[];
 };
 export type NodeFlowDragState =
   | NodeDrag
@@ -308,18 +311,21 @@ export function useNodeFlowCanvasInteractions(
           y1: point.y,
         };
         setMarquee(rect);
-        const ids = marqueeHits(
+        const boxes =
+          drag.boxes ||
           (current.nodesRef.current || []).map((node) => ({
             id: node.id,
             x: node.x,
             y: node.y,
             w: nodeWidth(node),
             h: nodeHeight(node),
-          })),
-          rect,
-        );
-        drag.ids = ids;
-        current.setSelectedIds(ids);
+          }));
+        drag.boxes = boxes;
+        const ids = marqueeHits(boxes, rect);
+        if (!sameIdList(drag.ids, ids)) {
+          drag.ids = ids;
+          current.setSelectedIds(ids);
+        }
       }
     };
 
@@ -438,17 +444,24 @@ export function useNodeFlowCanvasInteractions(
       } else if (drag?.mode === "marquee") {
         const target = toContent(event.clientX, event.clientY);
         const point = clampToViewport(target.x, target.y);
-        const ids = marqueeHits(
+        const boxes =
+          drag.boxes ||
           (current.nodesRef.current || []).map((node) => ({
             id: node.id,
             x: node.x,
             y: node.y,
             w: nodeWidth(node),
             h: nodeHeight(node),
-          })),
-          { x0: drag.x0, y0: drag.y0, x1: point.x, y1: point.y },
-        );
-        current.setSelectedIds(ids);
+          }));
+        const ids = marqueeHits(boxes, {
+          x0: drag.x0,
+          y0: drag.y0,
+          x1: point.x,
+          y1: point.y,
+        });
+        if (!sameIdList(drag.ids, ids)) {
+          current.setSelectedIds(ids);
+        }
         current.setSelectedId(ids.length === 1 ? ids[0] : null);
         setMarquee(null);
       }
@@ -563,11 +576,19 @@ export function useNodeFlowCanvasInteractions(
       current.setSelectedIds([]);
       current.setSelectedEdge(null);
       const point = toContent(event.clientX, event.clientY);
+      const boxes = (current.nodesRef.current || []).map((node) => ({
+        id: node.id,
+        x: node.x,
+        y: node.y,
+        w: nodeWidth(node),
+        h: nodeHeight(node),
+      }));
       dragRef.current = {
         mode: "marquee",
         x0: point.x,
         y0: point.y,
         ids: [],
+        boxes,
       };
       setMarquee({ x0: point.x, y0: point.y, x1: point.x, y1: point.y });
     },

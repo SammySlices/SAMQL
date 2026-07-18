@@ -297,6 +297,8 @@ frontend/src/lib/releaseHardening.component.test.ts
 frontend/src/lib/renderDebug.ts
 frontend/src/lib/resultExportFormats.component.test.ts
 frontend/src/lib/resultExportFormats.ts
+frontend/src/lib/runAllConcurrency.component.test.ts
+frontend/src/lib/runAllConcurrency.ts
 frontend/src/lib/runController.cancel.component.test.ts
 frontend/src/lib/runController.ts
 frontend/src/lib/selectFields.component.test.ts

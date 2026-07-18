@@ -39,3 +39,43 @@ export function startPointerDrag(options: PointerDragOptions): () => void {
   target.addEventListener("pointercancel", cancel);
   return cleanup;
 }
+
+/**
+ * Like ``startPointerDrag``, but coalesces ``onMove`` to one call per
+ * animation frame (preview/inspector resize, etc.).
+ */
+export function startPointerDragRaf(options: PointerDragOptions): () => void {
+  let raf = 0;
+  let last: PointerEvent | null = null;
+  const flush = () => {
+    raf = 0;
+    if (last) options.onMove(last);
+    last = null;
+  };
+  return startPointerDrag({
+    ...options,
+    onMove: (event) => {
+      last = event;
+      if (!raf) raf = requestAnimationFrame(flush);
+    },
+    onEnd: (event) => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      if (last) {
+        options.onMove(last);
+        last = null;
+      }
+      options.onEnd?.(event);
+    },
+    onCancel: (event) => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      last = null;
+      (options.onCancel ?? options.onEnd)?.(event);
+    },
+  });
+}
