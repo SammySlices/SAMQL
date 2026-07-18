@@ -23,6 +23,14 @@ from contextlib import nullcontext
 _DEFER_OFFSET = 5000
 
 
+class SnapNotReady(Exception):
+    """Deep sorted/filtered page requested before the Parquet snap landed.
+
+    Session.page converts this into a short ``pending`` response so HTTP
+    threads do not block for up to 120s waiting on background COPY.
+    """
+
+
 class _StoreSortedView:
     """A read-only, sorted projection over a DiskBackedRows store. The
     sort is executed by SQLite (ORDER BY c<ix>), so paging a sorted
@@ -1005,9 +1013,12 @@ class _LazySnapView:
                 return []
             deep = start >= self._PRE_SNAP_DEEP_OFFSET
             if deep:
-                snap = self._await_snap()
+                # Brief wait only — do not park the HTTP worker for minutes.
+                snap = self._await_snap(timeout=0.4)
                 if snap is not None:
                     return snap[item]
+                raise SnapNotReady(
+                    "sorted/filtered snapshot still building")
             if (step or 1) != 1:
                 self._kickoff()
                 rows = []
@@ -1029,9 +1040,11 @@ class _LazySnapView:
         if ix < 0 or ix >= n:
             raise IndexError(item)
         if ix >= self._PRE_SNAP_DEEP_OFFSET:
-            snap = self._await_snap()
+            snap = self._await_snap(timeout=0.4)
             if snap is not None:
                 return snap[ix]
+            raise SnapNotReady(
+                "sorted/filtered snapshot still building")
         rows = self._store._fetch(
             self._order, 1, ix, where=self._where, params=self._params)
         self._kickoff()

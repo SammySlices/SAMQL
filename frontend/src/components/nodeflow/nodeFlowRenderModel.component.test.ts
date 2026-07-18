@@ -162,6 +162,12 @@ describe("NodeFlow render model", () => {
     expect(wireById.bc).not.toBe(prevById.bc);
     expect(wireById.ab.bx).not.toBe(prevById.ab.bx);
     expect(wireById.bc.ax).not.toBe(prevById.bc.ax);
+    // Indexes avoid a full edgeById rebuild on geometry patch.
+    expect(patched!.edgeById).toBe(first.edgeById);
+    expect(patched!.incidentWireIndexesByNode).toBe(
+      first.incidentWireIndexesByNode,
+    );
+    expect(first.incidentWireIndexesByNode.get("b")?.length).toBe(2);
   });
 
   it("treats position-only dirty nodes as geometry-only (config edits are not)", () => {

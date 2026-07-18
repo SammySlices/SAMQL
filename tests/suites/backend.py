@@ -37802,6 +37802,56 @@ def backend_tests(datadir, csv_path, json_path):
         need(corr.get("unrelated_drop_keeps_flow") is True,
              "unrelated drop still keeps flow cache")
 
+    def t_perf_audit_medium_remain_harness():
+        # Deep snap pending, table_names_in CTE/sqlglot, FE deadline, drag indexes.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        script = os.path.join(
+            ROOT, "tests", "benchmark_perf_audit_medium_remain.py")
+        need(os.path.isfile(script),
+             "audit-medium-remain benchmark harness is bundled")
+        out = os.path.join(
+            DATADIR, "benchmark-perf-audit-medium-remain-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "audit-medium-remain self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "audit-medium-remain report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "audit-medium-remain self-test ok flag")
+        corr = result.get("correctness") or {}
+        need(corr.get("deep_pending_fast") is True,
+             "deep page returns pending quickly")
+        need(corr.get("deep_ready_rows") is True,
+             "deep page returns rows when snap ready")
+        need(corr.get("from_join_tables") is True,
+             "FROM/JOIN tables extracted")
+        need(corr.get("cte_excluded") is True,
+             "CTE aliases excluded when sqlglot available")
+        need(corr.get("fe_deadline_yields") is True,
+             "field-tree sample honors deadline")
+        need(corr.get("fe_discovery_ok") is True,
+             "field discovery still works")
+        need(corr.get("incident_wire_index") is True,
+             "incident wire indexes on render model")
+        need(corr.get("page_pending_retry") is True,
+             "frontend retries pending pages")
+        need(corr.get("minimap_large_freeze") is True,
+             "large minimap freezes paint mid-drag")
+        need(corr.get("unrelated_drop_keeps_flow") is True,
+             "unrelated drop still keeps flow cache")
+
     def t_catalog_dirty_skip_source():
         # Post-658 audit medium: tables_tree must not sync_catalog on every
         # focus/poll when nothing mutated.
@@ -37961,6 +38011,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_perf_audit_high_harness),
         ("perf audit medium defects harness (COUNT lock / catalog / filebrowser)",
          t_perf_audit_medium_harness),
+        ("perf audit medium remain harness (deep snap pending / names / FE)",
+         t_perf_audit_medium_remain_harness),
         ("catalog dirty-skip + SQLite warm PRAGMA (source)",
          t_catalog_dirty_skip_source),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",

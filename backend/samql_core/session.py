@@ -39,7 +39,7 @@ from .engines import (DBManager, DuckDBManager, HAS_DUCKDB,
                       total_physical_ram_bytes, _ExecKeepalive)
 from .nodeflow import sanitize_ident, NodeflowError
 from .profiler import profile_table, _infer_type
-from .rows import (DiskBackedRows, ParquetResultStore, _to_number,
+from .rows import (DiskBackedRows, ParquetResultStore, SnapNotReady, _to_number,
                    agg_group_multi, agg_minmax, agg_histogram, agg_xy)
 from . import tmputil
 from .flowcache import FlowCache, PersistentFlowCache
@@ -1436,7 +1436,8 @@ class Session:
         key = "%s:%s" % (engine, name)
         self._table_ui_order = [k for k in order if k != key]
 
-    def column_field_tree(self, engine, table, column, cancel=None):
+    def column_field_tree(self, engine, table, column, cancel=None,
+                          deadline=None):
         """The nested field tree for one column, parsed from its raw-case
         DuckDB type, so the sidebar can render the schema as an expandable tree
         instead of one giant type string. Returns {type, fields:[...]} where
@@ -1446,7 +1447,10 @@ class Session:
         Flatten-off loads often store deep nesting as opaque JSON / JSON[]
         (maximum_depth=2), so DESCRIBE alone yields an empty tree. In that
         case sample live cell values and build the tree from them.
-        ``cancel`` stops further sample windows (Field Explorer close / Stop)."""
+        ``cancel`` stops further sample windows (Field Explorer close / Stop).
+        ``deadline`` (monotonic) aborts further sample windows so a soft
+        table-tree budget can yield mid-column instead of blocking the request.
+        """
         from .diagnostics import (parse_duckdb_type, flatten_type_tree,
                                   access_recipes)
         mgr = self.duckdb if engine == "duckdb" else self.db
@@ -1473,7 +1477,8 @@ class Session:
         if engine == "duckdb" and Session._field_tree_needs_json_sample(
                 raw, rows):
             sampled = Session._sample_column_field_tree(
-                self, mgr, table, column, raw, cancel=cancel)
+                self, mgr, table, column, raw, cancel=cancel,
+                deadline=deadline)
             if sampled is not None:
                 return sampled
         return {"type": raw, "fields": rows}
@@ -1573,7 +1578,8 @@ class Session:
                 break
             q = self._fe_quote_select_ident(col)
             sub = self.column_field_tree(
-                engine, table, col, cancel=_cancelled)
+                engine, table, col, cancel=_cancelled,
+                deadline=t0 + budget)
             nested = list(sub.get("fields") or [])
             if nested:
                 root_kind = "struct"
@@ -1670,7 +1676,8 @@ class Session:
         return False
 
     def _fetch_shape_sample_values(self, mgr, table, select_expr,
-                                   batch=None, max_rows=None, cancel=None):
+                                   batch=None, max_rows=None, cancel=None,
+                                   deadline=None):
         """Read live cells for shape discovery, skipping empty-array prefixes.
 
         A single ``LIMIT N`` often only sees front-loaded empty nested arrays
@@ -1685,6 +1692,8 @@ class Session:
         parquet-backed (avoids expensive large ``OFFSET`` skips on nested
         payloads). Discovery-only — never writes or alters table contents.
         ``cancel`` is checked between windows (Field Explorer close / Stop).
+        ``deadline`` (monotonic) stops further windows so a soft HTTP budget
+        can yield without waiting out a full mid/end probe set.
         """
         from .diagnostics import (
             _coerce_json_sample, _json_shape_has_hollow_array,
@@ -1706,6 +1715,9 @@ class Session:
         def _cancelled():
             return bool(cancel and cancel())
 
+        def _over_budget():
+            return deadline is not None and time.monotonic() >= float(deadline)
+
         # Prefer projection pushdown over parquet when we have a file source.
         parquet_src = None
         try:
@@ -1723,7 +1735,7 @@ class Session:
             parquet_src = None
 
         def _read_window(offset, take):
-            if _cancelled():
+            if _cancelled() or _over_budget():
                 return []
             offset = max(0, int(offset))
             take = max(1, int(take))
@@ -1761,6 +1773,8 @@ class Session:
             return _json_shape_has_resolved_array(root)
 
         def _table_total():
+            if _cancelled() or _over_budget():
+                return 0
             try:
                 if parquet_src:
                     n = self._parquet_rowcount(mgr, parquet_src)
@@ -1780,7 +1794,7 @@ class Session:
         # force a full max scan). Key-union probes still run in phase 2.
         offset = 0
         while offset < max_rows:
-            if _cancelled():
+            if _cancelled() or _over_budget():
                 return values
             take = min(batch, max_rows - offset)
             seen_offsets.add(offset)
@@ -1794,7 +1808,7 @@ class Session:
                 break
             offset += len(batch_vals)
 
-        if _cancelled():
+        if _cancelled() or _over_budget():
             return values
 
         # Phase 2: ALWAYS probe mid/quartile/end when more rows exist so
@@ -1829,7 +1843,7 @@ class Session:
             seen_offsets.add(off)
             ordered.append(off)
         for off in ordered:
-            if _cancelled():
+            if _cancelled() or _over_budget():
                 break
             batch_vals = _read_window(off, batch)
             if not batch_vals:
@@ -1838,12 +1852,12 @@ class Session:
         return values
 
     def _sample_column_field_tree(self, mgr, table, column, raw_type,
-                                  cancel=None):
+                                  cancel=None, deadline=None):
         """Sample live values and build a field tree for opaque JSON columns."""
         from .diagnostics import json_values_to_field_tree, access_recipes
         from .sqlutil import quote_ident as _qid
         values = self._fetch_shape_sample_values(
-            mgr, table, _qid(column), cancel=cancel)
+            mgr, table, _qid(column), cancel=cancel, deadline=deadline)
         if not values:
             return None
         # Sidebar `path` tooltips: STRUCT shells keep dotted labels; pure
@@ -6305,7 +6319,57 @@ class Session:
 
 
     # ---- query execution / routing ---------------------------------
+    @staticmethod
+    def _table_names_in_sqlglot(sql):
+        """Parser-backed FROM/JOIN table names when sqlglot is installed.
+
+        Excludes CTE aliases. Returns None when sqlglot is missing or the
+        statement cannot be parsed so callers can fall back to regex.
+        """
+        from .sqlutil import HAS_SQLGLOT
+        if not HAS_SQLGLOT:
+            return None
+        text = (sql or "").strip()
+        if not text:
+            return set()
+        try:
+            import sqlglot
+            from sqlglot import exp
+            trees = sqlglot.parse(
+                text, error_level=sqlglot.ErrorLevel.IGNORE)
+        except Exception:
+            return None
+        if not trees:
+            return None
+        names = set()
+        found_table = False
+        for tree in trees:
+            if tree is None:
+                continue
+            cte_aliases = set()
+            for cte in tree.find_all(exp.CTE):
+                alias = getattr(cte, "alias_or_name", None) or getattr(
+                    cte, "alias", None)
+                if alias:
+                    cte_aliases.add(str(alias))
+            for table in tree.find_all(exp.Table):
+                found_table = True
+                name = getattr(table, "name", None)
+                if not name:
+                    continue
+                name = str(name)
+                if name in cte_aliases:
+                    continue
+                names.add(name)
+        # Empty parse / no tables → let regex try (sqlglot IGNORE can yield []).
+        if not found_table and not names:
+            return None
+        return names
+
     def _table_names_in(self, sql):
+        parsed = self._table_names_in_sqlglot(sql)
+        if parsed is not None:
+            return parsed
         try:
             return set(re.findall(
                 r'(?:\bfrom\b|\bjoin\b)\s+["\[]?([A-Za-z_][\w$]*)',
@@ -7946,7 +8010,26 @@ class Session:
                 total = cr.total
             if own_run and self._run_is_cancelled(query_id):
                 return {"cancelled": True}
-            chunk = view[offset:offset + limit]
+            try:
+                chunk = view[offset:offset + limit]
+            except SnapNotReady:
+                # Deep sorted/filtered page while background Parquet snap is
+                # still COPY-ing. Return quickly so HTTP is not blocked for
+                # up to 120s; clients retry with the same offset/sort.
+                return {
+                    "pending": True,
+                    "retry_after_ms": 250,
+                    "columns": list(cr.cols),
+                    "rows": [],
+                    "offset": offset,
+                    "total_rows": total,
+                    "filtered": bool(filters),
+                    "sql": cr.sql,
+                    "engine": cr.engine,
+                    "cell_capped": False,
+                    "result_capped": bool(cr.capped) and not filters,
+                    "result_cap": cr.cap if (cr.capped and not filters) else None,
+                }
             # Optional column projection: return only the requested columns
             # (in the requested order). Keeps the wire payload and the client's
             # row objects small for very wide results. Sorting/filtering still

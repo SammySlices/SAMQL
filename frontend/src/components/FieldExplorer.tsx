@@ -275,6 +275,9 @@ export const FieldExplorer: React.FC<Props> = ({
             const r = await api.tableFields(engine, table, ctrl.signal, {
               after: after || undefined,
               query_id: discoveryId,
+              // Short chunks so one HTTP call cannot sit on mid/end sample
+              // windows for tens of seconds; resume via next_after.
+              budget_sec: 1.0,
             });
             if (
               gen !== fieldsFetchGen.current ||

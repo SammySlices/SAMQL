@@ -335,7 +335,7 @@ def flatten_type_tree(column, node, max_nodes=4000):
     return rows
 
 
-def discover_load_fields(path, sample=0, time_budget_s=25):
+def discover_load_fields(path, sample=0, time_budget_s=8):
     """Sample records from a JSON file and list the fields that contain nested
     structure -- arrays (which become child tables and multiply rows) and
     objects (which add nested columns) -- so the load UI can offer a checkbox
@@ -347,12 +347,16 @@ def discover_load_fields(path, sample=0, time_budget_s=25):
     whether it covered the whole file. Each field: key, kind (array|object),
     min depth seen, how many sampled records had it, and (arrays) the largest
     element count seen. Skipping is by bare key, so one checkbox skips that key
-    wherever it appears."""
+    wherever it appears.
+
+    Default budget is 8s (Load-tab first pass). Callers that need a deeper scan
+    (UI "scan deeper") pass a larger ``time_budget_s``.
+    """
     from .flatten import stream_json_records
     seen = {}
     n = 0
     t0 = time.monotonic()
-    budget = float(time_budget_s or 25)
+    budget = float(time_budget_s or 8)
     cap = int(sample or 0)
     # Same caps as live-cell field trees (see JSON_TREE_* above).
     MAX_DEPTH = JSON_TREE_MAX_DEPTH

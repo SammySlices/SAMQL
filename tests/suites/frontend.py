@@ -6515,8 +6515,9 @@ console.log("OK");
                  in render_model
              and "if (wires.length <= threshold) return wires as NodeFlowWire[];"
                  in render_model
-             and "nodes.slice()" not in render_model
-             and "wires.slice()" not in render_model
+             # Geometry patch may copy wires via .slice(); cull must not.
+             and "return nodes.slice()" not in render_model
+             and "return wires.slice()" not in render_model
              and ").toBe(underThreshold)" in model_tests),
             ("dirty patch is geometry-only so dashboard versions stay fresh",
              "dirtyNodesAreGeometryOnly" in scene
@@ -6567,7 +6568,13 @@ console.log("OK");
             ("mid-drag world/minimap avoid redundant O(n) rescans",
              "canvasWorldSizeExpandOnly" in shell
              and "freeze world bounds" in canvas
-             and "One full scan" in shell),
+             and "One full scan" in shell
+             and "paintRef" in canvas
+             and "LARGE_GRAPH_NODE_THRESHOLD" in canvas),
+            ("dirty-wire patch uses incident indexes (not full wire map)",
+             "incidentWireIndexesByNode" in render_model
+             and "edgeById" in render_model
+             and "Indexes avoid a full edgeById rebuild" in model_tests),
             ("chartVersionByNode ignores full nodes array; history cap is 40",
              "Do not depend on the full ``nodes`` array" in scene
              and "}, [chartData, renderModel.dashboardSourceIdsByNode]);"

@@ -1,6 +1,7 @@
 import React, { useRef } from "react";
 import { wirePath } from "../lib/nodegraph";
 import type { NodeFlowWire } from "./nodeflow/nodeFlowRenderModel";
+import { LARGE_GRAPH_NODE_THRESHOLD } from "./nodeflow/nodeFlowRenderModel";
 import { useRenderCount } from "../lib/renderDebug";
 import {
   type NbNode,
@@ -236,6 +237,20 @@ export const NodeMinimap = React.memo(function NodeMinimap({
     maxY: number;
     scale: number;
   } | null>(null);
+  const paintRef = useRef<
+    | {
+        rects: {
+          id: string;
+          x: number;
+          y: number;
+          w: number;
+          h: number;
+          sel: boolean;
+        }[];
+        view: { x: number; y: number; w: number; h: number };
+      }
+    | null
+  >(null);
   if (!nodes.length) return null;
   const MM_W = 172;
   const MM_H = 116;
@@ -246,8 +261,11 @@ export const NodeMinimap = React.memo(function NodeMinimap({
   const vw = viewport.w / z;
   const vh = viewport.h / z;
   const dragging = isNodeFlowPointerDragging();
+  const large = nodes.length >= LARGE_GRAPH_NODE_THRESHOLD;
   // Mid-drag: freeze world bounds (no O(n) rescan). Node rects still use live
-  // positions so the dragged card moves on the minimap.
+  // positions so the dragged card moves on the minimap — except on large
+  // graphs, where a full rect remount every RAF dominates; freeze paint until
+  // pointerup (viewport frame still updates).
   if (!dragging || !boundsRef.current) {
     let minX = Infinity;
     let minY = Infinity;
@@ -282,6 +300,31 @@ export const NodeMinimap = React.memo(function NodeMinimap({
   const scale = frozen.scale;
   const tx = (cx: number) => (cx - minX) * scale;
   const ty = (cy: number) => (cy - minY) * scale;
+  const viewPaint = {
+    x: tx(vx),
+    y: ty(vy),
+    w: Math.max(4, vw * scale),
+    h: Math.max(4, vh * scale),
+  };
+  if (!dragging || !paintRef.current || !large) {
+    paintRef.current = {
+      rects: nodes.map((n) => ({
+        id: n.id,
+        x: tx(n.x),
+        y: ty(n.y),
+        w: Math.max(2, nodeWidth(n) * scale),
+        h: Math.max(2, nodeHeight(n) * scale),
+        sel: n.id === selectedId,
+      })),
+      view: viewPaint,
+    };
+  } else {
+    paintRef.current = {
+      rects: paintRef.current.rects,
+      view: viewPaint,
+    };
+  }
+  const paint = paintRef.current;
   const onMouseDown = (e: React.MouseEvent<HTMLElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
     onPan(minX + (e.clientX - r.left) / scale,
@@ -309,22 +352,22 @@ export const NodeMinimap = React.memo(function NodeMinimap({
       </button>
       {!mini && (
         <svg width={MM_W} height={MM_H}>
-          {nodes.map((n) => (
+          {paint.rects.map((n) => (
             <rect
               key={n.id}
-              x={tx(n.x)}
-              y={ty(n.y)}
-              width={Math.max(2, nodeWidth(n) * scale)}
-              height={Math.max(2, nodeHeight(n) * scale)}
+              x={n.x}
+              y={n.y}
+              width={n.w}
+              height={n.h}
               rx={1.5}
-              className={"nb2-mm-node" + (n.id === selectedId ? " sel" : "")}
+              className={"nb2-mm-node" + (n.sel ? " sel" : "")}
             />
           ))}
           <rect
-            x={tx(vx)}
-            y={ty(vy)}
-            width={Math.max(4, vw * scale)}
-            height={Math.max(4, vh * scale)}
+            x={paint.view.x}
+            y={paint.view.y}
+            width={paint.view.w}
+            height={paint.view.h}
             className="nb2-mm-view"
           />
         </svg>
