@@ -1,19 +1,35 @@
 /**
  * Client-side cache for NodeFlow inspector column probes.
- * Keys include graphSig so Select/rename/formula upstream changes miss the cache.
+ * Keys include graphSig so Select/rename/formula upstream changes miss the cache,
+ * and tablesSchemaSig so reload/reshape of loaded tables also misses.
  */
+
+import type { TableInfo } from "./types";
 
 export type ColumnsByPort = Record<string, string[]>;
 
 const cache = new Map<string, ColumnsByPort>();
+
+/** Stable schema fingerprint for loaded tables (engine:name:cols). */
+export function tablesSchemaSig(tables: TableInfo[] | undefined | null): string {
+  if (!tables || !tables.length) return "";
+  return tables
+    .map((t) => {
+      const cols = (t.columns || []).map((c) => c.name).join(",");
+      return `${t.engine}:${t.name}:${cols}`;
+    })
+    .sort()
+    .join("|");
+}
 
 export function nodeflowColsCacheKey(
   graphSig: string,
   selId: string,
   kind: "canvas" | "group-child",
   fingerprint: string,
+  schemaSig = "",
 ): string {
-  return `${graphSig}\n${selId}\n${kind}\n${fingerprint}`;
+  return `${graphSig}\n${selId}\n${kind}\n${fingerprint}\n${schemaSig}`;
 }
 
 export function fingerprintColumnReqs(

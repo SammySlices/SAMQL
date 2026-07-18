@@ -8,10 +8,12 @@ import {
   reconcileSelectFields,
 } from "../../lib/selectFields";
 import {
+  clearNodeflowColsCache,
   fingerprintColumnReqs,
   getNodeflowColsCache,
   nodeflowColsCacheKey,
   setNodeflowColsCache,
+  tablesSchemaSig,
 } from "../../lib/nodeflowColumnsCache";
 import { runAfterPaint } from "../../lib/prettyStruct";
 import { staleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
@@ -134,6 +136,12 @@ export function useNodeFlowInspectorController({
     setInspColsOwnedBy(null);
     setInspColsRaw({});
   };
+  // Loaded-table schema fingerprint: reload/reshape with the same graph must
+  // miss the columns cache (backend flow fingerprints salt _data_epoch).
+  const schemaSig = tablesSchemaSig(runtime.tables);
+  useEffect(() => {
+    clearNodeflowColsCache();
+  }, [schemaSig]);
   // Resolve upstream columns for the selection. Ownership gating (inspCols)
   // already hides sibling schemas on selId change — do not clear-on-select
   // before paint (that raced cache hits and flashed empty inspectors).
@@ -190,6 +198,7 @@ export function useNodeFlowInspectorController({
         sel.id,
         "group-child",
         fp,
+        schemaSig,
       );
       const cached = getNodeflowColsCache(cacheKey);
       if (cached) {
@@ -203,6 +212,7 @@ export function useNodeFlowInspectorController({
       const cancelPaint = runAfterPaint(() => {
         (async () => {
           const out: Record<string, string[]> = {};
+          let ok = false;
           try {
             await Promise.all([
               (async () => {
@@ -226,11 +236,15 @@ export function useNodeFlowInspectorController({
                 if (r.columns) out[stepAbovePort] = r.columns;
               })(),
             ]);
+            ok = true;
           } catch {
-            /* ignore */
+            /* ignore — do not cache failures as empty schemas */
           }
           if (!cancelled) {
-            setNodeflowColsCache(cacheKey, out);
+            // Always publish so ownership matches selection and probing can
+            // end. Only successful responses are cached — failures must miss
+            // on the next select so the probe retries.
+            if (ok) setNodeflowColsCache(cacheKey, out);
             publishInspCols(probedId, out);
             setInspColsProbing(false);
           }
@@ -263,7 +277,13 @@ export function useNodeFlowInspectorController({
       return;
     }
     const fp = fingerprintColumnReqs(reqs);
-    const cacheKey = nodeflowColsCacheKey(graphSig, sel.id, "canvas", fp);
+    const cacheKey = nodeflowColsCacheKey(
+      graphSig,
+      sel.id,
+      "canvas",
+      fp,
+      schemaSig,
+    );
     const cached = getNodeflowColsCache(cacheKey);
     if (cached) {
       publishInspCols(sel.id, cached);
@@ -276,6 +296,7 @@ export function useNodeFlowInspectorController({
     const cancelPaint = runAfterPaint(() => {
       (async () => {
         const out: Record<string, string[]> = {};
+        let ok = false;
         try {
           const r = await api.nodeflowColumnsBatch(
             graphForApi(),
@@ -284,11 +305,15 @@ export function useNodeFlowInspectorController({
           (r.results || []).forEach((res, i) => {
             if (res && res.columns && reqs[i]) out[reqs[i].port] = res.columns;
           });
+          ok = true;
         } catch {
-          /* ignore */
+          /* ignore — do not cache failures as empty schemas */
         }
         if (!cancelled) {
-          setNodeflowColsCache(cacheKey, out);
+          // Always publish so ownership matches selection and probing can
+          // end. Only successful responses are cached — failures must miss
+          // on the next select so the probe retries.
+          if (ok) setNodeflowColsCache(cacheKey, out);
           publishInspCols(probedId, out);
           setInspColsProbing(false);
         }
@@ -299,7 +324,7 @@ export function useNodeFlowInspectorController({
       cancelPaint();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeKey, selId, graphSig]);
+  }, [scopeKey, selId, graphSig, schemaSig]);
 
   // Keep EVERY wired Select node's field list in sync whenever the graph
   // structure/config changes -- top-level AND Selects inside group/iterator

@@ -4511,7 +4511,8 @@ console.log("OK");
             ("dragging a node doesn't refetch columns (structural signature)",
              "useNodeFlowGraphSnapshot(nodes, edges)" in nb
              and ("[selId, graphSig]" in nb
-                  or "[scopeKey, selId, graphSig]" in nb)),
+                  or "[scopeKey, selId, graphSig]" in nb
+                  or "[scopeKey, selId, graphSig, schemaSig]" in nb)),
             ("pointer drag/marquee is rAF-throttled",
              "requestAnimationFrame" in nb and "cancelAnimationFrame" in nb),
             ("graph persistence to localStorage is debounced",
@@ -4669,8 +4670,9 @@ console.log("OK");
             # --- .98: parallel Run all ---
             ("run all uses a bounded concurrency pool",
              "runDepth" in nb
-             and "const CONCURRENCY =" in nb
-             and "Promise.all(Array.from({ length: CONCURRENCY" in nb),
+             and "let CONCURRENCY =" in nb
+             and "Promise.all(Array.from({ length: CONCURRENCY" in nb
+             and "if (info.parallel_nodeflows) CONCURRENCY = 1" in nb),
             # --- .101: join single out port + buttons removed ---
             ("join exposes three outputs with L/R preview buttons (no mode select)",
              'join: { inputs: ["left", "right"], outputs: ["left_only", "inner", "right_only"] }'

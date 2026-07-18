@@ -7465,9 +7465,14 @@ class Session:
                     except Exception:
                         pass
 
+            # Clear sticky engine cancel from a prior Stop/load so BeatDaemon
+            # does not auto-abort this page (same posture as profile/query).
+            self._clear_stale_engine_cancel(eng, except_qid=query_id)
             handle = _PageHandle(eng)
             self._register_run(query_id, handle, kind="page",
                                target="result page")
+        elif own_run:
+            self._clear_stale_engine_cancel(except_qid=query_id)
         try:
             if own_run and self._run_is_cancelled(query_id):
                 return {"cancelled": True}
@@ -9133,6 +9138,7 @@ class Session:
             ensure_heavy_op_engine_memory(self.duckdb)
         except Exception:
             pass
+        shred_cache_path = None
         if plan.get("needs_cache"):
             # .471: materialize the parquet cache from the loaded
             # object (view or table) so every downstream statement --
@@ -9153,6 +9159,7 @@ class Session:
                     % (self._rq(table), sqlutil.sql_path(cache)))
                 plan["source"] = cache
                 plan["cache_materialized"] = True
+                shred_cache_path = cache
             except Exception as e:
                 return {"error": "Couldn't build the shred cache for "
                         "this table: " + err_str(e)}
@@ -9307,6 +9314,11 @@ class Session:
         finally:
             _unthrottle()
             self._unregister_run(query_id)
+            if shred_cache_path:
+                try:
+                    os.remove(shred_cache_path)
+                except Exception:
+                    pass
 
     def cell_value(self, result_id, row, column, sort_col=None,
                    descending=False, filters=None):

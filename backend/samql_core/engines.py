@@ -3014,26 +3014,28 @@ class DuckDBManager:
                 exec_conn = self.conn
                 lock_ctx = self.write_lock
         final = self.reserve_table_name(name)
+        cleanup = None
         try:
+          # NDJSON rewrite is filesystem-only; keep it outside write_lock so a
+          # large array rewrite does not serialize the whole engine when
+          # concurrent_reads is off (NullCtx path was already unlocked).
+          self._cancel.clear()
+          fwd = sqlutil.sql_path(path)
+          mem_mb = self._applied_resource_memory_mb
+          if kind == "parquet":
+              readers = [f"read_parquet('{fwd}')"]
+          elif kind == "json":
+              read_path, is_nd, cleanup = self._json_source_for_read(path)
+              rfwd = read_path.replace("\\", "/").replace("'", "''")
+              readers = _json_readers(
+                  rfwd, ndjson=is_nd, memory_limit_mb=mem_mb,
+                  maximum_depth=json_depth)
+          else:  # csv / delimited text
+              readers = _csv_readers(fwd, delimiter)
           with lock_ctx:
-            fwd = sqlutil.sql_path(path)
-            cleanup = None
             # Fresh load: clear any cancel left set by a previous one so it
-            # can't abort this read before it starts.
+            # can't abort this read before it starts (after lock wait).
             self._cancel.clear()
-            mem_mb = self._applied_resource_memory_mb
-            if kind == "parquet":
-                readers = [f"read_parquet('{fwd}')"]
-            elif kind == "json":
-                # A large top-level JSON array is streamed to a temp NDJSON so
-                # DuckDB doesn't buffer the whole array into memory.
-                read_path, is_nd, cleanup = self._json_source_for_read(path)
-                rfwd = read_path.replace("\\", "/").replace("'", "''")
-                readers = _json_readers(
-                    rfwd, ndjson=is_nd, memory_limit_mb=mem_mb,
-                    maximum_depth=json_depth)
-            else:  # csv / delimited text
-                readers = _csv_readers(fwd, delimiter)
             try:
                 with _ExecKeepalive(self.conn, self._cancel,
                                     threading.get_ident()):
@@ -3088,7 +3090,13 @@ class DuckDBManager:
                         os.unlink(cleanup)
                     except Exception:
                         pass
+                    cleanup = None
         finally:
+            if cleanup:
+                try:
+                    os.unlink(cleanup)
+                except Exception:
+                    pass
             self.release_table_name(final)
             if handle is not None:
                 with self._native_ops_lock:
@@ -3251,20 +3259,28 @@ class DuckDBManager:
         cfwd = cache.replace("\\", "/").replace("'", "''")
         cleanup = None
         try:
+            # NDJSON rewrite is pure filesystem work — do it outside write_lock
+            # so concurrent reads / peeks / cancel bookkeeping are not blocked
+            # for the whole multi-GB stream rewrite. COPY still takes the lock.
+            self._cancel.clear()
+            fwd = sqlutil.sql_path(path)
+            if kind == "parquet":
+                readers = [f"read_parquet('{fwd}')"]
+            elif kind == "json":
+                read_path, is_nd, cleanup = self._json_source_for_read(path)
+                rfwd = read_path.replace("\\", "/").replace("'", "''")
+                readers = _json_readers(
+                    rfwd, ndjson=is_nd,
+                    memory_limit_mb=self._applied_resource_memory_mb,
+                    maximum_depth=json_depth)
+            else:  # csv / delimited text
+                readers = _csv_readers(fwd, delimiter)
+            if cancel and cancel():
+                raise LoadCancelled()
             with self.write_lock:
+                # Drop sticky cancel again after waiting for the lock so a
+                # prior Stop cannot auto-abort this COPY via BeatDaemon.
                 self._cancel.clear()
-                fwd = sqlutil.sql_path(path)
-                if kind == "parquet":
-                    readers = [f"read_parquet('{fwd}')"]
-                elif kind == "json":
-                    read_path, is_nd, cleanup = self._json_source_for_read(path)
-                    rfwd = read_path.replace("\\", "/").replace("'", "''")
-                    readers = _json_readers(
-                        rfwd, ndjson=is_nd,
-                        memory_limit_mb=self._applied_resource_memory_mb,
-                        maximum_depth=json_depth)
-                else:  # csv / delimited text
-                    readers = _csv_readers(fwd, delimiter)
                 if cancel and cancel():
                     raise LoadCancelled()
                 # Try every reader (typed → tolerant), same ladder as CTAS.

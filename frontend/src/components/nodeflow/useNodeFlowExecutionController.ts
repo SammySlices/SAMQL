@@ -1775,7 +1775,15 @@ export function useNodeFlowExecutionController({
             ? doExportImage(n)
             : doExport(n);
     };
-    const CONCURRENCY = Math.min(3, runList.length || 1);
+    // Cap frontend Run-all concurrency when the backend already parallelizes
+    // DuckDB branch workers — stacking both pools oversubscribes CPU/RAM.
+    let CONCURRENCY = Math.min(3, runList.length || 1);
+    try {
+      const info = await api.flowCacheInfo();
+      if (info.parallel_nodeflows) CONCURRENCY = 1;
+    } catch {
+      /* keep default pool */
+    }
     const results: RunOutcome[] = [...batchOutcomes];
     let next = 0;
     const worker = async () => {

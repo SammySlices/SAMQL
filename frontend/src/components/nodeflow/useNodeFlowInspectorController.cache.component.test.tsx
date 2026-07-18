@@ -159,6 +159,65 @@ describe("useNodeFlowInspectorController column probe cache", () => {
     expect(nodeflowColumnsBatch.mock.calls.length).toBeGreaterThan(afterFirst);
   });
 
+  it("does not cache a failed probe as an empty schema (retry on re-select)", async () => {
+    const { nodes, edges } = nodesAndEdges();
+    const patch = vi.fn();
+    // Reject every batch until we explicitly recover — inspector probe and
+    // wired-Select reconcile both call nodeflowColumnsBatch.
+    nodeflowColumnsBatch.mockRejectedValue(new Error("engine busy"));
+
+    const { result, rerender } = renderHook(
+      (props: { graphSig: string; selectedId: string | null }) => {
+        const sel =
+          props.selectedId == null
+            ? null
+            : nodes.find((n) => n.id === props.selectedId) || null;
+        return useNodeFlowInspectorController({
+          scopeKey: "test",
+          nodes,
+          edges,
+          selectedId: props.selectedId,
+          selectedNode: sel,
+          childSelection: null,
+          graphSig: props.graphSig,
+          graphForApi: () => ({ nodes, edges }),
+          partialGroupGraph: () => ({ nodes, edges }),
+          patch,
+          runtime,
+        });
+      },
+      {
+        initialProps: {
+          graphSig: "sig-fail",
+          selectedId: "sel-1" as string | null,
+        },
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current.inspColsProbing).toBe(false);
+    });
+    // Failure publishes empty for this selection (probing ends) but must not
+    // leave a cache hit — re-select retries the probe.
+    expect(result.current.inspCols.in).toBeUndefined();
+    const afterFail = nodeflowColumnsBatch.mock.calls.length;
+    expect(afterFail).toBeGreaterThanOrEqual(1);
+
+    nodeflowColumnsBatch.mockResolvedValue({
+      results: [{ node: "in-1", port: "out", columns: ["recovered"] }],
+    });
+    act(() => {
+      rerender({ graphSig: "sig-fail", selectedId: null });
+    });
+    act(() => {
+      rerender({ graphSig: "sig-fail", selectedId: "sel-1" });
+    });
+    await waitFor(() => {
+      expect(result.current.inspCols.in).toEqual(["recovered"]);
+    });
+    expect(nodeflowColumnsBatch.mock.calls.length).toBeGreaterThan(afterFail);
+  });
+
   it("does not seed a newly selected Select from a sibling Select's upstream cols", async () => {
     // Two disconnected inputs + two Selects each wired to one input.
     // Switching selection must not reconcile the bottom Select against the

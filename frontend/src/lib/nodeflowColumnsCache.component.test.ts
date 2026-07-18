@@ -6,7 +6,9 @@ import {
   nodeflowColsCacheKey,
   nodeflowColsCacheSizeForTests,
   setNodeflowColsCache,
+  tablesSchemaSig,
 } from "./nodeflowColumnsCache";
+import type { TableInfo } from "./types";
 
 describe("nodeflowColumnsCache", () => {
   beforeEach(() => {
@@ -40,6 +42,50 @@ describe("nodeflowColumnsCache", () => {
     expect(getNodeflowColsCache(oldKey)).toBeUndefined();
     expect(getNodeflowColsCache(newKey)).toEqual({ in: ["fresh"] });
     expect(nodeflowColsCacheSizeForTests()).toBe(1);
+  });
+
+  it("misses after loaded-table schema changes (reload/reshape)", () => {
+    const fp = fingerprintColumnReqs([
+      { port: "in", node: "up", fromPort: "out" },
+    ]);
+    const tablesA: TableInfo[] = [
+      {
+        engine: "duckdb",
+        name: "orders",
+        source: "/a.json",
+        row_count: 1,
+        columns: [{ name: "a", type: "INTEGER" }],
+      },
+    ];
+    const tablesB: TableInfo[] = [
+      {
+        engine: "duckdb",
+        name: "orders",
+        source: "/b.json",
+        row_count: 1,
+        columns: [
+          { name: "a", type: "INTEGER" },
+          { name: "b", type: "VARCHAR" },
+        ],
+      },
+    ];
+    const oldKey = nodeflowColsCacheKey(
+      "sig",
+      "sel-1",
+      "canvas",
+      fp,
+      tablesSchemaSig(tablesA),
+    );
+    setNodeflowColsCache(oldKey, { in: ["a"] });
+    const newKey = nodeflowColsCacheKey(
+      "sig",
+      "sel-1",
+      "canvas",
+      fp,
+      tablesSchemaSig(tablesB),
+    );
+    expect(newKey).not.toBe(oldKey);
+    expect(getNodeflowColsCache(newKey)).toBeUndefined();
   });
 
   it("does not mutate the cache when the caller mutates the returned arrays", () => {

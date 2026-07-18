@@ -13665,8 +13665,20 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         need("plan[\"cache_materialized\"] = True" in sql
              and "COPY (SELECT * FROM %s) TO '%s' (FORMAT PARQUET)"
-             in sql,
-             "shred_run materializes the cache from the loaded object")
+             in sql
+             and "shred_cache_path" in sql
+             and "os.remove(shred_cache_path)" in sql,
+             "shred_run materializes the cache and deletes it in finally")
+        eng_src = open(os.path.join(BACKEND, "samql_core", "engines.py"),
+                       encoding="utf-8").read()
+        # load_file_to_parquet_view: NDJSON rewrite must not sit inside write_lock
+        idx = eng_src.find("def load_file_to_parquet_view")
+        need(idx > 0, "load_file_to_parquet_view present")
+        body = eng_src[idx:idx + 3500]
+        need("_json_source_for_read(path)" in body
+             and body.find("_json_source_for_read(path)")
+             < body.find("with self.write_lock:"),
+             "parquet-view NDJSON rewrite runs outside write_lock")
         need("eng0, _ = self._engine_obj(_t0)" in sql
              and sql.count("raise RuntimeError(\"interrupted\")") >= 1
              and "def _pivot_inner(self, spec, qid=None):" in sql
@@ -24230,6 +24242,30 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
             shutil.rmtree(dd, ignore_errors=True)
+
+    def t_page_survives_sticky_engine_cancel():
+        # Same sticky-_cancel hazard as profile: after Stop, BeatDaemon would
+        # auto-abort later result-grid pages (sort/filter materialize). Fresh
+        # page() must clear the flag and return rows.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        try:
+            r = s.run_query(
+                "SELECT i AS n FROM range(30) t(i)", target="duckdb")
+            need(r.get("result_id"), "query produced a pageable result: %r" % r)
+            s.duckdb.interrupt()
+            need(s.duckdb._cancel.is_set(), "interrupt left sticky cancel set")
+            pg = s.page(r["result_id"], offset=0, limit=10,
+                        query_id="page_after_stall")
+            need(not pg.get("cancelled") and not pg.get("error"),
+                 "page must not auto-cancel after sticky cancel: %r" % pg)
+            need(len(pg.get("rows") or []) == 10,
+                 "page returned rows: %r" % pg)
+            need(not s.duckdb._cancel.is_set(),
+                 "fresh page cleared sticky engine cancel")
+        finally:
+            s.shutdown()
 
     def t_rest_and_mssql_cancel():
         # Part 3: the IDE REST API fetch (load_api) and the MSSQL import
@@ -36785,6 +36821,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_bg_ops_server_cancel),
         ("profile survives sticky engine cancel after stalled load Stop",
          t_profile_survives_sticky_engine_cancel),
+        ("page survives sticky engine cancel after Stop",
+         t_page_survives_sticky_engine_cancel),
         ("REST API fetch + MSSQL import cancel server-side",
          t_rest_and_mssql_cancel),
         ("iterator/while per-pass fetch shares run cancel w/o clobbering",
