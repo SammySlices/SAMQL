@@ -14,6 +14,12 @@ interface Props {
   footer?: React.ReactNode;
   wide?: boolean;
   testId?: string;
+  /**
+   * Cheaper open/close for large interactive shells (Load File, file browser):
+   * opacity-only motion, lighter shadow, paint containment. Visual language
+   * stays the same; skips scale/translate that thrash with the dimmed app.
+   */
+  fast?: boolean;
 }
 
 const FOCUSABLE = [
@@ -32,6 +38,7 @@ export const Modal: React.FC<Props> = ({
   footer,
   wide,
   testId,
+  fast,
 }) => {
   // .435: every modal EXITS as smoothly as it enters -- a short
   // closing phase plays the soft pop-out (modal-out), then onClose fires.
@@ -41,6 +48,7 @@ export const Modal: React.FC<Props> = ({
   const closeTimer = useRef<number | null>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
   const titleId = useId();
+  const closeMs = fast ? 120 : 160;
 
   const beginClose = useCallback(() => {
     if (closing || closeTimer.current != null) return;
@@ -52,8 +60,8 @@ export const Modal: React.FC<Props> = ({
     closeTimer.current = window.setTimeout(() => {
       closeTimer.current = null;
       onClose();
-    }, 160);
-  }, [closing, onClose]);
+    }, closeMs);
+  }, [closing, closeMs, onClose]);
 
   useEffect(() => {
     previousFocus.current =
@@ -109,13 +117,22 @@ export const Modal: React.FC<Props> = ({
 
   return (
     <div
-      className={"modal-backdrop" + (closing ? " closing" : "")}
+      className={
+        "modal-backdrop" +
+        (fast ? " fast" : "") +
+        (closing ? " closing" : "")
+      }
       onMouseDown={beginClose}
     >
       <div
         ref={dialogRef}
         data-testid={testId}
-        className={"modal" + (wide ? " wide" : "") + (closing ? " closing" : "")}
+        className={
+          "modal" +
+          (wide ? " wide" : "") +
+          (fast ? " fast" : "") +
+          (closing ? " closing" : "")
+        }
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

@@ -81,9 +81,19 @@ export const FileBrowser: React.FC<{
 
   useEffect(() => {
     mountedRef.current = true;
-    load(initialPath);
+    // Paint the browser chrome + "reading…" first, then hit the FS API so
+    // nested open (Load File → Browse) is not blocked on the listing round-trip.
+    setLoading(true);
+    let raf2 = 0;
+    const raf1 = window.requestAnimationFrame(() => {
+      raf2 = window.requestAnimationFrame(() => {
+        if (mountedRef.current) load(initialPath);
+      });
+    });
     return () => {
       mountedRef.current = false;
+      window.cancelAnimationFrame(raf1);
+      window.cancelAnimationFrame(raf2);
       requestSeqRef.current += 1;
       requestControllerRef.current?.abort();
       requestControllerRef.current = null;
@@ -103,6 +113,7 @@ export const FileBrowser: React.FC<{
       }
       onClose={onClose}
       wide
+      fast
       footer={
         <>
           <button className="btn ghost" onClick={onClose}>

@@ -82,7 +82,13 @@ export const LoadDataModal: React.FC<Props> = ({
   };
 
   return (
-    <Modal title="Load a Table" onClose={handleClose} wide testId="load-data-modal">
+    <Modal
+      title="Load a Table"
+      onClose={handleClose}
+      wide
+      fast
+      testId="load-data-modal"
+    >
       <div className="tabs" style={{ borderRadius: 7, marginBottom: 16 }}>
         <button
           className={"tab" + (tab === "file" ? " active" : "")}

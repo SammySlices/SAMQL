@@ -33,6 +33,13 @@ function mount() {
 }
 
 describe("LoadDataModal source tabs", () => {
+  it("opens with the fast surface (cheaper paint / opacity-only motion)", () => {
+    mount();
+    const dialog = screen.getByTestId("load-data-modal");
+    expect(dialog.className).toMatch(/\bfast\b/);
+    expect(dialog.closest(".modal-backdrop")?.className).toMatch(/\bfast\b/);
+  });
+
   it("renders each extracted source form through the shared shell", async () => {
     mount();
     expect(screen.getByText("Choose a file on this computer")).toBeInTheDocument();

@@ -2623,7 +2623,9 @@ body.editor-ivory .code textarea.ta::placeholder {
   position: fixed;
   inset: 0;
   background: rgba(8, 9, 11, 0.62);
-  backdrop-filter: blur(2px);
+  /* No backdrop-filter: even 2px blur forces a full-viewport GPU pass on
+     every open (and doubles when FileBrowser nests over Load File). Solid
+     dim reads the same and stays cheap on Citrix / integrated GPUs. */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2706,6 +2708,15 @@ body.editor-ivory .code textarea.ta::placeholder {
 }
 .modal.wide {
   max-width: min(760px, 94vw);
+}
+/* Load File / file browser: keep the panel look, drop expensive open paint. */
+.modal.fast {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
+  contain: layout style paint;
+}
+.modal-backdrop.fast {
+  /* Paint/layout isolation only — avoid size containment on fixed inset:0. */
+  contain: layout style paint;
 }
 .modal-head {
   display: flex;
@@ -2934,6 +2945,7 @@ body.editor-ivory .code textarea.ta::placeholder {
   background: var(--panel-2);
   height: 360px;
   overflow: auto;
+  contain: layout style paint;
 }
 .fb-row {
   display: flex;
@@ -2942,6 +2954,8 @@ body.editor-ivory .code textarea.ta::placeholder {
   padding: 7px 12px;
   cursor: pointer;
   border-bottom: 1px solid var(--border);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 34px;
 }
 .fb-row:hover {
   background: var(--raised);
@@ -8338,11 +8352,19 @@ body.canvas-ivory .nb2-empty {
   from { opacity: 1; transform: translateY(0) scale(1); }
   to { opacity: 0; transform: translateY(-3px) scale(0.96); }
 }
+@keyframes modal-out-fast {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
 .modal.closing,
 .nb2-delconfirm.closing {
   animation: modal-out 0.16s cubic-bezier(0.4, 0, 1, 1) forwards;
 }
+.modal.fast.closing {
+  animation: modal-out-fast 0.12s ease-in forwards;
+}
 .modal-backdrop { transition: opacity 0.16s ease; }
+.modal-backdrop.fast { transition: opacity 0.12s ease; }
 .modal-backdrop.closing,
 .nb2-delconfirm-backdrop.closing { opacity: 0; }
 .tree-row .twist { transition: transform 0.15s ease; }
@@ -8616,6 +8638,11 @@ button:not(:disabled):active { transform: scale(0.97); }
   from { opacity: 0; transform: translateY(8px) scale(0.99); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
+/* Opacity-only enter for large load/browse shells (no scale/translate). */
+@keyframes modal-in-fast {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
 @keyframes toast-out {
   to { opacity: 0; transform: translateX(16px); }
 }
@@ -8626,6 +8653,8 @@ button:not(:disabled):active { transform: scale(0.97); }
 /* modals fade + rise instead of snapping in */
 .modal-backdrop { animation: backdrop-in 0.16s ease; }
 .modal { animation: modal-in 0.17s cubic-bezier(0.16, 1, 0.3, 1); }
+.modal-backdrop.fast { animation: backdrop-in 0.12s ease; }
+.modal.fast { animation: modal-in-fast 0.12s ease-out; }
 
 /* node selection ring + drag feedback. The transition covers box-shadow,
    border-color and transform; nodes are positioned with left/top (never

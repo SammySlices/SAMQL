@@ -57,6 +57,26 @@ describe("Modal accessibility and lifecycle", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("closes fast modals on the shorter exit timer", () => {
+    vi.useFakeTimers();
+    const onClose = vi.fn();
+    try {
+      render(
+        <Modal title="Load" onClose={onClose} fast>
+          body
+        </Modal>,
+      );
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      vi.advanceTimersByTime(119);
+      expect(onClose).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("closes immediately for reduced motion", () => {
     document.body.classList.add("motion-reduced");
     const onClose = vi.fn();

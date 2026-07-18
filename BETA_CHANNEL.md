@@ -7,7 +7,7 @@ Durable dogfood line for soak testing before a stable AppWindow cut.
 | Item | Value |
 |------|--------|
 | Branch | `beta` |
-| Current tip (as of channel setup) | build **2026-07-18.643** (v2.16.4) |
+| Current tip (as of channel setup) | build **2026-07-18.644** (v2.16.4) |
 | GitHub prerelease tag pattern | `app-beta-<build>` |
 | Stable (unchanged) | `master` + `app-<build>` **Latest** |
 
@@ -37,4 +37,4 @@ Confirm `/api/health` (or the AppWindow top bar) shows the expected `build`.
 
 ## What’s on beta today
 
-Load/Stop cancel reclaim (no sticky-cancel erase after lock wait; CTAS orphan cleanup), Field Explorer chunked nested discovery with cancel-on-close, NodeFlow canvas snap default OFF, plus nested/stall/cache stress harnesses. See `VERSION` for the detailed build log.
+Faster Load File / file-browser modals (fast opacity-only open, no backdrop blur, deferred FS listing), plus prior cancel reclaim / Field Explorer chunking / snap-default-OFF work. See VERSION for the detailed build log.
