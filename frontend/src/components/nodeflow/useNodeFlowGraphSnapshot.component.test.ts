@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { NbEdge, NbNode } from "../../lib/nodeFlowModel";
 import {
+  executionGraphSignature,
+  stripCosmeticNodeConfig,
+} from "../../lib/nodegraph";
+import {
   createNodeFlowGraphSnapshot,
   nodeFlowSnapshotMatches,
 } from "./useNodeFlowGraphSnapshot";
@@ -47,7 +51,10 @@ describe("NodeFlow graph snapshot cache", () => {
     expect(
       nodeFlowSnapshotMatches(
         snapshot,
-        [{ ...nodes[0], config: { ...nodes[0].config, label: "changed" } }, nodes[1]],
+        [
+          { ...nodes[0], config: { ...nodes[0].config, label: "changed" } },
+          nodes[1],
+        ],
         edges,
       ),
     ).toBe(false);
@@ -56,5 +63,66 @@ describe("NodeFlow graph snapshot cache", () => {
         { ...edges[0], to: { node: "b", port: "right" } },
       ]),
     ).toBe(false);
+  });
+
+  it("execution signature ignores cosmetic config but keeps fields/renames", () => {
+    const base = {
+      table: "t",
+      fields: [{ name: "a", keep: true, rename: "A" }],
+      bodyW: 220,
+      bodyH: 160,
+      label: "Select",
+      style: { theme: "dark" },
+      collapsed: false,
+    };
+    const nodesA: NbNode[] = [
+      makeNode("sel", 0, 0, base),
+      makeNode("out", 300, 0, { table: "x" }),
+    ];
+    const nodesB: NbNode[] = [
+      makeNode("sel", 0, 0, {
+        ...base,
+        bodyW: 400,
+        bodyH: 300,
+        label: "Renamed UI",
+        style: { theme: "light" },
+        collapsed: true,
+      }),
+      nodesA[1],
+    ];
+    const edges = [makeEdge("e", "sel", "out")];
+    expect(executionGraphSignature(nodesA as any, edges as any)).toBe(
+      executionGraphSignature(nodesB as any, edges as any),
+    );
+    expect(createNodeFlowGraphSnapshot(nodesA, edges).signature).toBe(
+      createNodeFlowGraphSnapshot(nodesB, edges).signature,
+    );
+
+    const nodesFields: NbNode[] = [
+      makeNode("sel", 0, 0, {
+        ...base,
+        fields: [{ name: "a", keep: true, rename: "Alpha" }],
+      }),
+      nodesA[1],
+    ];
+    expect(createNodeFlowGraphSnapshot(nodesA, edges).signature).not.toBe(
+      createNodeFlowGraphSnapshot(nodesFields, edges).signature,
+    );
+
+    const nodesKeep: NbNode[] = [
+      makeNode("sel", 0, 0, {
+        ...base,
+        fields: [{ name: "a", keep: false, rename: "A" }],
+      }),
+      nodesA[1],
+    ];
+    expect(createNodeFlowGraphSnapshot(nodesA, edges).signature).not.toBe(
+      createNodeFlowGraphSnapshot(nodesKeep, edges).signature,
+    );
+
+    expect(stripCosmeticNodeConfig(base)).toEqual({
+      table: "t",
+      fields: [{ name: "a", keep: true, rename: "A" }],
+    });
   });
 });

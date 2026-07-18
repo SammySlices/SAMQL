@@ -1,5 +1,8 @@
 import { useCallback, useRef } from "react";
-import { serializeGraph } from "../../lib/nodegraph";
+import {
+  executionGraphSignature,
+  serializeGraph,
+} from "../../lib/nodegraph";
 import type { NbEdge, NbNode } from "../../lib/nodeFlowModel";
 
 type ApiGraph = ReturnType<typeof serializeGraph>;
@@ -20,6 +23,7 @@ type EdgeStructureKey = {
 
 export interface NodeFlowGraphSnapshot {
   graph: ApiGraph;
+  /** Columns / reconcile / preview fingerprint (cosmetic config excluded). */
   signature: string;
   nodeKeys: NodeStructureKey[];
   edgeKeys: EdgeStructureKey[];
@@ -83,7 +87,8 @@ export function createNodeFlowGraphSnapshot(
   const graph = serializeGraph(nodes as any, edges as any);
   return {
     graph,
-    signature: JSON.stringify(graph),
+    // Execution signature: fields/renames/joins/sql/… invalidate; bodyW/label/style do not.
+    signature: executionGraphSignature(nodes as any, edges as any),
     nodeKeys: nodes.map((node) => ({
       id: node.id,
       type: node.type,

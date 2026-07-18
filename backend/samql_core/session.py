@@ -185,6 +185,69 @@ CELL_DISPLAY_CHARS = 1000        # max characters shown per cell in the grid
 PAGE_DISPLAY_BUDGET = 8_000_000  # ~8 MB soft ceiling on one serialized page
 
 
+class _JsonBudgetExceeded(Exception):
+    """Internal: stop json.dump once the display budget is filled."""
+
+
+class _JsonBudgetWriter:
+    """File-like sink for ``json.dump`` that never keeps more than ``budget`` chars."""
+
+    __slots__ = ("budget", "parts", "n", "hit")
+
+    def __init__(self, budget):
+        self.budget = max(0, int(budget))
+        self.parts = []
+        self.n = 0
+        self.hit = False
+
+    def write(self, s):
+        if self.hit or self.budget <= 0:
+            self.hit = True
+            raise _JsonBudgetExceeded()
+        chunk = str(s)
+        room = self.budget - self.n
+        if len(chunk) > room:
+            if room:
+                self.parts.append(chunk[:room])
+                self.n = self.budget
+            self.hit = True
+            raise _JsonBudgetExceeded()
+        self.parts.append(chunk)
+        self.n += len(chunk)
+
+    def getvalue(self):
+        return "".join(self.parts)
+
+
+def _nested_cell_preview(value, limit):
+    """Serialize a nested cell for grid display without a full multi-MB dump.
+
+    Returns ``(preview_or_value, truncated, display_len)``. Small values keep
+    their native dict/list shape when the JSON fits under ``limit``; oversized
+    values become a truncated preview string. Exact row counts are unchanged —
+    this is display-only (full cell still available via the cell endpoint).
+    """
+    limit = max(1, int(limit))
+    bio = _JsonBudgetWriter(limit)
+    try:
+        json.dump(value, bio, default=str, ensure_ascii=False)
+        s = bio.getvalue()
+        return value, False, len(s)
+    except _JsonBudgetExceeded:
+        s = bio.getvalue()
+        # True length unknown without a full dump — show budget+ as a floor.
+        return (s + "… [≥%d chars — truncated]" % limit), True, limit + 24
+    except Exception:
+        try:
+            s = str(value)
+        except Exception:
+            s = "<unprintable>"
+        if len(s) > limit:
+            return (s[:limit] + "… [%d chars — truncated]" % len(s),
+                    True, limit + 40)
+        return s, False, len(s)
+
+
 def _cap_page_rows(rows, per_cell=CELL_DISPLAY_CHARS,
                    page_budget=PAGE_DISPLAY_BUDGET):
     """Bound the size of a serialized result page for display.
@@ -220,30 +283,16 @@ def _cap_page_rows(rows, per_cell=CELL_DISPLAY_CHARS,
                     capped = True
                 used += len(v)
             elif isinstance(v, (dict, list)):
-                # .499: STRUCT / LIST / MAP columns come back from DuckDB as
-                # Python dict / list, NOT str -- so the string branch above
-                # never bounded them. A flatten-OFF nested column can be MBs per
-                # cell, and ~1000 such rows a page of hundreds of MB, which
-                # froze the browser tab receiving/parsing it -- and the server's
-                # single-shot response write then wedged behind the frozen tab
-                # (threads stuck in wfile.write, saturating the connection pool
-                # so Stop/reset couldn't get through). Bound these too: serialize
-                # to text and preview it past the per-cell / page budget. The
-                # full value stays available via the cell endpoint, and the data
-                # is still fully queryable (select sub-fields / use the structure
-                # view). Small nested cells keep their native shape.
-                try:
-                    s = json.dumps(v, default=str, ensure_ascii=False)
-                except Exception:
-                    s = str(v)
-                n = len(s)
+                # .499 / .647: bound nested encode *while* dumping — never
+                # materialize a multi-MB json.dumps just to truncate it.
                 limit = 120 if used >= page_budget else per_cell
-                if n > limit:
-                    v = s[:limit] + "… [%d chars — truncated]" % n
+                preview, was_cut, disp_n = _nested_cell_preview(v, limit)
+                if was_cut:
+                    v = preview
                     capped = True
-                    used += len(v)
+                    used += disp_n
                 else:
-                    used += n
+                    used += disp_n
             rr.append(v)
         out.append(rr)
     return out, capped
@@ -1366,7 +1415,7 @@ class Session:
         key = "%s:%s" % (engine, name)
         self._table_ui_order = [k for k in order if k != key]
 
-    def column_field_tree(self, engine, table, column):
+    def column_field_tree(self, engine, table, column, cancel=None):
         """The nested field tree for one column, parsed from its raw-case
         DuckDB type, so the sidebar can render the schema as an expandable tree
         instead of one giant type string. Returns {type, fields:[...]} where
@@ -1375,7 +1424,8 @@ class Session:
 
         Flatten-off loads often store deep nesting as opaque JSON / JSON[]
         (maximum_depth=2), so DESCRIBE alone yields an empty tree. In that
-        case sample live cell values and build the tree from them."""
+        case sample live cell values and build the tree from them.
+        ``cancel`` stops further sample windows (Field Explorer close / Stop)."""
         from .diagnostics import (parse_duckdb_type, flatten_type_tree,
                                   access_recipes)
         mgr = self.duckdb if engine == "duckdb" else self.db
@@ -1402,7 +1452,7 @@ class Session:
         if engine == "duckdb" and Session._field_tree_needs_json_sample(
                 raw, rows):
             sampled = Session._sample_column_field_tree(
-                self, mgr, table, column, raw)
+                self, mgr, table, column, raw, cancel=cancel)
             if sampled is not None:
                 return sampled
         return {"type": raw, "fields": rows}
@@ -1429,6 +1479,22 @@ class Session:
         mgr = self.duckdb if engine == "duckdb" else self.db
         if mgr is None or not hasattr(mgr, "_column_types_raw"):
             return {"fields": [], "error": "Engine not available."}
+        # Clear a sticky engine cancel from an earlier Stop so BeatDaemon does
+        # not auto-interrupt discovery, then register so cancel_query can
+        # interrupt the in-flight DuckDB sample windows.
+        self._clear_stale_engine_cancel(mgr, except_qid=query_id)
+        if query_id:
+            self._register_run(query_id, mgr, kind="field_tree", target=table)
+        try:
+            return self._table_field_tree_inner(
+                mgr, engine, table, after=after, budget_sec=budget_sec,
+                cancel=cancel, query_id=query_id)
+        finally:
+            if query_id:
+                self._end_run_keep_cancel(query_id)
+
+    def _table_field_tree_inner(self, mgr, engine, table, after=None,
+                                budget_sec=None, cancel=None, query_id=None):
         try:
             raw_cols = mgr._column_types_raw(table) or {}
         except Exception as e:
@@ -1485,7 +1551,8 @@ class Session:
                 next_after = last_done
                 break
             q = self._fe_quote_select_ident(col)
-            sub = self.column_field_tree(engine, table, col)
+            sub = self.column_field_tree(
+                engine, table, col, cancel=_cancelled)
             nested = list(sub.get("fields") or [])
             if nested:
                 root_kind = "struct"
@@ -1582,21 +1649,26 @@ class Session:
         return False
 
     def _fetch_shape_sample_values(self, mgr, table, select_expr,
-                                   batch=None, max_rows=None):
+                                   batch=None, max_rows=None, cancel=None):
         """Read live cells for shape discovery, skipping empty-array prefixes.
 
         A single ``LIMIT N`` often only sees front-loaded empty nested arrays
         (common in trade/event JSON), which used to leave Field Explorer on a
         dead-end ``(element)`` placeholder. While every nested array is still
-        hollow, read further OFFSET batches up to ``max_rows``, then probe
-        mid/end windows so keys past the sequential budget still surface.
-        Once any array has a real element shape, stop — remaining empty
-        optional siblings must not force a full max scan.
-        Discovery-only — never writes or alters table contents.
+        hollow, read further head batches up to ``max_rows``, then **always**
+        probe mid/quartile/end windows so heterogeneous keys that only appear
+        on later rows still union into the field tree (not every record has the
+        same nested fields).
+
+        Prefer Parquet ``file_row_number`` range filters when the table is
+        parquet-backed (avoids expensive large ``OFFSET`` skips on nested
+        payloads). Discovery-only — never writes or alters table contents.
+        ``cancel`` is checked between windows (Field Explorer close / Stop).
         """
         from .diagnostics import (
             _coerce_json_sample, _json_shape_has_hollow_array,
             _json_shape_has_resolved_array, _json_tree_merge, _json_tree_new)
+        from . import sqlutil
         from .sqlutil import quote_ident as _qid
         batch = int(batch if batch is not None
                     else Session._FIELD_TREE_SAMPLE_ROWS)
@@ -1610,10 +1682,43 @@ class Session:
         root = _json_tree_new()
         seen_offsets = set()
 
+        def _cancelled():
+            return bool(cancel and cancel())
+
+        # Prefer projection pushdown over parquet when we have a file source.
+        parquet_src = None
+        try:
+            sources = getattr(mgr, "table_sources", {}) or {}
+            src = sources.get(table)
+            if src is None:
+                low = str(table).lower()
+                for k, v in sources.items():
+                    if str(k).lower() == low:
+                        src = v
+                        break
+            if src and str(src).lower().endswith(".parquet"):
+                parquet_src = str(src)
+        except Exception:
+            parquet_src = None
+
         def _read_window(offset, take):
-            sql = ('SELECT %s FROM %s LIMIT %d OFFSET %d'
-                   % (select_expr, _qid(table), take, offset))
+            if _cancelled():
+                return []
+            offset = max(0, int(offset))
+            take = max(1, int(take))
             try:
+                if parquet_src:
+                    fwd = sqlutil.sql_path(parquet_src)
+                    # file_row_number is 0-based; range filter avoids OFFSET skip.
+                    sql = (
+                        "SELECT %s FROM read_parquet('%s', "
+                        "file_row_number = true) "
+                        "WHERE file_row_number >= %d "
+                        "AND file_row_number < %d"
+                        % (select_expr, fwd, offset, offset + take))
+                else:
+                    sql = ('SELECT %s FROM %s LIMIT %d OFFSET %d'
+                           % (select_expr, _qid(table), take, offset))
                 if reader is not None:
                     _c, rows = reader(sql)
                 else:
@@ -1627,70 +1732,97 @@ class Session:
                 _json_tree_merge(root, _coerce_json_sample(raw), 0)
             values.extend(batch_vals)
 
-        def _shape_done():
+        def _shape_arrays_resolved():
             if not root.get("kind"):
                 return False
             if not _json_shape_has_hollow_array(root):
                 return True
-            # Some arrays resolved; leftover hollows are optional empties.
             return _json_shape_has_resolved_array(root)
 
+        def _table_total():
+            try:
+                if parquet_src:
+                    n = self._parquet_rowcount(mgr, parquet_src)
+                    if n is not None:
+                        return int(n)
+                cnt_sql = 'SELECT count(*) FROM %s' % _qid(table)
+                if reader is not None:
+                    _c, crow = reader(cnt_sql)
+                else:
+                    _c, crow = mgr.execute(cnt_sql)
+                return int((crow or [[0]])[0][0] or 0)
+            except Exception:
+                return 0
+
+        # Phase 1: head walk — skip empty-array prefixes; stop early once
+        # arrays have a real element shape (optional empty siblings must not
+        # force a full max scan). Key-union probes still run in phase 2.
         offset = 0
         while offset < max_rows:
+            if _cancelled():
+                return values
             take = min(batch, max_rows - offset)
             seen_offsets.add(offset)
             batch_vals = _read_window(offset, take)
             if not batch_vals:
                 break
             _merge(batch_vals)
-            if _shape_done():
-                return values
+            if _shape_arrays_resolved():
+                break
             if len(batch_vals) < take:
                 break
             offset += len(batch_vals)
 
-        # Still no resolved array shape — probe later windows (keys past the
-        # sequential budget, or sparse populated rows after a long empty run).
-        if _shape_done():
+        if _cancelled():
             return values
-        try:
-            cnt_sql = 'SELECT count(*) FROM %s' % _qid(table)
-            if reader is not None:
-                _c, crow = reader(cnt_sql)
-            else:
-                _c, crow = mgr.execute(cnt_sql)
-            total = int((crow or [[0]])[0][0] or 0)
-        except Exception:
+
+        # Phase 2: ALWAYS probe mid/quartile/end when more rows exist so
+        # heterogeneous nested keys on later records still appear in the tree.
+        total = _table_total()
+        if total <= 0:
             return values
-        if total <= max_rows:
-            return values
-        # Windows past the sequential budget: resume at max_rows, a mid
-        # slice of the unread tail, and the table end.
         last_off = max(0, total - batch)
-        probes = [max_rows]
-        unread = total - max_rows
-        if unread > batch:
-            probes.append(max_rows + unread // 2)
-        probes.append(last_off)
+        if last_off <= 0:
+            return values
+        probes = []
+        for frac in (0.25, 0.5, 0.75, 1.0):
+            if frac >= 1.0:
+                off = last_off
+            else:
+                off = int(total * frac)
+                off = max(0, min(off, last_off))
+            # Also resume just past the sequential budget when the table is
+            # larger than max_rows (keys past SAMPLE_MAX).
+            probes.append(off)
+        if total > max_rows:
+            probes.append(max_rows)
+            unread = total - max_rows
+            if unread > batch:
+                probes.append(max_rows + unread // 2)
+        # Stable unique order
+        ordered = []
         for off in probes:
             off = max(0, min(int(off), last_off))
             if off in seen_offsets:
                 continue
             seen_offsets.add(off)
+            ordered.append(off)
+        for off in ordered:
+            if _cancelled():
+                break
             batch_vals = _read_window(off, batch)
             if not batch_vals:
                 continue
             _merge(batch_vals)
-            if _shape_done():
-                break
         return values
 
-    def _sample_column_field_tree(self, mgr, table, column, raw_type):
+    def _sample_column_field_tree(self, mgr, table, column, raw_type,
+                                  cancel=None):
         """Sample live values and build a field tree for opaque JSON columns."""
         from .diagnostics import json_values_to_field_tree, access_recipes
         from .sqlutil import quote_ident as _qid
         values = self._fetch_shape_sample_values(
-            mgr, table, _qid(column))
+            mgr, table, _qid(column), cancel=cancel)
         if not values:
             return None
         # Sidebar `path` tooltips: STRUCT shells keep dotted labels; pure
@@ -9249,6 +9381,9 @@ class Session:
             return {"error": "Nothing selected to create."}
         mgr = self.duckdb
         created = []
+        # Clear sticky cancel from a prior Stop so BeatDaemon does not
+        # auto-abort shred CTAS (same posture as page / profile / FE).
+        self._clear_stale_engine_cancel(mgr, except_qid=query_id)
         self._register_run(query_id, mgr, kind="shred", target=table)
         # .431: cap threads for the fat-struct pipelines (peak memory
         # multiplies by thread count); restored on every exit path.

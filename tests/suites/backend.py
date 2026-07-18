@@ -950,6 +950,14 @@ def backend_tests(datadir, csv_path, json_path):
              "oversized STRUCT/LIST cell truncated to a preview string")
         need(nrows[1][1] == {"a": 1} and nrows[2][1] == [1, 2, 3],
              "small nested cells keep their native dict/list shape")
+        # Bounded encode: a multi-MB nested cell must not require a full
+        # json.dumps before truncate (display-only; exact counts unchanged).
+        huge = {"pad": "Z" * 2_000_000, "kids": [{"n": i} for i in range(500)]}
+        hrows, hcap = SS._cap_page_rows([[huge]], per_cell=200)
+        need(hcap is True and isinstance(hrows[0][0], str),
+             "multi-MB nested cell becomes a truncated preview string")
+        need(len(hrows[0][0]) < 400 and "truncated" in hrows[0][0],
+             "preview stays near the per-cell budget without a full dump")
         eq(SS.json_safe({"region": "US", "tags": ["priority"]}),
            '{"region":"US","tags":["priority"]}',
            "structured result cells are serialized as valid JSON")
@@ -24501,6 +24509,92 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_field_tree_survives_sticky_engine_cancel():
+        # Field Explorer discovery must clear sticky _cancel (like page/profile)
+        # and register query_id so cancel_query can interrupt sample windows.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE fe_sticky AS "
+                "SELECT {'a': 1, 'b': {'c': 2}}::JSON AS payload")
+            duck.sync_catalog()
+            duck.interrupt()
+            need(duck._cancel.is_set(), "interrupt left sticky cancel set")
+            tree = s.table_field_tree(
+                "duckdb", "fe_sticky", query_id="fe_after_stall")
+            need(not tree.get("cancelled") and not tree.get("error"),
+                 "field tree must not auto-cancel after sticky cancel: %r"
+                 % tree)
+            names = [f.get("name") for f in (tree.get("fields") or [])]
+            need("payload" in names or "a" in names or "c" in names,
+                 "field tree returned nested names: %r" % names)
+            need(not duck._cancel.is_set(),
+                 "fresh field tree cleared sticky engine cancel")
+            # cancel_query interrupts a registered discovery run
+            import threading
+            started = threading.Event()
+            result = {}
+
+            def _slow():
+                started.set()
+                result["tree"] = s.table_field_tree(
+                    "duckdb", "fe_sticky", query_id="fe_cxl",
+                    budget_sec=30)
+
+            th = threading.Thread(target=_slow, daemon=True)
+            th.start()
+            need(started.wait(2), "discovery started")
+            # Give it a moment to register, then cancel.
+            time.sleep(0.05)
+            s.cancel_query("fe_cxl")
+            th.join(10)
+            need(result.get("tree") is not None, "discovery returned")
+            # Either cancelled mid-flight or finished; must not hang.
+            need(th.is_alive() is False, "cancelled discovery finished")
+        finally:
+            s.shutdown()
+
+    def t_field_tree_heterogeneous_keys_after_early_resolve():
+        # CODE was wrong: once head rows resolved array shapes, mid/end probes
+        # were skipped — keys that only appear on later records never showed.
+        # Phase-2 probes always run for key union when more rows exist.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        try:
+            # First rows: resolved contacts array. Later rows add unique keys.
+            rows = []
+            for i in range(40):
+                rows.append({
+                    "contacts": [{"role": "ops"}],
+                    "common": i,
+                })
+            # Past sequential early-exit: rare keys only at the end.
+            rows.append({
+                "contacts": [{"role": "rare", "email": "r@x.com"}],
+                "common": 99,
+                "only_at_end": {"deep_key": 1},
+            })
+            duck = s.get_duckdb()
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE fe_het AS "
+                "SELECT unnest(?)::JSON AS payload", [rows])
+            duck.sync_catalog()
+            tree = s.column_field_tree("duckdb", "fe_het", "payload")
+            names = [f.get("name") for f in (tree.get("fields") or [])]
+            need("contacts" in names and "role" in names,
+                 "resolved array keys present: %r" % names)
+            need("only_at_end" in names and "deep_key" in names,
+                 "late heterogeneous keys found via mid/end probes: %r"
+                 % names)
+            need("email" in names,
+                 "late contact field unioned: %r" % names)
+        finally:
+            s.shutdown()
+
     def t_rest_and_mssql_cancel():
         # Part 3: the IDE REST API fetch (load_api) and the MSSQL import
         # (import_from_connection) register their query id and bail when it's
@@ -37219,6 +37313,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_profile_survives_sticky_engine_cancel),
         ("page survives sticky engine cancel after Stop",
          t_page_survives_sticky_engine_cancel),
+        ("Field Explorer survives sticky cancel + registers interrupt",
+         t_field_tree_survives_sticky_engine_cancel),
+        ("Field Explorer mid/end probes union late heterogeneous keys",
+         t_field_tree_heterogeneous_keys_after_early_resolve),
         ("REST API fetch + MSSQL import cancel server-side",
          t_rest_and_mssql_cancel),
         ("iterator/while per-pass fetch shares run cancel w/o clobbering",

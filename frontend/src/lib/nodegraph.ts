@@ -125,3 +125,59 @@ export function serializeGraph(
     edges: edges.map((e) => ({ from: e.from, to: e.to })),
   };
 }
+
+/**
+ * UI-only NodeFlow config keys. Changing these must NOT invalidate columns
+ * probes, Select reconcile / missing-fields, or preview cache. Keep selected
+ * fields, renames, formulas, joins, filters, sql, disabled, input table, etc.
+ */
+export const NODEFLOW_COSMETIC_CONFIG_KEYS = [
+  "bodyW",
+  "bodyH",
+  "label",
+  "style",
+  "collapsed",
+] as const;
+
+const COSMETIC_KEY_SET = new Set<string>(NODEFLOW_COSMETIC_CONFIG_KEYS);
+
+/** Drop cosmetic keys from a node config (shallow). */
+export function stripCosmeticNodeConfig(
+  config: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const src = config || {};
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(src)) {
+    if (COSMETIC_KEY_SET.has(key)) continue;
+    out[key] = src[key];
+  }
+  return out;
+}
+
+/**
+ * Graph fingerprint for columns / missing-fields reconcile / preview cache.
+ * Same wiring + schema-affecting config as ``serializeGraph``, minus cosmetics.
+ */
+export function serializeGraphForExecution(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+): {
+  nodes: { id: string; type: string; config: Record<string, unknown> }[];
+  edges: { from: unknown; to: unknown }[];
+} {
+  return {
+    nodes: nodes.map((n) => ({
+      id: n.id,
+      type: n.type,
+      config: stripCosmeticNodeConfig(n.config),
+    })),
+    edges: edges.map((e) => ({ from: e.from, to: e.to })),
+  };
+}
+
+export function executionGraphSignature(
+  nodes: GraphNode[],
+  edges: GraphEdge[],
+): string {
+  return JSON.stringify(serializeGraphForExecution(nodes, edges));
+}
