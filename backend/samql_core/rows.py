@@ -365,7 +365,7 @@ class DiskBackedRows:
                     params.append(str(val))
         return (" AND ".join(clauses) if clauses else ""), params
 
-    def filtered_view(self, terms, sort_ix=None, descending=False):
+    def filtered_view(self, terms, sort_ix=None, descending=False, total=None):
         self._flush()
         if (sort_ix is not None and int(sort_ix) not in self._indexed
                 and self._n >= 20000):
@@ -824,7 +824,7 @@ class ParquetResultStore:
         key = ("sort", int(col_ix), bool(descending))
         return self._deferred_snap_view(key, order, total=len(self))
 
-    def filtered_view(self, terms, sort_ix=None, descending=False):
+    def filtered_view(self, terms, sort_ix=None, descending=False, total=None):
         if sort_ix is None:
             order = 'ORDER BY "__rn"'
         else:
@@ -839,7 +839,9 @@ class ParquetResultStore:
         # Empty filter → just sorted snapshot (or self for stable order).
         if not where and order == 'ORDER BY "__rn"':
             return self
-        total = self._count_where(where, params) if where else len(self)
+        # Prefer caller-supplied total (CachedResult already counted once).
+        if total is None:
+            total = self._count_where(where, params) if where else len(self)
         return self._deferred_snap_view(
             key, order, where=where, params=params, total=total)
 
@@ -877,7 +879,13 @@ class _LazySnapView:
     Exact ``len()`` / ``total_rows`` stay exact. Later pages use the snap's
     ``file_row_number`` ranges once COPY finishes. Sticky cancel still
     interrupts the COPY via the engine cancel flag.
+
+    Deep pages (offset past ``_PRE_SNAP_DEEP_OFFSET``) wait for the snap
+    instead of paying a huge TopN+OFFSET over the full file.
     """
+
+    # Shallow first-page window: TopN is fine. Past this, await the snap.
+    _PRE_SNAP_DEEP_OFFSET = 200
 
     def __init__(self, store, key, order, *, where="", params=None, total=None):
         import threading
@@ -891,6 +899,7 @@ class _LazySnapView:
         self._closed = False
         self._lock = threading.Lock()
         self._started = False
+        self._ready = threading.Event()
 
     def __len__(self):
         if self._snap is not None and not getattr(self._snap, "_closed", False):
@@ -934,8 +943,26 @@ class _LazySnapView:
                 pending = getattr(self._store, "_pending_snaps", None)
                 if isinstance(pending, dict):
                     pending.pop(self._key, None)
+            finally:
+                self._ready.set()
 
         threading.Thread(target=_build, daemon=True, name="samql-qv-snap").start()
+
+    def _await_snap(self, timeout=120.0):
+        """Wait for background COPY; used for deep pages to avoid OFFSET TopN."""
+        import time
+        snap = self._snap
+        if snap is not None and not getattr(snap, "_closed", False):
+            return snap
+        self._kickoff()
+        # If kickoff could not start (closed), nothing to wait for.
+        if self._closed:
+            return None
+        self._ready.wait(timeout=max(0.05, float(timeout)))
+        snap = self._snap
+        if snap is not None and not getattr(snap, "_closed", False):
+            return snap
+        return None
 
     def _slice(self, item):
         snap = self._snap
@@ -947,6 +974,11 @@ class _LazySnapView:
             if start >= stop:
                 self._kickoff()
                 return []
+            deep = start >= self._PRE_SNAP_DEEP_OFFSET
+            if deep:
+                snap = self._await_snap()
+                if snap is not None:
+                    return snap[item]
             if (step or 1) != 1:
                 self._kickoff()
                 rows = []
@@ -967,6 +999,10 @@ class _LazySnapView:
             ix += n
         if ix < 0 or ix >= n:
             raise IndexError(item)
+        if ix >= self._PRE_SNAP_DEEP_OFFSET:
+            snap = self._await_snap()
+            if snap is not None:
+                return snap[ix]
         rows = self._store._fetch(
             self._order, 1, ix, where=self._where, params=self._params)
         self._kickoff()
@@ -980,8 +1016,14 @@ class _LazySnapView:
     def __iter__(self):
         snap = self._snap
         if snap is not None and not getattr(snap, "_closed", False):
-            return iter(snap)
+            yield from snap
+            return
+        # Prefer snap when it lands quickly; else stream ordered rows.
         self._kickoff()
+        snap = self._await_snap(timeout=2.0)
+        if snap is not None:
+            yield from snap
+            return
         where = self._where
         params = self._params
         order = self._order

@@ -440,7 +440,14 @@ class _CachedResult:
                 if len(cache) >= 8:
                     cache.pop(next(iter(cache)))
                 cache[key] = total
-            return store.filtered_view(terms, sort_ix, descending), total
+            # Pass total into the store view so Parquet deferred snaps do not
+            # pay a second filtered COUNT(*) for len()/indices.
+            try:
+                view = store.filtered_view(
+                    terms, sort_ix, descending, total=total)
+            except TypeError:
+                view = store.filtered_view(terms, sort_ix, descending)
+            return view, total
         pred = _row_predicate(terms)
         filtered = [r for r in store if pred(r)]
         if sort_ix is not None:
@@ -859,6 +866,9 @@ class Session:
         self._flow_cache_stats = self._flow_cache_registry.stats
         self._flow_cache_lock = self._flow_cache_registry.lock
         self._data_epoch = 0
+        # Input table names observed while populating the volatile flow cache.
+        # Scoped count clears only bump/clear flow when they intersect this set.
+        self._flow_source_tables = set()
         # directory-node file cache: path -> (hidden_table, engine, mtime)
         self._dir_files = {}
         # API node: node id -> (hidden table, engine) for its last fetch, and
@@ -2087,24 +2097,60 @@ class Session:
         their cached counts. When omitted, the whole cache is cleared
         (unknown / free-form write SQL, resets, iterators).
 
-        Always bumps the NodeFlow data epoch and clears the flow cache —
-        table→fingerprint deps are not tracked, so flow invalidation stays
-        global.
+        Flow-cache epoch: global clears always bump. Scoped clears bump only
+        when the touched tables intersect tables known to feed the volatile
+        NodeFlow cache (so dropping an unrelated table does not nuke flow
+        homework). Fail-safe: if the cache has entries but deps were never
+        recorded, still bump.
         """
         if keys is None:
             self._count_cache.clear()
+            bump_flow = True
         else:
+            touched = []
             for key in keys:
                 try:
-                    self._count_cache.pop(tuple(key), None)
+                    key = tuple(key)
+                    self._count_cache.pop(key, None)
+                    if len(key) > 1 and key[1]:
+                        touched.append(str(key[1]))
                 except Exception:
                     pass
-        # Any data mutation also invalidates the incremental flow cache: bump
-        # the epoch (so every future fingerprint differs) and drop the cached
-        # intermediate tables. Guarded so it's safe if called very early.
-        if hasattr(self, "_flow_cache"):
+            bump_flow = self._should_bump_flow_for_tables(touched)
+        if bump_flow and hasattr(self, "_flow_cache"):
             self._data_epoch += 1
             self._flow_cache_clear()
+
+    def _note_flow_source_tables(self, graph):
+        """Record input table names from a graph that may populate flow cache."""
+        deps = getattr(self, "_flow_source_tables", None)
+        if deps is None:
+            self._flow_source_tables = deps = set()
+        for node in (graph or {}).get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            cfg = node.get("config") or {}
+            for key in ("table", "err_table", "left_table", "right_table"):
+                name = cfg.get(key)
+                if name:
+                    deps.add(str(name))
+
+    def _should_bump_flow_for_tables(self, names):
+        """Whether a scoped table mutation must invalidate NodeFlow cache."""
+        names = {str(n) for n in (names or []) if n}
+        registry = getattr(self, "_flow_cache_registry", None)
+        entries = getattr(registry, "entries", None) if registry else None
+        deps = getattr(self, "_flow_source_tables", None) or set()
+        if entries:
+            if not deps:
+                # Cache has entries but deps unknown — fail safe, bump.
+                return True
+            return bool(names & deps)
+        # Nothing cached: only bump if we previously tracked these as sources
+        # (epoch still matters for the next run that reuses fingerprints).
+        if not deps:
+            return False
+        return bool(names & deps)
 
     def _count_keys_for_tables(self, engine_label, *names):
         """Build ``(label, name)`` keys for scoped count invalidation."""
@@ -2213,6 +2259,9 @@ class Session:
         registry = getattr(self, "_flow_cache_registry", None)
         if registry is not None:
             registry.clear()
+        deps = getattr(self, "_flow_source_tables", None)
+        if deps is not None:
+            deps.clear()
 
     @staticmethod
     def _sql_path(path):
@@ -4041,6 +4090,7 @@ class Session:
         fps = {}
         if use_volatile_cache:
             try:
+                self._note_flow_source_tables(graph)
                 fps = nodeflow.flow_fingerprints(
                     graph, needed_map, getattr(self, "_data_epoch", 0),
                     "duckdb" if engine_target == DUCKDB_TARGET else "sqlite")
