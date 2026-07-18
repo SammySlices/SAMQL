@@ -3082,20 +3082,27 @@ def backend_tests(datadir, csv_path, json_path):
         stub._types_cache_drop()
         raw("t")
         eq(hits["describe"], 3, "a full clear forces a re-probe")
-        # structural invariant: every registry write drops the cache entry,
-        # and sync_catalog clears it
+        # structural invariant: every registry write drops the cache entry.
+        # sync_catalog is incremental (no blanket clear); it DESCRIBEs only
+        # changed tables and seeds _types_cache from those DESCRIBEs.
         import inspect
         src = inspect.getsource(DuckDBManager)
         for m in _re.finditer(
                 r"self\.table_columns\[(\w+)\][^\n]*\n(?:[^\n]*\n)?"
                 r"(?P<nxt>[^\n]*)", src):
             seg = src[m.start():m.start() + 220]
-            need("_types_cache_drop(" in seg,
+            need(("_types_cache_drop(" in seg
+                  or "cache[name]" in seg
+                  or "_types_cache" in seg),
                  "a table_columns write without cache invalidation near: "
                  + src[m.start():m.start() + 80].strip())
-        need("_types_cache.clear()" in inspect.getsource(
-            DuckDBManager.sync_catalog),
-            "sync_catalog clears the types cache")
+        sc = inspect.getsource(DuckDBManager.sync_catalog)
+        # May be a thin wrapper; also check the incremental helper.
+        helpers = sc + inspect.getsource(DuckDBManager._duck_sync_catalog)
+        need("_types_cache.clear()" not in helpers,
+             "sync_catalog must not wipe all cached types each refresh")
+        need("information_schema.columns" in helpers,
+             "incremental sync lists columns before selective DESCRIBE")
 
     def t_read_cursor_cap():
         # Stability: read cursors are BOUNDED. No free slot (a Run storm) ->
@@ -7419,6 +7426,8 @@ def backend_tests(datadir, csv_path, json_path):
                 def execute(self, sql):
                     class C:
                         def fetchall(s):
+                            if "information_schema.columns" in sql:
+                                return [("t", c[0]) for c in describe_cols]
                             if "information_schema" in sql:
                                 return [("t",)]
                             if sql.startswith("DESCRIBE"):
@@ -7439,6 +7448,8 @@ def backend_tests(datadir, csv_path, json_path):
 
             def _er(sql):
                 class C: pass
+                if "information_schema.columns" in sql:
+                    return C(), [("t", c[0]) for c in describe_cols]
                 if "information_schema" in sql:
                     return C(), [("t",)]
                 if sql.startswith("DESCRIBE"):
@@ -34892,9 +34903,10 @@ def backend_tests(datadir, csv_path, json_path):
            "degrades to {} when the schema can't be read (no real conn)")
 
     def t_duck_sync_catalog_concurrent_unbound():
-        # The concurrent reconcile reads information_schema + DESCRIBE on
-        # separate cursors and updates the cache under _catalog_lock. Verify the
-        # REAL method bound to a stub: live tables added, vanished ones dropped.
+        # The concurrent reconcile reads information_schema (+ columns) and
+        # selective DESCRIBE on separate cursors, then updates under
+        # _catalog_lock. Verify the REAL method: live tables added, vanished
+        # ones dropped; unchanged tables with warm types skip DESCRIBE.
         import threading as _th
         from samql_core.engines import DuckDBManager
 
@@ -34904,17 +34916,30 @@ def backend_tests(datadir, csv_path, json_path):
             def __init__(self):
                 self.table_columns = {"gone": ["x"], "keep": ["old"]}
                 self.table_sources = {"gone": "", "keep": ""}
-                self.table_origins = {"gone": "/tmp/gone.json", "keep": "/tmp/keep.json"}
+                self.table_origins = {"gone": "/tmp/gone.json",
+                                      "keep": "/tmp/keep.json"}
                 self._catalog_lock = _th.Lock()
                 self._types_cache = {}
+                self.describe_calls = []
 
             def _types_cache_drop(self, name=None):
-                pass
+                if name is None:
+                    self._types_cache.clear()
+                else:
+                    self._types_cache.pop(name, None)
 
             def execute_read(self, sql):
-                if "information_schema" in sql:
+                if "information_schema.tables" in sql:
                     return ["table_name"], [("keep",), ("new",)]
+                if "information_schema.columns" in sql:
+                    return ["table_name", "column_name"], [
+                        ("keep", "k1"),
+                        ("new", "n1"),
+                        ("new", "n2"),
+                    ]
+                need("DESCRIBE" in sql, "unexpected catalog SQL: %r" % sql)
                 tbl = sql.split('"')[1]
+                self.describe_calls.append(tbl)
                 cols = {"keep": [("k1", "BIGINT")],
                         "new": [("n1", "VARCHAR"), ("n2", "BIGINT")]}[tbl]
                 return ["column_name", "column_type"], cols
@@ -34932,6 +34957,15 @@ def backend_tests(datadir, csv_path, json_path):
         need("new" in st.table_sources, "the new table gets a source entry")
         need("keep" in st.table_origins,
              "surviving tables keep their origin path")
+        eq(sorted(st.describe_calls), ["keep", "new"],
+           "first sync DESCRIBEs tables whose shape is new/changed")
+        eq(st._types_cache.get("keep"), {"k1": "BIGINT"},
+           "sync seeds types cache from DESCRIBE")
+        # Second sync: shapes unchanged + warm types -> no DESCRIBE.
+        st.describe_calls.clear()
+        DuckDBManager.sync_catalog(st)
+        eq(st.describe_calls, [],
+           "unchanged catalog skips DESCRIBE on refresh")
 
     def t_concurrent_reads_source_guards():
         # Structural guarantees on the concurrent-read implementation.
@@ -37474,6 +37508,58 @@ def backend_tests(datadir, csv_path, json_path):
              "plural tables config is recorded")
         need("usernode" in body, "created-node graphs are walked")
 
+    def t_duck_sync_catalog_incremental_source():
+        # Post-655 audit #4: sync_catalog must not DESCRIBE-all every refresh.
+        eng = open(os.path.join(BACKEND, "samql_core", "engines.py"),
+                   encoding="utf-8").read()
+        need("def _duck_sync_catalog" in eng,
+             "incremental duck catalog helper exists")
+        i = eng.index("def _duck_sync_catalog")
+        j = eng.index("\n    def ", i + 1)
+        body = eng[i:j]
+        need("information_schema.columns" in body,
+             "lists columns before selective DESCRIBE")
+        need("need_describe" in body, "skips DESCRIBE for unchanged tables")
+        need("cache[name]" in body, "seeds types cache from DESCRIBE")
+        # Live: second sync + tables_tree pay zero DESCRIBEs when unchanged.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE inc_a AS SELECT 1 AS x, 2 AS y")
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE inc_b AS SELECT 1 AS z")
+            duck.sync_catalog()
+            n = {"d": 0}
+            orig = duck.execute_read
+
+            def wrap(sql):
+                if isinstance(sql, str) and sql.strip().upper().startswith(
+                        "DESCRIBE"):
+                    n["d"] += 1
+                return orig(sql)
+
+            duck.execute_read = wrap
+            n["d"] = 0
+            duck.sync_catalog()
+            eq(n["d"], 0, "unchanged sync skips DESCRIBE")
+            n["d"] = 0
+            names = [t["name"] for t in s.tables_tree()]
+            need("inc_a" in names and "inc_b" in names, "tables visible")
+            eq(n["d"], 0, "tables_tree does not re-DESCRIBE warm types")
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE inc_a AS SELECT 1 AS x, 2 AS y, 3 AS w")
+            n["d"] = 0
+            duck.sync_catalog()
+            eq(n["d"], 1, "column-list change DESCRIBEs only that table")
+            eq(duck.table_columns.get("inc_a"), ["x", "y", "w"],
+               "columns refreshed after shape change")
+        finally:
+            s.shutdown()
+
     def t_scoped_counts_api_hdfs_source():
         # Post-653 audit #2: API/HDFS/iterator/folder loads must not wipe the
         # whole sidebar COUNT cache. HDFS must not re-clear after load_file.
@@ -37672,6 +37758,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_scoped_counts_api_hdfs_source),
         ("flow source tables walker covers nested + plural",
          t_flow_source_tables_walker_source),
+        ("duck sync_catalog incremental: skip unchanged DESCRIBE",
+         t_duck_sync_catalog_incremental_source),
         ("perf audit high defects harness (filter COUNT / deep snap / flow)",
          t_perf_audit_high_harness),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",
