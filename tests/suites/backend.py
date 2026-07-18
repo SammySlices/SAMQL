@@ -729,6 +729,51 @@ def backend_tests(datadir, csv_path, json_path):
                  "drop of nested group input bumps flow epoch")
             eq(s.flow_cache_info()["size"], 0,
                "drop of nested group input clears flow cache")
+
+            # SQL-node tables must be recorded too (audit high #1).
+            s._flow_source_tables = set()
+            s._note_flow_source_tables({
+                "nodes": [
+                    {"id": "sq", "type": "sql",
+                     "config": {"sql": "SELECT * FROM sql_dep_tbl"}},
+                    {"id": "out", "type": "output", "config": {}}],
+            })
+            need("sql_dep_tbl" in (s._flow_source_tables or set()),
+                 "SQL node FROM table is a flow source dep")
+        finally:
+            s.shutdown()
+
+    def t_create_or_replace_refreshes_same_shape_types():
+        # CODE was wrong after incremental sync: CREATE OR REPLACE that kept
+        # the same column names skipped DESCRIBE, so types stayed stale.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        from samql_core.session import DUCKDB_TARGET
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            s.run_query(
+                "CREATE OR REPLACE TABLE shape_t AS "
+                "SELECT 1 AS id, 'x' AS val",
+                target=DUCKDB_TARGET)
+            types1 = duck.types_cached("shape_t")
+            need(types1.get("val"), "val typed after create")
+            t0 = str(types1.get("val") or "").upper()
+            need("VARCHAR" in t0 or "STRING" in t0 or "TEXT" in t0,
+                 "val starts as text-ish: %r" % types1.get("val"))
+            # Same column names, different type for val.
+            s.run_query(
+                "CREATE OR REPLACE TABLE shape_t AS "
+                "SELECT 1 AS id, 42 AS val",
+                target=DUCKDB_TARGET)
+            types2 = duck.types_cached("shape_t")
+            t1 = str(types2.get("val") or "").upper()
+            need(("INT" in t1) and ("VARCHAR" not in t1) and ("STRING" not in t1)
+                 and ("TEXT" not in t1),
+                 "val type refreshed after same-shape REPLACE: %r"
+                 % types2.get("val"))
+            need(t0 != t1, "type string actually changed")
         finally:
             s.shutdown()
 
@@ -37581,6 +37626,10 @@ def backend_tests(datadir, csv_path, json_path):
         need('cfg.get("tables")' in body or "cfg.get('tables')" in body,
              "plural tables config is recorded")
         need("usernode" in body, "created-node graphs are walked")
+        need('typ == "sql"' in body or "typ == 'sql'" in body,
+             "SQL nodes contribute table deps from sql text")
+        need("_table_names_in" in body,
+             "SQL deps reuse the table-name extractor")
 
     def t_duck_sync_catalog_incremental_source():
         # Post-655 audit #4: sync_catalog must not DESCRIBE-all every refresh.
@@ -37863,6 +37912,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_flow_cache_survives_unrelated_table_drop),
         ("flow cache notes nested group/iterator + plural tables",
          t_flow_cache_notes_nested_and_plural_tables),
+        ("CREATE OR REPLACE same columns refreshes cached types",
+         t_create_or_replace_refreshes_same_shape_types),
         ("filter rows (server-side)", t_filter_rows),
         ("filter + formula take a bare expression; IF() is portable",
          t_filter_formula_if),

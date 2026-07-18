@@ -3648,9 +3648,12 @@ class DuckDBManager:
         CACHED per table: the sidebar tree and the field explorer call this on
         every expand, and the typeof() fallback reads a live row -- on a
         multi-GB nested view that is an expensive probe to repeat. The cache
-        is dropped in sync_catalog() (the choke point every load / DDL / drop
-        passes through), and DML can't change TYPES, so a cached answer is
-        always current."""
+        is dropped for tables a write/DDL touches (see Session write path)
+        and for tables whose column *list* changes during incremental
+        sync_catalog. Unchanged tables keep a warm cache so tables_tree
+        does not re-DESCRIBE every refresh. DML that only changes VALUES
+        cannot change TYPES, so a cached answer stays current until DDL.
+        """
         cache = getattr(self, "_types_cache", None)
         if cache is None:
             cache = self._types_cache = {}
@@ -3716,11 +3719,11 @@ class DuckDBManager:
 
         Incremental: list live tables and column names from
         ``information_schema``, then ``DESCRIBE`` only tables that are new
-        or whose visible column list changed. DESCRIBE results seed
-        ``_types_cache`` so ``tables_tree`` does not pay a second DESCRIBE
-        per table. Unchanged tables keep their cached types (no blanket
-        clear) — CREATE OR REPLACE that keeps the same column names is
-        rare; mutating load/DDL paths still call sync after real changes.
+        or whose visible column list changed, or whose types cache was
+        dropped (write/DDL paths drop types for touched tables before
+        sync so ``CREATE OR REPLACE`` with the same column names still
+        refreshes). DESCRIBE results seed ``_types_cache`` so
+        ``tables_tree`` does not pay a second DESCRIBE per table.
         """
         if not self.concurrent_reads:
             # .464: same non-blocking rule as the sqlite twin -- a busy
