@@ -1,5 +1,6 @@
 import React, {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -130,8 +131,20 @@ export const SqlEditor: React.FC<Props> = ({
     return value.slice(0, pos).split("\n").length;
   }, [value]);
 
+  // Debounce highlight so mega one-liners don't tokenize on every keystroke.
+  // Plain text shows immediately; tokens catch up after idle.
+  const [highlightValue, setHighlightValue] = useState(value);
+  useEffect(() => {
+    if (value.length < 8000) {
+      setHighlightValue(value);
+      return;
+    }
+    const id = window.setTimeout(() => setHighlightValue(value), 80);
+    return () => window.clearTimeout(id);
+  }, [value]);
+
   const highlighted = useMemo(() => {
-    const tokens = tokenize(value);
+    const tokens = tokenize(highlightValue);
     return tokens.map((t, idx) => {
       const cls = TOKEN_CLASS[t.kind] || "";
       if (!cls) return <span key={idx}>{t.text}</span>;
@@ -141,7 +154,7 @@ export const SqlEditor: React.FC<Props> = ({
         </span>
       );
     });
-  }, [value]);
+  }, [highlightValue]);
 
   const flashPreRef = useRef<HTMLPreElement | null>(null);
 

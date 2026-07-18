@@ -35,12 +35,56 @@ _DIR = os.path.join(_ROOT, "filecache")
 _PID = os.getpid()
 _SEQ = [0]  # process-local staging counter: same-millisecond begins collide
 _SEQ_LOCK = __import__("threading").Lock()
+_SWEEP_LOCK = __import__("threading").Lock()
+_LAST_SWEEP = [0.0]  # monotonic time of last opportunistic sweep
+_SWEEP_MIN_INTERVAL_SEC = 120.0
+_CONV_LOCKS = {}
+_CONV_LOCKS_MU = __import__("threading").Lock()
 
 
 def _next_seq():
     with _SEQ_LOCK:
         _SEQ[0] += 1
         return _SEQ[0]
+
+
+def conversion_lock(key):
+    """Per-cache-key lock so two loads of the same file share one conversion.
+
+    Acquire **before** DuckDB ``write_lock`` to avoid lock-order inversion.
+    Returns a no-op context when ``key`` is falsy.
+    """
+    class _Null:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    if not key:
+        return _Null()
+    with _CONV_LOCKS_MU:
+        lk = _CONV_LOCKS.get(key)
+        if lk is None:
+            lk = __import__("threading").Lock()
+            _CONV_LOCKS[key] = lk
+        return lk
+
+
+def maybe_sweep(*, force=False):
+    """Throttled mid-session reclaim (startup still calls ``sweep()`` directly).
+
+    Avoids hammering disk after every small commit while still enforcing budget
+    during long conversion-heavy sessions.
+    """
+    if not enabled() and not force:
+        return 0
+    now = time.monotonic()
+    with _SWEEP_LOCK:
+        if not force and (now - _LAST_SWEEP[0]) < _SWEEP_MIN_INTERVAL_SEC:
+            return 0
+        _LAST_SWEEP[0] = now
+    return sweep()
 
 
 def enabled():
@@ -113,6 +157,10 @@ def commit(tmp_path, key):
     for _ in range(4):
         try:
             os.replace(tmp_path, final)
+            try:
+                maybe_sweep()
+            except Exception:
+                pass
             return final
         except OSError as e:
             last = e

@@ -1424,12 +1424,26 @@ class Session:
             return {"fields": [], "error": "No columns."}
 
         out = []
+        # Discovery-only wall budget: after this, remaining columns get a
+        # type-only row (no deep sample / OFFSET probes) so Field Explorer
+        # can paint instead of blocking the API thread on wide nested tables.
+        try:
+            budget = float(os.environ.get("SAMQL_FIELD_TREE_BUDGET_SEC") or 3.0)
+        except Exception:
+            budget = 3.0
+        budget = max(0.5, min(budget, 30.0))
+        t0 = time.monotonic()
+        partial = False
         for col, typ in raw_cols.items():
-            sub = self.column_field_tree(engine, table, col)
-            nested = list(sub.get("fields") or [])
-            # IDE-style SELECT idents (bare when safe). Always-quote made
-            # multi-select emit ``"code" AS …`` instead of ``code AS …``.
             q = self._fe_quote_select_ident(col)
+            deep = (time.monotonic() - t0) < budget
+            if deep:
+                sub = self.column_field_tree(engine, table, col)
+                nested = list(sub.get("fields") or [])
+            else:
+                partial = True
+                nested = []
+                sub = {"fields": [], "type": typ or ""}
             if nested:
                 root_kind = "struct"
                 tu = (typ or "").strip().upper()
@@ -1455,17 +1469,25 @@ class Session:
                     row["column"] = col
                     out.append(row)
             else:
+                note = ("Sample budget reached — type only; reopen Field "
+                        "Explorer or select this column later for nested keys."
+                        if partial and not deep and (
+                            (typ or "").upper().find("STRUCT") >= 0
+                            or (typ or "").upper() in ("JSON", "JSON[]")
+                            or (typ or "").endswith("[]"))
+                        else None)
                 out.append({
                     "depth": 1,
                     "name": col,
                     "type": typ or "",
-                    "kind": "scalar",
+                    "kind": "scalar" if not note else "struct",
                     "path": col,
-                    "note": None,
+                    "note": note,
                     "column": col,
                     "access": {"first": q, "sel": q, "unnests": []},
                 })
-        return {"ok": True, "fields": out, "table": table}
+        return {"ok": True, "fields": out, "table": table,
+                "partial": partial}
 
     # Live-cell field discovery: how many rows to pull when DESCRIBE stops at
     # opaque JSON (flatten-off maximum_depth). Kept modest — union of shapes,
@@ -2307,6 +2329,17 @@ class Session:
             warnings.append(
                 "File is over 4 GiB. Use Load a Table → File (path). Drag-drop "
                 "uploads are capped (see Storage & memory → Load thresholds).")
+        try:
+            from . import load_thresholds as LT
+            upload_mb = int(LT.get_int("upload_mb") or 0)
+        except Exception:
+            upload_mb = 0
+        if upload_mb > 0 and size >= max(64 * 1024 * 1024,
+                                          upload_mb * 1024 * 1024 // 2):
+            warnings.append(
+                "Configured drag-drop upload ceiling is %d MB. Prefer path/"
+                "folder load near or above that size."
+                % upload_mb)
         return info
 
     def configure_load_thresholds(self, updates=None, reset=False):
@@ -2857,8 +2890,15 @@ class Session:
         self._invalidate_profiles()
         self._invalidate_counts()   # new/replaced data -> drop count + flow caches
         try:
-            self._prime_count(loaded.get("engine"),
-                              loaded.get("table"), loaded.get("rows"))
+            # loaders return a list of table descriptors (name/rows/engine).
+            items = loaded if isinstance(loaded, list) else [loaded]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                self._prime_count(
+                    item.get("engine"),
+                    item.get("name") or item.get("table"),
+                    item.get("rows"))
         except Exception:
             pass
         return loaded

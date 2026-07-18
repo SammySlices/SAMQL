@@ -2,12 +2,24 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.640
+Current build:   2026-07-18.641
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.641  (v2.16.4)
+
+AUDIT FOLLOW-UPS (remaining suggestions).
+Fix load count priming; throttled filecache sweep + single-flight
+conversion lock; Field Explorer sample budget + after-paint open;
+SQL highlight debounce; NodeFlow autosave 500ms; preview slice sort;
+canvas snap luminance; flow-cache poll 8s; virtualize at 80/160;
+Journal idle timer gated when hidden; load-threshold/upload warnings;
+join NULL equality note; concurrent-reads comment default ON.
+Refresh samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-18.640  (v2.16.4)

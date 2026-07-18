@@ -3171,6 +3171,7 @@ export default function App() {
               features={feats || null}
               assistantOpen={assistantOpen && !assistantAllowInsert}
               onAssistantToggle={() => toggleAssistant(false)}
+              active={view === "notebook"}
             />
           </div>
           <FieldExplorer

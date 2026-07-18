@@ -35,7 +35,7 @@ export function useNodeFlowAutosave({
   activeTabRef,
   liveRef,
   persistGraphNow,
-  debounceMs = 150,
+  debounceMs = 500,
 }: UseNodeFlowAutosaveOptions) {
   useEffect(() => {
     if (!loadedRef.current || !activeTabId) return;

@@ -1518,7 +1518,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     sides), <b>only R</b> = right rows with no match. Feed
                     <b> inner</b> + <b>only L</b> into a Union for a full left
                     outer join, or <b>inner</b> + <b>only R</b> for a full right
-                    outer.
+                    outer. Keys use SQL equality (<code>=</code>);{" "}
+                    <code>NULL</code> never equals <code>NULL</code>, so null
+                    keys do not match.
                   </div>
                   <label className="nb2-lbl">Join keys (left = right)</label>
                   <InspColsHint

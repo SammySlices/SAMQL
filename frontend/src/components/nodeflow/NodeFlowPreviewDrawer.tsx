@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { startPointerDrag } from "../../lib/pointerDrag";
 import type { Cell, ResultPage } from "../../lib/types";
 import type { ColumnLineageOpenArgs } from "../../lib/columnLineage";
@@ -7,7 +7,6 @@ import { ColumnLineageModal } from "../ColumnLineageModal";
 import { DataGrid } from "../DataGrid";
 import type { NodeFlowPreview } from "./useNodeFlowExecutionController";
 
-const NOOP_SORT = () => {};
 const PREVIEW_CHART_FALLBACK = (
   <div className="faint">Couldn't render this chart.</div>
 );
@@ -34,18 +33,45 @@ export const NodeFlowPreviewDrawer = React.memo(
     const [lineageOpen, setLineageOpen] = useState<ColumnLineageOpenArgs | null>(
       null,
     );
+    // Sort applies to the loaded preview slice only (not a full server re-page).
+    const [sortCol, setSortCol] = useState<string | null>(null);
+    const [descending, setDescending] = useState(false);
 
-    const page = useMemo<ResultPage | null>(
-      () =>
-        preview?.kind === "table"
-          ? {
-              columns: preview.columns,
-              rows: preview.rows as Cell[][],
-              total_rows: preview.total,
-            }
-          : null,
-      [preview],
-    );
+    const previewKey =
+      preview?.kind === "table"
+        ? `${preview.sourceNodeId || ""}:${preview.title}:${preview.total}:${preview.rows.length}`
+        : "";
+    useEffect(() => {
+      setSortCol(null);
+      setDescending(false);
+    }, [previewKey]);
+
+    const page = useMemo<ResultPage | null>(() => {
+      if (preview?.kind !== "table") return null;
+      const cols = preview.columns;
+      let rows = preview.rows as Cell[][];
+      if (sortCol && cols.includes(sortCol)) {
+        const ci = cols.indexOf(sortCol);
+        rows = [...rows].sort((a, b) => {
+          const av = a[ci];
+          const bv = b[ci];
+          if (av == null && bv == null) return 0;
+          if (av == null) return descending ? 1 : -1;
+          if (bv == null) return descending ? -1 : 1;
+          if (typeof av === "number" && typeof bv === "number") {
+            return descending ? bv - av : av - bv;
+          }
+          const as = String(av);
+          const bs = String(bv);
+          return descending ? bs.localeCompare(as) : as.localeCompare(bs);
+        });
+      }
+      return {
+        columns: cols,
+        rows,
+        total_rows: preview.total,
+      };
+    }, [preview, sortCol, descending]);
 
     if (!preview) return null;
 
@@ -95,9 +121,15 @@ export const NodeFlowPreviewDrawer = React.memo(
         {preview.kind === "table" && page && (
           <DataGrid
             page={page}
-            sortCol={null}
-            descending={false}
-            onSort={NOOP_SORT}
+            sortCol={sortCol}
+            descending={descending}
+            onSort={(col) => {
+              if (sortCol === col) setDescending((d) => !d);
+              else {
+                setSortCol(col);
+                setDescending(false);
+              }
+            }}
             onShowLineage={(col, cell) => {
               setLineageOpen({
                 column: col,

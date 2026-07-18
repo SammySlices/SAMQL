@@ -12,6 +12,7 @@ import {
   abortTableFieldsDiscovery,
   startTableFieldsDiscovery,
 } from "../lib/fieldTreeDiscovery";
+import { runAfterPaint } from "../lib/prettyStruct";
 import { FlattenUidModal } from "./FlattenUidModal";
 
 // A floating, draggable JSON Field Explorer. Stays open across the IDE,
@@ -244,23 +245,30 @@ export const FieldExplorer: React.FC<Props> = ({
     setShredInfo(null);
     // Abort competing Sidebar column samples for this table, then own the slot.
     const ctrl = startTableFieldsDiscovery(engine, table);
-    api
-      .tableFields(engine, table, ctrl.signal)
-      .then((r) => {
-        if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
-        if (ctrl.signal.aborted) return;
-        setFields((r.fields || []) as FieldRow[]);
-      })
-      .catch(() => {
-        if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
-        if (ctrl.signal.aborted) return;
-        setFields([]);
-      })
-      .finally(() => {
-        if (gen === fieldsFetchGen.current && key === srcKeyRef.current) {
-          setBusy(false);
-        }
-      });
+    // Defer fetch until after paint so opening FE shows loading, not a dead UI.
+    const cancelPaint = runAfterPaint(() => {
+      api
+        .tableFields(engine, table, ctrl.signal)
+        .then((r) => {
+          if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
+          if (ctrl.signal.aborted) return;
+          setFields((r.fields || []) as FieldRow[]);
+        })
+        .catch(() => {
+          if (gen !== fieldsFetchGen.current || key !== srcKeyRef.current) return;
+          if (ctrl.signal.aborted) return;
+          setFields([]);
+        })
+        .finally(() => {
+          if (gen === fieldsFetchGen.current && key === srcKeyRef.current) {
+            setBusy(false);
+          }
+        });
+    });
+    return () => {
+      cancelPaint();
+      abortTableFieldsDiscovery(engine, table);
+    };
   };
   const initPos = {
     x: typeof saved.x === "number" ? saved.x : 120,
@@ -279,10 +287,7 @@ export const FieldExplorer: React.FC<Props> = ({
       setShredInfo(null);
       return;
     }
-    reloadFields(src.engine, src.table, src.key);
-    return () => {
-      abortTableFieldsDiscovery(src.engine, src.table);
-    };
+    return reloadFields(src.engine, src.table, src.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [srcKey]);
 

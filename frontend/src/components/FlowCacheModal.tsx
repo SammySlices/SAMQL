@@ -62,10 +62,22 @@ export const FlowCachePanel: React.FC<{
 
   useEffect(() => {
     void refresh();
-    const id = window.setInterval(() => {
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden")
+        return;
       void refresh();
-    }, 2500);
-    return () => window.clearInterval(id);
+    };
+    // Live telemetry while open; paused when the tab is hidden. 8s is enough
+    // for ops without the former 2.5s API chatter.
+    const id = window.setInterval(tick, 8000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [refresh]);
 
   const update = async (opts: Parameters<typeof api.flowCacheConfigure>[0]) => {

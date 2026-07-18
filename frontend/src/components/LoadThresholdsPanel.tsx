@@ -174,6 +174,22 @@ export const LoadThresholdsPanel: React.FC<{
             <span className="faint" style={{ fontSize: 11, display: "block", marginTop: 2 }}>
               {meta.help}
             </span>
+            {key === "ondisk_mb" && drafts[key] === "0" ? (
+              <span
+                className="warn"
+                style={{ fontSize: 11, display: "block", marginTop: 4 }}
+                data-testid="ondisk-mb-zero-warn"
+              >
+                Soft on-disk threshold is off. Large CSV/JSON may stay in engine
+                RAM unless the hard floor (ondisk_hard_mb) is still set.
+              </span>
+            ) : null}
+            {key === "upload_mb" && drafts[key] ? (
+              <span className="faint" style={{ fontSize: 11, display: "block", marginTop: 2 }}>
+                Drag-and-drop uploads reject files above this ceiling; prefer
+                path/folder load for multi-GB files.
+              </span>
+            ) : null}
           </label>
         );
       })}

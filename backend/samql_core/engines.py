@@ -191,11 +191,11 @@ HAS_PYARROW = _ilu.find_spec("pyarrow") is not None
 HAS_DUCKDB = _ilu.find_spec("duckdb") is not None
 duckdb = None
 
-# Opt-in flag (default OFF) that routes DuckDB's read-only paths -- the tables
-# panel's catalog reconcile, per-table row counts and schema peeks -- onto a
-# SEPARATE cursor so they don't queue behind a long build/query on the main
-# connection. Off by default so it can be A/B'd on a real build; flip with the
-# environment variable below (or Session.set_concurrent_reads at runtime).
+# Concurrent-reads flag (default ON) routes DuckDB's read-only paths -- the
+# tables panel's catalog reconcile, per-table row counts and schema peeks --
+# onto a SEPARATE cursor so they don't queue behind a long build/query on the
+# main connection. Set SAMQL_CONCURRENT_READS=0 (or Session.set_concurrent_reads)
+# to restore serialized main-connection reads for A/B comparison.
 CONCURRENT_READS_ENV = "SAMQL_CONCURRENT_READS"
 
 
@@ -3252,109 +3252,118 @@ class DuckDBManager:
             final = self.create_view_from_file(name, hit, "parquet")
             DuckDBManager._remember_origin(self, final, path)
             return final
-        if fc_key:
-            cache = filecache.begin(fc_key)
-        else:
-            cache = tmputil.new_tempfile("cache_", ".parquet")
-        cfwd = cache.replace("\\", "/").replace("'", "''")
-        cleanup = None
-        try:
-            # NDJSON rewrite is pure filesystem work — do it outside write_lock
-            # so concurrent reads / peeks / cancel bookkeeping are not blocked
-            # for the whole multi-GB stream rewrite. COPY still takes the lock.
-            self._cancel.clear()
-            fwd = sqlutil.sql_path(path)
-            if kind == "parquet":
-                readers = [f"read_parquet('{fwd}')"]
-            elif kind == "json":
-                read_path, is_nd, cleanup = self._json_source_for_read(path)
-                rfwd = read_path.replace("\\", "/").replace("'", "''")
-                readers = _json_readers(
-                    rfwd, ndjson=is_nd,
-                    memory_limit_mb=self._applied_resource_memory_mb,
-                    maximum_depth=json_depth)
-            else:  # csv / delimited text
-                readers = _csv_readers(fwd, delimiter)
-            if cancel and cancel():
-                raise LoadCancelled()
-            with self.write_lock:
-                # Drop sticky cancel again after waiting for the lock so a
-                # prior Stop cannot auto-abort this COPY via BeatDaemon.
+        # Single-flight per cache key (acquire before write_lock). A waiter
+        # re-looks up after the leader commits instead of duplicating COPY.
+        with filecache.conversion_lock(fc_key):
+            hit = filecache.lookup(fc_key)
+            if hit:
+                final = self.create_view_from_file(name, hit, "parquet")
+                DuckDBManager._remember_origin(self, final, path)
+                return final
+            if fc_key:
+                cache = filecache.begin(fc_key)
+            else:
+                cache = tmputil.new_tempfile("cache_", ".parquet")
+            cfwd = cache.replace("\\", "/").replace("'", "''")
+            cleanup = None
+            try:
+                # NDJSON rewrite is pure filesystem work — do it outside write_lock
+                # so concurrent reads / peeks / cancel bookkeeping are not blocked
+                # for the whole multi-GB stream rewrite. COPY still takes the lock.
                 self._cancel.clear()
+                fwd = sqlutil.sql_path(path)
+                if kind == "parquet":
+                    readers = [f"read_parquet('{fwd}')"]
+                elif kind == "json":
+                    read_path, is_nd, cleanup = self._json_source_for_read(path)
+                    rfwd = read_path.replace("\\", "/").replace("'", "''")
+                    readers = _json_readers(
+                        rfwd, ndjson=is_nd,
+                        memory_limit_mb=self._applied_resource_memory_mb,
+                        maximum_depth=json_depth)
+                else:  # csv / delimited text
+                    readers = _csv_readers(fwd, delimiter)
                 if cancel and cancel():
                     raise LoadCancelled()
-                # Try every reader (typed → tolerant), same ladder as CTAS.
-                # A single first-reader failure used to abort the whole
-                # on-disk path and refuse the load.
-                last = None
-                copied = False
-                for reader in readers:
-                    try:
+                with self.write_lock:
+                    # Drop sticky cancel again after waiting for the lock so a
+                    # prior Stop cannot auto-abort this COPY via BeatDaemon.
+                    self._cancel.clear()
+                    if cancel and cancel():
+                        raise LoadCancelled()
+                    # Try every reader (typed → tolerant), same ladder as CTAS.
+                    # A single first-reader failure used to abort the whole
+                    # on-disk path and refuse the load.
+                    last = None
+                    copied = False
+                    for reader in readers:
                         try:
-                            if os.path.exists(cache):
-                                os.unlink(cache)
-                        except OSError:
-                            pass
-                        if cancel and cancel():
-                            raise LoadCancelled()
-                        with _ExecKeepalive(self.conn, self._cancel,
-                                            threading.get_ident()):
-                            exec_copy_parquet(
-                                self.conn,
-                                "SELECT * FROM %s" % reader, cfwd,
-                                should_cancel=(
-                                    lambda: bool(cancel and cancel())
-                                    or self._cancel.is_set()),
-                                interrupt_fn=getattr(
-                                    self.conn, "interrupt", None))
-                        copied = True
-                        break
-                    except LoadCancelled:
-                        raise
-                    except Exception as e:
-                        if _is_interrupt(e):
+                            try:
+                                if os.path.exists(cache):
+                                    os.unlink(cache)
+                            except OSError:
+                                pass
+                            if cancel and cancel():
+                                raise LoadCancelled()
+                            with _ExecKeepalive(self.conn, self._cancel,
+                                                threading.get_ident()):
+                                exec_copy_parquet(
+                                    self.conn,
+                                    "SELECT * FROM %s" % reader, cfwd,
+                                    should_cancel=(
+                                        lambda: bool(cancel and cancel())
+                                        or self._cancel.is_set()),
+                                    interrupt_fn=getattr(
+                                        self.conn, "interrupt", None))
+                            copied = True
+                            break
+                        except LoadCancelled:
                             raise
-                        last = e
-                        continue
-                if not copied:
-                    raise RuntimeError(
-                        "DuckDB could not COPY %s to Parquet: %s"
-                        % (path, last)) from last
-        except BaseException:
-            try:
-                os.unlink(cache)
-            except OSError:
-                pass
-            raise
-        finally:
-            if cleanup:
+                        except Exception as e:
+                            if _is_interrupt(e):
+                                raise
+                            last = e
+                            continue
+                    if not copied:
+                        raise RuntimeError(
+                            "DuckDB could not COPY %s to Parquet: %s"
+                            % (path, last)) from last
+            except BaseException:
                 try:
-                    os.unlink(cleanup)
+                    os.unlink(cache)
                 except OSError:
                     pass
-        if fc_key:
-            try:
-                # publish atomically so a crash mid-COPY never leaves a half
-                # entry under the final name
-                cache = filecache.commit(cache, fc_key)
-            except Exception:
-                # couldn't publish (e.g. an AV scanner pinned the target):
-                # the LOAD must still succeed -- move the finished conversion
-                # to a per-instance temp and use it uncached
-                fallback = tmputil.new_tempfile("cache_", ".parquet")
+                raise
+            finally:
+                if cleanup:
+                    try:
+                        os.unlink(cleanup)
+                    except OSError:
+                        pass
+            if fc_key:
                 try:
-                    os.replace(cache, fallback)
-                except OSError:
-                    import shutil as _sh
-                    _sh.copyfile(cache, fallback)
-                    filecache.abort(cache)
-                cache = fallback
-        # Expose the cache as a query-in-place view (reuses the parquet path).
-        # Keep the ORIGINAL file path so diagnostics / nested field trees can
-        # still sniff JSON after table_sources points at the Parquet cache.
-        final = self.create_view_from_file(name, cache, "parquet")
-        DuckDBManager._remember_origin(self, final, path)
-        return final
+                    # publish atomically so a crash mid-COPY never leaves a half
+                    # entry under the final name
+                    cache = filecache.commit(cache, fc_key)
+                except Exception:
+                    # couldn't publish (e.g. an AV scanner pinned the target):
+                    # the LOAD must still succeed -- move the finished conversion
+                    # to a per-instance temp and use it uncached
+                    fallback = tmputil.new_tempfile("cache_", ".parquet")
+                    try:
+                        os.replace(cache, fallback)
+                    except OSError:
+                        import shutil as _sh
+                        _sh.copyfile(cache, fallback)
+                        filecache.abort(cache)
+                    cache = fallback
+            # Expose the cache as a query-in-place view (reuses the parquet path).
+            # Keep the ORIGINAL file path so diagnostics / nested field trees can
+            # still sniff JSON after table_sources points at the Parquet cache.
+            final = self.create_view_from_file(name, cache, "parquet")
+            DuckDBManager._remember_origin(self, final, path)
+            return final
+
 
     def _remember_origin(self, name, path):
         """Record the original load path when it differs from the live source."""

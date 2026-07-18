@@ -104,6 +104,18 @@ export function persistCanvasColor(
   writeKey(CANVAS_COLOR_KEYS[surface], n);
 }
 
+/** Relative luminance 0..1 for hex #rrggbb (sRGB). */
+export function hexLuminance(hex: string): number | null {
+  const n = normalizeHex(hex);
+  if (!n) return null;
+  const r = parseInt(n.slice(1, 3), 16) / 255;
+  const g = parseInt(n.slice(3, 5), 16) / 255;
+  const b = parseInt(n.slice(5, 7), 16) / 255;
+  const lin = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
 /** Apply or clear one surface's CSS variable + class on <html>. */
 export function applyCanvasColor(
   surface: CanvasSurface,
@@ -116,9 +128,26 @@ export function applyCanvasColor(
   if (n) {
     root.style.setProperty(varName, n);
     root.classList.add(cls);
+    if (surface === "node") {
+      const lum = hexLuminance(n);
+      root.classList.remove("canvas-node-luma-dark", "canvas-node-luma-light");
+      if (lum != null) {
+        root.classList.add(
+          lum < 0.45 ? "canvas-node-luma-dark" : "canvas-node-luma-light",
+        );
+        root.setAttribute(
+          "data-canvas-node-luma",
+          lum < 0.45 ? "dark" : "light",
+        );
+      }
+    }
   } else {
     root.style.removeProperty(varName);
     root.classList.remove(cls);
+    if (surface === "node") {
+      root.classList.remove("canvas-node-luma-dark", "canvas-node-luma-light");
+      root.removeAttribute("data-canvas-node-luma");
+    }
   }
 }
 

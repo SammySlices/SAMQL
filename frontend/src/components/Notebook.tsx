@@ -95,6 +95,8 @@ interface Props {
   assistantOpen?: boolean;
   /** Toggle / open assistant from Journal chrome (copy-only entry). */
   onAssistantToggle?: () => void;
+  /** When false, Journal is hidden but kept mounted — pause idle timers only. */
+  active?: boolean;
 }
 
 const LAZY_CHUNK = 1000;
@@ -227,6 +229,7 @@ export const Notebook: React.FC<Props> = ({
   features,
   assistantOpen = false,
   onAssistantToggle,
+  active = true,
 }) => {
   const boot = useRef<ReturnType<typeof ensureNotebookStore> | null>(null);
   if (boot.current === null) boot.current = ensureNotebookStore(seedDefs);
@@ -297,9 +300,10 @@ export const Notebook: React.FC<Props> = ({
   // a ticking clock so the "saved Xm ago" label stays current
   const [nowTick, setNowTick] = useState(Date.now());
   useEffect(() => {
+    if (!active) return;
     const t = setInterval(() => setNowTick(Date.now()), 30000);
     return () => clearInterval(t);
-  }, []);
+  }, [active]);
 
   const cellsRef = useRef(cells);
   cellsRef.current = cells;

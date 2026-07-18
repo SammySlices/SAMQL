@@ -48,8 +48,8 @@ export interface NodeFlowRenderModel {
   wires: readonly NodeFlowWire[];
 }
 
-export const LARGE_GRAPH_NODE_THRESHOLD = 120;
-export const LARGE_GRAPH_WIRE_THRESHOLD = 220;
+export const LARGE_GRAPH_NODE_THRESHOLD = 80;
+export const LARGE_GRAPH_WIRE_THRESHOLD = 160;
 export const LARGE_GRAPH_OVERSCAN_PX = 320;
 
 function indexedVisibleInputCount(
