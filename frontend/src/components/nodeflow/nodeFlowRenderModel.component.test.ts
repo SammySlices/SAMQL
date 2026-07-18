@@ -180,5 +180,13 @@ describe("NodeFlow render model", () => {
         : item,
     );
     expect(dirtyNodesAreGeometryOnly(nodes, edited, new Set(["b"]))).toBe(false);
+    const resized = nodes.map((item) =>
+      item.id === "b"
+        ? { ...item, config: { ...item.config, bodyW: 420, bodyH: 280 } }
+        : item,
+    );
+    expect(dirtyNodesAreGeometryOnly(nodes, resized, new Set(["b"]))).toBe(
+      true,
+    );
   });
 });

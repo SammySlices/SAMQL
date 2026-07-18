@@ -275,8 +275,28 @@ export function dirtyNodeIdsFromIdentity(
   return dirty;
 }
 
-/** True when dirty nodes only moved (same type + config ref). Config edits
- *  must full-rebuild so dashboard render versions see chart source changes. */
+/** Config keys that resize updates without changing node semantics. */
+const GEOMETRY_CONFIG_KEYS = new Set(["bodyW", "bodyH"]);
+
+/** True when two configs differ only in bodyW/bodyH (resize mid-gesture). */
+export function configDiffersOnlyGeometry(
+  prev: Record<string, unknown> | null | undefined,
+  next: Record<string, unknown> | null | undefined,
+): boolean {
+  if (prev === next) return true;
+  const a = prev || {};
+  const b = next || {};
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    if (GEOMETRY_CONFIG_KEYS.has(key)) continue;
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+}
+
+/** True when dirty nodes only moved/resized (same type; config unchanged
+ *  except optional bodyW/bodyH). Chart/dashboard config edits must
+ *  full-rebuild so render versions see source changes. */
 export function dirtyNodesAreGeometryOnly(
   prevNodes: readonly NbNode[],
   nodes: readonly NbNode[],
@@ -289,7 +309,16 @@ export function dirtyNodesAreGeometryOnly(
     if (!dirtyIds.has(next.id)) continue;
     const prev = prevNodes[index];
     if (!prev || prev.id !== next.id) return false;
-    if (prev.type !== next.type || prev.config !== next.config) return false;
+    if (prev.type !== next.type) return false;
+    if (
+      prev.config !== next.config &&
+      !configDiffersOnlyGeometry(
+        prev.config as Record<string, unknown>,
+        next.config as Record<string, unknown>,
+      )
+    ) {
+      return false;
+    }
   }
   return true;
 }

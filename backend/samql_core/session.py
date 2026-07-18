@@ -2190,6 +2190,12 @@ class Session:
                     else:
                         _add_name(item)
                 typ = node.get("type")
+                if typ == "sql":
+                    # Free-form SQL can name tables without config.table —
+                    # reuse the engine-routing extractor so drops invalidate
+                    # flow cache the same way Input nodes do.
+                    for name in self._table_names_in(cfg.get("sql") or ""):
+                        _add_name(name)
                 if typ in ("group", "iterator"):
                     _walk(cfg.get("children"))
                 elif typ == "usernode":
@@ -6250,6 +6256,51 @@ class Session:
         except Exception:
             return set()
 
+    def _mutation_table_names(self, sql):
+        """Best-effort table names a write/DDL statement touches.
+
+        Used to drop cached column types so incremental ``sync_catalog``
+        re-DESCRIBEs after ``CREATE OR REPLACE`` that keeps the same
+        column names. Falls back to empty when the statement cannot be
+        parsed — callers should then clear the whole types cache.
+        """
+        names = set(self._table_names_in(sql))
+        try:
+            for m in re.finditer(
+                    r'\b(?:create\s+(?:or\s+replace\s+)?'
+                    r'(?:temp(?:orary)?\s+)?(?:table|view)'
+                    r'|drop\s+(?:table|view)(?:\s+if\s+exists)?'
+                    r'|alter\s+table'
+                    r'|insert\s+into'
+                    r'|update'
+                    r'|delete\s+from)\s+["\[]?([A-Za-z_][\w$]*)',
+                    sql or "", re.IGNORECASE):
+                names.add(m.group(1))
+        except Exception:
+            pass
+        return names
+
+    def _drop_engine_types_for_sql(self, engine_obj, sql):
+        """Invalidate cached column types for tables a write SQL touched."""
+        if engine_obj is None:
+            return
+        touched = self._mutation_table_names(sql)
+        drop = getattr(engine_obj, "_types_cache_drop", None)
+        if callable(drop):
+            if touched:
+                for name in touched:
+                    drop(name)
+            else:
+                drop()
+            return
+        cache = getattr(engine_obj, "_types_cache", None)
+        if isinstance(cache, dict):
+            if touched:
+                for name in touched:
+                    cache.pop(name, None)
+            else:
+                cache.clear()
+
     def _choose_local_engine(self, sql):
         names = self._table_names_in(sql)
         duck_cols = (self.duckdb.table_columns
@@ -6831,14 +6882,18 @@ class Session:
                     pass
 
         elapsed = time.time() - t0
-        if cols is None:
-            # Non-SELECT statement (DDL/DML): the catalog may have changed.
+        # Writes (including DuckDB CREATE OR REPLACE, which returns a Count
+        # row rather than cols=None) must drop cached types for touched
+        # tables and reconcile the catalog so same-shape replaces refresh.
+        if stmt_kind == "write" or cols is None:
             try:
                 engine_obj, _ = self._engine_obj(first_target)
+                self._drop_engine_types_for_sql(engine_obj, original_sql)
                 if hasattr(engine_obj, "sync_catalog"):
                     engine_obj.sync_catalog()
             except Exception:
                 pass
+        if cols is None:
             self.history.add(original_sql, target=first_target, row_count=None,
                              elapsed_sec=round(elapsed, 3))
             self._invalidate_profiles()

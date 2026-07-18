@@ -6511,8 +6511,17 @@ console.log("OK");
             ("dirty patch is geometry-only so dashboard versions stay fresh",
              "dirtyNodesAreGeometryOnly" in scene
              and "export function dirtyNodesAreGeometryOnly" in render_model
+             and "configDiffersOnlyGeometry" in render_model
              and "treats position-only dirty nodes as geometry-only"
-                 in model_tests),
+                 in model_tests
+             and "bodyW: 420" in model_tests),
+            ("canvas resize uses setNodes not per-RAF patchNode; "
+             "pointercancel clears drag",
+             'drag.mode === "resize"' in interactions
+             and "patchNode(drag.nodeId" not in interactions
+             and "bodyW: nextW" in interactions
+             and 'addEventListener("pointercancel"' in interactions
+             and 'removeEventListener("pointercancel"' in interactions),
             ("canvas cards build their body inside a per-card memo boundary",
              "NodeFlowCanvasCard" in scene
              and "nb2-node-head" not in scene

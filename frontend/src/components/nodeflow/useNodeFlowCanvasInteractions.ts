@@ -289,10 +289,28 @@ export function useNodeFlowCanvasInteractions(
         }
       } else if (drag.mode === "resize") {
         const zoom = current.zoomRef.current || 1;
-        current.patchNode(drag.nodeId, {
-          bodyW: drag.startW + (lastX - drag.startX) / zoom,
-          bodyH: drag.baseBodyH + (lastY - drag.startY) / zoom,
-        });
+        const nextW = Math.max(
+          160,
+          drag.startW + (lastX - drag.startX) / zoom,
+        );
+        const nextH = Math.max(
+          110,
+          drag.baseBodyH + (lastY - drag.startY) / zoom,
+        );
+        // Geometry-only setNodes (like node drag) — do NOT patchNode each
+        // RAF. bodyW/bodyH live on config, but dirtyNodesAreGeometryOnly
+        // treats those keys as geometry so the dirty-wire path stays hot.
+        current.setNodes((nodes) =>
+          nodes.map((node) => {
+            if (node.id !== drag.nodeId) return node;
+            const cfg = node.config || {};
+            if (cfg.bodyW === nextW && cfg.bodyH === nextH) return node;
+            return {
+              ...node,
+              config: { ...cfg, bodyW: nextW, bodyH: nextH },
+            };
+          }),
+        );
       } else if (drag.mode === "wire") {
         setWireEnd(toContent(lastX, lastY));
       } else if (drag.mode === "pan") {
@@ -470,14 +488,31 @@ export function useNodeFlowCanvasInteractions(
       dragRef.current = null;
       setWireEnd(null);
       setGroupHover(null);
+      setMarquee(null);
+    };
+
+    const cancel = () => {
+      // Browser/OS stole the gesture — same chrome unlock as pointerup,
+      // without committing wire/marquee side effects mid-flight.
+      if (rafHandle) {
+        cancelAnimationFrame(rafHandle);
+        rafHandle = 0;
+      }
+      delete document.documentElement.dataset.samqlNfDrag;
+      dragRef.current = null;
+      setWireEnd(null);
+      setGroupHover(null);
+      setMarquee(null);
     };
 
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
     return () => {
       if (rafHandle) cancelAnimationFrame(rafHandle);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
     };
   }, [clampToViewport, fireSnap, groupAtContentPoint, nearestInputPort, resolveUnionPort, toContent]);
 
