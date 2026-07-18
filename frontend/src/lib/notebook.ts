@@ -587,15 +587,19 @@ export interface ChainCell {
   resultId?: string | null;
   queryId?: string; // .520: the run that produced resultId (cancel plumbing)
   ranCompiledSql?: string | null;
+  /** Session data_epoch observed when this result was produced. */
+  ranDataEpoch?: number | null;
 }
 
 /** A cell whose parquet result can stand in for its SQL: it ran, isn't stale
- * against the canonical composition (`compiledNow`), and wasn't capped
- * (a capped store is not the full answer). */
+ * against the canonical composition (`compiledNow`), wasn't capped (a capped
+ * store is not the full answer), and still matches the session data epoch
+ * when one is supplied (so an UPDATE/reload can't silently reuse old parquet). */
 export function cellIsFresh(
   c: ChainCell,
   compiledNow: string | undefined,
   resultCapped: boolean,
+  dataEpoch?: number,
 ): boolean {
   return !!(
     c.type === "sql" &&
@@ -603,7 +607,8 @@ export function cellIsFresh(
     c.resultId &&
     c.ranCompiledSql != null &&
     compiledNow === c.ranCompiledSql &&
-    !resultCapped
+    !resultCapped &&
+    (dataEpoch === undefined || c.ranDataEpoch === dataEpoch)
   );
 }
 
@@ -785,6 +790,7 @@ export function planJournalRunAll(
   groups: { id: string; name: string }[],
   compiledById: Record<string, string | undefined>,
   cappedById: Record<string, boolean> = {},
+  dataEpoch?: number,
 ): JournalRunPlan {
   const graph = buildJournalDependencyGraph(list, groups);
   const runnable = list.filter(
@@ -793,7 +799,7 @@ export function planJournalRunAll(
   const reusedIds: string[] = [];
   const runIds: string[] = [];
   for (const c of runnable) {
-    if (cellIsFresh(c, compiledById[c.id], !!cappedById[c.id]))
+    if (cellIsFresh(c, compiledById[c.id], !!cappedById[c.id], dataEpoch))
       reusedIds.push(c.id);
     else runIds.push(c.id);
   }

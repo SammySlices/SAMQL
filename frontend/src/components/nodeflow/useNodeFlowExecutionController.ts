@@ -58,6 +58,8 @@ interface UseNodeFlowExecutionControllerOptions {
   edges: NbEdge[];
   liveRef: React.MutableRefObject<NodeFlowSnapshot>;
   graphSig: string;
+  /** Backend Session._data_epoch — included in preview cache keys. */
+  dataEpoch?: number;
   graphForApi: () => any;
   graphForRun: () => any;
   childCtx: (id: string | null) =>
@@ -91,6 +93,7 @@ export function useNodeFlowExecutionController({
   edges,
   liveRef,
   graphSig,
+  dataEpoch = 0,
   graphForApi,
   graphForRun,
   childCtx,
@@ -137,6 +140,16 @@ export function useNodeFlowExecutionController({
     ((node: NbNode, port: string, title: string) => void) | null
   >(null);
   const previewCache = useRef<Map<string, Extract<NodeFlowPreview, { kind: "table" }>>>(new Map());
+  const previewEpochRef = useRef(dataEpoch);
+
+  // Data mutations bump the session epoch without changing graphSig. Drop any
+  // FE preview hits AND the open drawer so prior rows cannot look current.
+  useEffect(() => {
+    if (previewEpochRef.current === dataEpoch) return;
+    previewEpochRef.current = dataEpoch;
+    previewCache.current.clear();
+    setPreview(null);
+  }, [dataEpoch]);
 
   const isRunCurrent = (id: string) =>
     mountedRef.current && runScopesRef.current.get(id) === scopeVersionRef.current;
@@ -423,11 +436,13 @@ export function useNodeFlowExecutionController({
 
   const doPreview = async (node: NbNode, port: string, title: string) => {
     // reuse the last result for this (node, port) as long as the graph's
-    // structure is unchanged -- so clicking an output arrow again (or after
-    // just moving nodes around) doesn't re-run. Cheap: a preview holds <=200
-    // display rows, and the cache is capped + keyed by the structural signature
-    // (so any config/edge edit invalidates it). Cleared on tab switch.
-    const cacheKey = graphSig + "::" + node.id + "::" + port;
+    // structure AND the session data epoch are unchanged -- so clicking an
+    // output arrow again (or after just moving nodes around) doesn't re-run,
+    // but a table reload/UPDATE cannot serve a prior preview as current.
+    // Cheap: a preview holds <=200 display rows, and the cache is capped +
+    // keyed by structural signature + dataEpoch. Cleared on tab switch / epoch bump.
+    const cacheKey =
+      graphSig + "::" + dataEpoch + "::" + node.id + "::" + port;
     const hit = previewCache.current.get(cacheKey);
     if (hit) {
       setPreview(hit);
@@ -702,6 +717,17 @@ export function useNodeFlowExecutionController({
       }
     >
   >({});
+  // Latest-data wins: canvas charts / validate panels must not keep pre-mutation
+  // aggregates after the session epoch advances.
+  const chartEpochRef = useRef(dataEpoch);
+  useEffect(() => {
+    if (chartEpochRef.current === dataEpoch) return;
+    chartEpochRef.current = dataEpoch;
+    chartDataRef.current = {};
+    setChartData({});
+    setValidateResults({});
+    chartPromisesRef.current.clear();
+  }, [dataEpoch]);
   // the chart node feeding a given dashboard input port (if any)
   const upstreamChartNode = (dash: NbNode, inPort: string): NbNode | null => {
     const e = edges.find((x) => x.to.node === dash.id && x.to.port === inPort);

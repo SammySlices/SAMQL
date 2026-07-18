@@ -34,9 +34,12 @@ import {
   loadCreatedNodes,
   registerActiveNodeFlowGraphGetter,
 } from "../lib/createdNodes";
+import { clearNodeflowColsCache } from "../lib/nodeflowColumnsCache";
 
 export const NodeFlow: React.FC<{
   tables: TableInfo[];
+  /** Backend Session._data_epoch — salts FE preview cache after data mutates. */
+  dataEpoch?: number;
   onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
   features: { duckdb?: boolean } | null;
   onTablesChanged?: () => void;
@@ -74,6 +77,7 @@ export const NodeFlow: React.FC<{
   snap?: boolean;
 }> = ({
   tables,
+  dataEpoch = 0,
   onToast,
   onTablesChanged,
   showTables,
@@ -96,6 +100,10 @@ export const NodeFlow: React.FC<{
   if (nodeFlowDenseActive() !== denseMode) {
     setNodeFlowDenseMode(denseMode);
   }
+  // Latest-data wins: inspector column probes must miss after catalog mutations.
+  useEffect(() => {
+    clearNodeflowColsCache();
+  }, [dataEpoch]);
   const [nodes, setNodes] = useState<NbNode[]>([]);
   // node-type whose help window is open (the inspector "?" button), or null
   const [helpFor, setHelpFor] = useState<string | null>(null);
@@ -417,6 +425,7 @@ export const NodeFlow: React.FC<{
     edges,
     liveRef,
     graphSig,
+    dataEpoch,
     graphForApi,
     graphForRun,
     childCtx,

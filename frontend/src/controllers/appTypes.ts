@@ -30,6 +30,10 @@ export interface ResultTab {
   kind: "result" | "profile" | "recon";
   title: string;
   resultId?: string | null;
+  /** Session data_epoch when this result was produced (latest-data guard). */
+  ranDataEpoch?: number | null;
+  /** True when catalog data moved past ranDataEpoch — re-run required. */
+  dataStale?: boolean;
   originTabId?: string;
   pinned?: boolean;
   page?: ResultPage | null;

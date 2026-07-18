@@ -1,0 +1,39 @@
+# Latest data wins
+
+SamQL users trust that grids, previews, charts, and chain-reuse reflect the
+**current** loaded tables — not a prior cache hit. When freshness and reuse
+conflict, **prefer recompute / refetch / clear**.
+
+## Non-negotiable
+
+1. **Updated data is more important than cache hits.** Never present an unmarked
+   retained result as current after catalog content may have changed (load,
+   replace, drop, alter, write, or equivalent).
+2. **One freshness signal: `Session._data_epoch`.** It must advance on any
+   mutation that changes table contents. Do not gate IDE/Journal freshness on
+   NodeFlow dependency sets alone. Flow-cache *clearing* may stay scoped for
+   performance; the epoch itself must not.
+3. **Reuse is not display.** Blocking Journal chain-reuse or salting a cache key
+   is necessary but not sufficient. Open IDE result tabs, Journal cell grids,
+   NodeFlow preview drawers, and canvas charts must **badge, clear, or refetch**
+   when `data_epoch` advances past the result they hold.
+4. **Snapshot stores are frozen.** A `result_id` parquet is a point-in-time
+   answer. After an epoch bump it must expire (`result expired`) or be labeled
+   historical — never silently page as live against mutated tables.
+5. **External / nondeterministic sources.** Do not freeze filebrowser, remote,
+   directory/appendfolder, random sample, python, or unstable SQL outputs in
+   the volatile flow cache. Prefer content/stat signatures over mtime-only
+   session caches for file-backed sources.
+
+## Implementation checklist (before shipping cache work)
+
+- Does this path still show prior rows after reload/UPDATE with the same SQL?
+- Does `/api/tables` `data_epoch` advance for that mutation?
+- Do IDE / Journal / NodeFlow UIs react (clear, badge, or refetch)?
+- Are adjacent features preserved (joins, nested Field Explorer discovery-only,
+  flatten/shred opt-in, Parquet thresholds)? Call out any tradeoff.
+
+## Allowed tradeoffs
+
+More re-runs and fewer cache hits after data mutations are **expected and
+correct**. Do not weaken freshness guards to recover those hits.

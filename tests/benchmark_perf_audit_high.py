@@ -203,9 +203,10 @@ def run_suite(*, rows: int, work_dir: Path, self_test: bool) -> dict[str, Any]:
         ep = s3._data_epoch
         cache_size = s3.flow_cache_info().get("size", 0)
         s3.drop_table("sqlite", "other_tbl")
-        if s3._data_epoch != ep:
+        if s3._data_epoch <= ep:
             raise AssertionError(
-                "unrelated drop bumped flow epoch %r -> %r" % (ep, s3._data_epoch))
+                "unrelated drop must advance data_epoch %r -> %r"
+                % (ep, s3._data_epoch))
         if cache_size and s3.flow_cache_info().get("size", 0) != cache_size:
             raise AssertionError("unrelated drop cleared flow cache")
         report["correctness"]["unrelated_drop_keeps_flow_cache"] = True

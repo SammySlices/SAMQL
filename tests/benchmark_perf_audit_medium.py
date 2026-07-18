@@ -157,8 +157,9 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
             encoding="utf-8")
         report["correctness"]["filebrowser_disables_volatile_cache"] = (
             '_graph_has_types(' in src
-            and '("filebrowser",)' in src
-            and "use_volatile_cache = False" in src)
+            and '"filebrowser"' in src
+            and "use_volatile_cache = False" in src
+            and "_graph_has_nondeterministic_ops" in src)
     finally:
         s.shutdown()
 
@@ -181,7 +182,7 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         s.drop_table("sqlite", "other_tbl")
         report["correctness"]["unrelated_drop_keeps_flow"] = (
             (not r1.get("error"))
-            and s._data_epoch == ep
+            and s._data_epoch > ep
             and s.flow_cache_info()["size"] == size)
     finally:
         s.shutdown()

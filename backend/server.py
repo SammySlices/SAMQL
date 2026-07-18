@@ -1729,7 +1729,13 @@ class Api:
     # ---- tables ----------------------------------------------------
     @staticmethod
     def tables(s, m, body, ctx):
-        return {"tables": s.tables_tree()}
+        # data_epoch rides the catalog poll so IDE/Journal/NodeFlow clients can
+        # refuse stale chain-reuse / preview hits after underlying data mutates
+        # even when schema + row_count look unchanged.
+        return {
+            "tables": s.tables_tree(),
+            "data_epoch": int(getattr(s, "_data_epoch", 0) or 0),
+        }
 
     @staticmethod
     def tables_reorder(s, m, body, ctx):

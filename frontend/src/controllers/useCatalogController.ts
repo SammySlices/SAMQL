@@ -49,6 +49,8 @@ export function tablesCatalogEqual(
  */
 export function useCatalogController(toast: ToastFn) {
   const [tables, setTables] = useState<TableInfo[]>([]);
+  /** Backend Session._data_epoch — bumps on catalog-mutating writes/loads. */
+  const [dataEpoch, setDataEpoch] = useState(0);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [saved, setSaved] = useState<SavedQuery[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -60,9 +62,13 @@ export function useCatalogController(toast: ToastFn) {
 
   const refreshTables = useCallback(() => {
     const sequence = ++tablesSeq.current;
-    const apply = (value: TableInfo[]) => {
+    const apply = (snapshot: { tables: TableInfo[]; data_epoch: number }) => {
       if (sequence !== tablesSeq.current) return;
-      setTables((prev) => (tablesCatalogEqual(prev, value) ? prev : value));
+      // Epoch can advance without a schema/row_count reshape (UPDATE in place).
+      setDataEpoch(snapshot.data_epoch);
+      setTables((prev) =>
+        tablesCatalogEqual(prev, snapshot.tables) ? prev : snapshot.tables,
+      );
     };
     api
       .tables()
@@ -127,6 +133,8 @@ export function useCatalogController(toast: ToastFn) {
   return {
     tables,
     setTables,
+    dataEpoch,
+    setDataEpoch,
     history,
     setHistory,
     saved,

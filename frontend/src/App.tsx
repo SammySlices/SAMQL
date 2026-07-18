@@ -885,6 +885,8 @@ export default function App() {
   const {
     tables,
     setTables,
+    dataEpoch,
+    setDataEpoch,
     history,
     setHistory,
     saved,
@@ -943,6 +945,36 @@ export default function App() {
     resultPaging,
     rerunExpiredResultRef,
   } = useResultController(toast, LAZY_CHUNK);
+
+  // Latest-data wins: when catalog content mutates, mark IDE result tabs stale
+  // and drop row payloads so prior grids cannot look current. Backend page()
+  // also expires snapshots whose data_epoch no longer matches.
+  useEffect(() => {
+    setResTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.kind !== "result" || !tab.resultId) return tab;
+        if (tab.ranDataEpoch === dataEpoch) {
+          if (!tab.dataStale) return tab;
+          changed = true;
+          return { ...tab, dataStale: false };
+        }
+        if (tab.dataStale && (tab.page?.rows?.length ?? 0) === 0) return tab;
+        changed = true;
+        return {
+          ...tab,
+          dataStale: true,
+          page: tab.page
+            ? {
+                ...tab.page,
+                rows: [],
+              }
+            : tab.page,
+        };
+      });
+      return changed ? next : tabs;
+    });
+  }, [dataEpoch, setResTabs]);
 
   const { ui: confirmUi, ask: askConfirm } = useConfirmPop();
 
@@ -1264,6 +1296,8 @@ export default function App() {
                   ? {
                       ...r,
                       resultId: res.result_id ?? null,
+                      ranDataEpoch: dataEpoch,
+                      dataStale: false,
                       queryId,
                       page: res,
                       sql: trimmed,
@@ -1292,6 +1326,8 @@ export default function App() {
               kind: "result",
               title: titleForTab(originId),
               resultId: res.result_id ?? null,
+              ranDataEpoch: dataEpoch,
+              dataStale: false,
               queryId,
               originTabId: originId,
               pinned: false,
@@ -1377,6 +1413,7 @@ export default function App() {
       target,
       titleForTab,
       toast,
+      dataEpoch,
     ],
   );
 
@@ -1590,6 +1627,8 @@ export default function App() {
             ? {
                 ...t,
                 resultId: ent.result_id ?? null,
+                ranDataEpoch: dataEpoch,
+                dataStale: false,
                 page: { ...pg, result_id: ent.result_id },
                 sortCol: null,
                 descending: false,
@@ -2357,6 +2396,8 @@ export default function App() {
               ? {
                   ...x,
                   resultId: res.result_id ?? null,
+                  ranDataEpoch: dataEpoch,
+                  dataStale: false,
                   queryId,
                   page: res,
                   sortCol: null,
@@ -2559,6 +2600,7 @@ export default function App() {
     try {
       await api.clearAll();
       setTables([]);
+      setDataEpoch(0);
       setResTabs([]);
       setActiveResId(null);
       setEdTabs((ts) => ts.map((t) => ({ ...t, liveResId: undefined })));
@@ -3193,6 +3235,7 @@ export default function App() {
               appVersion={health?.version}
               appBuild={(health as any)?.build}
               tables={tables}
+              dataEpoch={dataEpoch}
               target={target}
               onTargetChange={setTarget}
               dialect={dialect}
@@ -3229,7 +3272,7 @@ export default function App() {
                 <div className="view-loading">Loading NodeFlow…</div>
               }
             >
-              <NodeFlow tables={tables} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} snap={nodeSnap} />
+              <NodeFlow tables={tables} dataEpoch={dataEpoch} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} snap={nodeSnap} />
             </Suspense>
           ) : view === "dashboard" ? (
             <Suspense
@@ -3755,6 +3798,16 @@ export default function App() {
                       style={{ color: "#c98a2b" }}
                     >
                       Capped
+                    </span>
+                  )}
+                  {activeResultTab.dataStale && (
+                    <span
+                      className="chip"
+                      data-testid="result-data-stale-chip"
+                      title="Loaded tables changed since this result ran. Re-run to refresh."
+                      style={{ color: "#c98a2b" }}
+                    >
+                      Data changed — re-run
                     </span>
                   )}
                   {activeResultTab.visibleColumns &&

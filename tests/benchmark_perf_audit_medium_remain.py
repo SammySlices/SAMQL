@@ -209,7 +209,7 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         s.drop_table("sqlite", "other_tbl")
         report["correctness"]["unrelated_drop_keeps_flow"] = (
             (not r1.get("error"))
-            and s._data_epoch == ep
+            and s._data_epoch > ep
             and s.flow_cache_info()["size"] == size)
     finally:
         s.shutdown()

@@ -39,6 +39,8 @@ export interface RunCell {
   error?: string | null;
   ranOnce?: boolean;
   ranCompiledSql?: string;
+  /** Session data_epoch when resultId was produced (chain-reuse guard). */
+  ranDataEpoch?: number | null;
   elapsedMs?: number | null;
   collapsed?: boolean;
   boxW?: number;

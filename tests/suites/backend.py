@@ -624,8 +624,11 @@ def backend_tests(datadir, csv_path, json_path):
                  "unrelated table count preserved after scoped invalidate")
             eq(s._count_cache[("sqlite", "keep_me")], 7,
                "preserved count value intact")
-            eq(s._data_epoch, ep,
-               "unrelated drop with empty flow deps must not bump epoch")
+            # Latest-data wins: any content-touching drop advances data_epoch
+            # so IDE/Journal refuse retained snapshots. Flow cache clear stays
+            # scoped separately (covered by t_flow_cache_survives_unrelated…).
+            need(s._data_epoch > ep,
+                 "content-touching drop must advance data_epoch")
         finally:
             s.shutdown()
 
@@ -652,11 +655,17 @@ def backend_tests(datadir, csv_path, json_path):
             ep = s._data_epoch
             size = s.flow_cache_info()["size"]
             s.drop_table("sqlite", "other_tbl")
-            eq(s._data_epoch, ep, "unrelated drop keeps data epoch")
+            # Latest-data wins: data_epoch always advances on content change.
+            # Flow-cache clear stays scoped — unrelated drops keep homework.
+            need(s._data_epoch > ep,
+                 "unrelated drop still advances data_epoch")
             eq(s.flow_cache_info()["size"], size,
                "unrelated drop keeps flow cache entries")
+            ep2 = s._data_epoch
             s.drop_table("sqlite", "flow_src")
-            need(s._data_epoch > ep, "drop of flow input still bumps epoch")
+            need(s._data_epoch > ep2, "drop of flow input still bumps epoch")
+            eq(s.flow_cache_info()["size"], 0,
+               "drop of flow input clears flow cache")
         finally:
             s.shutdown()
 
@@ -721,11 +730,13 @@ def backend_tests(datadir, csv_path, json_path):
             size = s.flow_cache_info()["size"]
             need(size >= 1, "flow cache populated after nested run")
             s.drop_table("sqlite", "other_nested")
-            eq(s._data_epoch, ep, "unrelated drop keeps epoch with nested deps")
+            need(s._data_epoch > ep,
+                 "unrelated drop advances data_epoch with nested deps")
             eq(s.flow_cache_info()["size"], size,
                "unrelated drop keeps nested flow cache")
+            ep2 = s._data_epoch
             s.drop_table("sqlite", "flow_nested")
-            need(s._data_epoch > ep,
+            need(s._data_epoch > ep2,
                  "drop of nested group input bumps flow epoch")
             eq(s.flow_cache_info()["size"], 0,
                "drop of nested group input clears flow cache")
@@ -16620,6 +16631,19 @@ def backend_tests(datadir, csv_path, json_path):
             ("the retry path routes through the guard too",
              ".then(apply)" in catalog
              and "api.tables().then(apply)" in catalog),
+            ("catalog refresh tracks session data_epoch for stale-cache guards",
+             "setDataEpoch(snapshot.data_epoch)" in catalog
+             and "data_epoch" in _fe("src", "lib", "api.ts")
+             and '"data_epoch"' in open(
+                 os.path.join(ROOT, "backend", "server.py"),
+                 encoding="utf-8").read()
+             and "_live_cached_result" in open(
+                 os.path.join(ROOT, "backend", "samql_core", "session.py"),
+                 encoding="utf-8").read()
+             and "Updated data is more important than cache hits" in open(
+                 os.path.join(ROOT, ".cursor", "rules",
+                              "latest-data-wins.mdc"),
+                 encoding="utf-8").read()),
         ]
         nb = _fe("src", "components", "Notebook.tsx")
         act = _fe("src", "components", "ActivityShared.tsx")
@@ -26566,6 +26590,85 @@ def backend_tests(datadir, csv_path, json_path):
                 eq(s2.flow_cache_info()["size"], 0, "nothing is cached when disabled")
             finally:
                 s2.shutdown()
+        finally:
+            s.shutdown()
+
+    def t_result_expires_after_data_epoch_bump():
+        # Latest-data wins: paging a result after a content mutation must expire
+        # rather than serve frozen parquet as current.
+        from samql_core.session import LOCAL_TARGET
+        s = _fresh_session()
+        try:
+            s.run_query(
+                "CREATE TABLE ep_src AS SELECT 1 AS g UNION ALL SELECT 2",
+                target=LOCAL_TARGET)
+            q = s.run_query("SELECT g FROM ep_src", target=LOCAL_TARGET)
+            need(not q.get("error"), "seed select: %s" % q.get("error"))
+            rid = q["result_id"]
+            p1 = s.page(rid, 0, 10)
+            need(not p1.get("error"), "fresh page works")
+            eq(p1.get("total_rows"), 2, "two rows")
+            ep = s._data_epoch
+            s.run_query("INSERT INTO ep_src VALUES (3)", target=LOCAL_TARGET)
+            need(s._data_epoch > ep, "write bumps data_epoch")
+            p2 = s.page(rid, 0, 10)
+            eq(p2.get("error"), "result expired",
+               "stale snapshot must expire after epoch bump")
+            # A new run at the new epoch is pageable again.
+            q2 = s.run_query("SELECT g FROM ep_src", target=LOCAL_TARGET)
+            need(not q2.get("error"), "re-run after mutation: %s"
+                 % q2.get("error"))
+            p3 = s.page(q2["result_id"], 0, 10)
+            need(not p3.get("error"), "fresh result pages")
+            eq(p3.get("total_rows"), 3, "re-run sees inserted row")
+        finally:
+            s.shutdown()
+
+    def t_flow_cache_skips_nondeterministic():
+        # Random sample / unstable SQL must not freeze the first materialisation
+        # in the volatile flow cache for the rest of the data epoch.
+        from samql_core.session import LOCAL_TARGET
+        s = _fresh_session()
+        try:
+            s.flow_cache = True
+            s._flow_cache_clear()
+            s.run_query(
+                "CREATE TABLE rnd_src AS SELECT 1 AS id UNION ALL SELECT 2 "
+                "UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 "
+                "UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8",
+                target=LOCAL_TARGET)
+            eng, _ = s._engine_obj(LOCAL_TARGET)
+            g = {"nodes": [
+                {"id": "n1", "type": "input",
+                 "config": {"table": "rnd_src"}},
+                {"id": "n2", "type": "sample",
+                 "config": {"mode": "random", "n": 3, "label": "s"}},
+                {"id": "n3", "type": "output",
+                 "config": {"label": "out"}}],
+                 "edges": [
+                    {"from": {"node": "n1", "port": "out"},
+                     "to": {"node": "n2", "port": "in"}},
+                    {"from": {"node": "n2", "port": "out"},
+                     "to": {"node": "n3", "port": "in"}}]}
+            need(s._graph_has_nondeterministic_ops(g, eng),
+                 "random sample is non-deterministic")
+            r1 = s.run_nodeflow(g, "n3", "out")
+            need(not r1.get("error"), "first random sample runs: %s"
+                 % r1.get("error"))
+            info1 = s.flow_cache_info()
+            # Fingerprints must stay empty for this graph (gate disables cache).
+            # Hits staying 0 across a second run is the user-visible guarantee.
+            hits_before = info1.get("hits") or 0
+            size_before = info1.get("size") or 0
+            r2 = s.run_nodeflow(g, "n3", "out")
+            need(not r2.get("error"), "second random sample runs: %s"
+                 % r2.get("error"))
+            info2 = s.flow_cache_info()
+            eq(info2.get("hits") or 0, hits_before,
+               "non-deterministic sample must not hit volatile flow cache")
+            # Size should not grow from fingerprint materialisations either.
+            need((info2.get("size") or 0) <= size_before + 0,
+                 "non-deterministic sample should not populate flow cache")
         finally:
             s.shutdown()
 
@@ -37608,8 +37711,8 @@ def backend_tests(datadir, csv_path, json_path):
              "sorted pages stay exact after snap")
         need(corr.get("scoped_count_drop") is True,
              "scoped count invalidation on drop")
-        need(corr.get("unrelated_drop_keeps_flow_epoch") is True,
-             "unrelated drop must not bump flow epoch")
+        need(corr.get("unrelated_drop_advances_data_epoch") is True,
+             "unrelated drop must advance data_epoch (latest-data wins)")
         need(corr.get("write_sql_global_counts") is True,
              "write SQL still clears counts globally")
         need(corr.get("scoped_count_api_style") is True,
@@ -37801,6 +37904,50 @@ def backend_tests(datadir, csv_path, json_path):
              "materialize path gates filebrowser volatile cache")
         need(corr.get("unrelated_drop_keeps_flow") is True,
              "unrelated drop still keeps flow cache")
+
+    def t_latest_data_wins_harness():
+        # IDE page expiry, Journal reuse refuse, NodeFlow rematerialize, FE pins.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        script = os.path.join(ROOT, "tests", "benchmark_latest_data_wins.py")
+        need(os.path.isfile(script),
+             "latest-data-wins benchmark harness is bundled")
+        out = os.path.join(DATADIR, "benchmark-latest-data-wins-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "latest-data-wins self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "latest-data-wins report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "latest-data-wins self-test ok flag")
+        corr = result.get("correctness") or {}
+        for key, why in (
+            ("ide_stale_page_expires", "IDE stale page expires"),
+            ("ide_rerun_sees_new_rows", "IDE re-run sees new rows"),
+            ("journal_reuse_refuses_stale", "Journal reuse refuses stale rid"),
+            ("journal_setup_reuse_stale", "Journal setup_reuse marks stale"),
+            ("journal_rerun_sees_new_rows", "Journal re-run sees new rows"),
+            ("nodeflow_rerun_sees_new_rows", "NodeFlow re-run sees new rows"),
+            ("nodeflow_old_result_expires", "NodeFlow old result expires"),
+            ("sqlite_ide_stale_page_expires", "SQLite IDE page expires"),
+            ("sqlite_ide_rerun_sees_new_rows", "SQLite IDE re-run sees new rows"),
+            ("fe_journal_epoch_freshness", "FE Journal epoch freshness"),
+            ("fe_ide_data_stale_chip", "FE IDE data-stale chip"),
+            ("fe_nodeflow_epoch_clears", "FE NodeFlow epoch clears"),
+            ("latest_data_wins_rule", "latest-data-wins rule present"),
+        ):
+            need(corr.get(key) is True, why)
 
     def t_perf_audit_medium_remain_harness():
         # Deep snap pending, table_names_in CTE/sqlglot, FE deadline, drag indexes.
@@ -38011,6 +38158,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_perf_audit_high_harness),
         ("perf audit medium defects harness (COUNT lock / catalog / filebrowser)",
          t_perf_audit_medium_harness),
+        ("latest-data-wins harness (IDE / Journal / NodeFlow refuse stale cache)",
+         t_latest_data_wins_harness),
         ("perf audit medium remain harness (deep snap pending / names / FE)",
          t_perf_audit_medium_remain_harness),
         ("catalog dirty-skip + SQLite warm PRAGMA (source)",
@@ -38135,6 +38284,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_flow_cache_incremental),
         ("flow cache: a data write invalidates (never stale)",
          t_flow_cache_invalidation),
+        ("result store expires after data_epoch bump (latest-data wins)",
+         t_result_expires_after_data_epoch_bump),
+        ("flow cache: non-deterministic sample skips volatile cache",
+         t_flow_cache_skips_nondeterministic),
         ("flow cache: eviction stays within the cap, results correct",
          t_flow_cache_eviction),
         ("flow cache: blocking join checkpoint reused on downstream edit",

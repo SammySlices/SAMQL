@@ -169,13 +169,15 @@ def run_suite(*, rows: int, work_dir: Path, self_test: bool) -> dict[str, Any]:
             raise AssertionError("scoped drop cleared unrelated count")
         if ("sqlite", "drop_b") in s2._count_cache:
             raise AssertionError("dropped table count still cached")
-        # Unrelated drop with empty flow deps must NOT nuke flow epoch.
-        if s2._data_epoch != before_epoch:
+        # Latest-data wins: unrelated drop advances data_epoch so IDE/Journal
+        # refuse retained snapshots. Flow-cache clear stays scoped (not tested
+        # here — empty flow deps).
+        if s2._data_epoch <= before_epoch:
             raise AssertionError(
-                "unrelated scoped drop must not bump flow epoch "
+                "unrelated scoped drop must advance data_epoch "
                 "(got %r -> %r)" % (before_epoch, s2._data_epoch))
         report["correctness"]["scoped_count_drop"] = True
-        report["correctness"]["unrelated_drop_keeps_flow_epoch"] = True
+        report["correctness"]["unrelated_drop_advances_data_epoch"] = True
 
         # Free-form write SQL still clears globally.
         s2._count_cache[("sqlite", "keep_a")] = 11
