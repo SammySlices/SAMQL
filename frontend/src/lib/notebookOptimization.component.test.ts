@@ -143,6 +143,13 @@ describe("Journal dependency optimization", () => {
     expect(plan.runIds).toEqual([]);
   });
 
+  it("marks a cell not fresh when ranDataEpoch is missing under a live epoch", () => {
+    const cells = [fresh("a", "cell1", "SELECT 1", "A")]; // no ranDataEpoch
+    const plan = planJournalRunAll(cells, [], { a: "A" }, {}, 1);
+    expect(plan.reusedIds).toEqual([]);
+    expect(plan.runIds).toEqual(["a"]);
+  });
+
   it("tracks chart and reconcile dependencies with the same graph", () => {
     const cells: ChainCell[] = [
       sql("a", "left", "SELECT 1 AS id"),

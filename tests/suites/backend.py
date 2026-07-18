@@ -37905,6 +37905,50 @@ def backend_tests(datadir, csv_path, json_path):
         need(corr.get("unrelated_drop_keeps_flow") is True,
              "unrelated drop still keeps flow cache")
 
+    def t_latest_data_wins_harness():
+        # IDE page expiry, Journal reuse refuse, NodeFlow rematerialize, FE pins.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        script = os.path.join(ROOT, "tests", "benchmark_latest_data_wins.py")
+        need(os.path.isfile(script),
+             "latest-data-wins benchmark harness is bundled")
+        out = os.path.join(DATADIR, "benchmark-latest-data-wins-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "latest-data-wins self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "latest-data-wins report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "latest-data-wins self-test ok flag")
+        corr = result.get("correctness") or {}
+        for key, why in (
+            ("ide_stale_page_expires", "IDE stale page expires"),
+            ("ide_rerun_sees_new_rows", "IDE re-run sees new rows"),
+            ("journal_reuse_refuses_stale", "Journal reuse refuses stale rid"),
+            ("journal_setup_reuse_stale", "Journal setup_reuse marks stale"),
+            ("journal_rerun_sees_new_rows", "Journal re-run sees new rows"),
+            ("nodeflow_rerun_sees_new_rows", "NodeFlow re-run sees new rows"),
+            ("nodeflow_old_result_expires", "NodeFlow old result expires"),
+            ("sqlite_ide_stale_page_expires", "SQLite IDE page expires"),
+            ("sqlite_ide_rerun_sees_new_rows", "SQLite IDE re-run sees new rows"),
+            ("fe_journal_epoch_freshness", "FE Journal epoch freshness"),
+            ("fe_ide_data_stale_chip", "FE IDE data-stale chip"),
+            ("fe_nodeflow_epoch_clears", "FE NodeFlow epoch clears"),
+            ("latest_data_wins_rule", "latest-data-wins rule present"),
+        ):
+            need(corr.get(key) is True, why)
+
     def t_perf_audit_medium_remain_harness():
         # Deep snap pending, table_names_in CTE/sqlglot, FE deadline, drag indexes.
         from samql_core.engines import HAS_DUCKDB
@@ -38114,6 +38158,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_perf_audit_high_harness),
         ("perf audit medium defects harness (COUNT lock / catalog / filebrowser)",
          t_perf_audit_medium_harness),
+        ("latest-data-wins harness (IDE / Journal / NodeFlow refuse stale cache)",
+         t_latest_data_wins_harness),
         ("perf audit medium remain harness (deep snap pending / names / FE)",
          t_perf_audit_medium_remain_harness),
         ("catalog dirty-skip + SQLite warm PRAGMA (source)",
