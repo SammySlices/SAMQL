@@ -197,6 +197,9 @@ function CanvasNodeFrameImpl({
 // body on the actual model + explicit external versions instead. During a
 // multi-node drag, setNodes preserves object identity for every stationary
 // node, so only the moved nodes and wire/minimap geometry reconcile each frame.
+// Scene prefers NodeFlowCanvasCard (memos body construction); that path uses
+// the non-memo view so children updates are never skipped by this comparator.
+export const CanvasNodeFrameView = CanvasNodeFrameImpl;
 export const CanvasNodeFrame = React.memo(
   CanvasNodeFrameImpl,
   (a, b) => sameCanvasNodeMemoState(a, b),

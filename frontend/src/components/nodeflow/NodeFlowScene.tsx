@@ -4,27 +4,21 @@ import {
   HEAD_H,
   NODE_W,
   PORTS,
-  PORT_LABEL,
-  inputPortMark,
-  isTopInput,
-  nodeShowsBody,
   portsOf,
-  portTopOffset,
   portXY,
-  sidePortLabel,
   type NbEdge,
   type NbNode,
   type NodeType,
 } from "../../lib/nodeFlowModel";
 import { useRenderCount } from "../../lib/renderDebug";
-import { ChartView } from "../ChartView";
-import { Icon } from "../Icon";
-import { CanvasNodeFrame } from "../NodeFlowCanvas";
 import {
   loadCreatedNodes,
   usernodeConfigFromDefinition,
 } from "../../lib/createdNodes";
-import { getNodeCardSummary, NODE_BY_TYPE } from "./nodeDefinitions";
+import {
+  NodeFlowCanvasCard,
+  type NodeFlowCanvasCardActions,
+} from "./NodeFlowCanvasCard";
 import { NodeFlowCanvasShell } from "./NodeFlowCanvasShell";
 import type { CanvasMenuState, NodeMenuState } from "./NodeFlowMenus";
 import type { NodeFlowMarquee } from "./useNodeFlowCanvasInteractions";
@@ -37,10 +31,6 @@ import {
   selectVisibleCanvasNodes,
   selectVisibleCanvasWires,
 } from "./nodeFlowRenderModel";
-
-const CHART_FALLBACK = (
-  <div className="nb2-chart-msg">Can’t draw this chart.</div>
-);
 
 interface PendingWireState {
   node: string;
@@ -170,6 +160,55 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
     from: number;
     to?: number;
   } | null>(null);
+  const chartDataRef = useRef(chartData);
+  chartDataRef.current = chartData;
+  // Stable action identity so NodeFlowCanvasCard memo is not busted every frame.
+  const cardActionsRef = useRef<NodeFlowCanvasCardActions>(null!);
+  cardActionsRef.current = {
+    startNodeDrag,
+    startNodeResize,
+    startWire,
+    patchNode,
+    ensureChartFor,
+    upstreamChartNode,
+    setDashboardPane,
+    groupReorder,
+    groupAddChild,
+    extractChildToCanvas,
+    setHoveredInput,
+    setSelectedId,
+    setSelectedIds,
+    setNodeMenu,
+  };
+  const cardActions = useMemo<NodeFlowCanvasCardActions>(
+    () => ({
+      startNodeDrag: (event, node) =>
+        cardActionsRef.current.startNodeDrag(event, node),
+      startNodeResize: (event, node) =>
+        cardActionsRef.current.startNodeResize(event, node),
+      startWire: (event, node, port) =>
+        cardActionsRef.current.startWire(event, node, port),
+      patchNode: (id, config) => cardActionsRef.current.patchNode(id, config),
+      ensureChartFor: (node, force) =>
+        cardActionsRef.current.ensureChartFor(node, force),
+      upstreamChartNode: (dashboard, inputPort) =>
+        cardActionsRef.current.upstreamChartNode(dashboard, inputPort),
+      setDashboardPane: (dashboard, index, port) =>
+        cardActionsRef.current.setDashboardPane(dashboard, index, port),
+      groupReorder: (groupId, from, to) =>
+        cardActionsRef.current.groupReorder(groupId, from, to),
+      groupAddChild: (groupId, type) =>
+        cardActionsRef.current.groupAddChild(groupId, type),
+      extractChildToCanvas: (groupId, childId) =>
+        cardActionsRef.current.extractChildToCanvas(groupId, childId),
+      setHoveredInput: (nodeId, port) =>
+        cardActionsRef.current.setHoveredInput(nodeId, port),
+      setSelectedId: (value) => cardActionsRef.current.setSelectedId(value),
+      setSelectedIds: (value) => cardActionsRef.current.setSelectedIds(value),
+      setNodeMenu: (value) => cardActionsRef.current.setNodeMenu(value),
+    }),
+    [],
+  );
   const chartObjectIds = useRef(new WeakMap<object, number>());
   const nextChartObjectId = useRef(1);
 
@@ -375,7 +414,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             ? selectedId
             : null;
         return (
-          <CanvasNodeFrame
+          <NodeFlowCanvasCard
             key={node.id}
             node={node}
             index={renderModel.nodeIndexById.get(node.id) || 0}
@@ -392,459 +431,14 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             renderVersion={renderModel.renderVersionByNode[node.id] || "-"}
             chartVersion={chartVersionByNode[node.id] ?? null}
             childSelection={childSelection}
-            onPointerDown={(event, currentNode) => {
-              // Whole-node press: drag if moved past threshold; left quick
-              // click opens inspector (via startNodeDrag → onInspectorOpen).
-              startNodeDrag(event, currentNode);
-            }}
-            onContextMenu={(event, currentNode) => {
-              // Right-click: select + node menu only. Do not open the
-              // inspector/config drawer (that is left-click quick-click).
-              event.preventDefault();
-              event.stopPropagation();
-              const currentSelection = selectedIdsRef.current || [];
-              const inMulti =
-                currentSelection.length > 1 &&
-                currentSelection.includes(currentNode.id);
-              if (!inMulti) {
-                setSelectedId(currentNode.id);
-                setSelectedIds([currentNode.id]);
-              }
-              setNodeMenu({
-                x: event.clientX,
-                y: event.clientY,
-                id: currentNode.id,
-              });
-            }}
-          >
-            <div
-              className="nb2-node-head"
-              onPointerDown={(event) => startNodeDrag(event, node)}
-            >
-              <span className="nb2-node-type">
-                {node.type === "usernode"
-                  ? "created"
-                  : node.type === "dyn_input"
-                    ? "dyn in"
-                    : node.type === "dyn_output"
-                      ? "dyn out"
-                      : node.type}
-              </span>
-              <span className="nb2-node-label">
-                {node.config.label ||
-                  node.config.name ||
-                  node.type}
-              </span>
-              {ports.inputs.length >= 1 && ports.outputs.length >= 1 && (
-                <button
-                  className={
-                    "nb2-node-bypass " +
-                    (node.config.disabled ? "off" : "on")
-                  }
-                  title={
-                    node.config.disabled
-                      ? "Bypassed — input passes straight through. Click to enable."
-                      : "Enabled. Click to bypass (pass the input straight through)."
-                  }
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={() =>
-                    patchNode(node.id, { disabled: !node.config.disabled })
-                  }
-                />
-              )}
-              {(node.type === "chart" || node.type === "dashboard") && (
-                <button
-                  className="nb2-node-collapse"
-                  title={nodeShowsBody(node) ? "Hide output" : "Show output"}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={() => {
-                    const shown = nodeShowsBody(node);
-                    patchNode(node.id, { collapsed: shown });
-                    if (!shown) {
-                      if (node.type === "chart") void ensureChartFor(node);
-                      else {
-                        (node.config.panes || ["in1", "in2", "in3", "in4"]).forEach(
-                          (port: string) =>
-                            void ensureChartFor(upstreamChartNode(node, port)),
-                        );
-                      }
-                    }
-                  }}
-                >
-                  {nodeShowsBody(node) ? "▾" : "▸"}
-                </button>
-              )}
-            </div>
-
-            {node.type === "text" ? (
-              <div className="nb2-textnote-body">
-                {node.config.text || "(empty note — type in the panel)"}
-              </div>
-            ) : node.type === "variable" ? (
-              <div className="nb2-var-body">
-                {(node.config.vars || []).filter((value: any) => value && value.name).length ? (
-                  (node.config.vars || [])
-                    .filter((value: any) => value && value.name)
-                    .map((value: any, index: number) => (
-                      <div key={index} className="nb2-var-chip">
-                        <span className="nb2-var-chip-k">{value.name}</span>
-                        <span className="nb2-var-chip-v">
-                          {value.value || "∅"}
-                        </span>
-                      </div>
-                    ))
-                ) : (
-                  <div className="nb2-var-empty">
-                    (no variables — add some in the panel)
-                  </div>
-                )}
-              </div>
-            ) : node.type === "group" || node.type === "iterator" ? (
-              <div
-                className="nb2-group-body"
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = "copy";
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const drag = groupDnd.current;
-                  if (drag && drag.groupId === node.id) {
-                    groupReorder(
-                      node.id,
-                      drag.from,
-                      drag.to ?? (node.config.children || []).length,
-                    );
-                    groupDnd.current = null;
-                    return;
-                  }
-                  const type = event.dataTransfer.getData(
-                    "application/x-nb-node",
-                  ) as NodeType;
-                  if (type && PORTS[type]) groupAddChild(node.id, type);
-                }}
-              >
-                {(node.config.children || []).length === 0 ? (
-                  <div className="nb2-group-empty">
-                    Drag nodes here to build a pipeline
-                  </div>
-                ) : (
-                  (node.config.children || []).map((child: any, index: number) => (
-                    <div
-                      key={child.id}
-                      className={
-                        "nb2-group-child" +
-                        (selectedId === child.id ? " sel" : "")
-                      }
-                      draggable
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                        setSelectedId(child.id);
-                        setSelectedIds([]);
-                      }}
-                      onDragStart={(event) => {
-                        event.stopPropagation();
-                        groupDnd.current = { groupId: node.id, from: index };
-                        event.dataTransfer.effectAllowed = "move";
-                      }}
-                      onDragOver={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const drag = groupDnd.current;
-                        if (drag && drag.groupId === node.id) {
-                          const rect = event.currentTarget.getBoundingClientRect();
-                          drag.to =
-                            event.clientY > rect.top + rect.height / 2
-                              ? index + 1
-                              : index;
-                        }
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const drag = groupDnd.current;
-                        if (drag && drag.groupId === node.id) {
-                          groupReorder(node.id, drag.from, drag.to ?? index);
-                          groupDnd.current = null;
-                          return;
-                        }
-                        const type = event.dataTransfer.getData(
-                          "application/x-nb-node",
-                        ) as NodeType;
-                        if (type && PORTS[type]) groupAddChild(node.id, type);
-                      }}
-                      title="Drag to reorder · click to edit"
-                    >
-                      <span className="nb2-gc-idx">{index + 1}</span>
-                      {(() => {
-                        const item = NODE_BY_TYPE[child.type as NodeType];
-                        const NodeIcon = item
-                          ? (Icon[item.icon] as React.FC<{ size?: number }>)
-                          : null;
-                        return NodeIcon ? <NodeIcon size={12} /> : null;
-                      })()}
-                      <span className="nb2-gc-type">{child.type}</span>
-                      <span className="nb2-gc-label">
-                        {(child.config && child.config.label) || child.type}
-                      </span>
-                      <button
-                        className="nb2-gc-x"
-                        title="Take out of group (back to the canvas)"
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          extractChildToCanvas(node.id, child.id);
-                        }}
-                      >
-                        ⤴
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            ) : node.type === "sql" || node.type === "python" ? null : (
-              <div className="nb2-node-sub">
-                {getNodeCardSummary(node, incomingEdges as NbEdge[])}
-              </div>
-            )}
-
-            {node.type === "sql" && (
-              <div
-                className="nb2-node-sql"
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                <pre className="nb2-node-sql-text">
-                  {(node.config.sql || "").trim() ||
-                    "SELECT …   (write your query in the panel →)"}
-                </pre>
-              </div>
-            )}
-
-            {node.type === "python" && (
-              <div
-                className="nb2-node-sql"
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                <pre className="nb2-node-sql-text">
-                  {(node.config.code || "").trim() ||
-                    "# write Python in the panel →"}
-                </pre>
-              </div>
-            )}
-
-            {node.type === "chart" && nodeShowsBody(node) && (
-              <div
-                className="nb2-node-chart"
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                {(() => {
-                  const current = chartData[node.id];
-                  if (current?.loading) {
-                    return <div className="nb2-chart-msg">Rendering…</div>;
-                  }
-                  if (current?.error) {
-                    return <div className="nb2-chart-msg">{current.error}</div>;
-                  }
-                  if (current?.data) {
-                    return (
-                      <ChartView
-                        data={current.data}
-                        chartType={node.config.chart_type}
-                        style={node.config.style}
-                        fallback={CHART_FALLBACK}
-                      />
-                    );
-                  }
-                  return (
-                    <button
-                      className="btn sm"
-                      onClick={() => void ensureChartFor(node, true)}
-                    >
-                      <Icon.Chart size={13} /> Show chart
-                    </button>
-                  );
-                })()}
-                <button
-                  className="nb2-chart-refresh"
-                  title="Refresh chart"
-                  onClick={() => void ensureChartFor(node, true)}
-                >
-                  <Icon.Refresh size={11} />
-                </button>
-              </div>
-            )}
-
-            {node.type === "dashboard" && nodeShowsBody(node) && (
-              <div
-                className="nb2-dash"
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                {[0, 1, 2, 3].map((index) => {
-                  const panes =
-                    node.config.panes || ["in1", "in2", "in3", "in4"];
-                  const port = panes[index] || `in${index + 1}`;
-                  const chartNode = upstreamChartNode(node, port);
-                  const current = chartNode ? chartData[chartNode.id] : undefined;
-                  return (
-                    <div className="nb2-dash-pane" key={index}>
-                      <div className="nb2-dash-bar">
-                        <select
-                          className="nb2-dash-sel"
-                          value={port}
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onChange={(event) =>
-                            setDashboardPane(node, index, event.target.value)
-                          }
-                        >
-                          {["in1", "in2", "in3", "in4"].map((inputPort) => {
-                            const upstream = upstreamChartNode(node, inputPort);
-                            return (
-                              <option key={inputPort} value={inputPort}>
-                                {upstream
-                                  ? upstream.config.label || "chart"
-                                  : `in ${inputPort.slice(2)} (empty)`}
-                              </option>
-                            );
-                          })}
-                        </select>
-                        {chartNode && (
-                          <button
-                            className="nb2-chart-refresh"
-                            title="Refresh"
-                            onClick={() => void ensureChartFor(chartNode, true)}
-                          >
-                            <Icon.Refresh size={10} />
-                          </button>
-                        )}
-                      </div>
-                      <div className="nb2-dash-body">
-                        {!chartNode ? (
-                          <div className="nb2-chart-msg">
-                            Connect a chart to {PORT_LABEL[port] || port}
-                          </div>
-                        ) : current?.loading ? (
-                          <div className="nb2-chart-msg">Rendering…</div>
-                        ) : current?.error ? (
-                          <div className="nb2-chart-msg">{current.error}</div>
-                        ) : current?.data ? (
-                          <ChartView
-                            data={current.data}
-                            chartType={chartNode.config.chart_type}
-                            style={chartNode.config.style}
-                            fallback={CHART_FALLBACK}
-                          />
-                        ) : (
-                          <button
-                            className="btn sm"
-                            onClick={() => void ensureChartFor(chartNode, true)}
-                          >
-                            Show
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {(((node.type === "chart" || node.type === "dashboard") &&
-              nodeShowsBody(node)) ||
-              node.type === "sql" ||
-              node.type === "python") && (
-              <div
-                className="nb2-node-resize"
-                title="Drag to resize"
-                onPointerDown={(event) => startNodeResize(event, node)}
-              />
-            )}
-
-            {ports.inputs
-              .slice(0, visibleInputCount)
-              .filter((port) => !isTopInput(node.type, port))
-              .map((port, index, leftPorts) => {
-                const mark = inputPortMark(port);
-                const label =
-                  node.type === "union"
-                    ? renderModel.incomingCountByNode[node.id] > 0
-                      ? `stack inputs (${renderModel.incomingCountByNode[node.id]}/10)`
-                      : "stack inputs"
-                    : sidePortLabel(port);
-                return (
-                  <div
-                    key={`i${port}`}
-                    className={
-                      "nb2-port in" + (mark ? ` port-${port}` : "")
-                    }
-                    style={{
-                      top: portTopOffset(
-                        node,
-                        "in",
-                        index,
-                        leftPorts.length,
-                      ),
-                    }}
-                    onPointerEnter={() => setHoveredInput(node.id, port)}
-                    onPointerLeave={() => setHoveredInput(node.id, null)}
-                    title={
-                      mark
-                        ? mark === "L"
-                          ? "Left input"
-                          : "Right input"
-                        : undefined
-                    }
-                  >
-                    <span className="nb2-dot">
-                      {mark && (
-                        <span className="nb2-dot-mark" aria-hidden>
-                          {mark}
-                        </span>
-                      )}
-                    </span>
-                    {label && (
-                      <span className="nb2-port-lbl in">{label}</span>
-                    )}
-                  </div>
-                );
-              })}
-
-            {ports.inputs
-              .slice(0, visibleInputCount)
-              .filter((port) => isTopInput(node.type, port))
-              .map((port) => (
-                <div
-                  key={`t${port}`}
-                  className="nb2-port top"
-                  onPointerEnter={() => setHoveredInput(node.id, port)}
-                  onPointerLeave={() => setHoveredInput(node.id, null)}
-                  title="Wire a table here — its rows drive the loop (one pass per row, columns bound as ${vars})"
-                >
-                  <span className="nb2-port-lbl top">
-                    {PORT_LABEL[port] || port}
-                  </span>
-                  <span className="nb2-dot down" />
-                </div>
-              ))}
-
-            {ports.outputs.map((port, index) => {
-              const label = sidePortLabel(port);
-              return (
-                <div
-                  key={`o${port}`}
-                  className={`nb2-port out ${port}`}
-                  style={{ top: portTopOffset(node, "out", index) }}
-                  onPointerDown={(event) => startWire(event, node, port)}
-                  title="Drag to an input to connect · click to preview this output"
-                >
-                  {label && (
-                    <span className="nb2-port-lbl out">{label}</span>
-                  )}
-                  <span className="nb2-dot" />
-                </div>
-              );
-            })}
-          </CanvasNodeFrame>
+            visibleInputCount={visibleInputCount}
+            incomingCount={renderModel.incomingCountByNode[node.id] || 0}
+            incomingEdges={incomingEdges}
+            actions={cardActions}
+            groupDnd={groupDnd}
+            chartDataRef={chartDataRef}
+            selectedIdsRef={selectedIdsRef}
+          />
         );
       })}
     </NodeFlowCanvasShell>

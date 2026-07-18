@@ -160,6 +160,24 @@ describe("NodeFlow Phase 9 canvas performance", () => {
     });
   });
 
+  it("does not rebuild stationary card summaries while a sibling moves", async () => {
+    const defs = await import("./nodeDefinitions");
+    const spy = vi.spyOn(defs, "getNodeCardSummary");
+    const first = makeNode("first", 20, 20, "select");
+    const second = makeNode("second", 220, 20, "select");
+    const props = makeSceneProps([first, second]);
+    const view = render(<NodeFlowScene {...props} />);
+    const afterMount = spy.mock.calls.length;
+    expect(afterMount).toBeGreaterThanOrEqual(2);
+
+    view.rerender(
+      <NodeFlowScene {...props} nodes={[{ ...first, x: 140 }, second]} />,
+    );
+    // Only the moved select card rebuilds its summary; stationary stays put.
+    expect(spy.mock.calls.length).toBe(afterMount + 1);
+    spy.mockRestore();
+  });
+
   it("survives StrictMode replay and deduplicates transient delete timers", () => {
     vi.useFakeTimers();
     const wrapper = ({ children }: { children: React.ReactNode }) => (
