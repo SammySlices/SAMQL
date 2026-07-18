@@ -27,8 +27,15 @@ function mount(result: ResultPage, overrides: Partial<React.ComponentProps<typeo
   const grid = screen.getByTestId("result-grid");
   Object.defineProperties(grid, {
     clientHeight: { configurable: true, value: 280 },
+    clientWidth: { configurable: true, value: 480 },
     scrollHeight: { configurable: true, value: Math.max(560, result.rows.length * 28) },
+    scrollWidth: {
+      configurable: true,
+      value: Math.max(960, 56 + result.columns.length * 150),
+    },
   });
+  // Nudge ResizeObserver-backed viewW/viewH from the mocked geometry.
+  fireEvent.scroll(grid);
   return { ...rendered, grid, props };
 }
 
@@ -293,6 +300,110 @@ describe("DataGrid DOM behavior", () => {
       rowIndex: 0,
       value: "alpha",
     });
+  });
+
+  it("keeps column virtualization off for narrow grids", async () => {
+    const columns = Array.from({ length: 12 }, (_, i) => `c${i}`);
+    const rows = [columns.map((_, c) => `v${c}`)];
+    const { grid } = mount(page(rows, columns));
+
+    await waitFor(() => {
+      const inner = grid.querySelector(".grid-inner") as HTMLElement;
+      expect(inner?.getAttribute("data-col-virt")).toBe("0");
+    });
+    expect(grid.querySelectorAll('[data-testid="grid-col-header"]').length).toBe(
+      columns.length,
+    );
+    expect(grid.querySelectorAll(".grid-col-spacer").length).toBe(0);
+    expect(grid.querySelector('[data-column="c0"]')).toBeTruthy();
+    expect(grid.querySelector('[data-column="c11"]')).toBeTruthy();
+  });
+
+  it("virtualizes wide column sets and keeps full scroll width", async () => {
+    const columns = Array.from({ length: 120 }, (_, i) => `c${i}`);
+    const rows = Array.from({ length: 30 }, (_, r) =>
+      columns.map((_, c) => `${r}-${c}`),
+    );
+    const onContentMetrics = vi.fn();
+    const { grid } = mount(page(rows, columns), { onContentMetrics });
+
+    await waitFor(() => {
+      const inner = grid.querySelector(".grid-inner") as HTMLElement;
+      expect(inner?.getAttribute("data-col-virt")).toBe("1");
+    });
+
+    const headers = grid.querySelectorAll('[data-testid="grid-col-header"]');
+    expect(headers.length).toBeGreaterThan(0);
+    expect(headers.length).toBeLessThan(columns.length);
+    expect(grid.querySelector('[data-column="c0"]')).toBeTruthy();
+    expect(grid.querySelector('[data-column="c119"]')).toBeNull();
+
+    const inner = grid.querySelector(".grid-inner") as HTMLElement;
+    // DEFAULT_W 150 until estimate settles; either way body must span all cols.
+    const widthPx = Number.parseFloat(inner.style.width || "0");
+    expect(widthPx).toBeGreaterThanOrEqual(56 + columns.length * 64);
+    expect(grid.querySelectorAll(".grid-col-spacer").length).toBeGreaterThan(0);
+  });
+
+  it("renders later columns after horizontal scroll", async () => {
+    const columns = Array.from({ length: 120 }, (_, i) => `c${i}`);
+    const rows = [columns.map((_, c) => `v${c}`)];
+    const onSort = vi.fn();
+    const { grid } = mount(page(rows, columns), { onSort });
+
+    await waitFor(() =>
+      expect(grid.querySelector(".grid-inner")?.getAttribute("data-col-virt")).toBe(
+        "1",
+      ),
+    );
+    expect(grid.querySelector('[data-column="c0"]')).toBeTruthy();
+
+    // After width estimate (~64px/col), scroll far enough that early columns
+    // fall out of the overscan window and late columns mount.
+    Object.defineProperty(grid, "scrollLeft", {
+      configurable: true,
+      writable: true,
+      value: 70 * 64,
+    });
+    fireEvent.scroll(grid);
+
+    await waitFor(() => {
+      expect(grid.querySelector('[data-column="c70"]')).toBeTruthy();
+    });
+    expect(grid.querySelector('[data-column="c0"]')).toBeNull();
+
+    const lateHeader = grid.querySelector(
+      '[data-testid="grid-col-header"][data-column="c70"]',
+    ) as HTMLElement;
+    fireEvent.click(lateHeader);
+    expect(onSort).toHaveBeenCalledWith("c70");
+  });
+
+  it("copies all columns from a selected row even when many are unmounted", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const columns = Array.from({ length: 100 }, (_, i) => `c${i}`);
+    const rows = [columns.map((_, c) => `v${c}`)];
+    const { grid } = mount(page(rows, columns));
+
+    await waitFor(() =>
+      expect(grid.querySelector(".grid-inner")?.getAttribute("data-col-virt")).toBe(
+        "1",
+      ),
+    );
+
+    const rownum = grid.querySelector(".gc-cell.rownum") as HTMLElement;
+    fireEvent.mouseDown(rownum);
+    fireEvent.click(screen.getByTestId("grid-copy-headers"));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    const tsv = String(writeText.mock.calls[0][0]);
+    expect(tsv.split("\t").length).toBeGreaterThanOrEqual(100);
+    expect(tsv).toContain("c99");
+    expect(tsv).toContain("v99");
   });
 
 });
