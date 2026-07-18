@@ -2250,6 +2250,19 @@ def backend_tests(datadir, csv_path, json_path):
                 fh.write(b" ")
             need(FC.cache_key(src.name, "json") != k_mtime,
                  "changing size changes the key")
+            # Latest-data wins: same size + preserved mtime must still miss when
+            # content changes (in-place rewrite / timestamp preservation).
+            with open(src.name, "wb") as fh:
+                fh.write(b"AAAAAA")
+            os.utime(src.name, (100, 100))
+            k_same_stat_a = FC.cache_key(src.name, "json")
+            with open(src.name, "wb") as fh:
+                fh.write(b"BBBBBB")  # same length
+            os.utime(src.name, (100, 100))  # preserve mtime
+            k_same_stat_b = FC.cache_key(src.name, "json")
+            need(k_same_stat_a and k_same_stat_b
+                 and k_same_stat_a != k_same_stat_b,
+                 "same-size/mtime content rewrite rolls the key")
             k_before = FC.cache_key(src.name, "json")
             saved_ver = FC.CACHE_VERSION
             FC.CACHE_VERSION = saved_ver + 1
