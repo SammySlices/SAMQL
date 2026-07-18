@@ -143,11 +143,12 @@ export function useNodeFlowExecutionController({
   const previewEpochRef = useRef(dataEpoch);
 
   // Data mutations bump the session epoch without changing graphSig. Drop any
-  // FE preview hits that were keyed under the previous epoch.
+  // FE preview hits AND the open drawer so prior rows cannot look current.
   useEffect(() => {
     if (previewEpochRef.current === dataEpoch) return;
     previewEpochRef.current = dataEpoch;
     previewCache.current.clear();
+    setPreview(null);
   }, [dataEpoch]);
 
   const isRunCurrent = (id: string) =>
@@ -716,6 +717,17 @@ export function useNodeFlowExecutionController({
       }
     >
   >({});
+  // Latest-data wins: canvas charts / validate panels must not keep pre-mutation
+  // aggregates after the session epoch advances.
+  const chartEpochRef = useRef(dataEpoch);
+  useEffect(() => {
+    if (chartEpochRef.current === dataEpoch) return;
+    chartEpochRef.current = dataEpoch;
+    chartDataRef.current = {};
+    setChartData({});
+    setValidateResults({});
+    chartPromisesRef.current.clear();
+  }, [dataEpoch]);
   // the chart node feeding a given dashboard input port (if any)
   const upstreamChartNode = (dash: NbNode, inPort: string): NbNode | null => {
     const e = edges.find((x) => x.to.node === dash.id && x.to.port === inPort);

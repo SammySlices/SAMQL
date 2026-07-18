@@ -373,9 +373,10 @@ def _estimate_row_bytes(row):
 class _CachedResult:
     __slots__ = ("id", "cols", "store", "total", "sql", "target",
                  "engine", "created", "_sorted_cache", "capped", "cap",
-                 "_fcount_cache")
+                 "_fcount_cache", "data_epoch")
 
-    def __init__(self, rid, cols, store, total, sql, target, engine):
+    def __init__(self, rid, cols, store, total, sql, target, engine,
+                 data_epoch=0):
         self.id = rid
         self.cols = cols
         self.store = store        # list[tuple] OR DiskBackedRows
@@ -388,6 +389,9 @@ class _CachedResult:
         # a result whose materialization hit the safety row ceiling
         self.capped = bool(getattr(store, "capped", False))
         self.cap = getattr(store, "cap", None)
+        # Session data_epoch when this snapshot was produced. Paging after a
+        # later content mutation must expire rather than serve frozen rows.
+        self.data_epoch = int(data_epoch or 0)
 
     def view(self, sort_col=None, descending=False):
         if sort_col is None or sort_col not in self.cols:
@@ -2169,17 +2173,18 @@ class Session:
         their cached counts. When omitted, the whole cache is cleared
         (unknown / free-form write SQL, engine resets).
 
-        Flow-cache epoch: global clears always bump. Scoped clears bump only
-        when the touched tables intersect tables known to feed the volatile
-        NodeFlow cache (so dropping an unrelated table does not nuke flow
-        homework). Fail-safe: if the cache has entries but deps were never
-        recorded, still bump.
+        Latest-data wins: any content-touching invalidate advances
+        ``_data_epoch`` so IDE/Journal/NodeFlow clients refuse retained
+        snapshots. Flow-cache *clearing* stays scoped — only when the touched
+        tables intersect known NodeFlow inputs (or global / fail-safe) — so
+        dropping an unrelated table does not wipe flow homework.
         """
+        touched = []
         if keys is None:
             self._count_cache.clear()
-            bump_flow = True
+            clear_flow = True
+            content_changed = True
         else:
-            touched = []
             for key in keys:
                 try:
                     key = tuple(key)
@@ -2188,10 +2193,12 @@ class Session:
                         touched.append(str(key[1]))
                 except Exception:
                     pass
-            bump_flow = self._should_bump_flow_for_tables(touched)
+            content_changed = bool(touched)
+            clear_flow = self._should_bump_flow_for_tables(touched)
         self._mark_catalog_dirty()
-        if bump_flow and hasattr(self, "_flow_cache"):
+        if content_changed:
             self._data_epoch += 1
+        if clear_flow and hasattr(self, "_flow_cache"):
             self._flow_cache_clear()
 
     def _note_flow_source_tables(self, graph):
@@ -4262,13 +4269,15 @@ class Session:
         # (no caching) when the cache is off or fingerprinting fails.
         use_volatile_cache = bool(
             getattr(self, "flow_cache", False) and _engine_override is None)
-        # Filebrowser / remote sources can change without a data-epoch bump
-        # (config text stays stable). Non-deterministic SQL/sample/python would
-        # likewise freeze the first materialisation for the epoch. Persistent
-        # cache already skips these; keep the session cache equally safe.
+        # Filebrowser / remote / directory sources can change without a
+        # data-epoch bump (config text stays stable). Non-deterministic
+        # SQL/sample/python would likewise freeze the first materialisation
+        # for the epoch. Persistent cache already skips these; keep the
+        # session cache equally safe.
         if use_volatile_cache and self._graph_has_types(
                 graph, ("filebrowser", "apinode", "sqlserver",
-                        "sharepoint", "webscrape")):
+                        "sharepoint", "webscrape", "directory",
+                        "appendfolder")):
             use_volatile_cache = False
         if use_volatile_cache:
             try:
@@ -6730,7 +6739,7 @@ class Session:
         a DuckDB parquet store, not capped (.349 -- a capped store is not the
         full result), file still on disk. None otherwise. Shared by the
         journal chain reuse (TEMP views) and reconcile input staging."""
-        cr = self._results.get(result_id)
+        cr = self._live_cached_result(result_id)
         store = getattr(cr, "store", None)
         path = getattr(store, "_path", None)
         if (cr is None or path is None
@@ -8003,8 +8012,9 @@ class Session:
 
     def _cache_result(self, cols, store, total, sql, target, engine_kind):
         rid = uuid.uuid4().hex[:12]
-        cr = _CachedResult(rid, cols, store, total, sql, target,
-                           engine_kind)
+        cr = _CachedResult(
+            rid, cols, store, total, sql, target, engine_kind,
+            data_epoch=getattr(self, "_data_epoch", 0))
         with self._lock:
             self._results[rid] = cr
             self._results_order.append(rid)
@@ -8028,10 +8038,31 @@ class Session:
             self._enforce_memory_budget()
         return rid
 
+    def _live_cached_result(self, result_id):
+        """Return a cached result only when it still matches the session epoch.
+
+        Latest-data wins: a parquet snapshot from an older epoch must not page,
+        chart, or pivot as if it were current after tables mutated.
+        """
+        cr = self._results.get(result_id)
+        if cr is None:
+            return None
+        try:
+            got = int(getattr(cr, "data_epoch"))
+        except Exception:
+            return None
+        try:
+            cur = int(getattr(self, "_data_epoch", 0) or 0)
+        except Exception:
+            cur = 0
+        if got != cur:
+            return None
+        return cr
+
     def page(self, result_id, offset=0, limit=DISPLAY_LIMIT,
              sort_col=None, descending=False, filters=None, columns=None,
              query_id=None):
-        cr = self._results.get(result_id)
+        cr = self._live_cached_result(result_id)
         if cr is None:
             return {"error": "result expired"}
         # .443 audit fix: a garbage offset/limit ("abc") raised
@@ -9949,7 +9980,7 @@ class Session:
         display truncation. Bounded by SAMQL_CELL_FETCH_MAX (default 5 MB) so
         a pathological single value can't blow up the browser either; the
         response says when even the fetch is clipped."""
-        cr = self._results.get(result_id)
+        cr = self._live_cached_result(result_id)
         if cr is None:
             return {"error": "result expired"}
         if column not in cr.cols:
@@ -10390,7 +10421,7 @@ class Session:
         server again, and a query that joined catalog + local data still
         saves). The name is auto-uniquified. Returns
         {ok, table, rows, engine, columns} or {error}."""
-        cr = self._results.get(result_id)
+        cr = self._live_cached_result(result_id)
         if cr is None:
             return {"error": "That result is no longer available -- re-run the "
                     "query, then save it."}
@@ -11333,7 +11364,7 @@ class Session:
 
     def export(self, result_id, fmt, out_path=None,
                sort_col=None, descending=False, query_id=None):
-        cr = self._results.get(result_id)
+        cr = self._live_cached_result(result_id)
         if cr is None:
             return {"error": "result expired"}
         fmt = (fmt or "csv").lower()
@@ -11731,7 +11762,7 @@ class Session:
         """Return (cols, iterable_of_rows) for a cached result or a table.
         Used by chart/pivot aggregation. Capped at ``limit`` rows."""
         if result_id is not None:
-            cr = self._results.get(result_id)
+            cr = self._live_cached_result(result_id)
             if cr is None:
                 return None, None
             return list(cr.cols), cr.store

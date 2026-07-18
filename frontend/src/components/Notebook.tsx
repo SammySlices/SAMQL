@@ -750,20 +750,39 @@ export const Notebook: React.FC<Props> = ({
     return m;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debSqlSig, groupSig]);
-  // staleness is now a cheap string compare against the last-run compiled SQL.
+  // Stale when SQL drifted OR the session data epoch moved past this result
+  // (latest-data wins: keep showing a badge, never silently reuse).
   const staleById = useMemo(() => {
     const m: Record<string, boolean> = {};
     for (const c of cells) {
+      if (c.type !== "sql" || !c.ranOnce) continue;
       const comp = compiledById[c.id];
-      m[c.id] =
-        c.type === "sql" &&
-        !!c.ranOnce &&
+      const sqlDrift =
         c.ranCompiledSql != null &&
         comp !== undefined &&
         comp !== c.ranCompiledSql;
+      const dataDrift =
+        c.resultId != null &&
+        (c.ranDataEpoch == null || c.ranDataEpoch !== dataEpoch);
+      m[c.id] = !!(sqlDrift || dataDrift);
     }
     return m;
-  }, [cells, compiledById]);
+  }, [cells, compiledById, dataEpoch]);
+
+  // Latest-data wins: drop retained Journal row payloads when the session
+  // epoch advances so stale grids cannot look current (badge already set).
+  useEffect(() => {
+    setCells((prev) => {
+      let changed = false;
+      const next = prev.map((c) => {
+        if (c.type !== "sql" || !c.resultId || !c.page?.rows?.length) return c;
+        if (c.ranDataEpoch === dataEpoch) return c;
+        changed = true;
+        return { ...c, page: { ...c.page, rows: [] } };
+      });
+      return changed ? next : prev;
+    });
+  }, [dataEpoch]);
 
   const discardRid = (rid?: string | null) => {
     if (rid) api.discardResult(rid).catch(() => {});
@@ -2235,7 +2254,14 @@ export const Notebook: React.FC<Props> = ({
                 c.type === "chart" || c.type === "pivot"
                   ? cells
                       .slice(0, i)
-                      .filter((s) => s.type === "sql" && s.ranOnce && s.resultId)
+                      .filter(
+                        (s) =>
+                          s.type === "sql" &&
+                          s.ranOnce &&
+                          s.resultId &&
+                          // Latest-data wins: charts/pivots only bind fresh sources.
+                          !staleById[s.id],
+                      )
                       .map((s) => ({
                         name: s.name as string,
                         resultId: s.resultId ?? null,

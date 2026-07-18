@@ -946,6 +946,36 @@ export default function App() {
     rerunExpiredResultRef,
   } = useResultController(toast, LAZY_CHUNK);
 
+  // Latest-data wins: when catalog content mutates, mark IDE result tabs stale
+  // and drop row payloads so prior grids cannot look current. Backend page()
+  // also expires snapshots whose data_epoch no longer matches.
+  useEffect(() => {
+    setResTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.kind !== "result" || !tab.resultId) return tab;
+        if (tab.ranDataEpoch === dataEpoch) {
+          if (!tab.dataStale) return tab;
+          changed = true;
+          return { ...tab, dataStale: false };
+        }
+        if (tab.dataStale && (tab.page?.rows?.length ?? 0) === 0) return tab;
+        changed = true;
+        return {
+          ...tab,
+          dataStale: true,
+          page: tab.page
+            ? {
+                ...tab.page,
+                rows: [],
+              }
+            : tab.page,
+        };
+      });
+      return changed ? next : tabs;
+    });
+  }, [dataEpoch, setResTabs]);
+
   const { ui: confirmUi, ask: askConfirm } = useConfirmPop();
 
   const {
@@ -1266,6 +1296,8 @@ export default function App() {
                   ? {
                       ...r,
                       resultId: res.result_id ?? null,
+                      ranDataEpoch: dataEpoch,
+                      dataStale: false,
                       queryId,
                       page: res,
                       sql: trimmed,
@@ -1294,6 +1326,8 @@ export default function App() {
               kind: "result",
               title: titleForTab(originId),
               resultId: res.result_id ?? null,
+              ranDataEpoch: dataEpoch,
+              dataStale: false,
               queryId,
               originTabId: originId,
               pinned: false,
@@ -1379,6 +1413,7 @@ export default function App() {
       target,
       titleForTab,
       toast,
+      dataEpoch,
     ],
   );
 
@@ -1592,6 +1627,8 @@ export default function App() {
             ? {
                 ...t,
                 resultId: ent.result_id ?? null,
+                ranDataEpoch: dataEpoch,
+                dataStale: false,
                 page: { ...pg, result_id: ent.result_id },
                 sortCol: null,
                 descending: false,
@@ -2359,6 +2396,8 @@ export default function App() {
               ? {
                   ...x,
                   resultId: res.result_id ?? null,
+                  ranDataEpoch: dataEpoch,
+                  dataStale: false,
                   queryId,
                   page: res,
                   sortCol: null,
@@ -3759,6 +3798,16 @@ export default function App() {
                       style={{ color: "#c98a2b" }}
                     >
                       Capped
+                    </span>
+                  )}
+                  {activeResultTab.dataStale && (
+                    <span
+                      className="chip"
+                      data-testid="result-data-stale-chip"
+                      title="Loaded tables changed since this result ran. Re-run to refresh."
+                      style={{ color: "#c98a2b" }}
+                    >
+                      Data changed — re-run
                     </span>
                   )}
                   {activeResultTab.visibleColumns &&

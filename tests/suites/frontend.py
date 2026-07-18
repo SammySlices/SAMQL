@@ -1069,7 +1069,8 @@ console.log("OK");
             ("freshness delegates to the lib predicate (capped-never-fresh "
              "is a harness case now; data_epoch blocks silent parquet reuse)",
              "cellIsFresh(" in nb and "result_capped" in nb
-             and "dataEpoch" in nb and "ranDataEpoch" in nb),
+             and "dataEpoch" in nb and "ranDataEpoch" in nb
+             and "dataDrift" in nb),
             ("staleness key stays the canonical composition",
              "ranCompiledSql: composed" in nb
              and "ranDataEpoch: dataEpoch" in nb),

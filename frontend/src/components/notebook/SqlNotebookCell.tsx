@@ -69,7 +69,7 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
         {props.stale && (
           <span
             className="nb-stale"
-            title="An edit upstream or here changed this cell's query since it last ran. Re-run to refresh."
+            title="Query or underlying data changed since this cell last ran. Re-run to refresh."
           >
             stale
           </span>
