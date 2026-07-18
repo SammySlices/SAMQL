@@ -4,7 +4,8 @@ On Windows, secrets are encrypted with DPAPI (CryptProtectData) tied to the
 current user account -- the same mechanism the ``keyring`` package uses on
 Windows, called directly through ``ctypes`` so we stay stdlib-only (a hard
 requirement here: no third-party crypto). The encrypted blob is stored
-base64-encoded in ``~/.json_csv_sql_explorer/secrets.json``.
+base64-encoded in the durable config dir ``secrets.json`` (``~/.samql``
+by default, migrated from the legacy layout).
 
 On any non-Windows platform, or if DPAPI can't be loaded, encryption is
 unavailable and NOTHING is stored -- a plaintext password is never written to
@@ -20,7 +21,7 @@ import os
 import sys
 import threading
 
-from .stores import APP_CONFIG_DIRNAME
+from .stores import app_config_dir
 
 _DPAPI_DESC = "SamQL saved credential"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x01
@@ -110,10 +111,10 @@ class SecretStore:
     returning False -- a plaintext secret is never persisted.
     """
 
-    def __init__(self, dirname=APP_CONFIG_DIRNAME, filename="secrets.json",
+    def __init__(self, dirname=None, filename="secrets.json",
                  protector="dpapi"):
         self._lock = threading.RLock()
-        self.path = os.path.join(os.path.expanduser("~"), dirname, filename)
+        self.path = str(app_config_dir(dirname) / filename)
         if protector == "dpapi":
             protector = _DPAPI
         self._protect = protector[0] if protector else None

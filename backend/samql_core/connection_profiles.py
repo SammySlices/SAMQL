@@ -11,7 +11,7 @@ import os
 import threading
 from typing import Any
 
-from .stores import APP_CONFIG_DIRNAME, atomic_write_json
+from .stores import app_config_dir, atomic_write_json
 
 
 def profile_key(kind: str, name: str) -> str:
@@ -39,10 +39,10 @@ def parse_profile_key(key: str) -> tuple[str, str] | None:
 class ConnectionProfileStore:
     """JSON registry of connection profiles (no passwords)."""
 
-    def __init__(self, dirname=APP_CONFIG_DIRNAME,
+    def __init__(self, dirname=None,
                  filename="connection_profiles.json"):
         self._lock = threading.RLock()
-        self.path = os.path.join(os.path.expanduser("~"), dirname, filename)
+        self.path = str(app_config_dir(dirname) / filename)
         self._data: dict[str, Any] = {"profiles": {}}
         self._load()
 

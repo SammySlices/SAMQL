@@ -299,7 +299,8 @@ def _subprocess_crash_restart_manifest(root, csv_path, _skip):
             return body if body.get("state") == "done" else None
 
         _wait_until(load_done, timeout=30, message="fixture load completion")
-        manifest = home / ".json_csv_sql_explorer" / "session_manifest.json"
+        from samql_core.stores import app_config_dir
+        manifest = app_config_dir() / "session_manifest.json"
         _wait_until(manifest.exists, timeout=5, message="manifest write")
         entries = json.loads(manifest.read_text(encoding="utf-8"))
         _need(any(e.get("path") == str(stable_csv) for e in entries),

@@ -25765,12 +25765,12 @@ def backend_tests(datadir, csv_path, json_path):
     def t_history_retention():
         import datetime as _dtt
         from pathlib import Path as _P
-        from samql_core.stores import QueryHistoryStore, SavedQueryStore
+        from samql_core.stores import QueryHistoryStore, SavedQueryStore, app_config_dir
         now = _dtt.datetime.now()
         old = (now - _dtt.timedelta(days=40)).isoformat(timespec="seconds")
         recent = (now - _dtt.timedelta(days=5)).isoformat(timespec="seconds")
         hfn, sfn = "test_hist_retention.json", "test_saved_retention.json"
-        cfg = _P.home() / ".json_csv_sql_explorer"
+        cfg = app_config_dir()
 
         eq(QueryHistoryStore.RETENTION_DAYS, 30,
            "history retention window is 30 days")
@@ -26116,6 +26116,80 @@ def backend_tests(datadir, csv_path, json_path):
         need("hunter2" not in raw, "profile JSON never holds the password")
         need(st.delete("mssql:Prod") is True, "delete removes the profile")
         need(st.get("mssql:Prod") is None, "deleted profile is gone")
+
+    def t_app_config_dir_migration():
+        # Post-656 audit #5: durable config is ~/.samql (not the legacy
+        # global ~/.json_csv_sql_explorer name alone). SAMQL_CONFIG_DIR
+        # isolates instances; legacy files copy once into the canonical dir.
+        import os as _os
+        import tempfile as _tf
+        from pathlib import Path as _P
+        from samql_core.stores import (
+            APP_CONFIG_DIRNAME, LEGACY_APP_CONFIG_DIRNAME, app_config_dir,
+            ConfigStore, _MIGRATION_MARKER)
+        from samql_core.connection_profiles import ConnectionProfileStore
+
+        eq(APP_CONFIG_DIRNAME, ".samql", "canonical config dirname")
+        eq(LEGACY_APP_CONFIG_DIRNAME, ".json_csv_sql_explorer",
+           "legacy dirname preserved for migration")
+
+        iso = _tf.mkdtemp(prefix="samql_cfg_iso_")
+        prev = _os.environ.get("SAMQL_CONFIG_DIR")
+        try:
+            _os.environ["SAMQL_CONFIG_DIR"] = iso
+            root = app_config_dir()
+            eq(str(root), iso, "SAMQL_CONFIG_DIR wins")
+            cfg = ConfigStore()
+            need(str(cfg.path).startswith(iso),
+                 "ConfigStore writes under SAMQL_CONFIG_DIR")
+            cfg.set("probe", 1)
+            need((_P(iso) / "config.json").is_file(), "config file created")
+            prof = ConnectionProfileStore()
+            need(str(prof.path).startswith(iso),
+                 "connection profiles use SAMQL_CONFIG_DIR")
+            prof.upsert("api", "Iso", {"url": "https://example.test"})
+            need((_P(iso) / "connection_profiles.json").is_file(),
+                 "profiles file created under isolated dir")
+        finally:
+            if prev is None:
+                _os.environ.pop("SAMQL_CONFIG_DIR", None)
+            else:
+                _os.environ["SAMQL_CONFIG_DIR"] = prev
+
+        # Migration: legacy home dir -> empty canonical dir (under a fake home).
+        fake_home = _P(_tf.mkdtemp(prefix="samql_home_"))
+        legacy = fake_home / LEGACY_APP_CONFIG_DIRNAME
+        legacy.mkdir()
+        (legacy / "connection_profiles.json").write_text(
+            '{"profiles": {"api:Legacy": {"kind": "api", "name": "Legacy",'
+            ' "fields": {"url": "https://legacy.test"}}}}',
+            encoding="utf-8")
+        (legacy / "config.json").write_text('{"migrated_probe": true}',
+                                            encoding="utf-8")
+        from unittest.mock import patch
+        prev2 = _os.environ.pop("SAMQL_CONFIG_DIR", None)
+        try:
+            with patch.object(_P, "home", return_value=fake_home):
+                dest = app_config_dir()
+                eq(dest, fake_home / APP_CONFIG_DIRNAME,
+                   "canonical dir under fake home")
+                need((dest / "connection_profiles.json").is_file(),
+                     "profiles copied from legacy")
+                need((dest / "config.json").is_file(),
+                     "config copied from legacy")
+                need((dest / _MIGRATION_MARKER).is_file(),
+                     "migration marker written")
+                # Second resolve must not wipe / re-copy over existing.
+                (dest / "config.json").write_text('{"kept": true}',
+                                                  encoding="utf-8")
+                dest2 = app_config_dir()
+                eq(dest2, dest, "second resolve returns same dir")
+                eq((dest / "config.json").read_text(encoding="utf-8"),
+                   '{"kept": true}',
+                   "existing canonical files are not overwritten")
+        finally:
+            if prev2 is not None:
+                _os.environ["SAMQL_CONFIG_DIR"] = prev2
 
     def t_chart_multiy():
         s = _loaded_session()
@@ -37867,6 +37941,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("secret store: DPAPI-gated, encrypted round-trip, no plaintext", t_secret_store),
         ("connection profiles: named fields + DPAPI secret by key",
          t_connection_profiles),
+        ("app config dir: ~/.samql + legacy migrate + SAMQL_CONFIG_DIR",
+         t_app_config_dir_migration),
         ("chart: multiple Y axes (shared x, y + y2 on two axes)", t_chart_multiy),
         ("session restore: rebuild loaded tables from the manifest",
          t_session_restore),
