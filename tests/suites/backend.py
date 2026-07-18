@@ -660,6 +660,78 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_flow_cache_notes_nested_and_plural_tables():
+        # CODE was wrong: _note_flow_source_tables only scanned top-level
+        # singular table/err/left/right keys. Nested group/iterator children,
+        # created-node graphs, and plural config.tables were invisible, so
+        # dropping those inputs left stale flow-cache entries.
+        from samql_core.session import LOCAL_TARGET
+        s = _fresh_session()
+        try:
+            s.flow_cache = True
+            s._flow_source_tables = set()
+            s._note_flow_source_tables({
+                "nodes": [
+                    {"id": "g", "type": "group", "config": {"children": [
+                        {"id": "gi", "type": "input",
+                         "config": {"table": "nested_grp"}}]}},
+                    {"id": "it", "type": "iterator", "config": {
+                        "table": "iter_accum",
+                        "children": [
+                            {"id": "ii", "type": "input",
+                             "config": {"table": "nested_iter"}}]}},
+                    {"id": "u", "type": "usernode", "config": {
+                        "graph": {"nodes": [
+                            {"id": "ui", "type": "input",
+                             "config": {"table": "nested_user"}}]}}},
+                    {"id": "ins", "type": "inputs", "config": {
+                        "tables": ["plural_a",
+                                   {"name": "plural_b"},
+                                   {"table": "plural_c"}]}},
+                    {"id": "api", "type": "apinode",
+                     "config": {"table": "api_ok", "err_table": "api_err"}},
+                ],
+            })
+            deps = s._flow_source_tables or set()
+            for name in ("nested_grp", "nested_iter", "nested_user",
+                         "iter_accum", "plural_a", "plural_b", "plural_c",
+                         "api_ok", "api_err"):
+                need(name in deps, "records %s as a flow source" % name)
+
+            # Live nested group input: drop must bump epoch / clear cache;
+            # unrelated drop must not.
+            s.run_query(
+                "CREATE TABLE flow_nested AS SELECT 1 AS g, 10 AS v",
+                target=LOCAL_TARGET)
+            s.run_query("CREATE TABLE other_nested AS SELECT 1 AS x",
+                        target=LOCAL_TARGET)
+            g = {"nodes": [
+                {"id": "g", "type": "group", "config": {"children": [
+                    {"id": "n1", "type": "input",
+                     "config": {"table": "flow_nested"}}]}},
+                {"id": "n2", "type": "output", "config": {"label": "out"}}],
+                 "edges": [{"from": {"node": "g", "port": "out"},
+                            "to": {"node": "n2", "port": "in"}}]}
+            r1 = s.run_nodeflow(g, "n2", "out")
+            need(not r1.get("error"), "nested group flow runs: %s"
+                 % r1.get("error"))
+            need("flow_nested" in (s._flow_source_tables or set()),
+                 "nested group input recorded after run")
+            ep = s._data_epoch
+            size = s.flow_cache_info()["size"]
+            need(size >= 1, "flow cache populated after nested run")
+            s.drop_table("sqlite", "other_nested")
+            eq(s._data_epoch, ep, "unrelated drop keeps epoch with nested deps")
+            eq(s.flow_cache_info()["size"], size,
+               "unrelated drop keeps nested flow cache")
+            s.drop_table("sqlite", "flow_nested")
+            need(s._data_epoch > ep,
+                 "drop of nested group input bumps flow epoch")
+            eq(s.flow_cache_info()["size"], 0,
+               "drop of nested group input clears flow cache")
+        finally:
+            s.shutdown()
+
     def t_change_type_persists():
         # a column that loads as TEXT (identifier name) -> change to INTEGER;
         # the change must show in the profile and persist (numeric ordering).
@@ -37385,6 +37457,23 @@ def backend_tests(datadir, csv_path, json_path):
         need(corr.get("nested_sorted_wire_bounded") is True,
              "nested sorted page wire stays bounded")
 
+    def t_flow_source_tables_walker_source():
+        # Post-654 audit #3: flow-cache deps must walk nested containers and
+        # plural tables, not only top-level singular keys.
+        sess = open(os.path.join(BACKEND, "samql_core", "session.py"),
+                    encoding="utf-8").read()
+        i = sess.index("def _note_flow_source_tables")
+        j = sess.index("\n    def ", i + 1)
+        body = sess[i:j]
+        need('typ in ("group", "iterator")' in body
+             or "typ in ('group', 'iterator')" in body,
+             "nested group/iterator children are walked")
+        need('cfg.get("children")' in body or "cfg.get('children')" in body,
+             "container children are scanned for table deps")
+        need('cfg.get("tables")' in body or "cfg.get('tables')" in body,
+             "plural tables config is recorded")
+        need("usernode" in body, "created-node graphs are walked")
+
     def t_scoped_counts_api_hdfs_source():
         # Post-653 audit #2: API/HDFS/iterator/folder loads must not wipe the
         # whole sidebar COUNT cache. HDFS must not re-clear after load_file.
@@ -37581,6 +37670,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_perf_medium_fixes_harness),
         ("scoped counts: API/HDFS/iterator/folder do not wipe sidebar cache",
          t_scoped_counts_api_hdfs_source),
+        ("flow source tables walker covers nested + plural",
+         t_flow_source_tables_walker_source),
         ("perf audit high defects harness (filter COUNT / deep snap / flow)",
          t_perf_audit_high_harness),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",
@@ -37608,6 +37699,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_table_count_cache_scoped_drop),
         ("flow cache survives unrelated table drop",
          t_flow_cache_survives_unrelated_table_drop),
+        ("flow cache notes nested group/iterator + plural tables",
+         t_flow_cache_notes_nested_and_plural_tables),
         ("filter rows (server-side)", t_filter_rows),
         ("filter + formula take a bare expression; IF() is portable",
          t_filter_formula_if),

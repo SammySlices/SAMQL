@@ -2159,18 +2159,45 @@ class Session:
             self._flow_cache_clear()
 
     def _note_flow_source_tables(self, graph):
-        """Record input table names from a graph that may populate flow cache."""
+        """Record input table names from a graph that may populate flow cache.
+
+        Walks nested group/iterator children and created-node graphs so a
+        drop/mutation of a nested input still bumps the flow epoch. Also
+        records plural ``tables`` (e.g. multi-table Inputs) alongside the
+        usual singular keys.
+        """
         deps = getattr(self, "_flow_source_tables", None)
         if deps is None:
             self._flow_source_tables = deps = set()
-        for node in (graph or {}).get("nodes") or []:
-            if not isinstance(node, dict):
-                continue
-            cfg = node.get("config") or {}
-            for key in ("table", "err_table", "left_table", "right_table"):
-                name = cfg.get(key)
-                if name:
-                    deps.add(str(name))
+
+        def _add_name(name):
+            if name is None or isinstance(name, (dict, list, tuple)):
+                return
+            text = str(name).strip()
+            if text:
+                deps.add(text)
+
+        def _walk(nodes):
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                cfg = node.get("config") or {}
+                for key in ("table", "err_table", "left_table", "right_table"):
+                    _add_name(cfg.get(key))
+                for item in (cfg.get("tables") or []):
+                    if isinstance(item, dict):
+                        _add_name(item.get("name") or item.get("table"))
+                    else:
+                        _add_name(item)
+                typ = node.get("type")
+                if typ in ("group", "iterator"):
+                    _walk(cfg.get("children"))
+                elif typ == "usernode":
+                    inner = cfg.get("graph") or {}
+                    if isinstance(inner, dict):
+                        _walk(inner.get("nodes"))
+
+        _walk((graph or {}).get("nodes"))
 
     def _should_bump_flow_for_tables(self, names):
         """Whether a scoped table mutation must invalidate NodeFlow cache."""
