@@ -44,6 +44,8 @@ type NodeDrag = {
   startY: number;
   /** True once pointer moved past click/drag threshold. */
   moved?: boolean;
+  /** Group/iterator nodes snapshot at drag start (skip full scan each RAF). */
+  groups?: NbNode[];
 };
 type ResizeDrag = {
   mode: "resize";
@@ -178,12 +180,16 @@ export function useNodeFlowCanvasInteractions(
   }, []);
 
   const groupAtContentPoint = useCallback(
-    (x: number, y: number, excludeId?: string) => {
-      const nodes = optionsRef.current.nodesRef.current || [];
+    (x: number, y: number, excludeId?: string, groups?: NbNode[]) => {
+      const nodes =
+        groups ||
+        (optionsRef.current.nodesRef.current || []).filter(
+          (node) => node.type === "group" || node.type === "iterator",
+        );
       for (const node of nodes) {
+        if (node.id === excludeId) continue;
         if (
-          (node.type !== "group" && node.type !== "iterator") ||
-          node.id === excludeId
+          (node.type !== "group" && node.type !== "iterator")
         ) {
           continue;
         }
@@ -275,7 +281,12 @@ export function useNodeFlowCanvasInteractions(
         );
         if (drag.ids.length === 1) {
           const point = toContent(lastX, lastY);
-          const group = groupAtContentPoint(point.x, point.y, drag.nodeId);
+          const group = groupAtContentPoint(
+            point.x,
+            point.y,
+            drag.nodeId,
+            drag.groups,
+          );
           const draggedType = current.nodesRef.current?.find(
             (node) => node.id === drag.nodeId,
           )?.type;
@@ -535,6 +546,9 @@ export function useNodeFlowCanvasInteractions(
       }
       // Block folder-handle / drawer chrome for the whole press (click or drag).
       document.documentElement.dataset.samqlNfDrag = "1";
+      const groups = (current.nodesRef.current || []).filter(
+        (item) => item.type === "group" || item.type === "iterator",
+      );
       dragRef.current = {
         mode: "node",
         nodeId: node.id,
@@ -543,6 +557,7 @@ export function useNodeFlowCanvasInteractions(
         startX: event.clientX,
         startY: event.clientY,
         moved: false,
+        groups,
       };
     },
     [],

@@ -268,22 +268,54 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
     return ids;
   }, [bornId, lineageFlashId, dyingIds, groupHover, pendingWire?.node, selectedId, selectedIds, snapId]);
 
-  const visibleNodes = useMemo(
-    () =>
-      selectVisibleCanvasNodes(nodes, viewport, zoom, forcedNodeIds, undefined, undefined, denseMode),
-    [forcedNodeIds, nodes, viewport, zoom, denseMode],
-  );
-  const visibleWires = useMemo(
-    () =>
-      selectVisibleCanvasWires(
-        renderModel.wires,
-        viewport,
-        zoom,
-        forcedNodeIds,
-        selectedEdge,
-      ),
-    [forcedNodeIds, renderModel.wires, selectedEdge, viewport, zoom],
-  );
+  const visibleCullIdsRef = useRef<string[] | null>(null);
+  const visibleWireIdsRef = useRef<string[] | null>(null);
+  const visibleNodes = useMemo(() => {
+    const dragging =
+      typeof document !== "undefined" &&
+      document.documentElement.dataset.samqlNfDrag === "1";
+    if (dragging && visibleCullIdsRef.current) {
+      const want = new Set(visibleCullIdsRef.current);
+      for (const id of forcedNodeIds) want.add(id);
+      return nodes.filter((node) => want.has(node.id));
+    }
+    const next = selectVisibleCanvasNodes(
+      nodes,
+      viewport,
+      zoom,
+      forcedNodeIds,
+      undefined,
+      undefined,
+      denseMode,
+    );
+    visibleCullIdsRef.current = next.map((node) => node.id);
+    return next;
+  }, [forcedNodeIds, nodes, viewport, zoom, denseMode]);
+  const visibleWires = useMemo(() => {
+    const dragging =
+      typeof document !== "undefined" &&
+      document.documentElement.dataset.samqlNfDrag === "1";
+    if (dragging && visibleWireIdsRef.current) {
+      const want = new Set(visibleWireIdsRef.current);
+      if (selectedEdge) want.add(selectedEdge);
+      return renderModel.wires.filter((wire) => {
+        if (want.has(wire.id)) return true;
+        if (forcedNodeIds.has(wire.fromN) || forcedNodeIds.has(wire.toN))
+          return true;
+        if (selectedEdge && wire.id === selectedEdge) return true;
+        return false;
+      });
+    }
+    const next = selectVisibleCanvasWires(
+      renderModel.wires,
+      viewport,
+      zoom,
+      forcedNodeIds,
+      selectedEdge,
+    );
+    visibleWireIdsRef.current = next.map((wire) => wire.id);
+    return next;
+  }, [forcedNodeIds, renderModel.wires, selectedEdge, viewport, zoom]);
 
   const chartVersionByNode = useMemo(() => {
     // Do not depend on the full ``nodes`` array — drag would re-scan every RAF.

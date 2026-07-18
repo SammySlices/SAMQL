@@ -136,6 +136,25 @@ export function useNodeFlowInspectorController({
     setInspColsOwnedBy(null);
     setInspColsRaw({});
   };
+  // Defer column probes until a canvas drag/resize finishes so rearranging
+  // nodes does not enqueue/cancel network work every selection flash.
+  const afterDragIdle = (run: () => void): (() => void) => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const tick = () => {
+      if (cancelled) return;
+      if (document.documentElement.dataset.samqlNfDrag === "1") {
+        timer = window.setTimeout(tick, 80);
+        return;
+      }
+      run();
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  };
   // Loaded-table schema fingerprint: reload/reshape with the same graph must
   // miss the columns cache (backend flow fingerprints salt _data_epoch).
   const schemaSig = tablesSchemaSig(runtime.tables);
@@ -209,50 +228,55 @@ export function useNodeFlowInspectorController({
       setInspColsProbing(true);
       let cancelled = false;
       const probedId = sel.id;
+      let stopWait: (() => void) | undefined;
       const cancelPaint = runAfterPaint(() => {
-        (async () => {
-          const out: Record<string, string[]> = {};
-          let ok = false;
-          try {
-            await Promise.all([
-              (async () => {
-                if (!groupReqs.length) return;
-                const r = await api.nodeflowColumnsBatch(
-                  graphForApi(),
-                  groupReqs.map((q) => ({ node: q.node, port: q.fromPort })),
-                );
-                (r.results || []).forEach((res, i) => {
-                  if (res && res.columns && groupReqs[i])
-                    out[groupReqs[i].port] = res.columns;
-                });
-              })(),
-              (async () => {
-                if (!stepAbovePort) return;
-                const r = await api.nodeflowColumns(
-                  partialGroupGraph(cctx.groupId, cctx.index),
-                  cctx.groupId,
-                  "out",
-                );
-                if (r.columns) out[stepAbovePort] = r.columns;
-              })(),
-            ]);
-            ok = true;
-          } catch {
-            /* ignore — do not cache failures as empty schemas */
-          }
-          if (!cancelled) {
-            // Always publish so ownership matches selection and probing can
-            // end. Only successful responses are cached — failures must miss
-            // on the next select so the probe retries.
-            if (ok) setNodeflowColsCache(cacheKey, out);
-            publishInspCols(probedId, out);
-            setInspColsProbing(false);
-          }
-        })();
+        stopWait = afterDragIdle(() => {
+          if (cancelled) return;
+          (async () => {
+            const out: Record<string, string[]> = {};
+            let ok = false;
+            try {
+              await Promise.all([
+                (async () => {
+                  if (!groupReqs.length) return;
+                  const r = await api.nodeflowColumnsBatch(
+                    graphForApi(),
+                    groupReqs.map((q) => ({ node: q.node, port: q.fromPort })),
+                  );
+                  (r.results || []).forEach((res, i) => {
+                    if (res && res.columns && groupReqs[i])
+                      out[groupReqs[i].port] = res.columns;
+                  });
+                })(),
+                (async () => {
+                  if (!stepAbovePort) return;
+                  const r = await api.nodeflowColumns(
+                    partialGroupGraph(cctx.groupId, cctx.index),
+                    cctx.groupId,
+                    "out",
+                  );
+                  if (r.columns) out[stepAbovePort] = r.columns;
+                })(),
+              ]);
+              ok = true;
+            } catch {
+              /* ignore — do not cache failures as empty schemas */
+            }
+            if (!cancelled) {
+              // Always publish so ownership matches selection and probing can
+              // end. Only successful responses are cached — failures must miss
+              // on the next select so the probe retries.
+              if (ok) setNodeflowColsCache(cacheKey, out);
+              publishInspCols(probedId, out);
+              setInspColsProbing(false);
+            }
+          })();
+        });
       });
       return () => {
         cancelled = true;
         cancelPaint();
+        stopWait?.();
       };
     }
     // every input port this node actually has, read straight from the port
@@ -293,35 +317,40 @@ export function useNodeFlowInspectorController({
     setInspColsProbing(true);
     let cancelled = false;
     const probedId = sel.id;
+    let stopWait: (() => void) | undefined;
     const cancelPaint = runAfterPaint(() => {
-      (async () => {
-        const out: Record<string, string[]> = {};
-        let ok = false;
-        try {
-          const r = await api.nodeflowColumnsBatch(
-            graphForApi(),
-            reqs.map((q) => ({ node: q.node, port: q.fromPort })),
-          );
-          (r.results || []).forEach((res, i) => {
-            if (res && res.columns && reqs[i]) out[reqs[i].port] = res.columns;
-          });
-          ok = true;
-        } catch {
-          /* ignore — do not cache failures as empty schemas */
-        }
-        if (!cancelled) {
-          // Always publish so ownership matches selection and probing can
-          // end. Only successful responses are cached — failures must miss
-          // on the next select so the probe retries.
-          if (ok) setNodeflowColsCache(cacheKey, out);
-          publishInspCols(probedId, out);
-          setInspColsProbing(false);
-        }
-      })();
+      stopWait = afterDragIdle(() => {
+        if (cancelled) return;
+        (async () => {
+          const out: Record<string, string[]> = {};
+          let ok = false;
+          try {
+            const r = await api.nodeflowColumnsBatch(
+              graphForApi(),
+              reqs.map((q) => ({ node: q.node, port: q.fromPort })),
+            );
+            (r.results || []).forEach((res, i) => {
+              if (res && res.columns && reqs[i]) out[reqs[i].port] = res.columns;
+            });
+            ok = true;
+          } catch {
+            /* ignore — do not cache failures as empty schemas */
+          }
+          if (!cancelled) {
+            // Always publish so ownership matches selection and probing can
+            // end. Only successful responses are cached — failures must miss
+            // on the next select so the probe retries.
+            if (ok) setNodeflowColsCache(cacheKey, out);
+            publishInspCols(probedId, out);
+            setInspColsProbing(false);
+          }
+        })();
+      });
     });
     return () => {
       cancelled = true;
       cancelPaint();
+      stopWait?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, selId, graphSig, schemaSig]);

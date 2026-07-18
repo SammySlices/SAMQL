@@ -35107,9 +35107,16 @@ def backend_tests(datadir, csv_path, json_path):
              and "self.write_lock.release()" in sc,
              "sync_catalog's flag-off path probes without parking and "
              "releases in finally")
-        need("_catalog_lock" in sc and "execute_read" in sc,
-             "sync_catalog has a concurrent path (no write_lock) guarded by "
-             "the catalog lock")
+        # Incremental sync (656+): concurrent work lives in _duck_sync_catalog
+        # (use_read=True → execute_read), then reconciles under _catalog_lock.
+        need("_duck_sync_catalog" in sc and "use_read=True" in sc,
+             "sync_catalog concurrent path delegates to _duck_sync_catalog")
+        dsc = inspect.getsource(DuckDBManager._duck_sync_catalog)
+        need("_catalog_lock" in dsc and "use_read" in dsc,
+             "incremental duck sync reconciles under the catalog lock")
+        fetch = inspect.getsource(DuckDBManager._duck_fetch_catalog_lists)
+        need("execute_read" in fetch,
+             "catalog list fetch uses execute_read on the concurrent path")
         ct = inspect.getsource(DuckDBManager._column_types_raw)
         need('hasattr(self, "execute_read")' in ct and "execute_read(" in ct,
              "schema reads try a separate cursor UNCONDITIONALLY (never queue "
@@ -37637,8 +37644,11 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         need("def _duck_sync_catalog" in eng,
              "incremental duck catalog helper exists")
-        i = eng.index("def _duck_sync_catalog")
-        j = eng.index("\n    def ", i + 1)
+        # Helpers were split (fetch/describe/sync); assert across that block.
+        i = eng.index("def _duck_fetch_catalog_lists")
+        j = eng.find("\nclass ", i)
+        if j < 0:
+            j = len(eng)
         body = eng[i:j]
         need("information_schema.columns" in body,
              "lists columns before selective DESCRIBE")
@@ -37670,6 +37680,9 @@ def backend_tests(datadir, csv_path, json_path):
             duck.sync_catalog()
             eq(n["d"], 0, "unchanged sync skips DESCRIBE")
             n["d"] = 0
+            # Dirty-skip (659+): force a reconcile so tables_tree is exercised
+            # without implying every poll DESCRIBEs.
+            s._mark_catalog_dirty()
             names = [t["name"] for t in s.tables_tree()]
             need("inc_a" in names and "inc_b" in names, "tables visible")
             eq(n["d"], 0, "tables_tree does not re-DESCRIBE warm types")
@@ -37747,6 +37760,67 @@ def backend_tests(datadir, csv_path, json_path):
              "unrelated drop keeps flow cache")
         need(corr.get("related_drop_bumps_flow") is True,
              "related drop still invalidates flow")
+
+    def t_perf_audit_medium_harness():
+        # Concurrent COUNT lock skip, catalog dirty-skip, SQLite warm PRAGMA
+        # skip, filebrowser volatile-cache gate, unrelated flow drop.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        script = os.path.join(ROOT, "tests", "benchmark_perf_audit_medium.py")
+        need(os.path.isfile(script),
+             "audit-medium benchmark harness is bundled")
+        out = os.path.join(DATADIR, "benchmark-perf-audit-medium-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "audit-medium self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "audit-medium report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "audit-medium self-test ok flag")
+        corr = result.get("correctness") or {}
+        need(corr.get("concurrent_count_no_write_lock") is True,
+             "concurrent COUNT must not take write_lock")
+        need(corr.get("catalog_dirty_skip") is True,
+             "clean tables_tree skips sync_catalog")
+        need(corr.get("sqlite_warm_pragma_skip") is True,
+             "warm SQLite sync skips PRAGMA; type-drop refreshes")
+        need(corr.get("filebrowser_volatile_gate") is True,
+             "filebrowser disables volatile flow cache")
+        need(corr.get("filebrowser_disables_volatile_cache") is True,
+             "materialize path gates filebrowser volatile cache")
+        need(corr.get("unrelated_drop_keeps_flow") is True,
+             "unrelated drop still keeps flow cache")
+
+    def t_catalog_dirty_skip_source():
+        # Post-658 audit medium: tables_tree must not sync_catalog on every
+        # focus/poll when nothing mutated.
+        sess = open(os.path.join(BACKEND, "samql_core", "session.py"),
+                    encoding="utf-8").read()
+        need("def _mark_catalog_dirty(self):" in sess,
+             "catalog dirty helper exists")
+        need("self._catalog_dirty = True" in sess, "dirty flag is set")
+        i = sess.index("def tables_tree(self):")
+        j = sess.index("\n    def ", i + 1)
+        body = sess[i:j]
+        need("_catalog_dirty" in body, "tables_tree checks dirty flag")
+        need("self._catalog_dirty = False" in body,
+             "tables_tree clears dirty after sync")
+        eng = open(os.path.join(BACKEND, "samql_core", "engines.py"),
+                   encoding="utf-8").read()
+        need("Skip PRAGMA when shape is known" in eng
+             or "name in cache" in eng,
+             "SQLite sync skips warm PRAGMA")
 
     def t_stress_cancel_reclaim_harness():
         # Stall / cancel / reclaim stress suite (tests/stress_cancel_reclaim.py).
@@ -37885,6 +37959,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_duck_sync_catalog_incremental_source),
         ("perf audit high defects harness (filter COUNT / deep snap / flow)",
          t_perf_audit_high_harness),
+        ("perf audit medium defects harness (COUNT lock / catalog / filebrowser)",
+         t_perf_audit_medium_harness),
+        ("catalog dirty-skip + SQLite warm PRAGMA (source)",
+         t_catalog_dirty_skip_source),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",
          t_stress_cancel_reclaim_harness),
         ("cache/memory pressure reclaim harness (self-test; full opt-in)",
