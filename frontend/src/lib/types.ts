@@ -149,6 +149,8 @@ export interface ResultPage {
   elapsed_ms?: number;
   target?: string;
   truncated?: boolean;
+  // Session data_epoch when this snapshot was produced (latest-data stamp).
+  data_epoch?: number;
   // a runaway result stopped at the safety ceiling (SAMQL_MAX_RESULT_ROWS)
   result_capped?: boolean;
   result_cap?: number | null;

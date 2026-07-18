@@ -142,15 +142,6 @@ export function useNodeFlowExecutionController({
   const previewCache = useRef<Map<string, Extract<NodeFlowPreview, { kind: "table" }>>>(new Map());
   const previewEpochRef = useRef(dataEpoch);
 
-  // Data mutations bump the session epoch without changing graphSig. Drop any
-  // FE preview hits AND the open drawer so prior rows cannot look current.
-  useEffect(() => {
-    if (previewEpochRef.current === dataEpoch) return;
-    previewEpochRef.current = dataEpoch;
-    previewCache.current.clear();
-    setPreview(null);
-  }, [dataEpoch]);
-
   const isRunCurrent = (id: string) =>
     mountedRef.current && runScopesRef.current.get(id) === scopeVersionRef.current;
 
@@ -203,6 +194,17 @@ export function useNodeFlowExecutionController({
     auxRequestsRef.current.clear();
     chartPromisesRef.current.clear();
   };
+
+  // Data mutations bump the session epoch without changing graphSig. Drop any
+  // FE preview hits AND the open drawer so prior rows cannot look current.
+  // Abort in-flight preview/chart/validate so completions cannot repaint stale.
+  useEffect(() => {
+    if (previewEpochRef.current === dataEpoch) return;
+    previewEpochRef.current = dataEpoch;
+    abortAuxRequests();
+    previewCache.current.clear();
+    setPreview(null);
+  }, [dataEpoch]);
 
   const beginAuxRequest = (key: string, queryId?: string): AuxRequestOwner => {
     const previous = auxRequestsRef.current.get(key);

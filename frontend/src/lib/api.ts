@@ -10,6 +10,15 @@ import type {
 import { buildLoadForm } from "./loadForm";
 import type { ReconcileDetailRequest } from "./reconcileRequest";
 
+/** Stamp IDE/Journal ranDataEpoch from the result snapshot, not the catalog poll. */
+export function stampResultEpoch(
+  res: { data_epoch?: number | null } | null | undefined,
+  fallback: number,
+): number {
+  const n = Number(res?.data_epoch);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 // All requests are same-origin: in production the Python server serves
 // both the static app and /api; in dev Vite proxies /api to the backend.
 const BASE = "";

@@ -6977,6 +6977,10 @@ class Session:
             # next /api/tables recomputes them
             self._invalidate_counts()
 
+        # Capture freshness before materialization. Concurrent mutations that
+        # bump `_data_epoch` while this query runs must expire the snapshot.
+        epoch0 = int(getattr(self, "_data_epoch", 0) or 0)
+
         # A query that references a remote catalog table runs on that SQL
         # Server connection (passthrough); the result is cached like any
         # other so the grid / paging / charts work unchanged.
@@ -7103,7 +7107,7 @@ class Session:
                     "truncated": False}
 
         rid = self._cache_result(cols, rows, total, original_sql, first_target,
-                                 engine_kind)
+                                 engine_kind, data_epoch=epoch0)
         capped = bool(getattr(rows, "capped", False))
         cap_n = getattr(rows, "cap", None)
         self.history.add(original_sql, target=first_target, row_count=total,
@@ -7126,6 +7130,8 @@ class Session:
             "truncated": total > DISPLAY_LIMIT,
             "result_capped": capped,
             "result_cap": cap_n if capped else None,
+            # Snapshot epoch for IDE/Journal stamps (not the live catalog poll).
+            "data_epoch": epoch0,
         })
         if preview_n is not None:
             page.update({"preview": True,
@@ -8010,11 +8016,17 @@ class Session:
                     except Exception:
                         pass
 
-    def _cache_result(self, cols, store, total, sql, target, engine_kind):
+    def _cache_result(self, cols, store, total, sql, target, engine_kind,
+                      data_epoch=None):
+        # Stamp the epoch observed when the query *started*, not when the
+        # store finished. A concurrent mutation that bumps `_data_epoch`
+        # mid-run must not make a pre-mutation snapshot look live.
+        if data_epoch is None:
+            data_epoch = getattr(self, "_data_epoch", 0)
         rid = uuid.uuid4().hex[:12]
         cr = _CachedResult(
             rid, cols, store, total, sql, target, engine_kind,
-            data_epoch=getattr(self, "_data_epoch", 0))
+            data_epoch=data_epoch)
         with self._lock:
             self._results[rid] = cr
             self._results_order.append(rid)
@@ -8165,6 +8177,7 @@ class Session:
                 "cell_capped": cell_capped,
                 "result_capped": bool(cr.capped) and not filters,
                 "result_cap": cr.cap if (cr.capped and not filters) else None,
+                "data_epoch": int(getattr(cr, "data_epoch", 0) or 0),
             }
         except Exception as e:
             from .engines import _is_interrupt
@@ -10404,6 +10417,11 @@ class Session:
             engine_kind = ("duckdb"
                            if (self.duckdb is not None and eng is self.duckdb)
                            else "sqlite")
+            # Staging tables are content mutations — bump data_epoch so
+            # IDE/Journal refuse retained snapshots that predate this write.
+            self._invalidate_profiles()
+            self._invalidate_counts(
+                keys=self._count_keys_for_tables(engine_kind, name))
             return {"name": name, "columns": cols, "engine": engine_kind}
         except Exception as e:
             if _is_interrupt(e) or self._run_is_cancelled(query_id):
@@ -11792,10 +11810,15 @@ class Session:
         SQL-aggregation context (run, src, colref, castnum) when the source
         can aggregate in the engine -- a spilled result, a Parquet result,
         or a table -- else None so the caller uses the small in-memory
-        Python path. ``cols`` is the column-name list (or None if gone)."""
+        Python path. ``cols`` is the column-name list (or None if gone).
+
+        Latest-data wins: result snapshots must go through
+        ``_live_cached_result`` so chart/pivot/profile cannot aggregate a
+        frozen parquet after the session epoch advances.
+        """
         rid = spec.get("result_id")
         if rid is not None:
-            cr = self._results.get(rid)
+            cr = self._live_cached_result(rid)
             if cr is None:
                 return None, None
             store = cr.store
@@ -13391,6 +13414,12 @@ class Session:
                     bn, cols, rows, source=src)
                 cols_now = self.db.table_columns.get(tname, list(cols))
                 engine = "sqlite"
+            # Direct MSSQL import (and catalog-table import) must advance
+            # data_epoch; otherwise FE guards keep prior result_ids looking live.
+            self._invalidate_profiles()
+            self._refresh_scoped_counts([{
+                "engine": engine, "name": tname, "rows": n,
+            }])
             return {
                 "ok": True,
                 "table": tname,
@@ -13466,7 +13495,14 @@ class Session:
         if not path or not os.path.isfile(path):
             return {"error": "That file no longer exists."}
         try:
-            mtime = os.path.getmtime(path)
+            st = os.stat(path)
+            # size/ctime/ino catch in-place rewrites that preserve mtime.
+            file_token = (
+                int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
+                int(st.st_size),
+                int(getattr(st, "st_ctime_ns", 0) or 0),
+                int(getattr(st, "st_ino", 0) or 0),
+            )
         except OSError as e:
             return {"error": err_str(e)}
 
@@ -13479,9 +13515,9 @@ class Session:
 
         cached = self._dir_files.get(path)
         if cached:
-            name, eng_name, mt = cached
+            name, eng_name, tok = cached
             eng = self.duckdb if eng_name == "duckdb" else self.db
-            if mt == mtime and eng is not None and name in eng.table_columns:
+            if tok == file_token and eng is not None and name in eng.table_columns:
                 return {"ok": True, "table": name, "engine": eng_name,
                         "columns": eng.table_columns.get(name, []),
                         "rows": _count(eng, name)}
@@ -13529,7 +13565,7 @@ class Session:
         d = (descs or [None])[0]
         if not d or not d.get("name"):
             return {"error": "No readable data in that file."}
-        self._dir_files[path] = (d["name"], d.get("engine", "sqlite"), mtime)
+        self._dir_files[path] = (d["name"], d.get("engine", "sqlite"), file_token)
         self._refresh_scoped_counts([d])
         return {"ok": True, "table": d["name"],
                 "engine": d.get("engine", "sqlite"),
@@ -14180,7 +14216,16 @@ class Session:
                     "(CSV, TSV, JSON, Parquet, Excel)."}
         paths = [os.path.join(folder, n) for n in names]
         try:
-            sig = tuple((n, os.path.getmtime(p)) for n, p in zip(names, paths))
+            # Include size/ctime/ino so same-mtime rewrites miss the cache.
+            sig = tuple(
+                (n,
+                 int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
+                 int(st.st_size),
+                 int(getattr(st, "st_ctime_ns", 0) or 0),
+                 int(getattr(st, "st_ino", 0) or 0))
+                for n, p in zip(names, paths)
+                for st in (os.stat(p),)
+            )
         except OSError as e:
             return {"error": err_str(e)}
 
@@ -14510,19 +14555,6 @@ class Session:
         res = self.import_from_connection(
             conn, "SELECT * FROM %s" % qualified, base_name=base,
             destination="duckdb")
-        if isinstance(res, dict) and res.get("ok"):
-            self._invalidate_profiles()
-            specs = []
-            for block in res.get("loaded") or []:
-                if isinstance(block, dict):
-                    specs.extend(block.get("tables") or [])
-            if res.get("table"):
-                specs.append({
-                    "engine": res.get("engine"),
-                    "name": res.get("table"),
-                    "rows": res.get("rows"),
-                })
-            self._refresh_scoped_counts(specs)
         return res
 
     def flatten_json_to_csv_dir(self, json_path, out_dir, base_name=None,

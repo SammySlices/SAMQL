@@ -9,7 +9,7 @@ import { useConfirmPop } from "./ConfirmPop";
 import { NotebookCell, type RunCell } from "./NotebookCell";
 import { ProgressBar } from "./ProgressBar";
 import { Icon } from "./Icon";
-import { api, exportResultToFile, saveToDownloads } from "../lib/api";
+import { api, exportResultToFile, saveToDownloads, stampResultEpoch } from "../lib/api";
 import { cancelOne, cancelAllRuns, isCancelledError, registerRun, unregisterRun } from "../lib/runController";
 import { uid } from "../lib/ids";
 import { startPointerDrag } from "../lib/pointerDrag";
@@ -775,10 +775,13 @@ export const Notebook: React.FC<Props> = ({
     setCells((prev) => {
       let changed = false;
       const next = prev.map((c) => {
-        if (c.type !== "sql" || !c.resultId || !c.page?.rows?.length) return c;
+        if (c.type !== "sql" || !c.resultId || !c.page) return c;
         if (c.ranDataEpoch === dataEpoch) return c;
+        if ((c.page.rows?.length ?? 0) === 0 && (c.page.total_rows ?? 0) === 0) {
+          return c;
+        }
         changed = true;
-        return { ...c, page: { ...c.page, rows: [] } };
+        return { ...c, page: { ...c.page, rows: [], total_rows: 0 } };
       });
       return changed ? next : prev;
     });
@@ -944,7 +947,7 @@ export const Notebook: React.FC<Props> = ({
           error: null,
           ranOnce: true,
           ranCompiledSql: composed,
-          ranDataEpoch: dataEpoch,
+          ranDataEpoch: stampResultEpoch(res, dataEpoch),
           resultId: null,
           page: { columns: [], rows: [], total_rows: 0 },
           elapsedMs: res.elapsed_ms ?? null,
@@ -958,7 +961,7 @@ export const Notebook: React.FC<Props> = ({
           error: null,
           ranOnce: true,
           ranCompiledSql: composed,
-          ranDataEpoch: dataEpoch,
+          ranDataEpoch: stampResultEpoch(res, dataEpoch),
           resultId: res.result_id,
           queryId, // .520: page fetches ride the run id (cancellable send)
           page: res,

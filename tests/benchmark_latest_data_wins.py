@@ -222,6 +222,20 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
             target=DUCKDB_TARGET)
         report["correctness"]["nodeflow_old_result_expires"] = (
             s.page(rid_old, 0, 5).get("error") == "result expired")
+
+        # Chart/pivot/profile must expire the same way (not bypass via _agg_source).
+        chart = s.chart_data({
+            "result_id": rid_old, "chart_type": "bar",
+            "x": "id", "y": "id", "agg": "sum",
+        })
+        report["correctness"]["ide_stale_chart_expires"] = (
+            chart.get("error") == "result expired")
+        pivot = s.pivot({
+            "result_id": rid_old, "rows": ["id"], "cols": [],
+            "vals": [{"field": "id", "agg": "count"}],
+        })
+        report["correctness"]["ide_stale_pivot_expires"] = (
+            pivot.get("error") == "result expired")
     finally:
         s.shutdown()
 
@@ -234,6 +248,12 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         q1 = s.run_query("SELECT id FROM local_src", target=LOCAL_TARGET)
         rid = q1["result_id"]
         need(not s.page(rid, 0, 10).get("error"), "sqlite page ok")
+        need(int(q1.get("data_epoch") or -1) == int(s._data_epoch),
+             "query response carries snapshot data_epoch")
+        report["correctness"]["query_returns_data_epoch"] = (
+            "data_epoch" in q1
+            and int(q1.get("data_epoch") or -1) == int(
+                getattr(s._results.get(rid), "data_epoch", -2)))
         s.run_query("INSERT INTO local_src VALUES (3)", target=LOCAL_TARGET)
         report["correctness"]["sqlite_ide_stale_page_expires"] = (
             s.page(rid, 0, 10).get("error") == "result expired")
@@ -244,12 +264,35 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
     finally:
         s.shutdown()
 
+    # ---- 4b) materialize staging bumps data_epoch ----
+    s = Session()
+    try:
+        _seed_duck_table(s, "mat_src", max(10, n // 20))
+        q1 = s.run_query("SELECT id FROM mat_src", target=DUCKDB_TARGET)
+        rid = q1["result_id"]
+        ep = s._data_epoch
+        mat = s.materialize(
+            "__nb_mat_audit", "SELECT id FROM mat_src",
+            target=DUCKDB_TARGET)
+        need(not mat.get("error"), "materialize ok: %s" % mat.get("error"))
+        report["correctness"]["materialize_advances_data_epoch"] = (
+            s._data_epoch > ep)
+        report["correctness"]["materialize_expires_prior_result"] = (
+            s.page(rid, 0, 5).get("error") == "result expired")
+    finally:
+        s.shutdown()
+
     # ---- 5) FE source contracts (display + reuse guards) ----
     nb = (ROOT / "frontend" / "src" / "lib" / "notebook.ts").read_text(
         encoding="utf-8")
     notebook = (ROOT / "frontend" / "src" / "components"
                 / "Notebook.tsx").read_text(encoding="utf-8")
     app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    api_ts = (ROOT / "frontend" / "src" / "lib" / "api.ts").read_text(
+        encoding="utf-8")
+    sql_cell = (
+        ROOT / "frontend" / "src" / "components" / "notebook"
+        / "SqlNotebookCell.tsx").read_text(encoding="utf-8")
     exec_ctrl = (
         ROOT / "frontend" / "src" / "components" / "nodeflow"
         / "useNodeFlowExecutionController.ts").read_text(encoding="utf-8")
@@ -263,11 +306,21 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         "dataStale" in app
         and "result-data-stale-chip" in app
         and "Data changed — re-run" in app)
+    report["correctness"]["fe_stamp_result_epoch"] = (
+        "stampResultEpoch" in api_ts
+        and "stampResultEpoch" in app
+        and "stampResultEpoch" in notebook)
+    report["correctness"]["fe_chart_stale_guard"] = (
+        "result-data-stale-panel" in app
+        and "Data changed — re-run to chart" in app
+        and "nb-out-stale" in sql_cell
+        and "Data changed — re-run to" in sql_cell)
     report["correctness"]["fe_nodeflow_epoch_clears"] = (
         "previewEpochRef" in exec_ctrl
         and "setPreview(null)" in exec_ctrl
         and "setChartData({})" in exec_ctrl
-        and "setValidateResults({})" in exec_ctrl)
+        and "setValidateResults({})" in exec_ctrl
+        and "abortAuxRequests()" in exec_ctrl)
     report["correctness"]["latest_data_wins_rule"] = (
         "Updated data is more important than cache hits" in rule)
 

@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.665
+Current build:   2026-07-18.666
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.666  (v2.16.4)
+
+FIX: audit of latest-data-wins gaps. Chart/pivot/profile expire via
+_live_cached_result; materialize + MSSQL import bump data_epoch;
+stamp snapshot epoch at query start and echo on responses; FE stamps
+ranDataEpoch from result, clears chart/pivot + zeros total_rows,
+NodeFlow aborts aux on epoch; dir/folder cache tokens include
+size/ctime/ino. Harness extended. Refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.665  (v2.16.4)

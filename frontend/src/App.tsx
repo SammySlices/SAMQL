@@ -15,7 +15,8 @@ import { ServerWatchdog } from "./components/ServerWatchdog";
 import { api,
   ApiError,
   exportResultToFile,
-  saveToDownloads } from "./lib/api";
+  saveToDownloads,
+  stampResultEpoch } from "./lib/api";
 import type { RootIdChoice } from "./lib/api";
 import { dropManyConfirmMessage } from "./lib/dropManyConfirm";
 import { menuPos } from "./lib/menuPos";
@@ -959,7 +960,13 @@ export default function App() {
           changed = true;
           return { ...tab, dataStale: false };
         }
-        if (tab.dataStale && (tab.page?.rows?.length ?? 0) === 0) return tab;
+        if (
+          tab.dataStale &&
+          (tab.page?.rows?.length ?? 0) === 0 &&
+          (tab.page?.total_rows ?? 0) === 0
+        ) {
+          return tab;
+        }
         changed = true;
         return {
           ...tab,
@@ -968,6 +975,7 @@ export default function App() {
             ? {
                 ...tab.page,
                 rows: [],
+                total_rows: 0,
               }
             : tab.page,
         };
@@ -1296,7 +1304,7 @@ export default function App() {
                   ? {
                       ...r,
                       resultId: res.result_id ?? null,
-                      ranDataEpoch: dataEpoch,
+                      ranDataEpoch: stampResultEpoch(res, dataEpoch),
                       dataStale: false,
                       queryId,
                       page: res,
@@ -1326,7 +1334,7 @@ export default function App() {
               kind: "result",
               title: titleForTab(originId),
               resultId: res.result_id ?? null,
-              ranDataEpoch: dataEpoch,
+              ranDataEpoch: stampResultEpoch(res, dataEpoch),
               dataStale: false,
               queryId,
               originTabId: originId,
@@ -1627,7 +1635,7 @@ export default function App() {
             ? {
                 ...t,
                 resultId: ent.result_id ?? null,
-                ranDataEpoch: dataEpoch,
+                ranDataEpoch: stampResultEpoch(pg, dataEpoch),
                 dataStale: false,
                 page: { ...pg, result_id: ent.result_id },
                 sortCol: null,
@@ -2396,7 +2404,7 @@ export default function App() {
               ? {
                   ...x,
                   resultId: res.result_id ?? null,
-                  ranDataEpoch: dataEpoch,
+                  ranDataEpoch: stampResultEpoch(res, dataEpoch),
                   dataStale: false,
                   queryId,
                   page: res,
@@ -4017,10 +4025,15 @@ export default function App() {
                 />
               ) : activeResultTab ? (
                 (activeResultTab.view ?? "grid") === "chart" ? (
-                  hasFloat(floats, activeResultTab.resultId ?? "", "chart") ? (
+                  activeResultTab.dataStale ? (
+                    <div className="result-data-stale-panel faint">
+                      Data changed — re-run to chart.
+                    </div>
+                  ) : hasFloat(floats, activeResultTab.resultId ?? "", "chart") ? (
                     floatPlaceholder("Chart")
                   ) : (
                     <ChartPanel
+                      key={`chart-${activeResultTab.resultId}-${activeResultTab.ranDataEpoch ?? 0}`}
                       resultId={activeResultTab.resultId ?? null}
                       columns={activeResultTab.page?.columns || []}
                       sampleRows={activeResultTab.page?.rows}
@@ -4035,10 +4048,15 @@ export default function App() {
                     />
                   )
                 ) : activeResultTab.view === "pivot" ? (
-                  hasFloat(floats, activeResultTab.resultId ?? "", "pivot") ? (
+                  activeResultTab.dataStale ? (
+                    <div className="result-data-stale-panel faint">
+                      Data changed — re-run to pivot.
+                    </div>
+                  ) : hasFloat(floats, activeResultTab.resultId ?? "", "pivot") ? (
                     floatPlaceholder("Pivot")
                   ) : (
                     <PivotPanel
+                      key={`pivot-${activeResultTab.resultId}-${activeResultTab.ranDataEpoch ?? 0}`}
                       tables={tables}
                       result={
                         activeResultTab.resultId
@@ -4762,8 +4780,13 @@ export default function App() {
         const title = (r?.title ?? "Result") + " · " + f.view;
         let body: React.ReactNode;
         if (f.view === "chart")
-          body = (
+          body = r?.dataStale ? (
+            <div className="result-data-stale-panel faint">
+              Data changed — re-run to chart.
+            </div>
+          ) : (
             <ChartPanel
+              key={`float-chart-${r?.resultId}-${r?.ranDataEpoch ?? 0}`}
               resultId={r?.resultId ?? null}
               columns={r?.page?.columns || []}
               sampleRows={r?.page?.rows}
@@ -4777,8 +4800,13 @@ export default function App() {
             />
           );
         else if (f.view === "pivot")
-          body = (
+          body = r?.dataStale ? (
+            <div className="result-data-stale-panel faint">
+              Data changed — re-run to pivot.
+            </div>
+          ) : (
             <PivotPanel
+              key={`float-pivot-${r?.resultId}-${r?.ranDataEpoch ?? 0}`}
               tables={tables}
               result={
                 r?.resultId
