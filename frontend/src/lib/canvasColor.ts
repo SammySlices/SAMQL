@@ -1,6 +1,8 @@
 /** Settings → Visual → Change Canvas Color.
  *  Per-surface workspace backgrounds: IDE (SQL editor), Journal, NodeFlow.
  *  When set, `--user-canvas-bg-*` on <html> wins over ivory / light hard-coded whites.
+ *
+ *  NodeFlow snap-grid dots can also be customized (color + opacity) on the Node tab.
  */
 
 export type CanvasSurface = "ide" | "journal" | "node";
@@ -31,6 +33,18 @@ export const HAS_USER_CANVAS_BG_CLASSES: Record<CanvasSurface, string> = {
 /** Cool gray matching light chrome-strip / workspace gray (picker default). */
 export const DEFAULT_CANVAS_COLOR = "#d8d8d8";
 
+/** Default NodeFlow snap-grid dot color (matches CSS rgba(127,127,127,…)). */
+export const DEFAULT_NODE_DOT_COLOR = "#7f7f7f";
+
+/** Default NodeFlow snap-grid dot opacity percent (0–100). Matches ~0.28 alpha. */
+export const DEFAULT_NODE_DOT_OPACITY = 28;
+
+export const NODE_DOT_COLOR_KEY = "samql.canvasDotColor.node";
+export const NODE_DOT_OPACITY_KEY = "samql.canvasDotOpacity.node";
+export const USER_CANVAS_DOT_COLOR_VAR = "--user-canvas-dot-color-node";
+export const USER_CANVAS_DOT_OPACITY_VAR = "--user-canvas-dot-opacity-node";
+export const HAS_USER_CANVAS_DOT_CLASS = "has-user-canvas-dot-node";
+
 export type CanvasColorPreset = { label: string; value: string };
 
 /** SamQL cool gray / white / soft green-tint — avoid purple AI clichés. */
@@ -45,6 +59,13 @@ export const CANVAS_COLOR_PRESETS: CanvasColorPreset[] = [
 
 export type CanvasColors = Record<CanvasSurface, string | null>;
 
+/** NodeFlow snap-grid dot style. null color/opacity means theme auto defaults. */
+export type NodeDotStyle = {
+  color: string | null;
+  /** 0–100; null = default */
+  opacity: number | null;
+};
+
 const HEX_RE = /^#([0-9a-fA-F]{6})$/;
 
 export function normalizeHex(raw: string | null | undefined): string | null {
@@ -52,6 +73,15 @@ export function normalizeHex(raw: string | null | undefined): string | null {
   const s = String(raw).trim();
   if (!HEX_RE.test(s)) return null;
   return s.toLowerCase();
+}
+
+export function normalizeOpacityPercent(
+  raw: number | string | null | undefined,
+): number | null {
+  if (raw == null || raw === "") return null;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(100, Math.round(n)));
 }
 
 function readKey(key: string): string | null {
@@ -66,6 +96,23 @@ function writeKey(key: string, color: string | null): void {
   try {
     if (color) window.localStorage?.setItem(key, color);
     else window.localStorage?.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+function readOpacityKey(key: string): number | null {
+  try {
+    return normalizeOpacityPercent(window.localStorage?.getItem(key));
+  } catch {
+    return null;
+  }
+}
+
+function writeOpacityKey(key: string, opacity: number | null): void {
+  try {
+    if (opacity == null) window.localStorage?.removeItem(key);
+    else window.localStorage?.setItem(key, String(opacity));
   } catch {
     /* ignore */
   }
@@ -102,6 +149,18 @@ export function persistCanvasColor(
 ): void {
   const n = color == null ? null : normalizeHex(color);
   writeKey(CANVAS_COLOR_KEYS[surface], n);
+}
+
+export function readPersistedNodeDotStyle(): NodeDotStyle {
+  return {
+    color: readKey(NODE_DOT_COLOR_KEY),
+    opacity: readOpacityKey(NODE_DOT_OPACITY_KEY),
+  };
+}
+
+export function persistNodeDotStyle(style: NodeDotStyle): void {
+  writeKey(NODE_DOT_COLOR_KEY, normalizeHex(style.color));
+  writeOpacityKey(NODE_DOT_OPACITY_KEY, normalizeOpacityPercent(style.opacity));
 }
 
 /** Relative luminance 0..1 for hex #rrggbb (sRGB). */
@@ -148,6 +207,32 @@ export function applyCanvasColor(
       root.classList.remove("canvas-node-luma-dark", "canvas-node-luma-light");
       root.removeAttribute("data-canvas-node-luma");
     }
+  }
+}
+
+/**
+ * Apply NodeFlow snap-grid dot color/opacity. When either value is set,
+ * `.has-user-canvas-dot-node` overrides luminance-auto / ivory dot colors.
+ */
+export function applyNodeDotStyle(style: NodeDotStyle): void {
+  const root = document.documentElement;
+  const color = normalizeHex(style.color);
+  const opacity = normalizeOpacityPercent(style.opacity);
+  const hasCustom = color != null || opacity != null;
+  if (hasCustom) {
+    root.style.setProperty(
+      USER_CANVAS_DOT_COLOR_VAR,
+      color ?? DEFAULT_NODE_DOT_COLOR,
+    );
+    root.style.setProperty(
+      USER_CANVAS_DOT_OPACITY_VAR,
+      String(opacity ?? DEFAULT_NODE_DOT_OPACITY),
+    );
+    root.classList.add(HAS_USER_CANVAS_DOT_CLASS);
+  } else {
+    root.style.removeProperty(USER_CANVAS_DOT_COLOR_VAR);
+    root.style.removeProperty(USER_CANVAS_DOT_OPACITY_VAR);
+    root.classList.remove(HAS_USER_CANVAS_DOT_CLASS);
   }
 }
 

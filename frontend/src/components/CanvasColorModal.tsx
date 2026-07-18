@@ -3,8 +3,11 @@ import { createPortal } from "react-dom";
 import {
   CANVAS_COLOR_PRESETS,
   DEFAULT_CANVAS_COLOR,
+  DEFAULT_NODE_DOT_COLOR,
+  DEFAULT_NODE_DOT_OPACITY,
   type CanvasColors,
   type CanvasSurface,
+  type NodeDotStyle,
 } from "../lib/canvasColor";
 import { Icon } from "./Icon";
 import { useWinDrag } from "./ActivityShared";
@@ -18,16 +21,24 @@ const TABS: { id: CanvasSurface; label: string }[] = [
 type Props = {
   open: boolean;
   colors: CanvasColors;
+  nodeDots: NodeDotStyle;
   onPick: (surface: CanvasSurface, color: string) => void;
   onReset: (surface: CanvasSurface) => void;
+  onPickNodeDotColor: (color: string) => void;
+  onPickNodeDotOpacity: (opacity: number) => void;
+  onResetNodeDots: () => void;
   onClose: () => void;
 };
 
 export const CanvasColorModal: React.FC<Props> = ({
   open,
   colors,
+  nodeDots,
   onPick,
   onReset,
+  onPickNodeDotColor,
+  onPickNodeDotOpacity,
+  onResetNodeDots,
   onClose,
 }) => {
   const { pos, startDrag, dragging, settled, winRef } = useWinDrag({
@@ -40,6 +51,10 @@ export const CanvasColorModal: React.FC<Props> = ({
 
   const current = colors[tab];
   const wheelValue = current ?? DEFAULT_CANVAS_COLOR;
+  const dotColor = nodeDots.color ?? DEFAULT_NODE_DOT_COLOR;
+  const dotOpacity = nodeDots.opacity ?? DEFAULT_NODE_DOT_OPACITY;
+  const dotsCustom =
+    nodeDots.color != null || nodeDots.opacity != null;
 
   return createPortal(
     <div
@@ -127,6 +142,78 @@ export const CanvasColorModal: React.FC<Props> = ({
             />
           ))}
         </div>
+        {tab === "node" && (
+          <div
+            className="settings-canvas-dots"
+            data-testid="settings-canvas-dots"
+          >
+            <div className="settings-canvas-dots-title">Snap grid dots</div>
+            <label className="settings-canvas-color-wheel">
+              <span className="settings-canvas-color-label">Dot color</span>
+              <input
+                type="color"
+                data-testid="settings-canvas-dot-color"
+                value={dotColor}
+                aria-label="NodeFlow snap grid dot color"
+                onInput={(e) =>
+                  onPickNodeDotColor((e.target as HTMLInputElement).value)
+                }
+                onChange={(e) =>
+                  onPickNodeDotColor((e.target as HTMLInputElement).value)
+                }
+              />
+            </label>
+            <label className="settings-canvas-dot-opacity">
+              <span className="settings-canvas-color-label">
+                Opacity
+                <span className="settings-canvas-dot-opacity-val">
+                  {dotOpacity}%
+                </span>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                data-testid="settings-canvas-dot-opacity"
+                value={dotOpacity}
+                aria-label="NodeFlow snap grid dot opacity"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={dotOpacity}
+                onInput={(e) =>
+                  onPickNodeDotOpacity(
+                    Number((e.target as HTMLInputElement).value),
+                  )
+                }
+                onChange={(e) =>
+                  onPickNodeDotOpacity(
+                    Number((e.target as HTMLInputElement).value),
+                  )
+                }
+              />
+            </label>
+            <div
+              className="settings-canvas-dot-preview"
+              aria-hidden="true"
+              style={{
+                backgroundImage: `radial-gradient(color-mix(in srgb, ${dotColor} ${dotOpacity}%, transparent) 1.5px, transparent 1.5px)`,
+                backgroundSize: "12px 12px",
+              }}
+            />
+            {dotsCustom && (
+              <button
+                type="button"
+                className="btn sm ghost canvas-color-reset"
+                data-testid="settings-canvas-dot-reset"
+                title="Restore default snap-grid dot color and transparency"
+                onClick={onResetNodeDots}
+              >
+                Reset dots
+              </button>
+            )}
+          </div>
+        )}
         <button
           type="button"
           className="btn sm ghost canvas-color-reset"

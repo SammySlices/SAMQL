@@ -84,10 +84,14 @@ import { setNodeFlowDenseMode } from "./lib/nodeFlowModel";
 import {
   applyAllCanvasColors,
   applyCanvasColor,
+  applyNodeDotStyle,
   persistCanvasColor,
+  persistNodeDotStyle,
   readPersistedCanvasColors,
+  readPersistedNodeDotStyle,
   type CanvasColors,
   type CanvasSurface,
+  type NodeDotStyle,
 } from "./lib/canvasColor";
 import { ReconcileModal, ReconSpec } from "./components/ReconcileModal";
 import { DocsModal } from "./components/DocsModal";
@@ -761,6 +765,12 @@ export default function App() {
     applyAllCanvasColors(saved);
     return saved;
   });
+  // NodeFlow snap-grid dots (color + opacity) — Settings → Canvas Color → Node.
+  const [nodeDots, setNodeDots] = useState<NodeDotStyle>(() => {
+    const saved = readPersistedNodeDotStyle();
+    applyNodeDotStyle(saved);
+    return saved;
+  });
   const [canvasColorPanelOpen, setCanvasColorPanelOpen] = useState(false);
   const pickCanvasColor = useCallback(
     (surface: CanvasSurface, raw: string) => {
@@ -776,6 +786,31 @@ export default function App() {
     setCanvasColors((prev) => ({ ...prev, [surface]: null }));
     applyCanvasColor(surface, null);
     persistCanvasColor(surface, null);
+  }, []);
+  const pickNodeDotColor = useCallback((raw: string) => {
+    const next = raw.trim().toLowerCase();
+    if (!/^#[0-9a-f]{6}$/.test(next)) return;
+    setNodeDots((prev) => {
+      const style = { ...prev, color: next };
+      applyNodeDotStyle(style);
+      persistNodeDotStyle(style);
+      return style;
+    });
+  }, []);
+  const pickNodeDotOpacity = useCallback((opacity: number) => {
+    const n = Math.max(0, Math.min(100, Math.round(opacity)));
+    setNodeDots((prev) => {
+      const style = { ...prev, opacity: n };
+      applyNodeDotStyle(style);
+      persistNodeDotStyle(style);
+      return style;
+    });
+  }, []);
+  const resetNodeDots = useCallback(() => {
+    const style: NodeDotStyle = { color: null, opacity: null };
+    setNodeDots(style);
+    applyNodeDotStyle(style);
+    persistNodeDotStyle(style);
   }, []);
   const [exiting, setExiting] = useState<null | "kept" | "stopped">(null);
   // While true, the browser shows a native "leave site?" prompt on tab
@@ -4315,8 +4350,12 @@ export default function App() {
       <CanvasColorModal
         open={canvasColorPanelOpen}
         colors={canvasColors}
+        nodeDots={nodeDots}
         onPick={pickCanvasColor}
         onReset={resetCanvasColor}
+        onPickNodeDotColor={pickNodeDotColor}
+        onPickNodeDotOpacity={pickNodeDotOpacity}
+        onResetNodeDots={resetNodeDots}
         onClose={() => setCanvasColorPanelOpen(false)}
       />
       {ideFile && (
