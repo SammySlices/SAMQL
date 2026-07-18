@@ -8,6 +8,7 @@ import {
   type CanvasNodeMemoState,
   isNodeFlowPointerDragging,
   nodeHeight,
+  nodeUsesSphereChrome,
   nodeWidth,
   sameCanvasNodeMemoState,
 } from "../lib/nodeFlowModel";
@@ -156,6 +157,10 @@ function CanvasNodeFrameImpl({
   children,
 }: CanvasNodeFrameProps) {
   useRenderCount(`NodeFlowNode:${node.id}`);
+  const sphere = nodeUsesSphereChrome(node);
+  const hoverName = String(
+    node.config.label || node.config.name || node.type,
+  );
   return (
     <div
       data-testid="nodeflow-node"
@@ -173,9 +178,16 @@ function CanvasNodeFrameImpl({
         (snapped ? " snap" : "") +
         (dying ? " dying" : "") +
         (born ? " born" : "") +
-        (lineageFlash ? " lineage-flash" : "")
+        (lineageFlash ? " lineage-flash" : "") +
+        (sphere ? " sphere" : "")
       }
-      title={error ? "Error: " + error : warning || undefined}
+      title={
+        error
+          ? "Error: " + error
+          : sphere
+            ? hoverName
+            : warning || undefined
+      }
       style={{
         left: node.x,
         top: node.y,

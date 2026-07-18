@@ -92,8 +92,11 @@ export function buildNodeFlowRenderModel(
   edges: readonly NbEdge[],
   /** React cache key — densify() reads the shared layout flag. */
   denseMode = false,
+  /** React cache key — sphere helpers read the shared layout flag. */
+  sphereMode = false,
 ): NodeFlowRenderModel {
   void denseMode;
+  void sphereMode;
   const nodeById = new Map<string, NbNode>();
   const nodeIndexById = new Map<string, number>();
   const incomingMutable: Record<string, NbEdge[]> = {};
@@ -399,8 +402,11 @@ export function selectVisibleCanvasNodes(
   overscanPx = LARGE_GRAPH_OVERSCAN_PX,
   /** React cache key — densify() reads the shared layout flag. */
   denseMode = false,
+  /** React cache key — sphere helpers read the shared layout flag. */
+  sphereMode = false,
 ): NbNode[] {
   void denseMode;
+  void sphereMode;
   // Under the large-graph threshold, return the same array identity so
   // Scene/WireLayer memo can skip when nothing else changed.
   if (nodes.length <= threshold) return nodes as NbNode[];

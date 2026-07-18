@@ -540,6 +540,8 @@ export const CANVAS_PAD = 240;
 export const HEAD_H = 30;
 export const PORT_TOP = 46;
 export const PORT_GAP = 24;
+/** Icon-sphere node diameter (Settings → Visual → Sphere nodes). */
+export const SPHERE_SIZE = 56;
 
 /** Dense NodeFlow scale (Settings > View). Eye Care zooms chrome; dense
  *  shrinks canvas geometry so more nodes fit. Composes with Eye Care. */
@@ -549,6 +551,7 @@ export const NB_DENSE_SCALE = 0.85;
 // during the same render that toggles Settings (classList alone would lag
 // one frame behind useEffect).
 let _denseMode = false;
+let _sphereMode = false;
 
 export function setNodeFlowDenseMode(on: boolean): void {
   _denseMode = !!on;
@@ -570,6 +573,40 @@ export function nodeFlowDenseActive(): boolean {
   return _denseMode;
 }
 
+export function setNodeFlowSphereMode(on: boolean): void {
+  _sphereMode = !!on;
+  if (typeof document !== "undefined") {
+    document.documentElement.classList.toggle("nb-sphere", _sphereMode);
+    document.documentElement.setAttribute(
+      "data-nb-sphere",
+      _sphereMode ? "on" : "off",
+    );
+  }
+}
+
+export function nodeFlowSphereActive(): boolean {
+  if (typeof document !== "undefined") {
+    return document.documentElement.classList.contains("nb-sphere");
+  }
+  return _sphereMode;
+}
+
+/**
+ * Transparent icon-sphere chrome (vs classic box cards). Groups, notes,
+ * variables, SQL, and expanded chart/dashboard keep the box so their body
+ * content stays usable.
+ */
+export function nodeUsesSphereChrome(n: NbNode): boolean {
+  if (!nodeFlowSphereActive()) return false;
+  if (n.type === "group" || n.type === "iterator") return false;
+  if (n.type === "text" || n.type === "variable") return false;
+  if (n.type === "sql") return false;
+  if ((n.type === "chart" || n.type === "dashboard") && nodeShowsBody(n)) {
+    return false;
+  }
+  return true;
+}
+
 function denseScale(): number {
   return nodeFlowDenseActive() ? NB_DENSE_SCALE : 1;
 }
@@ -577,6 +614,10 @@ function denseScale(): number {
 function densify(n: number): number {
   const s = denseScale();
   return s === 1 ? n : Math.max(1, Math.round(n * s));
+}
+
+export function sphereSize(): number {
+  return densify(SPHERE_SIZE);
 }
 
 export const STORE_KEY = "samql.nodeflow.v1";
@@ -603,6 +644,7 @@ export function nodeShowsBody(n: NbNode) {
   return false;
 }
 export function nodeWidth(n: NbNode) {
+  if (nodeUsesSphereChrome(n)) return sphereSize();
   if (n.type === "group" || n.type === "iterator") return densify(GROUP_W);
   if ((n.type === "chart" || n.type === "dashboard") && nodeShowsBody(n)) {
     const def = densify(n.type === "dashboard" ? DASH_W : NODE_W);
@@ -638,6 +680,7 @@ export function portsOf(n: NbNode): { inputs: string[]; outputs: string[] } {
 }
 
 export function nodeHeight(n: NbNode) {
+  if (nodeUsesSphereChrome(n)) return sphereSize();
   const head = densify(HEAD_H);
   const portTop = densify(PORT_TOP);
   const portGap = densify(PORT_GAP);
@@ -761,12 +804,41 @@ export function visibleOutputCount(n: NbNode): number {
 // near the header instead, where the in/out conceptually belong. `total` lets a
 // caller override the port count (groups pass their visible-input count so the
 // shown arrows centre correctly); it defaults to the static port list.
+/** Port center (px from node top-left) on the sphere circumference. */
+export function spherePortOffset(
+  n: NbNode,
+  side: "in" | "out",
+  idx: number,
+  total?: number,
+): { left: number; top: number } {
+  const S = sphereSize();
+  const cx = S / 2;
+  const cy = S / 2;
+  const r = S / 2;
+  const t = Math.max(1, total ?? 1);
+  // Inputs along the left arc (π/2 → 3π/2); outputs along the right (−π/2 → π/2).
+  let angle: number;
+  if (side === "in") {
+    angle = t === 1 ? Math.PI : Math.PI / 2 + (idx / Math.max(1, t - 1)) * Math.PI;
+  } else {
+    angle =
+      t === 1 ? 0 : -Math.PI / 2 + (idx / Math.max(1, t - 1)) * Math.PI;
+  }
+  return {
+    left: cx + r * Math.cos(angle),
+    top: cy + r * Math.sin(angle),
+  };
+}
+
 export function portTopOffset(
   n: NbNode,
   side: "in" | "out",
   idx: number,
   total?: number,
 ) {
+  if (nodeUsesSphereChrome(n)) {
+    return spherePortOffset(n, side, idx, total).top;
+  }
   const portTop = densify(PORT_TOP);
   const portGap = densify(PORT_GAP);
   if (
@@ -791,6 +863,22 @@ export function portXY(
 ) {
   const arr = side === "in" ? portsOf(n).inputs : portsOf(n).outputs;
   const port = arr[idx];
+  if (nodeUsesSphereChrome(n)) {
+    if (side === "in" && isTopInput(n.type, port)) {
+      const S = sphereSize();
+      return { x: n.x + S / 2, y: n.y };
+    }
+    if (side === "in") {
+      const left = arr.filter((p) => !isTopInput(n.type, p));
+      if (left.length !== arr.length) {
+        const li = Math.max(0, left.indexOf(port));
+        const off = spherePortOffset(n, "in", li, left.length);
+        return { x: n.x + off.left, y: n.y + off.top };
+      }
+    }
+    const off = spherePortOffset(n, side, idx, total);
+    return { x: n.x + off.left, y: n.y + off.top };
+  }
   // top inputs (the iterator's "vars" driver) anchor on the top edge, centered
   if (side === "in" && isTopInput(n.type, port)) {
     return { x: n.x + nodeWidth(n) / 2, y: n.y };
@@ -831,6 +919,8 @@ export interface CanvasNodeMemoState {
   lineageFlash: boolean;
   /** Dense NodeFlow layout flag — module densify() is not visible to React.memo. */
   denseMode: boolean;
+  /** Icon-sphere chrome flag — module sphere helpers are not visible to React.memo. */
+  sphereMode: boolean;
   renderVersion: string;
   chartVersion: unknown;
   childSelection: string | null;
@@ -853,6 +943,7 @@ export function sameCanvasNodeMemoState(
     a.born === b.born &&
     a.lineageFlash === b.lineageFlash &&
     a.denseMode === b.denseMode &&
+    a.sphereMode === b.sphereMode &&
     a.renderVersion === b.renderVersion &&
     a.chartVersion === b.chartVersion &&
     a.childSelection === b.childSelection

@@ -276,6 +276,7 @@ frontend/src/lib/nodeFlowFavorites.component.test.ts
 frontend/src/lib/nodeFlowModel.ts
 frontend/src/lib/nodeFlowPersistence.component.test.ts
 frontend/src/lib/nodeFlowPersistence.ts
+frontend/src/lib/nodeFlowSphere.component.test.ts
 frontend/src/lib/nodeHelp.ts
 frontend/src/lib/nodeSnap.component.test.tsx
 frontend/src/lib/nodeflowColumnsCache.component.test.ts

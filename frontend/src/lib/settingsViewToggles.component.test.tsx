@@ -9,7 +9,7 @@ const apiMock = vi.hoisted(() => ({
     build: "test",
     features: { duckdb: true },
   })),
-  tables: vi.fn(async () => []),
+  tables: vi.fn(async () => ({ tables: [], data_epoch: 0 })),
   history: vi.fn(async () => ({ history: [] })),
   saved: vi.fn(async () => ({ saved: [] })),
   workflowsList: vi.fn(async () => ({ workflows: [] })),
@@ -71,15 +71,17 @@ vi.mock("../components/ActivityShared", () => ({
 }));
 
 import App from "../App";
-import { setNodeFlowDenseMode } from "./nodeFlowModel";
+import { setNodeFlowDenseMode, setNodeFlowSphereMode } from "./nodeFlowModel";
 
 describe("Settings View consolidations", () => {
   beforeEach(() => {
     localStorage.clear();
     setNodeFlowDenseMode(false);
+    setNodeFlowSphereMode(false);
     document.documentElement.classList.remove(
       "eye-care",
       "nb-dense",
+      "nb-sphere",
       "theme-light",
       "has-user-canvas-bg",
       "has-user-canvas-bg-ide",
@@ -100,6 +102,7 @@ describe("Settings View consolidations", () => {
     document.documentElement.removeAttribute("data-canvas-node-luma");
     document.documentElement.removeAttribute("data-eye-care");
     document.documentElement.removeAttribute("data-nb-dense");
+    document.documentElement.removeAttribute("data-nb-sphere");
     document.documentElement.setAttribute("data-theme", "dark");
     document.body.classList.remove("motion-reduced", "canvas-ivory", "editor-ivory");
     apiMock.health.mockClear();
@@ -192,7 +195,7 @@ describe("Settings View consolidations", () => {
     ).toBeTruthy();
   });
 
-  it("nests theme, Eye Care, Reduce motion, Condensed NodeFlow, and Node Snap under Visual Toggles", async () => {
+  it("nests theme, Eye Care, Reduce motion, Condensed NodeFlow, Node Snap, and Sphere nodes under Visual Toggles", async () => {
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -207,6 +210,7 @@ describe("Settings View consolidations", () => {
     expect(screen.queryByTestId("eye-care-toggle")).toBeNull();
     expect(screen.queryByTestId("nodeflow-dense-toggle")).toBeNull();
     expect(screen.queryByTestId("node-snap-toggle")).toBeNull();
+    expect(screen.queryByTestId("nodeflow-sphere-toggle")).toBeNull();
     expect(screen.queryByTestId("settings-reduce-motion-toggle")).toBeNull();
     expect(screen.queryByTestId("settings-canvas-color")).toBeNull();
 
@@ -216,6 +220,7 @@ describe("Settings View consolidations", () => {
     const motion = screen.getByTestId("settings-reduce-motion-toggle");
     const dense = screen.getByTestId("nodeflow-dense-toggle");
     const snap = screen.getByTestId("node-snap-toggle");
+    const sphere = screen.getByTestId("nodeflow-sphere-toggle");
     const canvasColor = screen.getByTestId("settings-canvas-color");
     expect(theme).toHaveTextContent("Toggle Light Mode");
     expect(eye).toHaveTextContent("Eye Care");
@@ -223,8 +228,11 @@ describe("Settings View consolidations", () => {
     expect(dense).toHaveTextContent("Condensed NodeFlow");
     expect(snap).toHaveTextContent("Node Snap");
     expect(snap).toHaveAttribute("aria-pressed", "false");
+    expect(sphere).toHaveTextContent("Sphere nodes");
+    expect(sphere).toHaveAttribute("aria-pressed", "false");
     expect(canvasColor).toHaveTextContent("Change Canvas Color");
     expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
+    expect(localStorage.getItem("samql.nodeSphere")).toBe("0");
 
     fireEvent.click(theme);
     await waitFor(() => {
@@ -262,6 +270,16 @@ describe("Settings View consolidations", () => {
       expect(snap).toHaveAttribute("aria-pressed", "true");
       expect(snap).toHaveTextContent("Node Snap: on");
       expect(localStorage.getItem("samql.nodeSnap")).toBe("1");
+    });
+
+    fireEvent.click(sphere);
+    await waitFor(() => {
+      expect(sphere).toHaveAttribute("aria-pressed", "true");
+      expect(sphere).toHaveTextContent("Sphere nodes: on");
+      expect(localStorage.getItem("samql.nodeSphere")).toBe("1");
+      expect(document.documentElement.classList.contains("nb-sphere")).toBe(
+        true,
+      );
     });
   });
 

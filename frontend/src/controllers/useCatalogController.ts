@@ -66,9 +66,8 @@ export function useCatalogController(toast: ToastFn) {
       if (sequence !== tablesSeq.current) return;
       // Epoch can advance without a schema/row_count reshape (UPDATE in place).
       setDataEpoch(snapshot.data_epoch);
-      setTables((prev) =>
-        tablesCatalogEqual(prev, snapshot.tables) ? prev : snapshot.tables,
-      );
+      const next = Array.isArray(snapshot?.tables) ? snapshot.tables : [];
+      setTables((prev) => (tablesCatalogEqual(prev, next) ? prev : next));
     };
     api
       .tables()

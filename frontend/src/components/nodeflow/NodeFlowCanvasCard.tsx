@@ -6,10 +6,12 @@ import {
   inputPortMark,
   isTopInput,
   nodeShowsBody,
+  nodeUsesSphereChrome,
   portsOf,
   portTopOffset,
   sidePortLabel,
   sameCanvasNodeMemoState,
+  spherePortOffset,
   type CanvasNodeMemoState,
   type NbEdge,
   type NbNode,
@@ -18,12 +20,35 @@ import {
 import { ChartView } from "../ChartView";
 import { Icon } from "../Icon";
 import { CanvasNodeFrameView } from "../NodeFlowCanvas";
-import { getNodeCardSummary, NODE_BY_TYPE } from "./nodeDefinitions";
+import {
+  getNodeCardSummary,
+  getNodeDefinition,
+  NODE_BY_TYPE,
+} from "./nodeDefinitions";
 import type { NodeMenuState } from "./NodeFlowMenus";
 
 const CHART_FALLBACK = (
   <div className="nb2-chart-msg">Can’t draw this chart.</div>
 );
+
+function sphereHoverTitle(node: NbNode): string {
+  const custom = String(node.config.label || node.config.name || "").trim();
+  if (custom) return custom;
+  return getNodeDefinition(node.type).label || node.type;
+}
+
+function SphereNodeIcon({ node }: { node: NbNode }) {
+  const definition = getNodeDefinition(node.type);
+  const fromConfig =
+    node.type === "usernode" && typeof node.config.icon === "string"
+      ? node.config.icon
+      : null;
+  const iconName = (fromConfig || definition.icon || "Sparkle") as keyof typeof Icon;
+  const NodeIcon = (Icon[iconName] || Icon.Sparkle) as React.FC<{
+    size?: number;
+  }>;
+  return <NodeIcon size={22} />;
+}
 
 export type NodeFlowCanvasCardActions = {
   startNodeDrag: (event: React.PointerEvent, node: NbNode) => void;
@@ -72,6 +97,7 @@ function NodeFlowCanvasCardImpl({
   born,
   lineageFlash,
   denseMode,
+  sphereMode,
   renderVersion,
   chartVersion,
   childSelection,
@@ -85,7 +111,10 @@ function NodeFlowCanvasCardImpl({
 }: NodeFlowCanvasCardProps) {
   void renderVersion;
   void chartVersion;
+  void sphereMode;
   const ports = portsOf(node);
+  const sphere = nodeUsesSphereChrome(node);
+  const sphereTitle = sphereHoverTitle(node);
   return (
     <CanvasNodeFrameView
       node={node}
@@ -100,6 +129,7 @@ function NodeFlowCanvasCardImpl({
       born={born}
       lineageFlash={lineageFlash}
       denseMode={denseMode}
+      sphereMode={sphereMode}
       renderVersion={renderVersion}
       chartVersion={chartVersion}
       childSelection={childSelection}
@@ -124,6 +154,18 @@ function NodeFlowCanvasCardImpl({
         });
       }}
     >
+            {sphere ? (
+              <div
+                className="nb2-sphere-face"
+                data-testid="nodeflow-sphere-face"
+                title={sphereTitle}
+                aria-label={sphereTitle}
+                onPointerDown={(event) => actions.startNodeDrag(event, node)}
+              >
+                <SphereNodeIcon node={node} />
+              </div>
+            ) : (
+              <>
             <div
               className="nb2-node-head"
               onPointerDown={(event) => actions.startNodeDrag(event, node)}
@@ -466,6 +508,8 @@ function NodeFlowCanvasCardImpl({
                 onPointerDown={(event) => actions.startNodeResize(event, node)}
               />
             )}
+              </>
+            )}
 
             {ports.inputs
               .slice(0, visibleInputCount)
@@ -478,20 +522,29 @@ function NodeFlowCanvasCardImpl({
                       ? `stack inputs (${incomingCount}/10)`
                       : "stack inputs"
                     : sidePortLabel(port);
+                const pos = sphere
+                  ? spherePortOffset(node, "in", index, leftPorts.length)
+                  : null;
                 return (
                   <div
                     key={`i${port}`}
                     className={
-                      "nb2-port in" + (mark ? ` port-${port}` : "")
+                      "nb2-port in" +
+                      (mark ? ` port-${port}` : "") +
+                      (sphere ? " sphere-port" : "")
                     }
-                    style={{
-                      top: portTopOffset(
-                        node,
-                        "in",
-                        index,
-                        leftPorts.length,
-                      ),
-                    }}
+                    style={
+                      pos
+                        ? { left: pos.left, top: pos.top }
+                        : {
+                            top: portTopOffset(
+                              node,
+                              "in",
+                              index,
+                              leftPorts.length,
+                            ),
+                          }
+                    }
                     onPointerEnter={() => actions.setHoveredInput(node.id, port)}
                     onPointerLeave={() => actions.setHoveredInput(node.id, null)}
                     title={
@@ -499,7 +552,7 @@ function NodeFlowCanvasCardImpl({
                         ? mark === "L"
                           ? "Left input"
                           : "Right input"
-                        : undefined
+                        : label || port
                     }
                   >
                     <span className="nb2-dot">
@@ -509,14 +562,15 @@ function NodeFlowCanvasCardImpl({
                         </span>
                       )}
                     </span>
-                    {label && (
+                    {!sphere && label && (
                       <span className="nb2-port-lbl in">{label}</span>
                     )}
                   </div>
                 );
               })}
 
-            {ports.inputs
+            {!sphere &&
+              ports.inputs
               .slice(0, visibleInputCount)
               .filter((port) => isTopInput(node.type, port))
               .map((port) => (
@@ -536,15 +590,28 @@ function NodeFlowCanvasCardImpl({
 
             {ports.outputs.map((port, index) => {
               const label = sidePortLabel(port);
+              const pos = sphere
+                ? spherePortOffset(node, "out", index)
+                : null;
               return (
                 <div
                   key={`o${port}`}
-                  className={`nb2-port out ${port}`}
-                  style={{ top: portTopOffset(node, "out", index) }}
+                  className={
+                    `nb2-port out ${port}` + (sphere ? " sphere-port" : "")
+                  }
+                  style={
+                    pos
+                      ? { left: pos.left, top: pos.top }
+                      : { top: portTopOffset(node, "out", index) }
+                  }
                   onPointerDown={(event) => actions.startWire(event, node, port)}
-                  title="Drag to an input to connect · click to preview this output"
+                  title={
+                    label
+                      ? `${label} — drag to an input to connect · click to preview`
+                      : "Drag to an input to connect · click to preview this output"
+                  }
                 >
-                  {label && (
+                  {!sphere && label && (
                     <span className="nb2-port-lbl out">{label}</span>
                   )}
                   <span className="nb2-dot" />

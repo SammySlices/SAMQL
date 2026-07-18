@@ -952,6 +952,10 @@ html.nb-dense .nb2-port {
   height: calc(18px * var(--nb-dense-scale, 0.85));
   margin-top: calc(-9px * var(--nb-dense-scale, 0.85));
 }
+html.nb-dense .nb2-node.sphere .nb2-port.sphere-port {
+  height: auto;
+  margin-top: 0;
+}
 html.nb-dense .nb2-node-label {
   font-size: 11px;
 }
@@ -6147,6 +6151,83 @@ kbd {
   border-radius: 9px;
   box-shadow: var(--shadow);
   user-select: none;
+}
+/* Settings → Visual → Sphere nodes: icon in a transparent circle; ports on the rim. */
+.nb2-node.sphere {
+  background: color-mix(in srgb, var(--panel) 28%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+  border-radius: 50%;
+  border-top-width: 1px;
+  box-shadow: none;
+  overflow: visible;
+}
+.nb2-node.sphere.sel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-fade);
+}
+.nb2-node.sphere.input,
+.nb2-node.sphere.filter,
+.nb2-node.sphere.output,
+.nb2-node.sphere.select,
+.nb2-node.sphere.join,
+.nb2-node.sphere.union,
+.nb2-node.sphere.formula,
+.nb2-node.sphere.summarize,
+.nb2-node.sphere.pivot,
+.nb2-node.sphere.chart,
+.nb2-node.sphere.reconcile,
+.nb2-node.sphere.sort,
+.nb2-node.sphere.sample,
+.nb2-node.sphere.unique,
+.nb2-node.sphere.unpivot,
+.nb2-node.sphere.window,
+.nb2-node.sphere.browse {
+  border-top: 1px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+}
+.nb2-node.sphere.sel.input,
+.nb2-node.sphere.sel.filter,
+.nb2-node.sphere.sel.output,
+.nb2-node.sphere.sel.select,
+.nb2-node.sphere.sel.join,
+.nb2-node.sphere.sel.union,
+.nb2-node.sphere.sel.formula,
+.nb2-node.sphere.sel.summarize,
+.nb2-node.sphere.sel.pivot,
+.nb2-node.sphere.sel.chart,
+.nb2-node.sphere.sel.reconcile,
+.nb2-node.sphere.sel.sort,
+.nb2-node.sphere.sel.sample,
+.nb2-node.sphere.sel.unique,
+.nb2-node.sphere.sel.unpivot,
+.nb2-node.sphere.sel.window,
+.nb2-node.sphere.sel.browse {
+  border-top-color: var(--accent);
+}
+.nb2-sphere-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--text);
+  cursor: grab;
+}
+.nb2-sphere-face:active {
+  cursor: grabbing;
+}
+.nb2-node.sphere .nb2-port.sphere-port {
+  left: auto;
+  right: auto;
+  margin-top: 0;
+  height: auto;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+}
+.nb2-node.sphere .nb2-port.sphere-port.in,
+.nb2-node.sphere .nb2-port.sphere-port.out {
+  left: auto;
+  right: auto;
 }
 .nb2-node.sel {
   border-color: var(--accent);

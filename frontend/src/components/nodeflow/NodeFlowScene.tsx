@@ -99,6 +99,8 @@ interface NodeFlowSceneProps {
   setNodeMenu: React.Dispatch<React.SetStateAction<NodeMenuState | null>>;
   /** Dense NodeFlow — prop so memo'd Scene re-renders when Settings toggles it. */
   denseMode: boolean;
+  /** Icon-sphere chrome — prop so memo'd Scene re-renders when Settings toggles it. */
+  sphereMode: boolean;
 }
 
 export const NodeFlowScene = React.memo(function NodeFlowScene({
@@ -153,6 +155,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   setHoveredInput,
   setNodeMenu,
   denseMode,
+  sphereMode,
 }: NodeFlowSceneProps) {
   useRenderCount("NodeFlowScene");
   const groupDnd = useRef<{
@@ -212,18 +215,24 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   const chartObjectIds = useRef(new WeakMap<object, number>());
   const nextChartObjectId = useRef(1);
 
-  // densify() reads html.nb-dense / module flag; denseMode prop busts Scene memo.
+  // densify()/sphere helpers read html flags; denseMode/sphereMode props bust Scene memo.
   // Drag/resize only change node object identity for moved cards — patch those
   // wires instead of rebuilding O(edges) geometry every RAF.
   const renderModelCacheRef = useRef<{
     nodes: NbNode[];
     edges: NbEdge[];
     denseMode: boolean;
+    sphereMode: boolean;
     model: ReturnType<typeof buildNodeFlowRenderModel>;
   } | null>(null);
   const renderModel = useMemo(() => {
     const prev = renderModelCacheRef.current;
-    if (prev && prev.edges === edges && prev.denseMode === denseMode) {
+    if (
+      prev &&
+      prev.edges === edges &&
+      prev.denseMode === denseMode &&
+      prev.sphereMode === sphereMode
+    ) {
       const dirty = dirtyNodeIdsFromIdentity(prev.nodes, nodes);
       if (dirty && dirty.size === 0) return prev.model;
       // Position-only drag: patch wires. Config/type edits: full rebuild so
@@ -245,16 +254,28 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             nodes,
             edges,
             denseMode,
+            sphereMode,
             model: patched,
           };
           return patched;
         }
       }
     }
-    const model = buildNodeFlowRenderModel(nodes, edges, denseMode);
-    renderModelCacheRef.current = { nodes, edges, denseMode, model };
+    const model = buildNodeFlowRenderModel(
+      nodes,
+      edges,
+      denseMode,
+      sphereMode,
+    );
+    renderModelCacheRef.current = {
+      nodes,
+      edges,
+      denseMode,
+      sphereMode,
+      model,
+    };
     return model;
-  }, [nodes, edges, denseMode]);
+  }, [nodes, edges, denseMode, sphereMode]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const forcedNodeIds = useMemo(() => {
     const ids = new Set(selectedIds);
@@ -287,10 +308,11 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
       undefined,
       undefined,
       denseMode,
+      sphereMode,
     );
     visibleCullIdsRef.current = next.map((node) => node.id);
     return next;
-  }, [forcedNodeIds, nodes, viewport, zoom, denseMode]);
+  }, [forcedNodeIds, nodes, viewport, zoom, denseMode, sphereMode]);
   const visibleWires = useMemo(() => {
     const dragging =
       typeof document !== "undefined" &&
@@ -460,6 +482,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
             born={bornId === node.id}
             lineageFlash={lineageFlashId === node.id}
             denseMode={denseMode}
+            sphereMode={sphereMode}
             renderVersion={renderModel.renderVersionByNode[node.id] || "-"}
             chartVersion={chartVersionByNode[node.id] ?? null}
             childSelection={childSelection}

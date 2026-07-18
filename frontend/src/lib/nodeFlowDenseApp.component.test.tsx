@@ -9,7 +9,7 @@ const apiMock = vi.hoisted(() => ({
     build: "test",
     features: { duckdb: true },
   })),
-  tables: vi.fn(async () => []),
+  tables: vi.fn(async () => ({ tables: [], data_epoch: 0 })),
   history: vi.fn(async () => ({ history: [] })),
   saved: vi.fn(async () => ({ saved: [] })),
   workflowsList: vi.fn(async () => ({ workflows: [] })),

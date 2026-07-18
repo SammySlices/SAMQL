@@ -5,7 +5,9 @@ import {
   type NbEdge,
   type NbNode,
   nodeFlowDenseActive,
+  nodeFlowSphereActive,
   setNodeFlowDenseMode,
+  setNodeFlowSphereMode,
 } from "../lib/nodeFlowModel";
 import type { TableInfo } from "../lib/types";
 import { useStableEvent } from "../lib/useStableEvent";
@@ -73,6 +75,8 @@ export const NodeFlow: React.FC<{
   onOpenLoad?: () => void;
   /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
   denseMode?: boolean;
+  /** Icon-sphere chrome (owned by App Settings → Visual). Default OFF. */
+  sphereMode?: boolean;
   /** Canvas grid snap while dragging (owned by App Settings → Visual). Default OFF. */
   snap?: boolean;
 }> = ({
@@ -93,12 +97,16 @@ export const NodeFlow: React.FC<{
   onToolsTablesOpenChange,
   onOpenLoad,
   denseMode = false,
+  sphereMode = false,
   snap = false,
 }) => {
-  // Keep densify() aligned with App Settings before Scene paints (also syncs
-  // a lazy-chunk module copy if Rollup ever duplicates nodeFlowModel).
+  // Keep densify() / sphere helpers aligned with App Settings before Scene paints
+  // (also syncs a lazy-chunk module copy if Rollup ever duplicates nodeFlowModel).
   if (nodeFlowDenseActive() !== denseMode) {
     setNodeFlowDenseMode(denseMode);
+  }
+  if (nodeFlowSphereActive() !== sphereMode) {
+    setNodeFlowSphereMode(sphereMode);
   }
   // Latest-data wins: inspector column probes must miss after catalog mutations.
   useEffect(() => {
@@ -627,6 +635,7 @@ export const NodeFlow: React.FC<{
           setHoveredInput={setHoveredInput}
           setNodeMenu={setNodeMenu}
           denseMode={denseMode}
+          sphereMode={sphereMode}
         />
 
         {/* inspector — floats over the canvas, or (when the tables panel is

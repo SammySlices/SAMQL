@@ -81,7 +81,7 @@ import { ProgressBar } from "./components/ProgressBar";
 import { useRunProgress } from "./lib/useRunProgress";
 import { cancelOne, isCancelledError, registerRun, unregisterRun, wasCancelled } from "./lib/runController";
 import { uid } from "./lib/ids";
-import { setNodeFlowDenseMode } from "./lib/nodeFlowModel";
+import { setNodeFlowDenseMode, setNodeFlowSphereMode } from "./lib/nodeFlowModel";
 import {
   applyAllCanvasColors,
   applyCanvasColor,
@@ -723,6 +723,25 @@ export default function App() {
       /* ignore */
     }
   }, [nodeSnap]);
+  // Icon-sphere NodeFlow chrome (vs classic box cards). Default OFF; Settings → Visual.
+  const [nodeSphere, setNodeSphere] = useState(() => {
+    let on = false;
+    try {
+      on = window.localStorage?.getItem("samql.nodeSphere") === "1";
+    } catch {
+      on = false;
+    }
+    setNodeFlowSphereMode(on);
+    return on;
+  });
+  useLayoutEffect(() => {
+    setNodeFlowSphereMode(nodeSphere);
+    try {
+      window.localStorage?.setItem("samql.nodeSphere", nodeSphere ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [nodeSphere]);
   // optional ivory background for the SQL editor (paired with canvas under
   // Visual Toggles → light mode)
   const [ivoryEditor, setIvoryEditor] = useState(() => {
@@ -3191,6 +3210,22 @@ export default function App() {
                     {nodeSnap ? "Node Snap: on" : "Node Snap"}
                   </button>
                   <button
+                    role="menuitemcheckbox"
+                    data-testid="nodeflow-sphere-toggle"
+                    aria-checked={nodeSphere}
+                    aria-pressed={nodeSphere}
+                    title="Show NodeFlow nodes as icon spheres with ports around the rim (groups, notes, SQL, and expanded charts stay boxes)"
+                    onClick={() =>
+                      setNodeSphere((v) => {
+                        const next = !v;
+                        setNodeFlowSphereMode(next);
+                        return next;
+                      })
+                    }
+                  >
+                    {nodeSphere ? "Sphere nodes: on" : "Sphere nodes"}
+                  </button>
+                  <button
                     role="menuitem"
                     data-testid="settings-canvas-color"
                     aria-expanded={canvasColorPanelOpen}
@@ -3351,7 +3386,7 @@ export default function App() {
                 <div className="view-loading">Loading NodeFlow…</div>
               }
             >
-              <NodeFlow tables={tables} dataEpoch={dataEpoch} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} snap={nodeSnap} />
+              <NodeFlow tables={tables} dataEpoch={dataEpoch} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} sphereMode={nodeSphere} snap={nodeSnap} />
             </Suspense>
           ) : view === "dashboard" ? (
             <Suspense
