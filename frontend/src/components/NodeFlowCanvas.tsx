@@ -191,7 +191,6 @@ export const NodeMinimap = React.memo(function NodeMinimap({
   onToggle: () => void;
   onPan: (x: number, y: number) => void;
 }) {
-}) {
   const boundsRef = useRef<{
     minX: number;
     minY: number;

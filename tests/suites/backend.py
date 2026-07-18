@@ -616,6 +616,7 @@ def backend_tests(datadir, csv_path, json_path):
             need(("sqlite", "keep_me") in s._count_cache
                  and ("sqlite", "drop_me") in s._count_cache,
                  "both counts cached")
+            ep = s._data_epoch
             s.drop_table("sqlite", "drop_me")
             need(("sqlite", "drop_me") not in s._count_cache,
                  "dropped table count cleared")
@@ -623,6 +624,39 @@ def backend_tests(datadir, csv_path, json_path):
                  "unrelated table count preserved after scoped invalidate")
             eq(s._count_cache[("sqlite", "keep_me")], 7,
                "preserved count value intact")
+            eq(s._data_epoch, ep,
+               "unrelated drop with empty flow deps must not bump epoch")
+        finally:
+            s.shutdown()
+
+    def t_flow_cache_survives_unrelated_table_drop():
+        # CODE was wrong: every scoped count clear also nuked NodeFlow cache.
+        # Dropping a table that is not a flow input must keep epoch + cache.
+        from samql_core.session import LOCAL_TARGET
+        s = _fresh_session()
+        try:
+            s.flow_cache = True
+            s.run_query("CREATE TABLE flow_src AS SELECT 1 AS g, 10 AS v",
+                        target=LOCAL_TARGET)
+            s.run_query("CREATE TABLE other_tbl AS SELECT 1 AS x",
+                        target=LOCAL_TARGET)
+            g = {"nodes": [
+                {"id": "n1", "type": "input", "config": {"table": "flow_src"}},
+                {"id": "n2", "type": "output", "config": {"label": "out"}}],
+                 "edges": [{"from": {"node": "n1", "port": "out"},
+                            "to": {"node": "n2", "port": "in"}}]}
+            r1 = s.run_nodeflow(g, "n2", "out")
+            need(not r1.get("error"), "flow runs: %s" % r1.get("error"))
+            need("flow_src" in (s._flow_source_tables or set()),
+                 "flow input table recorded for scoped invalidation")
+            ep = s._data_epoch
+            size = s.flow_cache_info()["size"]
+            s.drop_table("sqlite", "other_tbl")
+            eq(s._data_epoch, ep, "unrelated drop keeps data epoch")
+            eq(s.flow_cache_info()["size"], size,
+               "unrelated drop keeps flow cache entries")
+            s.drop_table("sqlite", "flow_src")
+            need(s._data_epoch > ep, "drop of flow input still bumps epoch")
         finally:
             s.shutdown()
 
@@ -37285,10 +37319,48 @@ def backend_tests(datadir, csv_path, json_path):
              "sorted pages stay exact after snap")
         need(corr.get("scoped_count_drop") is True,
              "scoped count invalidation on drop")
+        need(corr.get("unrelated_drop_keeps_flow_epoch") is True,
+             "unrelated drop must not bump flow epoch")
         need(corr.get("write_sql_global_counts") is True,
              "write SQL still clears counts globally")
         need(corr.get("nested_sorted_wire_bounded") is True,
              "nested sorted page wire stays bounded")
+
+    def t_perf_audit_high_harness():
+        # Single filter COUNT, deep sorted snap page, flow cache vs unrelated drop.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        script = os.path.join(ROOT, "tests", "benchmark_perf_audit_high.py")
+        need(os.path.isfile(script),
+             "audit-high benchmark harness is bundled")
+        out = os.path.join(DATADIR, "benchmark-perf-audit-high-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "audit-high self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "audit-high report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "audit-high self-test ok flag")
+        corr = result.get("correctness") or {}
+        need(corr.get("single_filter_count") is True,
+             "first filter COUNT once")
+        need(corr.get("deep_sorted_uses_snap") is True,
+             "deep sorted page uses snap")
+        need(corr.get("unrelated_drop_keeps_flow_cache") is True,
+             "unrelated drop keeps flow cache")
+        need(corr.get("related_drop_bumps_flow") is True,
+             "related drop still invalidates flow")
 
     def t_stress_cancel_reclaim_harness():
         # Stall / cancel / reclaim stress suite (tests/stress_cancel_reclaim.py).
@@ -37419,6 +37491,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_perf_high_fixes_harness),
         ("perf-medium fixes harness (deferred sort + scoped counts; self-test)",
          t_perf_medium_fixes_harness),
+        ("perf audit high defects harness (filter COUNT / deep snap / flow)",
+         t_perf_audit_high_harness),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",
          t_stress_cancel_reclaim_harness),
         ("cache/memory pressure reclaim harness (self-test; full opt-in)",
@@ -37442,6 +37516,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("table count cache + invalidation", t_table_count_cache),
         ("table count cache scopes drop to changed table",
          t_table_count_cache_scoped_drop),
+        ("flow cache survives unrelated table drop",
+         t_flow_cache_survives_unrelated_table_drop),
         ("filter rows (server-side)", t_filter_rows),
         ("filter + formula take a bare expression; IF() is portable",
          t_filter_formula_if),
