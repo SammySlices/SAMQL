@@ -6085,6 +6085,7 @@ console.log("OK");
              "useNodeFlowGraphSnapshot(nodes, edges)" in component
              and "key.config !== node.config" in graph_snapshot
              and "x: node.x" not in graph_snapshot
+             and "executionGraphSignature" in graph_snapshot
              and "previous.graphSig === next.graphSig" in inspector_panel
              and "previous.scopeKey === next.scopeKey" in inspector_panel),
             ("event, graph, and transient work have stable focused owners",
