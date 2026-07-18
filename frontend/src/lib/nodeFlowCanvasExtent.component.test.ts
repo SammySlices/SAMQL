@@ -3,6 +3,7 @@ import {
   CANVAS_MIN_H,
   CANVAS_MIN_W,
   canvasWorldSize,
+  canvasWorldSizeExpandOnly,
   nodeHeight,
   type NbNode,
 } from "./nodeFlowModel";
@@ -54,5 +55,24 @@ describe("canvasWorldSize / SQL node height", () => {
     };
     expect(nodeHeight(tall)).toBeGreaterThan(nodeHeight(short));
     expect(nodeHeight(tall)).toBeGreaterThan(200);
+  });
+
+  it("expand-only mid-drag world size grows but does not shrink", () => {
+    const far: NbNode[] = [
+      { id: "a", type: "input", x: 4000, y: 2500, config: {} },
+    ];
+    const near: NbNode[] = [
+      { id: "a", type: "input", x: 40, y: 40, config: {} },
+    ];
+    const grown = canvasWorldSize(far);
+    const shrunk = canvasWorldSizeExpandOnly(grown, near);
+    expect(shrunk.w).toBe(grown.w);
+    expect(shrunk.h).toBe(grown.h);
+    const farther: NbNode[] = [
+      { id: "a", type: "input", x: 5000, y: 3000, config: {} },
+    ];
+    const expanded = canvasWorldSizeExpandOnly(grown, farther);
+    expect(expanded.w).toBeGreaterThan(grown.w);
+    expect(expanded.h).toBeGreaterThan(grown.h);
   });
 });

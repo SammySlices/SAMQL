@@ -1,10 +1,11 @@
-import React from "react";
+import React, { useRef } from "react";
 import { wirePath } from "../lib/nodegraph";
 import type { NodeFlowWire } from "./nodeflow/nodeFlowRenderModel";
 import { useRenderCount } from "../lib/renderDebug";
 import {
   type NbNode,
   type CanvasNodeMemoState,
+  isNodeFlowPointerDragging,
   nodeHeight,
   nodeWidth,
   sameCanvasNodeMemoState,
@@ -190,6 +191,14 @@ export const NodeMinimap = React.memo(function NodeMinimap({
   onToggle: () => void;
   onPan: (x: number, y: number) => void;
 }) {
+}) {
+  const boundsRef = useRef<{
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+    scale: number;
+  } | null>(null);
   if (!nodes.length) return null;
   const MM_W = 172;
   const MM_H = 116;
@@ -213,7 +222,38 @@ export const NodeMinimap = React.memo(function NodeMinimap({
   minY = Math.min(minY, vy) - PAD;
   maxX = Math.max(maxX, vx + vw) + PAD;
   maxY = Math.max(maxY, vy + vh) + PAD;
-  const scale = Math.min(MM_W / Math.max(1, maxX - minX), MM_H / Math.max(1, maxY - minY));
+  const liveScale = Math.min(
+    MM_W / Math.max(1, maxX - minX),
+    MM_H / Math.max(1, maxY - minY),
+  );
+  // Mid-drag: expand-only frozen bounds/scale (avoid shrink thrash every RAF).
+  const dragging = isNodeFlowPointerDragging();
+  if (!dragging || !boundsRef.current) {
+    boundsRef.current = { minX, minY, maxX, maxY, scale: liveScale };
+  } else {
+    const prev = boundsRef.current;
+    const nextMinX = Math.min(prev.minX, minX);
+    const nextMinY = Math.min(prev.minY, minY);
+    const nextMaxX = Math.max(prev.maxX, maxX);
+    const nextMaxY = Math.max(prev.maxY, maxY);
+    boundsRef.current = {
+      minX: nextMinX,
+      minY: nextMinY,
+      maxX: nextMaxX,
+      maxY: nextMaxY,
+      scale: Math.min(
+        prev.scale,
+        MM_W / Math.max(1, nextMaxX - nextMinX),
+        MM_H / Math.max(1, nextMaxY - nextMinY),
+      ),
+    };
+  }
+  const frozen = boundsRef.current;
+  minX = frozen.minX;
+  minY = frozen.minY;
+  maxX = frozen.maxX;
+  maxY = frozen.maxY;
+  const scale = frozen.scale;
   const tx = (cx: number) => (cx - minX) * scale;
   const ty = (cy: number) => (cy - minY) * scale;
   const onMouseDown = (e: React.MouseEvent<HTMLElement>) => {

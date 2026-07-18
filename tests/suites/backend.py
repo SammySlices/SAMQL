@@ -595,6 +595,37 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_table_count_cache_scoped_drop():
+        # CODE was wrong: every mutation cleared ALL sidebar counts. Dropping
+        # one table must only forget that table's key; unrelated counts stay.
+        s = _fresh_session()
+        try:
+            import csv as _csv
+            dd = tempfile.mkdtemp()
+            for name, n in (("keep_me", 7), ("drop_me", 3)):
+                pp = os.path.join(dd, name + ".csv")
+                with open(pp, "w", newline="") as f:
+                    w = _csv.writer(f)
+                    w.writerow(["x"])
+                    for i in range(n):
+                        w.writerow([i])
+                s.load_file(pp, destination="sqlite", base_name=name)
+            tree = {t["name"]: t for t in s.tables_tree()}
+            eq(tree["keep_me"]["row_count"], 7, "keep_me counted")
+            eq(tree["drop_me"]["row_count"], 3, "drop_me counted")
+            need(("sqlite", "keep_me") in s._count_cache
+                 and ("sqlite", "drop_me") in s._count_cache,
+                 "both counts cached")
+            s.drop_table("sqlite", "drop_me")
+            need(("sqlite", "drop_me") not in s._count_cache,
+                 "dropped table count cleared")
+            need(("sqlite", "keep_me") in s._count_cache,
+                 "unrelated table count preserved after scoped invalidate")
+            eq(s._count_cache[("sqlite", "keep_me")], 7,
+               "preserved count value intact")
+        finally:
+            s.shutdown()
+
     def t_change_type_persists():
         # a column that loads as TEXT (identifier name) -> change to INTEGER;
         # the change must show in the profile and persist (numeric ordering).
@@ -18866,8 +18897,10 @@ def backend_tests(datadir, csv_path, json_path):
              and '"__rn"' not in ran[-1]
              and "WHERE" not in ran[-1],
              "an export streams in raw file order (no synthesized sort)")
-        # Sorted pages materialize once to a snapshot, then page with
-        # file_row_number ranges (not repeating TopN every scroll).
+        # Sorted pages: first page is TopN (no write_lock COPY); a background
+        # snapshot then enables file_row_number range pages. CODE was wrong to
+        # block the first page on a full COPY — test updated to the deferred
+        # contract (exact totals unchanged).
         mat_calls = []
 
         def _fake_mat(order, where="", params=None):
@@ -18879,9 +18912,28 @@ def backend_tests(datadir, csv_path, json_path):
 
         store._materialize_snapshot = _fake_mat
         sv = store.sorted_view(0, descending=True)
-        need(mat_calls and 'ORDER BY "a" DESC' in mat_calls[0],
-             "sorted_view materializes with the user ORDER BY")
+        need(not mat_calls,
+             "sorted_view must not COPY before the first page")
         _ = sv[0:50]
+        need(any("LIMIT 50" in s and "OFFSET 0" in s and 'ORDER BY "a" DESC' in s
+                 for s in ran),
+             "first sorted page uses TopN LIMIT/OFFSET: %s" % ran[-1])
+        # Kickoff starts background mat; wait briefly for fake_mat to land.
+        import time as _time
+        deadline = _time.monotonic() + 2.0
+        while not mat_calls and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        need(mat_calls and 'ORDER BY "a" DESC' in mat_calls[0],
+             "background snapshot materializes with the user ORDER BY")
+        # Once snap is in cache, pages use file_row_number ranges.
+        deadline = _time.monotonic() + 2.0
+        while store._snap_cache.get(("sort", 0, True)) is None \
+                and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        snap = store._snap_cache.get(("sort", 0, True))
+        need(snap is not None, "snapshot landed in cache")
+        ran.clear()
+        _ = snap[0:50]
         need("WHERE file_row_number >= 0" in ran[-1]
              and "file_row_number < 50" in ran[-1],
              "after materialize, sorted pages use file_row_number ranges")
@@ -37200,6 +37252,44 @@ def backend_tests(datadir, csv_path, json_path):
         need(len(corr.get("fe_hostile_names") or []) >= 15,
              "hostile FE surfaced nested names")
 
+    def t_perf_medium_fixes_harness():
+        # Deferred sort first-page, scoped counts, nested sorted wire bound.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        script = os.path.join(ROOT, "tests", "benchmark_perf_medium_fixes.py")
+        need(os.path.isfile(script),
+             "perf-medium fixes benchmark harness is bundled")
+        out = os.path.join(DATADIR, "benchmark-perf-medium-fixes-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "perf-medium fixes self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "perf-medium report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "perf-medium self-test ok flag")
+        corr = result.get("correctness") or {}
+        need(corr.get("first_sorted_page_exact_total") is True,
+             "first sorted page keeps exact total_rows")
+        need(corr.get("sorted_pages_exact") is True,
+             "sorted pages stay exact after snap")
+        need(corr.get("scoped_count_drop") is True,
+             "scoped count invalidation on drop")
+        need(corr.get("write_sql_global_counts") is True,
+             "write SQL still clears counts globally")
+        need(corr.get("nested_sorted_wire_bounded") is True,
+             "nested sorted page wire stays bounded")
+
     def t_stress_cancel_reclaim_harness():
         # Stall / cancel / reclaim stress suite (tests/stress_cancel_reclaim.py).
         # Default CI runs --self-test: recursive CTE + tiny nested NDJSON, with
@@ -37327,6 +37417,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_hostile_nested_ndjson_perf_harness),
         ("perf-high fixes hostile nested harness (self-test; larger pads opt-in)",
          t_perf_high_fixes_harness),
+        ("perf-medium fixes harness (deferred sort + scoped counts; self-test)",
+         t_perf_medium_fixes_harness),
         ("stall cancel/reclaim stress harness (self-test; full opt-in)",
          t_stress_cancel_reclaim_harness),
         ("cache/memory pressure reclaim harness (self-test; full opt-in)",
@@ -37348,6 +37440,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("change type persists", t_change_type_persists),
         ("duckdb change column type", t_duckdb_change_column_type),
         ("table count cache + invalidation", t_table_count_cache),
+        ("table count cache scopes drop to changed table",
+         t_table_count_cache_scoped_drop),
         ("filter rows (server-side)", t_filter_rows),
         ("filter + formula take a bare expression; IF() is portable",
          t_filter_formula_if),

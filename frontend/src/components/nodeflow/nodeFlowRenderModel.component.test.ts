@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { NbEdge, NbNode } from "../../lib/nodeFlowModel";
 import {
   buildNodeFlowRenderModel,
+  patchNodeFlowRenderModelForDirtyNodes,
   selectVisibleCanvasNodes,
   selectVisibleCanvasWires,
 } from "./nodeFlowRenderModel";
@@ -110,5 +111,40 @@ describe("NodeFlow render model", () => {
     );
 
     expect(visible.map((item) => item.id)).toEqual(["w0", "w1", "w228", "w229"]);
+  });
+
+  it("patches only incident wires when one node moves (preserves other wire refs)", () => {
+    const nodes = [
+      node("a", 0, 0),
+      node("b", 240, 0, "select"),
+      node("c", 480, 0, "output"),
+      node("d", 0, 300),
+      node("e", 240, 300, "output"),
+    ];
+    const edges = [
+      edge("ab", "a", "b"),
+      edge("bc", "b", "c"),
+      edge("de", "d", "e"),
+    ];
+    const first = buildNodeFlowRenderModel(nodes, edges);
+    const moved = nodes.map((item) =>
+      item.id === "b" ? { ...item, x: item.x + 80, y: item.y + 40 } : item,
+    );
+    const patched = patchNodeFlowRenderModelForDirtyNodes(
+      first,
+      moved,
+      edges,
+      new Set(["b"]),
+    );
+    expect(patched).not.toBeNull();
+    const wireById = Object.fromEntries(patched!.wires.map((w) => [w.id, w]));
+    const prevById = Object.fromEntries(first.wires.map((w) => [w.id, w]));
+    // Unrelated branch keeps the same wire object.
+    expect(wireById.de).toBe(prevById.de);
+    // Incident wires are new objects with updated endpoints.
+    expect(wireById.ab).not.toBe(prevById.ab);
+    expect(wireById.bc).not.toBe(prevById.bc);
+    expect(wireById.ab.bx).not.toBe(prevById.ab.bx);
+    expect(wireById.bc.ax).not.toBe(prevById.bc.ax);
   });
 });

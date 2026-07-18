@@ -2072,21 +2072,50 @@ class Session:
         """The loader KNOWS how many rows it just wrote -- prime the
         count cache so the very next tree refresh never has to probe a
         lock the background indexer may be holding. Call AFTER
-        _invalidate_counts (which clears the whole cache)."""
+        _invalidate_counts (whole-cache or scoped to this table)."""
         try:
             if name and n is not None:
                 self._count_cache[(kind, name)] = int(n)
         except Exception:
             pass
 
-    def _invalidate_counts(self):
-        self._count_cache.clear()
+    def _invalidate_counts(self, keys=None):
+        """Drop sidebar COUNT(*) cache entries after a mutation.
+
+        ``keys`` — optional iterable of ``(engine_label, table_name)``. When
+        given, only those entries are removed so unrelated large tables keep
+        their cached counts. When omitted, the whole cache is cleared
+        (unknown / free-form write SQL, resets, iterators).
+
+        Always bumps the NodeFlow data epoch and clears the flow cache —
+        table→fingerprint deps are not tracked, so flow invalidation stays
+        global.
+        """
+        if keys is None:
+            self._count_cache.clear()
+        else:
+            for key in keys:
+                try:
+                    self._count_cache.pop(tuple(key), None)
+                except Exception:
+                    pass
         # Any data mutation also invalidates the incremental flow cache: bump
         # the epoch (so every future fingerprint differs) and drop the cached
         # intermediate tables. Guarded so it's safe if called very early.
         if hasattr(self, "_flow_cache"):
             self._data_epoch += 1
             self._flow_cache_clear()
+
+    def _count_keys_for_tables(self, engine_label, *names):
+        """Build ``(label, name)`` keys for scoped count invalidation."""
+        out = []
+        label = "duckdb" if engine_label in ("duckdb", "__duckdb__") else (
+            "sqlite" if engine_label in ("sqlite", "__local__", "local")
+            else engine_label)
+        for name in names:
+            if name:
+                out.append((label, name))
+        return out
 
     def _table_exists(self, eng, name):
         """Cheap check that a (temp) table is still queryable on ``eng``."""
@@ -3060,7 +3089,20 @@ class Session:
             except Exception:
                 pass
         self._invalidate_profiles()
-        self._invalidate_counts()   # new/replaced data -> drop count + flow caches
+        # Scope counts to tables this load touched; unrelated sidebar counts stay.
+        _count_keys = []
+        try:
+            items = loaded if isinstance(loaded, list) else [loaded]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                eng = item.get("engine")
+                nm = item.get("name") or item.get("table")
+                if eng and nm:
+                    _count_keys.append((eng, nm))
+        except Exception:
+            _count_keys = []
+        self._invalidate_counts(keys=_count_keys or None)
         try:
             # loaders return a list of table descriptors (name/rows/engine).
             items = loaded if isinstance(loaded, list) else [loaded]
@@ -5285,11 +5327,11 @@ class Session:
                     % (type(e).__name__, e)}
         self._flow_cleanup(query_id, et, created)
         self._invalidate_profiles()
-        self._invalidate_counts()
-        self._prime_count("duckdb" if et == DUCKDB_TARGET else "sqlite",
-                          nm, n)
+        _kind = "duckdb" if et == DUCKDB_TARGET else "sqlite"
+        self._invalidate_counts(keys=self._count_keys_for_tables(_kind, nm))
+        self._prime_count(_kind, nm, n)
         return {"ok": True, "table": nm, "mode": write_mode,
-                "engine": "duckdb" if et == DUCKDB_TARGET else "sqlite",
+                "engine": _kind,
                 "rows": n, "all": self.tables_tree()}
 
     # ---- iterator ---------------------------------------------------
@@ -9300,7 +9342,9 @@ class Session:
             mgr.sync_catalog()
         except Exception:
             pass
-        self._invalidate_counts()
+        self._invalidate_counts(
+            keys=self._count_keys_for_tables(
+                "duckdb", *[c["name"] for c in created]))
         self._invalidate_profiles()
         for c in created:
             self._prime_count("duckdb", c["name"], c["rows"])
@@ -9519,7 +9563,9 @@ class Session:
                     _purge([t["name"] for t in created])
                 except Exception:
                     pass
-            self._invalidate_counts()
+            self._invalidate_counts(
+                keys=self._count_keys_for_tables(
+                    "duckdb", *[t["name"] for t in created]))
             self._invalidate_profiles()
             return {"ok": True, "created": created}
         except Exception as e:
@@ -9800,7 +9846,8 @@ class Session:
             origins[new] = origins.pop(old)
         self._rename_table_ui_order(engine, old, new)
         self._invalidate_profiles()
-        self._invalidate_counts()
+        self._invalidate_counts(
+            keys=self._count_keys_for_tables(engine, old, new))
         return {"ok": True, "name": new}
 
     def drop_table(self, engine, name):
@@ -9819,7 +9866,8 @@ class Session:
             pass
         self._drop_table_ui_order(engine, name)
         self._invalidate_profiles()
-        self._invalidate_counts()
+        self._invalidate_counts(
+            keys=self._count_keys_for_tables(engine, name))
         self._schedule_cleanup(full=True)
         return {"ok": True}
 
@@ -9905,7 +9953,8 @@ class Session:
         if src_is_file:
             self._cleanup_temp_source(old_src)  # delete the old CSV/JSON temp
         self._invalidate_profiles()
-        self._invalidate_counts()
+        self._invalidate_counts(
+            keys=self._count_keys_for_tables("duckdb", final))
         return {"ok": True, "name": final, "all": self.tables_tree()}
 
     def materialize(self, name, sql, target="auto", query_id=None,
@@ -10032,7 +10081,8 @@ class Session:
             return {"error": err_str(e)}
         finally:
             self._unregister_run(query_id)
-        self._invalidate_counts()
+        self._invalidate_counts(
+            keys=self._count_keys_for_tables(kind, tname))
         self._invalidate_profiles()
         self._prime_count(kind, tname, n)
         return {"ok": True, "table": tname, "rows": n, "engine": kind,
@@ -10052,7 +10102,8 @@ class Session:
         finally:
             self._unregister_run(query_id)
         self._invalidate_profiles()
-        self._invalidate_counts()
+        self._invalidate_counts(
+            keys=self._count_keys_for_tables(engine, table))
         return {"ok": bool(ok)}
 
     def clear_all(self, clear_manifest=False):

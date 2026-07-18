@@ -6,7 +6,6 @@ import React, {
   useState,
 } from "react";
 import { uid } from "../../lib/ids";
-import { startPointerDrag } from "../../lib/pointerDrag";
 import {
   clampPointToBox,
   marqueeHits,
@@ -45,6 +44,16 @@ type NodeDrag = {
   /** True once pointer moved past click/drag threshold. */
   moved?: boolean;
 };
+type ResizeDrag = {
+  mode: "resize";
+  nodeId: string;
+  startX: number;
+  startY: number;
+  startW: number;
+  startH: number;
+  /** Fallback body height before this resize gesture. */
+  baseBodyH: number;
+};
 type WireDrag = {
   mode: "wire";
   fromNode: string;
@@ -65,7 +74,12 @@ type MarqueeDrag = {
   y0: number;
   ids: string[];
 };
-export type NodeFlowDragState = NodeDrag | WireDrag | PanDrag | MarqueeDrag;
+export type NodeFlowDragState =
+  | NodeDrag
+  | ResizeDrag
+  | WireDrag
+  | PanDrag
+  | MarqueeDrag;
 
 interface UseNodeFlowCanvasInteractionsOptions {
   nodesRef: React.RefObject<NbNode[]>;
@@ -270,6 +284,12 @@ export function useNodeFlowCanvasInteractions(
         } else {
           setGroupHover(null);
         }
+      } else if (drag.mode === "resize") {
+        const zoom = current.zoomRef.current || 1;
+        current.patchNode(drag.nodeId, {
+          bodyW: drag.startW + (lastX - drag.startX) / zoom,
+          bodyH: drag.baseBodyH + (lastY - drag.startY) / zoom,
+        });
       } else if (drag.mode === "wire") {
         setWireEnd(toContent(lastX, lastY));
       } else if (drag.mode === "pan") {
@@ -499,27 +519,25 @@ export function useNodeFlowCanvasInteractions(
     (event: React.PointerEvent, node: NbNode) => {
       event.preventDefault();
       event.stopPropagation();
-      const current = optionsRef.current;
-      const zoom = current.zoomRef.current || 1;
-      const startX = event.clientX;
-      const startY = event.clientY;
       const startW = nodeWidth(node);
-      const startH = nodeHeight(node);
-      startPointerDrag({
-        onMove: (moveEvent) => {
-          current.patchNode(node.id, {
-            bodyW: startW + (moveEvent.clientX - startX) / zoom,
-            bodyH:
-              (node.config.bodyH ??
-                (node.type === "dashboard"
-                  ? DASH_BODY_H
-                  : node.type === "sql"
-                    ? SQL_BODY_H
-                    : CHART_BODY_H)) +
-              (moveEvent.clientY - startY) / zoom,
-          });
-        },
-      });
+      const baseBodyH =
+        node.config.bodyH ??
+        (node.type === "dashboard"
+          ? DASH_BODY_H
+          : node.type === "sql"
+            ? SQL_BODY_H
+            : CHART_BODY_H);
+      // Same chrome lock + RAF path as node drag (no per-pixel patchNode).
+      document.documentElement.dataset.samqlNfDrag = "1";
+      dragRef.current = {
+        mode: "resize",
+        nodeId: node.id,
+        startX: event.clientX,
+        startY: event.clientY,
+        startW,
+        startH: nodeHeight(node),
+        baseBodyH: Number(baseBodyH) || SQL_BODY_H,
+      };
     },
     [],
   );
