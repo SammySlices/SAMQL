@@ -2175,14 +2175,13 @@ class Session:
 
         Latest-data wins: any content-touching invalidate advances
         ``_data_epoch`` so IDE/Journal/NodeFlow clients refuse retained
-        snapshots. Flow-cache *clearing* stays scoped — only when the touched
-        tables intersect known NodeFlow inputs (or global / fail-safe) — so
-        dropping an unrelated table does not wipe flow homework.
+        snapshots. Volatile flow fingerprints salt that epoch, so entries
+        kept across a bump can never hit — they only orphan temp tables.
+        Clear the flow cache whenever the epoch advances.
         """
         touched = []
         if keys is None:
             self._count_cache.clear()
-            clear_flow = True
             content_changed = True
         else:
             for key in keys:
@@ -2194,12 +2193,11 @@ class Session:
                 except Exception:
                     pass
             content_changed = bool(touched)
-            clear_flow = self._should_bump_flow_for_tables(touched)
         self._mark_catalog_dirty()
         if content_changed:
             self._data_epoch += 1
-        if clear_flow and hasattr(self, "_flow_cache"):
-            self._flow_cache_clear()
+            if hasattr(self, "_flow_cache"):
+                self._flow_cache_clear()
 
     def _note_flow_source_tables(self, graph):
         """Record input table names from a graph that may populate flow cache.
@@ -2275,7 +2273,13 @@ class Session:
         return _walk((graph or {}).get("nodes"))
 
     def _should_bump_flow_for_tables(self, names):
-        """Whether a scoped table mutation must invalidate NodeFlow cache."""
+        """Whether touched tables intersect known NodeFlow inputs.
+
+        Retained for diagnostics / callers that need dep-scoped reasoning.
+        Volatile flow cache clearing follows ``_data_epoch`` advances in
+        ``_invalidate_counts`` (epoch-salted fingerprints cannot hit across
+        a bump, so keeping entries only orphans memory).
+        """
         names = {str(n) for n in (names or []) if n}
         registry = getattr(self, "_flow_cache_registry", None)
         entries = getattr(registry, "entries", None) if registry else None

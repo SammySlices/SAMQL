@@ -9,7 +9,7 @@ r"""Benchmark + correctness for audit medium fixes (build 659+).
    tables whose columns + types are already warm.
 4. **Filebrowser disables volatile flow cache** — fingerprints are not
    reused across filebrowser materialisations.
-5. **Adjacent** — unrelated top-level flow drop still keeps cache (654+).
+5. **Adjacent** — unrelated top-level flow drop clears cache (epoch orphans).
 
 CI gate::
 
@@ -163,7 +163,7 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
     finally:
         s.shutdown()
 
-    # ---- 5) Adjacent: unrelated drop keeps flow cache ----
+    # ---- 5) Adjacent: unrelated drop clears flow cache ----
     s = Session()
     try:
         s.flow_cache = True
@@ -180,10 +180,11 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         ep = s._data_epoch
         size = s.flow_cache_info()["size"]
         s.drop_table("sqlite", "other_tbl")
-        report["correctness"]["unrelated_drop_keeps_flow"] = (
+        report["correctness"]["unrelated_drop_clears_flow"] = (
             (not r1.get("error"))
+            and size >= 1
             and s._data_epoch > ep
-            and s.flow_cache_info()["size"] == size)
+            and s.flow_cache_info()["size"] == 0)
     finally:
         s.shutdown()
 

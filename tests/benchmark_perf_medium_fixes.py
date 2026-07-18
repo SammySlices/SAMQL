@@ -170,8 +170,7 @@ def run_suite(*, rows: int, work_dir: Path, self_test: bool) -> dict[str, Any]:
         if ("sqlite", "drop_b") in s2._count_cache:
             raise AssertionError("dropped table count still cached")
         # Latest-data wins: unrelated drop advances data_epoch so IDE/Journal
-        # refuse retained snapshots. Flow-cache clear stays scoped (not tested
-        # here — empty flow deps).
+        # refuse retained snapshots. Flow cache also clears on that bump.
         if s2._data_epoch <= before_epoch:
             raise AssertionError(
                 "unrelated scoped drop must advance data_epoch "

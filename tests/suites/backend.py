@@ -625,16 +625,17 @@ def backend_tests(datadir, csv_path, json_path):
             eq(s._count_cache[("sqlite", "keep_me")], 7,
                "preserved count value intact")
             # Latest-data wins: any content-touching drop advances data_epoch
-            # so IDE/Journal refuse retained snapshots. Flow cache clear stays
-            # scoped separately (covered by t_flow_cache_survives_unrelated…).
+            # so IDE/Journal refuse retained snapshots. Flow cache clears on
+            # the same epoch bump (covered by t_flow_cache_clears_on_unrelated…).
             need(s._data_epoch > ep,
                  "content-touching drop must advance data_epoch")
         finally:
             s.shutdown()
 
-    def t_flow_cache_survives_unrelated_table_drop():
-        # CODE was wrong: every scoped count clear also nuked NodeFlow cache.
-        # Dropping a table that is not a flow input must keep epoch + cache.
+    def t_flow_cache_clears_on_unrelated_table_drop():
+        # CODE was incomplete: scoped flow clear + epoch-salted fingerprints
+        # left orphaned entries that could never hit. Unrelated drops must
+        # still advance data_epoch AND clear volatile flow cache.
         from samql_core.session import LOCAL_TARGET
         s = _fresh_session()
         try:
@@ -654,13 +655,18 @@ def backend_tests(datadir, csv_path, json_path):
                  "flow input table recorded for scoped invalidation")
             ep = s._data_epoch
             size = s.flow_cache_info()["size"]
+            need(size >= 1, "flow cache populated before unrelated drop")
             s.drop_table("sqlite", "other_tbl")
-            # Latest-data wins: data_epoch always advances on content change.
-            # Flow-cache clear stays scoped — unrelated drops keep homework.
             need(s._data_epoch > ep,
                  "unrelated drop still advances data_epoch")
-            eq(s.flow_cache_info()["size"], size,
-               "unrelated drop keeps flow cache entries")
+            eq(s.flow_cache_info()["size"], 0,
+               "unrelated drop clears flow cache (no epoch-orphan entries)")
+            # Rematerialize after clear still works and sees live inputs.
+            r2 = s.run_nodeflow(g, "n2", "out")
+            need(not r2.get("error"), "flow re-run after clear: %s"
+                 % r2.get("error"))
+            need(s.flow_cache_info()["size"] >= 1,
+                 "flow cache repopulates after rematerialize")
             ep2 = s._data_epoch
             s.drop_table("sqlite", "flow_src")
             need(s._data_epoch > ep2, "drop of flow input still bumps epoch")
@@ -707,8 +713,8 @@ def backend_tests(datadir, csv_path, json_path):
                          "api_ok", "api_err"):
                 need(name in deps, "records %s as a flow source" % name)
 
-            # Live nested group input: drop must bump epoch / clear cache;
-            # unrelated drop must not.
+            # Live nested group input: any content drop clears cache (epoch);
+            # drop of the nested input still clears.
             s.run_query(
                 "CREATE TABLE flow_nested AS SELECT 1 AS g, 10 AS v",
                 target=LOCAL_TARGET)
@@ -732,8 +738,11 @@ def backend_tests(datadir, csv_path, json_path):
             s.drop_table("sqlite", "other_nested")
             need(s._data_epoch > ep,
                  "unrelated drop advances data_epoch with nested deps")
-            eq(s.flow_cache_info()["size"], size,
-               "unrelated drop keeps nested flow cache")
+            eq(s.flow_cache_info()["size"], 0,
+               "unrelated drop clears nested flow cache (no orphans)")
+            # Repopulate, then drop the nested input.
+            r2 = s.run_nodeflow(g, "n2", "out")
+            need(not r2.get("error"), "nested re-run: %s" % r2.get("error"))
             ep2 = s._data_epoch
             s.drop_table("sqlite", "flow_nested")
             need(s._data_epoch > ep2,
@@ -37872,8 +37881,8 @@ def backend_tests(datadir, csv_path, json_path):
              "first filter COUNT once")
         need(corr.get("deep_sorted_uses_snap") is True,
              "deep sorted page uses snap")
-        need(corr.get("unrelated_drop_keeps_flow_cache") is True,
-             "unrelated drop keeps flow cache")
+        need(corr.get("unrelated_drop_clears_flow_cache") is True,
+             "unrelated drop clears flow cache")
         need(corr.get("related_drop_bumps_flow") is True,
              "related drop still invalidates flow")
 
@@ -37915,8 +37924,8 @@ def backend_tests(datadir, csv_path, json_path):
              "filebrowser disables volatile flow cache")
         need(corr.get("filebrowser_disables_volatile_cache") is True,
              "materialize path gates filebrowser volatile cache")
-        need(corr.get("unrelated_drop_keeps_flow") is True,
-             "unrelated drop still keeps flow cache")
+        need(corr.get("unrelated_drop_clears_flow") is True,
+             "unrelated drop clears flow cache")
 
     def t_latest_data_wins_harness():
         # IDE page expiry, Journal reuse refuse, NodeFlow rematerialize, FE pins.
@@ -38016,8 +38025,8 @@ def backend_tests(datadir, csv_path, json_path):
              "frontend retries pending pages")
         need(corr.get("minimap_large_freeze") is True,
              "large minimap freezes paint mid-drag")
-        need(corr.get("unrelated_drop_keeps_flow") is True,
-             "unrelated drop still keeps flow cache")
+        need(corr.get("unrelated_drop_clears_flow") is True,
+             "unrelated drop clears flow cache")
 
     def t_catalog_dirty_skip_source():
         # Post-658 audit medium: tables_tree must not sync_catalog on every
@@ -38207,8 +38216,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("table count cache + invalidation", t_table_count_cache),
         ("table count cache scopes drop to changed table",
          t_table_count_cache_scoped_drop),
-        ("flow cache survives unrelated table drop",
-         t_flow_cache_survives_unrelated_table_drop),
+        ("flow cache clears on unrelated table drop",
+         t_flow_cache_clears_on_unrelated_table_drop),
         ("flow cache notes nested group/iterator + plural tables",
          t_flow_cache_notes_nested_and_plural_tables),
         ("CREATE OR REPLACE same columns refreshes cached types",

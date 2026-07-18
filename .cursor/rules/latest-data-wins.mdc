@@ -11,8 +11,9 @@ conflict, **prefer recompute / refetch / clear**.
    replace, drop, alter, write, or equivalent).
 2. **One freshness signal: `Session._data_epoch`.** It must advance on any
    mutation that changes table contents. Do not gate IDE/Journal freshness on
-   NodeFlow dependency sets alone. Flow-cache *clearing* may stay scoped for
-   performance; the epoch itself must not.
+   NodeFlow dependency sets alone. Volatile flow-cache fingerprints salt the
+   epoch, so the cache must clear whenever the epoch advances — keeping
+   entries after a bump only orphans temp tables (hits never land).
 3. **Reuse is not display.** Blocking Journal chain-reuse or salting a cache key
    is necessary but not sufficient. Open IDE result tabs, Journal cell grids,
    NodeFlow preview drawers, and canvas charts must **badge, clear, or refetch**
