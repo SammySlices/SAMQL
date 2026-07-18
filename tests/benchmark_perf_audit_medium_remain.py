@@ -6,8 +6,8 @@ r"""Benchmark + correctness for remaining audit medium fixes (build 661+).
 2. **``_table_names_in``** — CTE aliases excluded; schema-qualified /
    quoted identifiers resolve when sqlglot is available.
 3. **Field-tree deadline** — sample windows honor a soft deadline.
-4. **Adjacent** — unrelated flow drop still keeps cache; flatten-off /
-   discovery-only posture unchanged.
+4. **Adjacent** — unrelated flow drop clears cache (no epoch orphans);
+   flatten-off / discovery-only posture unchanged.
 
 CI gate::
 
@@ -190,7 +190,7 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
     finally:
         s.shutdown()
 
-    # ---- 4) Adjacent: unrelated drop keeps flow ----
+    # ---- 4) Adjacent: unrelated drop clears flow ----
     s = Session()
     try:
         s.flow_cache = True
@@ -207,10 +207,11 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         ep = s._data_epoch
         size = s.flow_cache_info()["size"]
         s.drop_table("sqlite", "other_tbl")
-        report["correctness"]["unrelated_drop_keeps_flow"] = (
+        report["correctness"]["unrelated_drop_clears_flow"] = (
             (not r1.get("error"))
+            and size >= 1
             and s._data_epoch > ep
-            and s.flow_cache_info()["size"] == size)
+            and s.flow_cache_info()["size"] == 0)
     finally:
         s.shutdown()
 

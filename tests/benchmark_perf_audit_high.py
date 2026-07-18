@@ -5,9 +5,10 @@ r"""Benchmark + correctness suite for audit high defects 0–3 (build 650+).
    ``COUNT(*)`` scans (CachedResult total is reused by deferred snap).
 2. **Deep sorted page awaits snap** — offset past the shallow TopN window
    must use the Parquet snapshot (``file_row_number``), not OFFSET TopN.
-3. **Flow cache survives unrelated drop** — scoped count clear for a table
-   not in ``_flow_source_tables`` must not bump ``_data_epoch`` / clear
-   flow cache; a drop of a used input table still invalidates.
+3. **Flow cache clears on unrelated drop** — content mutations always advance
+   ``_data_epoch``; volatile flow cache clears on that bump so epoch-salted
+   fingerprints cannot leave orphan entries. A drop of a used input still
+   invalidates.
 
 CI gate::
 
@@ -173,7 +174,7 @@ def run_suite(*, rows: int, work_dir: Path, self_test: bool) -> dict[str, Any]:
     finally:
         s2.shutdown()
 
-    # ---- 3) Flow cache survives unrelated drop ----
+    # ---- 3) Flow cache clears on unrelated drop (no epoch orphans) ----
     s3 = Session()
     try:
         s3.flow_cache = True
@@ -202,20 +203,28 @@ def run_suite(*, rows: int, work_dir: Path, self_test: bool) -> dict[str, Any]:
             s3._note_flow_source_tables(g)
         ep = s3._data_epoch
         cache_size = s3.flow_cache_info().get("size", 0)
+        if cache_size < 1:
+            raise AssertionError("expected populated flow cache before drop")
         s3.drop_table("sqlite", "other_tbl")
         if s3._data_epoch <= ep:
             raise AssertionError(
                 "unrelated drop must advance data_epoch %r -> %r"
                 % (ep, s3._data_epoch))
-        if cache_size and s3.flow_cache_info().get("size", 0) != cache_size:
-            raise AssertionError("unrelated drop cleared flow cache")
-        report["correctness"]["unrelated_drop_keeps_flow_cache"] = True
+        if s3.flow_cache_info().get("size", 0) != 0:
+            raise AssertionError(
+                "unrelated drop must clear flow cache (epoch orphans)")
+        report["correctness"]["unrelated_drop_clears_flow_cache"] = True
 
         # Related drop must still invalidate.
+        r2 = s3.run_nodeflow(g, "n2", "out")
+        if r2.get("error"):
+            raise AssertionError("flow re-run failed: %s" % r2.get("error"))
         ep2 = s3._data_epoch
         s3.drop_table("sqlite", "flow_src")
         if s3._data_epoch <= ep2:
             raise AssertionError("drop of flow input must bump epoch")
+        if s3.flow_cache_info().get("size", 0) != 0:
+            raise AssertionError("drop of flow input must clear flow cache")
         report["correctness"]["related_drop_bumps_flow"] = True
     finally:
         s3.shutdown()
