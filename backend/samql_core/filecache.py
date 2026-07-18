@@ -7,9 +7,10 @@ wipes -- so every app start re-paid the full parse of a multi-GB file.
 
 This module keeps those conversions in a STABLE directory
 (<system-temp>/samql/filecache/) keyed by the source file's identity
-(absolute path + size + mtime_ns + reader kind/options + a format version),
-so a restart re-attaches the existing Parquet in milliseconds. The source
-changing in any way changes the key, which is a miss -- stale entries are
+(absolute path + size + mtime/ctime/inode + bounded content samples +
+reader kind/options + a format version), so a restart re-attaches the
+existing Parquet in milliseconds. An in-place rewrite that preserves
+mtime still misses (content samples / ctime / inode). Stale entries are
 never served, only aged out.
 
 Budgeted + aged: SAMQL_FILECACHE_GB (default 32) caps total size with
@@ -28,7 +29,9 @@ import time
 # changes, COPY options, ...): every existing entry then misses and ages out.
 # .431: bumped -- cache WRITES changed (byte-capped row groups),
 # and only a freshly written file benefits.
-CACHE_VERSION = 2
+# .667: bumped -- cache KEY now includes ctime/inode + content samples so
+# same-mtime rewrites cannot reuse a stale Parquet.
+CACHE_VERSION = 3
 
 _ROOT = os.path.join(tempfile.gettempdir(), "samql")
 _DIR = os.path.join(_ROOT, "filecache")
@@ -99,15 +102,47 @@ def _ensure_dir():
         pass
 
 
+def _source_content_digest(path, size):
+    """Bounded content samples (same posture as Session._stable_path_signature).
+
+    Size/mtime alone can collide after an in-place rewrite that preserves
+    timestamps. Hashing a few 64 KiB windows keeps lookup bounded while making
+    accidental stale reuse materially less likely.
+    """
+    h = hashlib.sha256()
+    size = int(size)
+    offsets = sorted(set([
+        0,
+        max(0, size // 4 - 32 * 1024),
+        max(0, size // 2 - 32 * 1024),
+        max(0, (size * 3) // 4 - 32 * 1024),
+        max(0, size - 64 * 1024),
+    ]))
+    with open(path, "rb") as fh:
+        for offset in offsets:
+            fh.seek(offset)
+            h.update(str(offset).encode("ascii"))
+            h.update(fh.read(64 * 1024))
+    return h.hexdigest()[:32]
+
+
 def cache_key(path, kind, extra=""):
-    """Identity of one conversion: the source file's stats + how it is read.
-    Returns a hex key, or None when the source can't be stat'ed (caller then
-    skips the cache for this load)."""
+    """Identity of one conversion: source stats + content samples + how it is read.
+
+    Returns a hex key, or None when the source can't be stat'ed / sampled
+    (caller then skips the cache for this load).
+    """
     try:
         st = os.stat(path)
+        size = int(st.st_size)
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        ctime_ns = int(getattr(st, "st_ctime_ns", 0) or 0)
+        ino = int(getattr(st, "st_ino", 0) or 0)
+        digest = _source_content_digest(path, size)
         raw = "\x00".join([
-            os.path.abspath(path), str(st.st_size),
-            str(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
+            os.path.abspath(path), str(size),
+            str(mtime_ns), str(ctime_ns), str(ino),
+            digest,
             str(kind or ""), str(extra or ""), "v%d" % CACHE_VERSION,
         ])
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
