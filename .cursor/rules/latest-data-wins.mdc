@@ -16,10 +16,13 @@ conflict, **prefer recompute / refetch / clear**.
 3. **Reuse is not display.** Blocking Journal chain-reuse or salting a cache key
    is necessary but not sufficient. Open IDE result tabs, Journal cell grids,
    NodeFlow preview drawers, and canvas charts must **badge, clear, or refetch**
-   when `data_epoch` advances past the result they hold.
+   when `data_epoch` advances past the result they hold. Chart / pivot / profile
+   aggregates over a `result_id` must expire the same way as `page` / `export`.
 4. **Snapshot stores are frozen.** A `result_id` parquet is a point-in-time
    answer. After an epoch bump it must expire (`result expired`) or be labeled
-   historical — never silently page as live against mutated tables.
+   historical — never silently page as live against mutated tables. Stamp the
+   epoch observed at query *start* (not finish) so a concurrent mutation cannot
+   make a pre-mutation snapshot look live.
 5. **External / nondeterministic sources.** Do not freeze filebrowser, remote,
    directory/appendfolder, random sample, python, or unstable SQL outputs in
    the volatile flow cache. Prefer content/stat signatures over mtime-only

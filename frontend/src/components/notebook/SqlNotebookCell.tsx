@@ -232,9 +232,14 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
       {cell.error ? (
         <div className="nb-err">{cell.error}</div>
       ) : cell.ranOnce && !cell.collapsed && cell.resultId && cell.page ? (
-        cell.outView === "chart" ? (
+        props.stale && (cell.outView === "chart" || cell.outView === "pivot") ? (
+          <div className="nb-out-stale faint">
+            Data changed — re-run to {cell.outView === "chart" ? "chart" : "pivot"}.
+          </div>
+        ) : cell.outView === "chart" ? (
           <div className="nb-out-chart">
             <ChartPanel
+              key={`nb-chart-${cell.resultId}-${cell.ranDataEpoch ?? 0}`}
               resultId={cell.resultId}
               columns={cell.page.columns}
               sampleRows={cell.page.rows}
@@ -243,6 +248,7 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
         ) : cell.outView === "pivot" ? (
           <div className="nb-out-pivot">
             <PivotPanel
+              key={`nb-pivot-${cell.resultId}-${cell.ranDataEpoch ?? 0}`}
               tables={props.tables}
               result={{
                 id: cell.resultId,
