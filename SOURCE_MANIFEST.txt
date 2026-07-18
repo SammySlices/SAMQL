@@ -220,6 +220,7 @@ frontend/src/components/notebook/VisualizationNotebookCell.tsx
 frontend/src/controllers/AppControllers.component.test.tsx
 frontend/src/controllers/README.md
 frontend/src/controllers/appTypes.ts
+frontend/src/controllers/tablesCatalogEqual.component.test.ts
 frontend/src/controllers/useBackgroundOperations.ts
 frontend/src/controllers/useCatalogController.ts
 frontend/src/controllers/useIdeController.ts
@@ -333,6 +334,7 @@ requirements-test.txt
 tests/benchmark_cache_memory_pressure.py
 tests/benchmark_nested_ndjson.py
 tests/benchmark_perf_audit_high.py
+tests/benchmark_perf_audit_medium.py
 tests/benchmark_perf_high_fixes.py
 tests/benchmark_perf_medium_fixes.py
 tests/benchmark_workloads.py

@@ -8,6 +8,40 @@ import type {
 } from "../lib/types";
 import type { ToastFn } from "./appTypes";
 
+/** True when two catalog snapshots are equivalent for sidebar render. */
+export function tablesCatalogEqual(
+  prev: TableInfo[],
+  next: TableInfo[],
+): boolean {
+  if (prev === next) return true;
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    const a = prev[i];
+    const b = next[i];
+    if (
+      a.engine !== b.engine ||
+      a.name !== b.name ||
+      a.row_count !== b.row_count ||
+      (a.source || "") !== (b.source || "")
+    ) {
+      return false;
+    }
+    const ac = a.columns || [];
+    const bc = b.columns || [];
+    if (ac.length !== bc.length) return false;
+    for (let j = 0; j < ac.length; j += 1) {
+      const ca = ac[j] as { name?: string; type?: string } | string;
+      const cb = bc[j] as { name?: string; type?: string } | string;
+      const an = typeof ca === "string" ? ca : ca?.name;
+      const bn = typeof cb === "string" ? cb : cb?.name;
+      const at = typeof ca === "string" ? "" : ca?.type || "";
+      const bt = typeof cb === "string" ? "" : cb?.type || "";
+      if (an !== bn || at !== bt) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Owns the sidebar/catalog collections and their latest-response-wins refresh
  * rails. Keeping these sequences together prevents one surface from silently
@@ -27,7 +61,8 @@ export function useCatalogController(toast: ToastFn) {
   const refreshTables = useCallback(() => {
     const sequence = ++tablesSeq.current;
     const apply = (value: TableInfo[]) => {
-      if (sequence === tablesSeq.current) setTables(value);
+      if (sequence !== tablesSeq.current) return;
+      setTables((prev) => (tablesCatalogEqual(prev, value) ? prev : value));
     };
     api
       .tables()

@@ -1313,6 +1313,12 @@ class DBManager:
             if cache is None:
                 cache = self._types_cache = {}
             for name in live:
+                old = self.table_columns.get(name)
+                # Skip PRAGMA when shape is known and types are warm — write
+                # SQL drops types for touched tables so DDL still refreshes.
+                if old is not None and name in cache:
+                    self.table_sources.setdefault(name, "")
+                    continue
                 try:
                     cur.execute(f'PRAGMA table_info("{name}")')
                     rows = cur.fetchall()
@@ -1322,13 +1328,9 @@ class DBManager:
                     cols = self.table_columns.get(name, [])
                     types = None
                 vis = _visible_columns(cols)
-                old = self.table_columns.get(name)
                 self.table_columns[name] = vis
                 self.table_sources.setdefault(name, "")
-                # Seed / refresh types when the shape changed or cache miss;
-                # unchanged tables keep a warm types cache (no re-PRAGMA for
-                # types_cached on the next tables_tree).
-                if types is not None and (old != vis or name not in cache):
+                if types is not None:
                     vis_set = set(vis)
                     cache[name] = {k: v for k, v in types.items()
                                    if k in vis_set}

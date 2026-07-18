@@ -37748,6 +37748,67 @@ def backend_tests(datadir, csv_path, json_path):
         need(corr.get("related_drop_bumps_flow") is True,
              "related drop still invalidates flow")
 
+    def t_perf_audit_medium_harness():
+        # Concurrent COUNT lock skip, catalog dirty-skip, SQLite warm PRAGMA
+        # skip, filebrowser volatile-cache gate, unrelated flow drop.
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb is not installed")
+        import json as _json
+        import subprocess as _subprocess
+        script = os.path.join(ROOT, "tests", "benchmark_perf_audit_medium.py")
+        need(os.path.isfile(script),
+             "audit-medium benchmark harness is bundled")
+        out = os.path.join(DATADIR, "benchmark-perf-audit-medium-self-test.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = BACKEND + os.pathsep + env.get("PYTHONPATH", "")
+        cp = _subprocess.run(
+            [sys.executable, script, "--self-test", "--output", out],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
+        need(cp.returncode == 0,
+             "audit-medium self-test failed: %s"
+             % (cp.stderr or cp.stdout))
+        data = _json.load(open(out, encoding="utf-8"))
+        eq(data.get("schema_version"), 1, "audit-medium report schema")
+        eq(data.get("mode"), "self-test", "self-test mode marker")
+        result = data.get("result") or {}
+        if result.get("skipped"):
+            skip(result["skipped"])
+        need(result.get("ok"), "audit-medium self-test ok flag")
+        corr = result.get("correctness") or {}
+        need(corr.get("concurrent_count_no_write_lock") is True,
+             "concurrent COUNT must not take write_lock")
+        need(corr.get("catalog_dirty_skip") is True,
+             "clean tables_tree skips sync_catalog")
+        need(corr.get("sqlite_warm_pragma_skip") is True,
+             "warm SQLite sync skips PRAGMA; type-drop refreshes")
+        need(corr.get("filebrowser_volatile_gate") is True,
+             "filebrowser disables volatile flow cache")
+        need(corr.get("filebrowser_disables_volatile_cache") is True,
+             "materialize path gates filebrowser volatile cache")
+        need(corr.get("unrelated_drop_keeps_flow") is True,
+             "unrelated drop still keeps flow cache")
+
+    def t_catalog_dirty_skip_source():
+        # Post-658 audit medium: tables_tree must not sync_catalog on every
+        # focus/poll when nothing mutated.
+        sess = open(os.path.join(BACKEND, "samql_core", "session.py"),
+                    encoding="utf-8").read()
+        need("def _mark_catalog_dirty(self):" in sess,
+             "catalog dirty helper exists")
+        need("self._catalog_dirty = True" in sess, "dirty flag is set")
+        i = sess.index("def tables_tree(self):")
+        j = sess.index("\n    def ", i + 1)
+        body = sess[i:j]
+        need("_catalog_dirty" in body, "tables_tree checks dirty flag")
+        need("self._catalog_dirty = False" in body,
+             "tables_tree clears dirty after sync")
+        eng = open(os.path.join(BACKEND, "samql_core", "engines.py"),
+                   encoding="utf-8").read()
+        need("Skip PRAGMA when shape is known" in eng
+             or "name in cache" in eng,
+             "SQLite sync skips warm PRAGMA")
+
     def t_stress_cancel_reclaim_harness():
         # Stall / cancel / reclaim stress suite (tests/stress_cancel_reclaim.py).
         # Default CI runs --self-test: recursive CTE + tiny nested NDJSON, with

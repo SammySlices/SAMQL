@@ -869,6 +869,9 @@ class Session:
         # Input table names observed while populating the volatile flow cache.
         # Scoped count clears only bump/clear flow when they intersect this set.
         self._flow_source_tables = set()
+        # Sidebar catalog reconcile: skip sync_catalog when nothing mutated
+        # since the last tables_tree (focus/poll refresh becomes cheap).
+        self._catalog_dirty = True
         # directory-node file cache: path -> (hidden_table, engine, mtime)
         self._dir_files = {}
         # API node: node id -> (hidden table, engine) for its last fetch, and
@@ -1293,19 +1296,27 @@ class Session:
         return self._connection_profiles
 
     # ---- tables tree ------------------------------------------------
+    def _mark_catalog_dirty(self):
+        """Note that the next tables_tree must reconcile engine catalogs."""
+        self._catalog_dirty = True
+
     def tables_tree(self):
         out = []
         # Reconcile caches with the live DB so user-created/dropped
-        # tables (via raw SQL) are reflected.
-        try:
-            self.db.sync_catalog()
-        except Exception:
-            pass
-        if self.duckdb is not None:
+        # tables (via raw SQL) are reflected. Skip when nothing mutated
+        # since the last refresh (focus/visibility polls).
+        dirty = bool(getattr(self, "_catalog_dirty", True))
+        if dirty:
             try:
-                self.duckdb.sync_catalog()
+                self.db.sync_catalog()
             except Exception:
                 pass
+            if self.duckdb is not None:
+                try:
+                    self.duckdb.sync_catalog()
+                except Exception:
+                    pass
+            self._catalog_dirty = False
         # SQLite
         for name in sorted(self.db.table_columns):
             if name.startswith("__"):
@@ -2022,6 +2033,16 @@ class Session:
         # let the next refresh fill it in; do NOT cache the miss.
         if _stmt_stepping(engine):
             return None  # a statement is stepping; never queue behind it
+        # Concurrent DuckDB COUNT uses a separate cursor (engine.read) and
+        # must NOT hold write_lock — otherwise sidebar refresh serializes
+        # loads/builds. SQLite / non-concurrent engines keep the lock probe.
+        concurrent = bool(
+            getattr(engine, "concurrent_reads", False)
+            and getattr(engine, "read", None) is not None)
+        if concurrent:
+            val = self._safe_count(engine, name)
+            self._count_cache[key] = val
+            return val
         # .464: probe the engine lock without ever punishing a test
         # double -- only a REAL "held by someone else" answer skips;
         # an odd/absent lock computes exactly as before.
@@ -2154,6 +2175,7 @@ class Session:
                 except Exception:
                     pass
             bump_flow = self._should_bump_flow_for_tables(touched)
+        self._mark_catalog_dirty()
         if bump_flow and hasattr(self, "_flow_cache"):
             self._data_epoch += 1
             self._flow_cache_clear()
@@ -2204,6 +2226,32 @@ class Session:
                         _walk(inner.get("nodes"))
 
         _walk((graph or {}).get("nodes"))
+
+    @staticmethod
+    def _graph_has_types(graph, types):
+        """True if any node (including nested children) has a listed type."""
+        want = {str(t).lower() for t in (types or ())}
+        if not want:
+            return False
+
+        def _walk(nodes):
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("type") or "").lower() in want:
+                    return True
+                cfg = node.get("config") or {}
+                typ = node.get("type")
+                if typ in ("group", "iterator"):
+                    if _walk(cfg.get("children")):
+                        return True
+                elif typ == "usernode":
+                    inner = cfg.get("graph") or {}
+                    if isinstance(inner, dict) and _walk(inner.get("nodes")):
+                        return True
+            return False
+
+        return _walk((graph or {}).get("nodes"))
 
     def _should_bump_flow_for_tables(self, names):
         """Whether a scoped table mutation must invalidate NodeFlow cache."""
@@ -2264,12 +2312,15 @@ class Session:
         """Cheap, conservative table-size estimate for byte-budgeted LRU."""
         try:
             eng, _kind = self._engine_obj(engine_target)
-            _cols, rows_out = eng.execute(
-                'SELECT COUNT(*) FROM "%s"' % table)
-            rows = max(0, int(rows_out[0][0] if rows_out else 0))
-            types = eng.column_types(table) or {}
+            # Prefer concurrent COUNT when available (no write_lock).
+            rows = self._safe_count(eng, table)
+            if rows is None:
+                rows = 0
+            types_fn = getattr(eng, "types_cached", None) or getattr(
+                eng, "column_types", None)
+            types = (types_fn(table) if types_fn else None) or {}
             row_bytes = sum(self._flow_type_width(t) for t in types.values())
-            return max(4096, rows * max(8, row_bytes))
+            return max(4096, int(rows) * max(8, row_bytes))
         except Exception:
             return 4096
 
@@ -4138,6 +4189,12 @@ class Session:
         # (no caching) when the cache is off or fingerprinting fails.
         use_volatile_cache = bool(
             getattr(self, "flow_cache", False) and _engine_override is None)
+        # Filebrowser reads disk globs at run time; config text is stable while
+        # files change. Volatile fingerprints would reuse stale materialisations
+        # (persistent cache already skips these graphs).
+        if use_volatile_cache and self._graph_has_types(
+                graph, ("filebrowser",)):
+            use_volatile_cache = False
         fps = {}
         if use_volatile_cache:
             try:

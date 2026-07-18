@@ -6522,6 +6522,24 @@ console.log("OK");
              and "bodyW: nextW" in interactions
              and 'addEventListener("pointercancel"' in interactions
              and 'removeEventListener("pointercancel"' in interactions),
+            ("catalog refresh preserves table identity when unchanged",
+             "export function tablesCatalogEqual" in rd(
+                 "src", "controllers", "useCatalogController.ts")
+             and "tablesCatalogEqual(prev, value)" in rd(
+                 "src", "controllers", "useCatalogController.ts")
+             and "returns true for identical snapshots" in rd(
+                 "src", "controllers",
+                 "tablesCatalogEqual.component.test.ts")),
+            ("inspector probes wait for drag idle; mid-drag cull freezes",
+             "afterDragIdle" in rd(
+                 "src", "components", "nodeflow",
+                 "useNodeFlowInspectorController.tsx")
+             and "samqlNfDrag" in rd(
+                 "src", "components", "nodeflow",
+                 "useNodeFlowInspectorController.tsx")
+             and "visibleCullIdsRef" in scene
+             and "visibleWireIdsRef" in scene
+             and "drag.groups" in interactions),
             ("canvas cards build their body inside a per-card memo boundary",
              "NodeFlowCanvasCard" in scene
              and "nb2-node-head" not in scene

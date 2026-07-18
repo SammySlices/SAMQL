@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.658
+Current build:   2026-07-18.659
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.659  (v2.16.4)
+
+PERF: audit medium — COUNT lock, catalog dirty-skip, SQLite PRAGMA,
+filebrowser cache gate, catalog equality, drag probe/cull. Concurrent
+DuckDB COUNT skips write_lock; tables_tree syncs only when dirty;
+warm SQLite skips PRAGMA; filebrowser disables volatile flow cache;
+sidebar setTables identity-preserving; inspector probes wait for drag
+idle; mid-drag cull freezes. Tests + benchmarks + refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.658  (v2.16.4)
