@@ -1309,17 +1309,33 @@ class DBManager:
             except Exception:
                 return
             live_set = set(live)
+            cache = getattr(self, "_types_cache", None)
+            if cache is None:
+                cache = self._types_cache = {}
             for name in live:
                 try:
                     cur.execute(f'PRAGMA table_info("{name}")')
-                    cols = [r[1] for r in cur.fetchall()]
+                    rows = cur.fetchall()
+                    cols = [r[1] for r in rows]
+                    types = {r[1]: (r[2] or "").upper() for r in rows}
                 except Exception:
                     cols = self.table_columns.get(name, [])
-                self.table_columns[name] = _visible_columns(cols)
+                    types = None
+                vis = _visible_columns(cols)
+                old = self.table_columns.get(name)
+                self.table_columns[name] = vis
                 self.table_sources.setdefault(name, "")
+                # Seed / refresh types when the shape changed or cache miss;
+                # unchanged tables keep a warm types cache (no re-PRAGMA for
+                # types_cached on the next tables_tree).
+                if types is not None and (old != vis or name not in cache):
+                    vis_set = set(vis)
+                    cache[name] = {k: v for k, v in types.items()
+                                   if k in vis_set}
             for gone in [n for n in self.table_columns if n not in live_set]:
                 self.table_columns.pop(gone, None)
                 self.table_sources.pop(gone, None)
+                cache.pop(gone, None)
                 origins = getattr(self, "table_origins", None)
                 if isinstance(origins, dict):
                     origins.pop(gone, None)
@@ -3696,82 +3712,137 @@ class DuckDBManager:
 
     def sync_catalog(self):
         """Reconcile the cache with DuckDB's information_schema so views
-        and tables created by raw SQL are reflected."""
-        # the catalog may have changed shape -> cached column types are stale
-        try:
-            self._types_cache.clear()
-        except Exception:
-            pass
+        and tables created by raw SQL are reflected.
+
+        Incremental: list live tables and column names from
+        ``information_schema``, then ``DESCRIBE`` only tables that are new
+        or whose visible column list changed. DESCRIBE results seed
+        ``_types_cache`` so ``tables_tree`` does not pay a second DESCRIBE
+        per table. Unchanged tables keep their cached types (no blanket
+        clear) — CREATE OR REPLACE that keeps the same column names is
+        rare; mutating load/DDL paths still call sync after real changes.
+        """
         if not self.concurrent_reads:
             # .464: same non-blocking rule as the sqlite twin -- a busy
             # engine serves the cached catalog rather than stalling.
             if not self.write_lock.acquire(blocking=False):
                 return
             try:
-                try:
-                    cur = self.conn.execute(
-                        "SELECT table_name FROM information_schema.tables "
-                        "WHERE table_schema NOT IN ('information_schema') "
-                        "ORDER BY table_name")
-                    live = [r[0] for r in cur.fetchall()]
-                except Exception:
-                    return
-                live_set = set(live)
-                for name in live:
-                    try:
-                        c = self.conn.execute(f'DESCRIBE "{name}"')
-                        cols = [r[0] for r in c.fetchall()]
-                    except Exception:
-                        cols = self.table_columns.get(name, [])
-                    self.table_columns[name] = _visible_columns(cols)
-                    self._types_cache_drop(name)
-                    self.table_sources.setdefault(name, "")
-                for gone in [n for n in self.table_columns
-                             if n not in live_set]:
-                    self.table_columns.pop(gone, None)
-                    self.table_sources.pop(gone, None)
-                    origins = getattr(self, "table_origins", None)
-                    if isinstance(origins, dict):
-                        origins.pop(gone, None)
+                # Class-bound so tests that bind sync_catalog onto a stub
+                # still resolve the incremental helpers.
+                DuckDBManager._duck_sync_catalog(self, use_read=False)
             finally:
                 self.write_lock.release()
             return
-        # Concurrent path: read information_schema and each DESCRIBE on separate
-        # cursors (no write_lock) so a refresh doesn't queue behind a build,
-        # then reconcile the in-memory cache under a dedicated lock so two
-        # concurrent refreshes can't race the dict mutation. A table created by
-        # an in-flight (uncommitted) build simply isn't seen until it commits
-        # and the next reconcile -- which is correct.
+        # Concurrent path: information_schema + selective DESCRIBE on
+        # separate cursors (no write_lock), then reconcile under
+        # _catalog_lock so two refreshes cannot race dict mutation.
+        DuckDBManager._duck_sync_catalog(self, use_read=True)
+
+    def _duck_fetch_catalog_lists(self, use_read):
+        """Return ``(live_names, cols_by_name)`` from information_schema."""
+        tables_sql = (
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema NOT IN ('information_schema') "
+            "ORDER BY table_name")
+        cols_sql = (
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema NOT IN ('information_schema') "
+            "ORDER BY table_name, ordinal_position")
         try:
-            _c, rows = self.execute_read(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema NOT IN ('information_schema') "
-                "ORDER BY table_name")
-            live = [r[0] for r in (rows or [])]
+            if use_read:
+                _c, rows = self.execute_read(tables_sql)
+                live = [r[0] for r in (rows or [])]
+                _c2, crows = self.execute_read(cols_sql)
+                col_rows = crows or []
+            else:
+                cur = self.conn.execute(tables_sql)
+                live = [r[0] for r in cur.fetchall()]
+                cur = self.conn.execute(cols_sql)
+                col_rows = cur.fetchall()
         except Exception:
+            return None, None
+        cols_by = {}
+        for row in col_rows:
+            if not row:
+                continue
+            tname, cname = row[0], row[1]
+            cols_by.setdefault(tname, []).append(cname)
+        return live, cols_by
+
+    def _duck_describe_table(self, name, use_read):
+        """Return ``(column_names, types_by_col)`` from DESCRIBE."""
+        rows = None
+        try:
+            if use_read:
+                _c, rows = self.execute_read(f'DESCRIBE "{name}"')
+            else:
+                cur = self.conn.execute(f'DESCRIBE "{name}"')
+                rows = cur.fetchall()
+        except Exception:
+            rows = None
+        cols, types = [], {}
+        for r in (rows or []):
+            if not r:
+                continue
+            cols.append(r[0])
+            if len(r) > 1 and r[1]:
+                types[r[0]] = r[1]
+        return cols, types
+
+    def _duck_sync_catalog(self, use_read):
+        live, cols_by = DuckDBManager._duck_fetch_catalog_lists(self, use_read)
+        if live is None:
             return
         live_set = set(live)
-        cols_by = {}
+        cache = getattr(self, "_types_cache", None)
+        if cache is None:
+            cache = self._types_cache = {}
+
+        # Decide which tables need DESCRIBE (new, column-list change, or
+        # missing types). Unchanged tables with a warm types cache skip.
+        need_describe = []
+        planned_cols = {}
         for name in live:
-            try:
-                _c2, drows = self.execute_read(f'DESCRIBE "{name}"')
-                cols_by[name] = [r[0] for r in (drows or [])]
-            except Exception:
-                cols_by[name] = self.table_columns.get(name, [])
-        with self._catalog_lock:
+            info_cols = _visible_columns(cols_by.get(name) or [])
+            planned_cols[name] = info_cols
+            old = self.table_columns.get(name)
+            if old == info_cols and name in cache and info_cols:
+                continue
+            need_describe.append(name)
+
+        described = {}
+        for name in need_describe:
+            cols, types = DuckDBManager._duck_describe_table(
+                self, name, use_read)
+            if not cols:
+                # Fall back to information_schema names when DESCRIBE fails.
+                cols = list(planned_cols.get(name) or
+                            self.table_columns.get(name) or [])
+            described[name] = (cols, types)
+
+        def _apply():
             for name in live:
-                # .480 audit: the non-concurrent path above filters retype
-                # shadows via _visible_columns; this concurrent twin did
-                # NOT, so a sync after a retype put __samql_orig__* back
-                # into the visible catalog (sidebar/grid/export). Filter
-                # here too.
-                self.table_columns[name] = _visible_columns(cols_by[name])
-                self._types_cache_drop(name)
                 self.table_sources.setdefault(name, "")
-            for gone in [n for n in self.table_columns
+                if name in described:
+                    cols, types = described[name]
+                    vis = _visible_columns(cols)
+                    self.table_columns[name] = vis
+                    vis_set = set(vis)
+                    cache[name] = {k: v for k, v in types.items()
+                                   if k in vis_set}
+                # else: unchanged shape + warm types — leave caches as-is
+            for gone in [n for n in list(self.table_columns)
                          if n not in live_set]:
                 self.table_columns.pop(gone, None)
                 self.table_sources.pop(gone, None)
+                cache.pop(gone, None)
                 origins = getattr(self, "table_origins", None)
                 if isinstance(origins, dict):
                     origins.pop(gone, None)
+
+        if use_read:
+            with self._catalog_lock:
+                _apply()
+        else:
+            _apply()
