@@ -6107,6 +6107,7 @@ console.log("OK");
                  "data-total-nodes",
                  "data-rendered-nodes",
                  "without rerendering a stationary sibling",
+                 "does not rebuild stationary card summaries",
                  "survives StrictMode replay",
                  "newly loaded expanded chart in the same tab",
              ))
@@ -6116,7 +6117,10 @@ console.log("OK");
                  "virtualizes only above the large-graph threshold",
                  "four-thousand-node render model",
                  "culls off-screen wires",
-             ))),
+             ))
+             and "NodeFlowCanvasCard" in scene
+             and "Body construction lives inside memo" in _read_text(os.path.join(
+                 nodeflow_dir, "NodeFlowCanvasCard.tsx"))),
         ]
         missing = [name for name, ok in checks if not ok]
         need(not missing, "phase-9 NodeFlow rendering/performance broken: "
@@ -6509,6 +6513,10 @@ console.log("OK");
              and "export function dirtyNodesAreGeometryOnly" in render_model
              and "treats position-only dirty nodes as geometry-only"
                  in model_tests),
+            ("canvas cards build their body inside a per-card memo boundary",
+             "NodeFlowCanvasCard" in scene
+             and "nb2-node-head" not in scene
+             and "cardActions" in scene),
             ("preview and inspector resize coalesce via RAF",
              "startPointerDragRaf" in preview
              and "startPointerDragRaf" in inspector

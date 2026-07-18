@@ -170,6 +170,7 @@ frontend/src/components/load/SqlServerLoadTab.tsx
 frontend/src/components/nodeflow/InspectorControls.component.test.tsx
 frontend/src/components/nodeflow/InspectorControls.tsx
 frontend/src/components/nodeflow/InspectorShell.tsx
+frontend/src/components/nodeflow/NodeFlowCanvasCard.tsx
 frontend/src/components/nodeflow/NodeFlowCanvasShell.tsx
 frontend/src/components/nodeflow/NodeFlowChrome.component.test.tsx
 frontend/src/components/nodeflow/NodeFlowControllerHooks.component.test.tsx
