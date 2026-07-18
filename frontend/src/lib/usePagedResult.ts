@@ -76,6 +76,7 @@ export interface PagedResultController {
 
 const DEFAULT_PAGE_SIZE = 1000;
 const EXPIRED_ERROR = "result expired";
+const MAX_PENDING_PAGE_RETRIES = 240;
 
 function copyFilters(filters: ColumnFilter[] | undefined): ColumnFilter[] {
   return (filters || []).map((filter) => ({ ...filter }));
@@ -118,6 +119,47 @@ function requestOptions(
     columns: cols && cols.length ? [...cols] : undefined,
     query_id: item.queryId,
   };
+}
+
+async function sleepMs(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Retry while backend returns pending (deep snap still building). */
+async function fetchPageAwaiting(
+  fetchPage: UsePagedResultOptions<PagedResultSnapshot>["fetchPage"],
+  resultId: string,
+  options: PageRequestOptions,
+  signal: AbortSignal,
+): Promise<ResultPage> {
+  let page = await fetchPage(resultId, options, signal);
+  let attempts = 0;
+  while (page.pending && attempts < MAX_PENDING_PAGE_RETRIES && !signal.aborted) {
+    const wait = Math.max(50, Math.min(2000, page.retry_after_ms ?? 250));
+    try {
+      await sleepMs(wait, signal);
+    } catch {
+      return page;
+    }
+    page = await fetchPage(resultId, options, signal);
+    attempts += 1;
+  }
+  return page;
 }
 
 /**
@@ -255,7 +297,8 @@ export function usePagedResult<T extends PagedResultSnapshot>(
 
       const controller = registerController(id);
       try {
-        const page = await opts.fetchPage(
+        const page = await fetchPageAwaiting(
+          opts.fetchPage,
           expected.resultId,
           requestOptions(item, expected, 0, opts.pageSize || DEFAULT_PAGE_SIZE),
           controller.signal,
@@ -275,7 +318,8 @@ export function usePagedResult<T extends PagedResultSnapshot>(
           views.current.set(id, retried);
           const retryController = registerController(id);
           try {
-            const retryPage = await opts.fetchPage(
+            const retryPage = await fetchPageAwaiting(
+              opts.fetchPage,
               freshResultId,
               requestOptions(
                 { ...freshItem, resultId: freshResultId },
@@ -401,7 +445,8 @@ export function usePagedResult<T extends PagedResultSnapshot>(
       const controller = registerController(id);
       try {
         const windowStart = item.page.offset || 0;
-        const page = await opts.fetchPage(
+        const page = await fetchPageAwaiting(
+          opts.fetchPage,
           item.resultId,
           requestOptions(
             item,

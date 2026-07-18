@@ -46,6 +46,10 @@ export interface NodeFlowRenderModel {
   renderVersionByNode: Readonly<Record<string, string>>;
   dashboardSourceIdsByNode: Readonly<Record<string, readonly string[]>>;
   wires: readonly NodeFlowWire[];
+  /** Edge lookup by id — reused on geometry-only patches. */
+  edgeById: ReadonlyMap<string, NbEdge>;
+  /** Wire indexes incident to each node — avoids mapping every wire on drag. */
+  incidentWireIndexesByNode: ReadonlyMap<string, readonly number[]>;
 }
 
 export const LARGE_GRAPH_NODE_THRESHOLD = 80;
@@ -142,6 +146,8 @@ export function buildNodeFlowRenderModel(
   }
 
   const wires: NodeFlowWire[] = [];
+  const edgeById = new Map<string, NbEdge>();
+  const incidentMutable = new Map<string, number[]>();
   for (const edge of edges) {
     const fromNode = nodeById.get(edge.from.node);
     const toNode = nodeById.get(edge.to.node);
@@ -155,6 +161,7 @@ export function buildNodeFlowRenderModel(
       inputIndex < 0 ? 0 : inputIndex,
       visibleInputCountByNode[toNode.id],
     );
+    const wireIndex = wires.length;
     wires.push({
       id: edge.id,
       ax: start.x,
@@ -164,6 +171,15 @@ export function buildNodeFlowRenderModel(
       fromN: edge.from.node,
       toN: edge.to.node,
     });
+    edgeById.set(edge.id, edge);
+    const fromList = incidentMutable.get(edge.from.node) || [];
+    fromList.push(wireIndex);
+    incidentMutable.set(edge.from.node, fromList);
+    if (edge.to.node !== edge.from.node) {
+      const toList = incidentMutable.get(edge.to.node) || [];
+      toList.push(wireIndex);
+      incidentMutable.set(edge.to.node, toList);
+    }
   }
 
   return {
@@ -175,6 +191,8 @@ export function buildNodeFlowRenderModel(
     renderVersionByNode,
     dashboardSourceIdsByNode,
     wires,
+    edgeById,
+    incidentWireIndexesByNode: incidentMutable,
   };
 }
 
@@ -191,6 +209,7 @@ export function patchNodeFlowRenderModelForDirtyNodes(
 ): NodeFlowRenderModel | null {
   if (!dirtyIds.size) return prev;
   if (nodes.length !== prev.nodeById.size) return null;
+  if (edges.length !== prev.edgeById.size) return null;
 
   const nodeById = new Map<string, NbNode>();
   const nodeIndexById = new Map<string, number>();
@@ -209,6 +228,8 @@ export function patchNodeFlowRenderModelForDirtyNodes(
   };
   const renderVersionByNode = prev.renderVersionByNode;
   const dashboardSourceIdsByNode = prev.dashboardSourceIdsByNode;
+  const edgeById = prev.edgeById;
+  const incidentWireIndexesByNode = prev.incidentWireIndexesByNode;
 
   for (const id of dirtyIds) {
     const node = nodeById.get(id);
@@ -217,16 +238,22 @@ export function patchNodeFlowRenderModelForDirtyNodes(
     visibleInputCountByNode[id] = indexedVisibleInputCount(node, incoming);
   }
 
-  const edgeById = new Map<string, NbEdge>();
-  for (const edge of edges) edgeById.set(edge.id, edge);
-
-  const wires: NodeFlowWire[] = prev.wires.map((wire) => {
-    if (!dirtyIds.has(wire.fromN) && !dirtyIds.has(wire.toN)) return wire;
+  // Copy wires once, then rewrite only indexes incident to dirty nodes.
+  const wires = prev.wires.slice();
+  const touched = new Set<number>();
+  for (const id of dirtyIds) {
+    const indexes = incidentWireIndexesByNode.get(id);
+    if (!indexes) continue;
+    for (const wireIndex of indexes) touched.add(wireIndex);
+  }
+  for (const wireIndex of touched) {
+    const wire = wires[wireIndex];
+    if (!wire) continue;
     const fromNode = nodeById.get(wire.fromN);
     const toNode = nodeById.get(wire.toN);
-    if (!fromNode || !toNode) return wire;
+    if (!fromNode || !toNode) continue;
     const edge = edgeById.get(wire.id);
-    if (!edge) return wire;
+    if (!edge) continue;
     const outputIndex = portsOf(fromNode).outputs.indexOf(edge.from.port);
     const inputIndex = portsOf(toNode).inputs.indexOf(edge.to.port);
     const start = portXY(fromNode, "out", outputIndex < 0 ? 0 : outputIndex);
@@ -236,7 +263,7 @@ export function patchNodeFlowRenderModelForDirtyNodes(
       inputIndex < 0 ? 0 : inputIndex,
       visibleInputCountByNode[toNode.id],
     );
-    return {
+    wires[wireIndex] = {
       id: wire.id,
       ax: start.x,
       ay: start.y,
@@ -245,7 +272,7 @@ export function patchNodeFlowRenderModelForDirtyNodes(
       fromN: wire.fromN,
       toN: wire.toN,
     };
-  });
+  }
 
   return {
     nodeById,
@@ -256,6 +283,8 @@ export function patchNodeFlowRenderModelForDirtyNodes(
     renderVersionByNode,
     dashboardSourceIdsByNode,
     wires,
+    edgeById,
+    incidentWireIndexesByNode,
   };
 }
 

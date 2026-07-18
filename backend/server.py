@@ -2396,9 +2396,13 @@ class Api:
             raise ApiError(400, "Field discovery is for JSON files only.")
         from samql_core.diagnostics import discover_load_fields
         try:
-            budget = int(b.get("budget") or 25)
+            # Default 8s keeps the Load-tab checkbox scan snappy; "scan deeper"
+            # in the UI still passes a larger budget (up to 60). Cap at 60 so a
+            # hostile body cannot park an HTTP worker for minutes.
+            budget = int(b.get("budget") or 8)
         except Exception:
-            budget = 25
+            budget = 8
+        budget = max(1, min(budget, 60))
         try:
             sample = int(b.get("sample") or 0)
         except Exception:

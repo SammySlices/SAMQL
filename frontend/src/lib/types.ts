@@ -155,6 +155,9 @@ export interface ResultPage {
   statement?: string;
   filtered?: boolean;
   cancelled?: boolean;
+  // Deep sorted/filtered page while Parquet snap still builds — retry soon.
+  pending?: boolean;
+  retry_after_ms?: number;
   // bounded exploratory execution; full runs leave these absent
   preview?: boolean;
   preview_limit?: number;
