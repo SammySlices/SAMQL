@@ -8074,6 +8074,25 @@ html.has-user-canvas-bg-node[data-canvas-node-luma="light"] .nb2-canvas.snap,
 html.has-user-canvas-bg-node.canvas-node-luma-light .nb2-canvas.snap {
   background-image: radial-gradient(rgba(0, 0, 0, 0.2) 1px, transparent 1px);
 }
+/* User-picked NodeFlow snap-grid dots (Settings → Canvas Color → Node) win
+   over luminance-auto / ivory defaults when either color or opacity is set. */
+html.has-user-canvas-dot-node .nb2-canvas.snap,
+html.has-user-canvas-dot-node.has-user-canvas-bg-node .nb2-canvas.snap,
+html.has-user-canvas-dot-node.has-user-canvas-bg-node[data-canvas-node-luma="dark"] .nb2-canvas.snap,
+html.has-user-canvas-dot-node.has-user-canvas-bg-node.canvas-node-luma-dark .nb2-canvas.snap,
+html.has-user-canvas-dot-node.has-user-canvas-bg-node[data-canvas-node-luma="light"] .nb2-canvas.snap,
+html.has-user-canvas-dot-node.has-user-canvas-bg-node.canvas-node-luma-light .nb2-canvas.snap,
+html.has-user-canvas-dot-node body.canvas-ivory .nb2-canvas.snap {
+  background-image: radial-gradient(
+    color-mix(
+      in srgb,
+      var(--user-canvas-dot-color-node, #7f7f7f)
+        calc(var(--user-canvas-dot-opacity-node, 28) * 1%),
+      transparent
+    ) 1px,
+    transparent 1px
+  );
+}
 /* optional light canvas (Settings > NodeFlow canvas: ivory toggle) */
 body.canvas-ivory .nb2-canvas-wrap {
   background-color: #d8d8d8;
@@ -12099,6 +12118,47 @@ html.theme-light .nb2-zoom .btn.primary:hover {
   align-self: flex-start;
   font-size: 11.5px;
   padding: 4px 8px;
+}
+.settings-canvas-dots {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.settings-canvas-dots-title {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.settings-canvas-dot-opacity {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.settings-canvas-dot-opacity .settings-canvas-color-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.settings-canvas-dot-opacity-val {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.settings-canvas-dot-opacity input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.settings-canvas-dot-preview {
+  height: 36px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+  background-color: var(--panel-2, var(--panel));
 }
 
 html.has-user-canvas-bg-node .nb2-canvas-wrap,

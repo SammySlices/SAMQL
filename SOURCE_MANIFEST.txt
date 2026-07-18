@@ -234,6 +234,7 @@ frontend/src/lib/LoadThresholdsPanel.component.test.tsx
 frontend/src/lib/activity.ts
 frontend/src/lib/api.ts
 frontend/src/lib/apiProfiles.ts
+frontend/src/lib/canvasColor.component.test.ts
 frontend/src/lib/canvasColor.ts
 frontend/src/lib/chartOption.component.test.ts
 frontend/src/lib/chartOption.ts

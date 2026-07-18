@@ -85,11 +85,19 @@ describe("Settings View consolidations", () => {
       "has-user-canvas-bg-ide",
       "has-user-canvas-bg-journal",
       "has-user-canvas-bg-node",
+      "has-user-canvas-dot-node",
+      "canvas-node-luma-dark",
+      "canvas-node-luma-light",
     );
     document.documentElement.style.removeProperty("--user-canvas-bg");
     document.documentElement.style.removeProperty("--user-canvas-bg-ide");
     document.documentElement.style.removeProperty("--user-canvas-bg-journal");
     document.documentElement.style.removeProperty("--user-canvas-bg-node");
+    document.documentElement.style.removeProperty("--user-canvas-dot-color-node");
+    document.documentElement.style.removeProperty(
+      "--user-canvas-dot-opacity-node",
+    );
+    document.documentElement.removeAttribute("data-canvas-node-luma");
     document.documentElement.removeAttribute("data-eye-care");
     document.documentElement.removeAttribute("data-nb-dense");
     document.documentElement.setAttribute("data-theme", "dark");
@@ -322,6 +330,92 @@ describe("Settings View consolidations", () => {
         document.documentElement.style.getPropertyValue("--user-canvas-bg-node"),
       ).toBe("#ececec");
     });
+    expect(screen.getByTestId("settings-canvas-dots")).toBeTruthy();
+    expect(screen.getByTestId("settings-canvas-dot-color")).toBeTruthy();
+    expect(screen.getByTestId("settings-canvas-dot-opacity")).toBeTruthy();
+  });
+
+  it("Node tab sets snap-grid dot color and opacity", async () => {
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    fireEvent.click(screen.getByTestId("settings-canvas-color"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-canvas-color-panel")).toBeTruthy(),
+    );
+    // Dots controls only on Node tab
+    expect(screen.queryByTestId("settings-canvas-dots")).toBeNull();
+    fireEvent.click(screen.getByTestId("settings-canvas-tab-node"));
+    expect(screen.getByTestId("settings-canvas-dots")).toBeTruthy();
+
+    const dotColor = screen.getByTestId(
+      "settings-canvas-dot-color",
+    ) as HTMLInputElement;
+    fireEvent.input(dotColor, { target: { value: "#224466" } });
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasDotColor.node")).toBe("#224466");
+      expect(
+        document.documentElement.classList.contains("has-user-canvas-dot-node"),
+      ).toBe(true);
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-dot-color-node",
+        ),
+      ).toBe("#224466");
+    });
+
+    const opacity = screen.getByTestId(
+      "settings-canvas-dot-opacity",
+    ) as HTMLInputElement;
+    fireEvent.input(opacity, { target: { value: "55" } });
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasDotOpacity.node")).toBe("55");
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-dot-opacity-node",
+        ),
+      ).toBe("55");
+    });
+
+    fireEvent.click(screen.getByTestId("settings-canvas-dot-reset"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasDotColor.node")).toBeNull();
+      expect(localStorage.getItem("samql.canvasDotOpacity.node")).toBeNull();
+      expect(
+        document.documentElement.classList.contains("has-user-canvas-dot-node"),
+      ).toBe(false);
+    });
+  });
+
+  it("restores persisted NodeFlow snap-grid dots on load", async () => {
+    localStorage.setItem("samql.canvasDotColor.node", "#aabbcc");
+    localStorage.setItem("samql.canvasDotOpacity.node", "40");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    expect(
+      document.documentElement.classList.contains("has-user-canvas-dot-node"),
+    ).toBe(true);
+    expect(
+      document.documentElement.style.getPropertyValue(
+        "--user-canvas-dot-color-node",
+      ),
+    ).toBe("#aabbcc");
+    expect(
+      document.documentElement.style.getPropertyValue(
+        "--user-canvas-dot-opacity-node",
+      ),
+    ).toBe("40");
   });
 
   it("restores persisted per-surface canvas colors on load", async () => {
