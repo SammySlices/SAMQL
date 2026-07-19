@@ -343,9 +343,22 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         and "reloadFields" in fe)
     report["correctness"]["fe_apply_data_epoch"] = (
         "applyDataEpoch" in app and "onDataEpoch" in notebook)
+    report["correctness"]["fe_monotonic_data_epoch"] = (
+        "nextMonotonicDataEpoch" in app
+        and "nextMonotonicDataEpoch" in api_ts
+        and "Math.max" in api_ts)
+    report["correctness"]["fe_epoch_cancels_pending_pages"] = (
+        "resultPaging.cancelPending()" in app
+        and "notebookPaging.cancelPending()" in notebook)
     report["correctness"]["be_reclaim_stale_results"] = (
         "def _reclaim_stale_results" in session_py
         and "self._reclaim_stale_results()" in session_py)
+    report["correctness"]["be_invalidate_counts_clears_profiles"] = (
+        "self._invalidate_profiles()" in session_py
+        and "_invalidate_counts" in session_py
+        and session_py.split("def _invalidate_counts", 1)[1]
+            .split("def _reclaim_stale_results", 1)[0]
+            .count("self._invalidate_profiles()") >= 1)
     report["correctness"]["fe_nodeflow_epoch_clears"] = (
         "previewEpochRef" in exec_ctrl
         and "setPreview(null)" in exec_ctrl

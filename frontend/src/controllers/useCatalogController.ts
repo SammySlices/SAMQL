@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { api } from "../lib/api";
+import { api, nextMonotonicDataEpoch } from "../lib/api";
 import type {
   HistoryEntry,
   SavedQuery,
@@ -65,7 +65,11 @@ export function useCatalogController(toast: ToastFn) {
     const apply = (snapshot: { tables: TableInfo[]; data_epoch: number }) => {
       if (sequence !== tablesSeq.current) return;
       // Epoch can advance without a schema/row_count reshape (UPDATE in place).
-      setDataEpoch(snapshot.data_epoch);
+      // Never move backwards: a slow poll must not overwrite a newer mutation echo.
+      setDataEpoch((prev) => {
+        const next = nextMonotonicDataEpoch(prev, snapshot.data_epoch);
+        return next == null ? prev : next;
+      });
       const next = Array.isArray(snapshot?.tables) ? snapshot.tables : [];
       setTables((prev) => (tablesCatalogEqual(prev, next) ? prev : next));
     };

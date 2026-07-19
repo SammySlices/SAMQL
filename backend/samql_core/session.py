@@ -2202,8 +2202,9 @@ class Session:
         ``_data_epoch`` so IDE/Journal/NodeFlow clients refuse retained
         snapshots. Volatile flow fingerprints salt that epoch, so entries
         kept across a bump can never hit — they only orphan temp tables.
-        Clear the flow cache whenever the epoch advances, and reclaim
-        unpinned result snapshots from older epochs.
+        Clear the flow cache whenever the epoch advances, reclaim
+        unpinned result snapshots from older epochs, and drop the profile
+        cache so a write that returns columns cannot serve stale stats.
         """
         touched = []
         if keys is None:
@@ -2225,6 +2226,9 @@ class Session:
             if hasattr(self, "_flow_cache"):
                 self._flow_cache_clear()
             self._reclaim_stale_results()
+            # Same freshness rail as epoch: profile(table) must not hit a
+            # pre-mutation cache after any content-touching invalidate.
+            self._invalidate_profiles()
 
     def _reclaim_stale_results(self):
         """Close result snapshots whose data_epoch no longer matches.

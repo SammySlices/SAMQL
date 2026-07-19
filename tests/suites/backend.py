@@ -333,6 +333,30 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_profile_cache_clears_on_write_epoch_bump():
+        # Latest-data wins: INSERT (write that returns columns) bumps epoch via
+        # _invalidate_counts and must drop _profile_cache — not only DDL paths
+        # that call _invalidate_profiles explicitly.
+        from samql_core.session import LOCAL_TARGET
+        s = _loaded_session()
+        try:
+            a = s.profile("data")
+            b = s.profile("data")
+            need(a is b, "profile cached before write")
+            ep = s._data_epoch
+            w = s.run_query(
+                "INSERT INTO data (id, name, score, category, dt) "
+                "VALUES (9999, 'x', 1.0, 'A', '2024-06-01')",
+                target=LOCAL_TARGET)
+            need(not w.get("error"), "insert ok: %s" % w.get("error"))
+            need(s._data_epoch > ep, "insert bumps data_epoch")
+            c = s.profile("data")
+            need(c is not a,
+                 "profile cache must miss after write epoch bump")
+            need(c.get("columns"), "fresh profile has columns")
+        finally:
+            s.shutdown()
+
     def t_profile_field():
         s = _loaded_session()
         try:
@@ -16784,7 +16808,9 @@ def backend_tests(datadir, csv_path, json_path):
              ".then(apply)" in catalog
              and "api.tables().then(apply)" in catalog),
             ("catalog refresh tracks session data_epoch for stale-cache guards",
-             "setDataEpoch(snapshot.data_epoch)" in catalog
+             "nextMonotonicDataEpoch" in catalog
+             and "snapshot.data_epoch" in catalog
+             and "Math.max" in _fe("src", "lib", "api.ts")
              and "data_epoch" in _fe("src", "lib", "api.ts")
              and '"data_epoch"' in open(
                  os.path.join(ROOT, "backend", "server.py"),
@@ -16796,6 +16822,12 @@ def backend_tests(datadir, csv_path, json_path):
                  os.path.join(ROOT, ".cursor", "rules",
                               "latest-data-wins.mdc"),
                  encoding="utf-8").read()),
+            ("IDE/Journal abort page fetches on dataEpoch bump",
+             "resultPaging.cancelPending()" in app
+             and "notebookPaging.cancelPending()" in _fe(
+                 "src", "components", "Notebook.tsx")
+             and "nextMonotonicDataEpoch" in app
+             and "applyDataEpoch" in app),
         ]
         nb = _fe("src", "components", "Notebook.tsx")
         act = _fe("src", "components", "ActivityShared.tsx")
@@ -38402,6 +38434,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("GROUP BY aggregate", t_group_by),
         ("profiler stats", t_profile_stats),
         ("profiler result cache", t_profile_cache),
+        ("profile cache clears on write epoch bump",
+         t_profile_cache_clears_on_write_epoch_bump),
         ("profile field (table + result)", t_profile_field),
         ("chart data", t_chart),
         ("pivot table", t_pivot),

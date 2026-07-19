@@ -252,6 +252,7 @@ frontend/src/lib/dashboardModel.component.test.ts
 frontend/src/lib/dashboardModel.ts
 frontend/src/lib/dashboardPdf.component.test.ts
 frontend/src/lib/dashboardPdf.ts
+frontend/src/lib/dataEpoch.component.test.ts
 frontend/src/lib/docking.ts
 frontend/src/lib/dropManyConfirm.component.test.ts
 frontend/src/lib/dropManyConfirm.ts

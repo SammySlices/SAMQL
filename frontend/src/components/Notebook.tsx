@@ -774,7 +774,9 @@ export const Notebook: React.FC<Props> = ({
 
   // Latest-data wins: drop retained Journal row payloads when the session
   // epoch advances so stale grids cannot look current (badge already set).
+  // Abort in-flight page fetches so a late page cannot repaint old rows.
   useEffect(() => {
+    notebookPaging.cancelPending();
     setCells((prev) => {
       let changed = false;
       const next = prev.map((c) => {
@@ -788,7 +790,9 @@ export const Notebook: React.FC<Props> = ({
       });
       return changed ? next : prev;
     });
-  }, [dataEpoch]);
+    // cancelPending is stable; do not depend on the whole paging object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataEpoch, notebookPaging.cancelPending]);
 
   const discardRid = (rid?: string | null) => {
     if (rid) api.discardResult(rid).catch(() => {});
