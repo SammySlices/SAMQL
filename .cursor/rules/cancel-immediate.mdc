@@ -1,0 +1,39 @@
+---
+description: Cancel must always stop frontend AND backend immediately; check cancel impact on every related change
+alwaysApply: true
+---
+
+# Cancel immediate (frontend + backend)
+
+**Mantra:** A cancel / Stop command must **always** immediately cancel **both** the frontend request and the backend work. Aborting the fetch alone is never enough; interrupting the backend alone leaves the UI waiting. Use `cancelOne` / `cancelById` / `cancelAllRuns` (or the surface-equivalent that both aborts and `POST`s `/api/query/{id}/cancel`).
+
+## Non-negotiable
+
+1. **End-to-end every time.** Stop / Cancel / modal close-while-busy must: (a) mark cancelled, (b) abort registered `AbortController`s, (c) call backend `cancel_query` so the engine statement unwinds.
+2. **Private DuckDB cursors must be interruptible.** Any `conn.cursor()` used for long work (aggregates, page drains, COPY, loads) must register in `DuckDBManager._native_ops` (and prefer `_BeatScope` / `_ExecKeepalive` on **that** cursor). Engine-level `interrupt()` does not reach an unregistered child cursor — that is how pivot/chart Stop looked broken on Parquet results.
+3. **Register before heavy work.** Backend runs need `_register_run(qid, engine_or_cursor)` bound to the connection that actually executes. Frontend runs need `registerRun(qid, ctrl)` before the fetch.
+4. **Sticky cancel is not a substitute for mid-run interrupt.** Clearing sticky `_cancel` at the *next* op entry must not be confused with stopping the *current* op.
+
+## Before shipping any change that might touch cancel
+
+Ask and answer (in the PR / agent notes):
+
+- Does this change add, move, or skip a private cursor / concurrent-read path / keepalive target?
+- Does this change alter `_register_run`, `_interrupt_entry`, `cancel_query`, `_clear_stale_engine_cancel`, `runController`, or a Stop button?
+- Does a Stop still abort the HTTP request **and** interrupt the live statement within a tight budget?
+- Are adjacent surfaces still cancellable: IDE query, Journal cell, Pivot/Chart, NodeFlow run / iterator / while, loads, flatten/shred, Field Explorer, Activity tray?
+
+If the change could affect cancellation, **verify and fix cancel in the same change** — do not defer. Prefer additive registration over narrowing the interrupt path.
+
+## Correct patterns (copy these)
+
+- Frontend: `registerRun` → work with `signal` → Stop via `cancelOne(qid, ctrl)` (always hits `api.cancelQuery`).
+- Backend DuckDB private cursor: register in `_native_ops[tid]`, wrap execute in `_BeatScope`, unregister on close/`finally`.
+- Keepalive around own-cursor loads must target **`exec_conn`**, not only `self.conn`.
+
+## Do not
+
+- Ship a Stop that only `abort()`s the fetch.
+- Add `conn.cursor()` long work without `_native_ops`.
+- Register `_register_run(qid, None)` for work that runs engine SQL without later rebinding the live engine/cursor.
+- Weaken cancel tests to go green after a path change.

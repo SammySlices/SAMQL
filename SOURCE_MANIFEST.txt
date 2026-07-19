@@ -364,6 +364,7 @@ tests/test_assistant_build_pack.py
 tests/test_fetch_assistant_pack.py
 tests/test_nodeflow_resources.py
 tests/test_optimizations_dual_engine.py
+tests/test_parquet_agg_cancel.py
 tests/test_refactor_phase2.py
 tests/test_release_hardening.py
 tests/test_select_omits_missing_output.py

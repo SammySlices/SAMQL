@@ -2,11 +2,11 @@ import { api } from "./api";
 
 // Shared run/cancel primitives used by all three run surfaces -- the IDE query,
 // the Journal cells, and the Node workflow. Starting and (above all) cancelling
-// a run must behave identically everywhere: a Stop has to free the connection
-// pool AND interrupt the backend, so no surface can be left waiting on a wedged
-// request or holding a slot. Each surface keeps its own run-trigger calls
-// (api.query vs api.nodeflowRun vs runCell); only the cancel/classify plumbing
-// is shared here.
+// a run must behave identically everywhere.
+//
+// MANTRA: Cancel must ALWAYS stop BOTH the frontend request AND the backend
+// work immediately. Aborting the fetch alone leaves the engine running;
+// interrupt alone leaves the UI waiting. Every Stop uses cancelOne/cancelById.
 
 // True when a thrown error is really a cancellation rather than a genuine
 // failure: an aborted fetch, a client-side timeout (ApiError carries status 0),
