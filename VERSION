@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-19.673
+Current build:   2026-07-19.674
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-19.674  (v2.16.4)
+
+FIX: Sidebar + Field Explorer cancel end-to-end; Journal Stop all scoped.
+Sidebar column expand registers query_id + registerRun (collapse/supersede/
+Activity Cancel abort fetch and interrupt sampling). Field Explorer discovery
+registers in runController so Activity Cancel aborts the FE fetch. Journal
+Run-all Stop cancels only Journal cells (no global cancelAllRuns). Refresh
+samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-19.673  (v2.16.4)

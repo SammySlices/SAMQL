@@ -500,6 +500,7 @@ export const api = {
     table: string,
     column: string,
     signal?: AbortSignal,
+    queryId?: string,
   ) =>
     jsonFetch<{
       type?: string;
@@ -528,7 +529,12 @@ export const api = {
       }[];
     }>("/api/column/fields", {
       method: "POST",
-      body: JSON.stringify({ engine, table, column }),
+      body: JSON.stringify({
+        engine,
+        table,
+        column,
+        query_id: queryId,
+      }),
       signal,
     }),
 

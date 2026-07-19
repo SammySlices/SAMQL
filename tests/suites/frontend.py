@@ -1022,10 +1022,29 @@ console.log("OK");
              and "columnFields(" not in fx),
             ("closing Field Explorer cancels in-flight nested discovery",
              "stopDiscovery" in fx
-             and "cancelQuery" in fx
+             and "registerRun(discoveryId, ctrl)" in fx
+             and "cancelOne" in fx
+             and "startTableFieldsDiscovery(engine, table, discoveryId)" in fx
              and "openRef" in fx
              and "next_after" in fx
              and "[srcKey, open, dataEpoch]" in fx),
+            ("Sidebar column expand cancel is end-to-end (query_id + registerRun)",
+             "sb-colfields-" in _read_fe("src", "components", "Sidebar.tsx")
+             and "registerRun(qid, ctrl)" in _read_fe(
+                 "src", "components", "Sidebar.tsx")
+             and "query_id: queryId" in api_src
+             and "cancelOne" in _read_fe(
+                 "src", "lib", "fieldTreeDiscovery.ts")),
+            ("Journal Stop all cancels only Journal cells (not cancelAllRuns)",
+             "cancelAllRef" in _read_fe("src", "components", "Notebook.tsx")
+             and "cancelCell(id)" in _read_fe(
+                 "src", "components", "Notebook.tsx")
+             and "cancelAllRuns()" not in _read_fe(
+                 "src", "components", "Notebook.tsx")
+             and "cancelAllRuns," not in _read_fe(
+                 "src", "components", "Notebook.tsx")
+             and "cancelAllRuns }" not in _read_fe(
+                 "src", "components", "Notebook.tsx")),
             ("dataEpoch advances clear fields and re-run nested discovery",
              "dataEpoch" in fx
              and "[srcKey, open, dataEpoch]" in fx
@@ -3250,7 +3269,8 @@ console.log("OK");
              "runningAll" in nb and "cancelAll" in nb
              and "<Icon.Square size={13} /> Stop" in nb),
             ("Journal Stop halts the sweep and cancels in-flight cells",
-             "cancelAllRef" in nb and "cancelCell(id)" in nb),
+             "cancelAllRef" in nb and "cancelCell(id)" in nb
+             and "cancelAllRuns()" not in nb),
             ("IDE exports profile + reconcile tabs, not just query results",
              "canExport" in app and "reconReportCsv" in app
              and "profileCsv" in app

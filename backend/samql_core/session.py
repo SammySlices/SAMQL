@@ -1443,7 +1443,7 @@ class Session:
         self._table_ui_order = [k for k in order if k != key]
 
     def column_field_tree(self, engine, table, column, cancel=None,
-                          deadline=None):
+                          deadline=None, query_id=None):
         """The nested field tree for one column, parsed from its raw-case
         DuckDB type, so the sidebar can render the schema as an expandable tree
         instead of one giant type string. Returns {type, fields:[...]} where
@@ -1456,38 +1456,61 @@ class Session:
         ``cancel`` stops further sample windows (Field Explorer close / Stop).
         ``deadline`` (monotonic) aborts further sample windows so a soft
         table-tree budget can yield mid-column instead of blocking the request.
+        ``query_id`` (Sidebar expand) registers so cancel_query / Activity
+        Cancel can interrupt; table_field_tree passes cancel without owning
+        a nested query_id (outer registration covers that path).
         """
         from .diagnostics import (parse_duckdb_type, flatten_type_tree,
                                   access_recipes)
         mgr = self.duckdb if engine == "duckdb" else self.db
         if mgr is None or not hasattr(mgr, "_column_types_raw"):
             return {"type": "", "fields": []}
+        own_run = bool(query_id)
+        if own_run:
+            # Clear sticky cancel from an earlier Stop, then register so
+            # cancel_query interrupts this column's sample windows.
+            self._clear_stale_engine_cancel(mgr, except_qid=query_id)
+            self._register_run(
+                query_id, mgr, kind="field_tree",
+                target="%s.%s" % (table, column))
+
+        def _cancelled():
+            if cancel and cancel():
+                return True
+            if query_id and self._run_is_cancelled(query_id):
+                return True
+            return False
+
         try:
-            raw = mgr._column_types_raw(table).get(column, "")
-        except Exception:
-            raw = ""
-        if not raw:
-            return {"type": "", "fields": []}
-        try:
-            node = parse_duckdb_type(raw)
-            rows = flatten_type_tree(column, node, max_nodes=1500)
-            # per-node access recipes (needs the root row for context)
-            access_recipes(column, rows)
-        except Exception:
-            return {"type": raw, "fields": []}
-        # drop the root row (the column itself already shows in the tree)
-        if rows and rows[0].get("depth") == 0:
-            rows = rows[1:]
-        # Call via the class so unit tests that bind this method onto a
-        # SimpleNamespace still resolve the static helper.
-        if engine == "duckdb" and Session._field_tree_needs_json_sample(
-                raw, rows):
-            sampled = Session._sample_column_field_tree(
-                self, mgr, table, column, raw, cancel=cancel,
-                deadline=deadline)
-            if sampled is not None:
-                return sampled
-        return {"type": raw, "fields": rows}
+            try:
+                raw = mgr._column_types_raw(table).get(column, "")
+            except Exception:
+                raw = ""
+            if not raw:
+                return {"type": "", "fields": []}
+            try:
+                node = parse_duckdb_type(raw)
+                rows = flatten_type_tree(column, node, max_nodes=1500)
+                # per-node access recipes (needs the root row for context)
+                access_recipes(column, rows)
+            except Exception:
+                return {"type": raw, "fields": []}
+            # drop the root row (the column itself already shows in the tree)
+            if rows and rows[0].get("depth") == 0:
+                rows = rows[1:]
+            # Call via the class so unit tests that bind this method onto a
+            # SimpleNamespace still resolve the static helper.
+            if engine == "duckdb" and Session._field_tree_needs_json_sample(
+                    raw, rows):
+                sampled = Session._sample_column_field_tree(
+                    self, mgr, table, column, raw, cancel=_cancelled,
+                    deadline=deadline)
+                if sampled is not None:
+                    return sampled
+            return {"type": raw, "fields": rows}
+        finally:
+            if own_run:
+                self._end_run_keep_cancel(query_id)
 
     def table_field_tree(self, engine, table, after=None, budget_sec=None,
                          cancel=None, query_id=None):
