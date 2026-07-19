@@ -2,12 +2,20 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-19.676
+Current build:   2026-07-19.677
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-19.677  (v2.16.4)
+
+FIX: Latest-data wins — free-form SQL writes stamp shred source epochs.
+INSERT/UPDATE/DELETE use scoped _mutation_table_names when parseable;
+unknown writes fail-closed via _stamp_shred_sources_content_epoch so
+shred(refresh=false) rebuilds. Refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-19.676  (v2.16.4)
