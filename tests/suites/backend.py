@@ -3543,6 +3543,37 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             os.environ.pop("SAMQL_PINNED_STALE_MAX_SEC", None)
 
+    def t_reclaim_pinned_default_ttl_15min():
+        # Default pin TTL is 15 minutes (900s) so leaked expired parquet does
+        # not sit for an hour; env override still wins.
+        import inspect
+        import threading as _th
+        import types as _t
+        from samql_core import session as S
+        src = inspect.getsource(S.Session._reclaim_stale_results)
+        need("or 900" in src,
+             "default SAMQL_PINNED_STALE_MAX_SEC fallback is 900")
+        closed = []
+
+        def mk(rid, epoch, created):
+            return _t.SimpleNamespace(
+                data_epoch=epoch, created=created,
+                close=lambda rid=rid: closed.append(rid))
+
+        sess = S.Session.__new__(S.Session)
+        sess._lock = _th.RLock()
+        sess._data_epoch = 2
+        now = __import__("time").time()
+        sess._reuse_pins = {"mid": 1}
+        sess._reuse_pin_since = {"mid": now - 1200}  # 20 min > 15 min default
+        sess._discard_deferred = set()
+        sess._results = {"mid": mk("mid", 1, now - 1200)}
+        sess._results_order = ["mid"]
+        os.environ.pop("SAMQL_PINNED_STALE_MAX_SEC", None)
+        S.Session._reclaim_stale_results(sess)
+        need("mid" not in sess._results and "mid" in closed,
+             "default 15min TTL reclaims aged expired pin")
+
     def t_shred_plan_and_sql():
         # Relational shred: one table per array level with hierarchical keys,
         # child arrays EXCLUDEd (they get their own tables), scalar arrays a
@@ -4230,6 +4261,16 @@ def backend_tests(datadir, csv_path, json_path):
                  and ("table" in r["error"] or "nested" in r["error"])
                  and r.get("node") == "sh2",
                  "missing config names AND highlights the node: %r" % r)
+            # Latest-data wins: scoped source mutation re-flattens even with
+            # refresh=false when the family already exists.
+            calls.clear()
+            s._table_content_epoch = {"big": int(s._data_epoch) + 1}
+            s._shred_at = {("big", "built_root"): int(s._data_epoch)}
+            g["nodes"][0]["config"]["refresh"] = False
+            g["nodes"][0]["config"].pop("output", None)
+            s.run_nodeflow(g, "f", "out")
+            eq(calls, [("big", "built_root")],
+               "source content epoch advance re-flattens with refresh off")
         finally:
             try:
                 s.duckdb = _orig_duck
@@ -25043,7 +25084,7 @@ def backend_tests(datadir, csv_path, json_path):
             skip("duckdb not installed")
         import inspect
         need("query_id" in inspect.signature(
-            S.Session.column_field_tree).parameters,
+            Session.column_field_tree).parameters,
              "column_field_tree accepts query_id")
         s = _fresh_session()
         try:
@@ -29075,6 +29116,30 @@ def backend_tests(datadir, csv_path, json_path):
             need(got and int(got[0][0]) == 1,
                  "folder cache served rewritten content, not stale: %r"
                  % (got,))
+            # Materialize refreshes folder stacks without a manual Read.
+            open(jan, "w", newline="").write(
+                "id,region,amt\n1,East,100\n2,West,200\n")
+            r0 = s.load_folder_files(d)
+            need(r0.get("ok"), "seed folder: %s" % r0.get("error"))
+            g2 = {"nodes": [
+                {"id": "af", "type": "appendfolder",
+                 "config": {"folder": d, "table": r0["table"], "label": "f"}},
+                {"id": "o", "type": "sort",
+                 "config": {"sorts": [{"col": "id", "dir": "asc"}]}}],
+                "edges": [{"from": {"node": "af", "port": "out"},
+                           "to": {"node": "o", "port": "in"}}]}
+            st2 = os.stat(jan)
+            open(jan, "w", newline="").write(
+                "id,region,amt\n41,East,9\n42,West,8\n")
+            os.utime(jan, (st2.st_atime, st2.st_mtime))
+            res2 = s.run_nodeflow(g2, "o", "out")
+            need(not res2.get("error"),
+                 "folder auto-refresh flow: %s" % res2.get("error"))
+            ids = [row[res2["columns"].index("id")] for row in res2["rows"]]
+            need(41 in ids and 42 in ids,
+                 "materialize saw rewritten folder rows: %r" % ids)
+            need(g2["nodes"][0]["config"].get("table"),
+                 "appendfolder config.table patched after refresh")
             need(s.load_folder_files("/no/such/folder/zz").get("error"),
                  "a missing folder errors")
         finally:
@@ -33715,6 +33780,32 @@ def backend_tests(datadir, csv_path, json_path):
             need(got and got[0][0] == "North",
                  "directory cache served rewritten content, not stale: %r"
                  % (got,))
+            # Run all / materialize must refresh without an interactive Read
+            # when disk content changed (stale config.table snapshot).
+            open(p, "w", newline="").write(
+                "id,region,amt\n1,East,100\n2,West,200\n3,East,50\n")
+            r0 = s.load_directory_file(p)
+            need(r0.get("ok"), "seed directory table: %s" % r0.get("error"))
+            g2 = {"nodes": [
+                {"id": "dir", "type": "directory",
+                 "config": {"path": p, "table": r0["table"],
+                            "label": "directory"}},
+                {"id": "f", "type": "filter",
+                 "config": {"condition": "region = 'East'"}}],
+                "edges": [{"from": {"node": "dir", "port": "out"},
+                           "to": {"node": "f", "port": "in"}}]}
+            st2 = os.stat(p)
+            open(p, "w", newline="").write(
+                "id,region,amt\n11,East,1\n12,East,2\n13,West,3\n")
+            os.utime(p, (st2.st_atime, st2.st_mtime))
+            # Do NOT call load_directory_file — materialize must refresh.
+            res2 = s.run_nodeflow(g2, "f", "true")
+            need(not res2.get("error"),
+                 "directory auto-refresh flow: %s" % res2.get("error"))
+            eq(len(res2["rows"]), 2,
+               "materialize saw rewritten East rows without manual Read")
+            need(g2["nodes"][0]["config"].get("table"),
+                 "directory config.table patched after refresh")
             # a missing file errors gracefully
             need(s.load_directory_file(os.path.join(d, "nope.csv")).get("error"),
                  "a missing file returns an error")
@@ -39389,6 +39480,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_send_json_no_store),
         ("results: reclaim pinned epoch-expired after pin age/release",
          t_reclaim_pinned_epoch_expired),
+        ("reclaim pinned stale default TTL is 15 minutes",
+         t_reclaim_pinned_default_ttl_15min),
         ("journal chain reuse: TEMP VIEWs over fresh upstream results",
          t_chain_reuse_views),
         ("load UI: flatten field checkboxes aren't stretched by .form-row",

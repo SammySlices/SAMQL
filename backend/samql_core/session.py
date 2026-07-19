@@ -915,6 +915,10 @@ class Session:
         # First-pin wall time per result id (leaked-pin age bound).
         self._reuse_pin_since = {}
         self._discard_deferred = set()
+        # Shred freshness: source table content epoch vs last successful shred.
+        # Latest-data wins when refresh=false but the nested source changed.
+        self._table_content_epoch = {}
+        self._shred_at = {}
         self._lock = threading.RLock()
         # DuckDB on disk (bounded memory; cold data spilled to a temp DB
         # file) when low-memory mode or explicitly requested.
@@ -2223,6 +2227,21 @@ class Session:
         self._mark_catalog_dirty()
         if content_changed:
             self._data_epoch += 1
+            ep = int(self._data_epoch)
+            # Stamp which tables changed so shred(refresh=false) can re-flatten
+            # only when its nested source moved — not on every unrelated bump.
+            # Free-form writes (keys=None) still bump _data_epoch / flow cache;
+            # they do not force every shred family to rebuild (use refresh=true
+            # or a scoped load/replace of the nested source for that).
+            if keys is not None:
+                tce = getattr(self, "_table_content_epoch", None)
+                if tce is None:
+                    self._table_content_epoch = tce = {}
+                for name in touched:
+                    try:
+                        tce[str(name).lower()] = ep
+                    except Exception:
+                        pass
             if hasattr(self, "_flow_cache"):
                 self._flow_cache_clear()
             self._reclaim_stale_results()
@@ -2236,9 +2255,9 @@ class Session:
         Live checks already refuse them; reclaiming frees parquet/slots so
         frequent mutations do not pile dead stores until ordinary eviction.
         Pinned Journal-reuse results are kept while the pin is live and
-        younger than ``SAMQL_PINNED_STALE_MAX_SEC`` (default 1h). Once pins
-        release — or a pin ages out — epoch-expired stores are reclaimed so
-        wrong data is never served from a leaked pin.
+        younger than ``SAMQL_PINNED_STALE_MAX_SEC`` (default 15 min). Once
+        pins release — or a pin ages out — epoch-expired stores are
+        reclaimed so wrong data is never served from a leaked pin.
         """
         try:
             cur = int(getattr(self, "_data_epoch", 0) or 0)
@@ -2246,11 +2265,11 @@ class Session:
             cur = 0
         try:
             max_pin = float(os.environ.get("SAMQL_PINNED_STALE_MAX_SEC")
-                            or 3600)
+                            or 900)
         except Exception:
-            max_pin = 3600.0
+            max_pin = 900.0
         if max_pin < 0:
-            max_pin = 3600.0
+            max_pin = 900.0
         now = time.time()
         pin_since = getattr(self, "_reuse_pin_since", None)
         if pin_since is None:
@@ -4317,6 +4336,10 @@ class Session:
         # without a prior interactive Fetch.
         self._ensure_source_nodes_fetched(
             graph, [nid for nid, _port in targets], query_id=None)
+        # Directory / append-folder: re-read disk when content digests moved
+        # so Run all / materialize does not SELECT a stale snapshot table.
+        self._ensure_disk_source_nodes_fresh(
+            graph, [nid for nid, _port in targets], query_id=None)
         # SHRED nodes create their relational tables before anything composes
         self._shred_flow_prepass(graph, targets)
         from . import nodeflow
@@ -4657,7 +4680,9 @@ class Session:
         """Run every SHRED node feeding a flow target before composing: the
         CREATEs are a side effect, so they happen once, up front, with the
         node id attached to any failure. ``refresh`` re-shreds every run;
-        otherwise an existing family root means the work is already done."""
+        otherwise an existing family is reused unless the nested source
+        table's content epoch advanced since the last shred (latest-data
+        wins after reload/replace without forcing refresh=true)."""
         from . import nodeflow
         edges = (graph or {}).get("edges") or []
         nodes = {n.get("id"): n for n in (graph or {}).get("nodes") or []}
@@ -4675,6 +4700,12 @@ class Session:
                 continue
             seen.add(nid)
             stack.extend(back.get(nid, []))
+        shred_at = getattr(self, "_shred_at", None)
+        if shred_at is None:
+            self._shred_at = shred_at = {}
+        tce = getattr(self, "_table_content_epoch", None)
+        if tce is None:
+            self._table_content_epoch = tce = {}
         for nid in seen:
             n = nodes.get(nid)
             if not n or (n.get("type") or "") != "shred":
@@ -4691,10 +4722,17 @@ class Session:
                 eng = self.duckdb
                 existing = {str(t).lower() for t in
                             (getattr(eng, "table_columns", {}) or {})}
-                # the base table is the family anchor; its presence means
-                # the flatten already ran (base + joinkeys + per-list).
+                # Family root present: reuse unless the nested source's
+                # content epoch advanced since the last shred stamp.
                 if base.lower() in existing:
-                    continue
+                    src_key = table.lower()
+                    stamp_key = (src_key, base.lower())
+                    last = shred_at.get(stamp_key)
+                    src_ep = tce.get(src_key)
+                    if src_ep is None or (
+                            last is not None
+                            and int(last) >= int(src_ep)):
+                        continue
             # .475: the shred NODE flattens the WHOLE table via the very same
             # flatten_table the Load-modal toggle uses -- so it inherits every
             # improvement for free: the base + <base>_joinkeys + per-list
@@ -4711,6 +4749,11 @@ class Session:
                     node_id=nid, node_type="shred")
             if r.get("cancelled"):
                 raise nodeflow.NodeflowError("cancelled")
+            try:
+                shred_at[(table.lower(), base.lower())] = int(
+                    getattr(self, "_data_epoch", 0) or 0)
+            except Exception:
+                pass
 
     def _materialize_flow(self, graph, node_id, port, engine_target,
                           collect=None, row_limit=None):
@@ -5802,6 +5845,107 @@ class Session:
                 live_cfg["columns"] = fr.get("columns")
             if fr.get("rows") is not None:
                 live_cfg["rows"] = fr.get("rows")
+            live["config"] = live_cfg
+
+    def _disk_source_nodes_upstream(self, graph, start_nodes):
+        """Upstream directory / appendfolder nodes that must re-check disk
+        before materialize (Run all / dashboard), using the same content
+        digests as ``load_directory_file`` / ``load_folder_files``."""
+        want = {"directory", "appendfolder"}
+        edges = graph.get("edges") or []
+        nodes = {n.get("id"): n for n in (graph.get("nodes") or [])
+                 if isinstance(n, dict)}
+
+        def _collect_nested(n, out_list):
+            if not isinstance(n, dict):
+                return
+            if n.get("type") in want:
+                out_list.append(n)
+            if n.get("type") in ("group", "iterator"):
+                for ch in (n.get("config") or {}).get("children") or []:
+                    _collect_nested(ch, out_list)
+
+        seen, stack, out = set(), list(start_nodes or []), []
+        while stack:
+            nid = stack.pop()
+            if nid is None or nid in seen:
+                continue
+            seen.add(nid)
+            n = nodes.get(nid)
+            if n:
+                _collect_nested(n, out)
+            for e in edges:
+                if (e.get("to") or {}).get("node") == nid:
+                    frm = (e.get("from") or {}).get("node")
+                    if frm:
+                        stack.append(frm)
+        seen_ids, uniq = set(), []
+        for n in out:
+            nid = n.get("id")
+            if nid is None or nid in seen_ids:
+                continue
+            seen_ids.add(nid)
+            uniq.append(n)
+        return uniq
+
+    def _ensure_disk_source_nodes_fresh(self, graph, start_nodes, query_id=None):
+        """Re-read upstream directory / appendfolder sources when disk content
+        changed. Mutates ``graph`` node configs (``table`` may change for
+        folder stacks). Cache hits inside ``load_*`` stay cheap when unchanged.
+        Raises ``nodeflow.NodeflowError`` on failure / cancel."""
+        from . import nodeflow
+        sources = self._disk_source_nodes_upstream(graph, start_nodes)
+        if not sources:
+            return
+        by_id = {}
+
+        def _index(nodes):
+            for n in nodes or []:
+                if not isinstance(n, dict):
+                    continue
+                nid = n.get("id")
+                if nid is not None:
+                    by_id[nid] = n
+                cfg = n.get("config") or {}
+                if n.get("type") in ("group", "iterator"):
+                    _index(cfg.get("children"))
+
+        _index(graph.get("nodes"))
+        for n in sources:
+            nid = n.get("id")
+            typ = n.get("type")
+            cfg = dict(n.get("config") or {})
+            label = (cfg.get("label") or typ or "source")
+            if typ == "directory":
+                path = (cfg.get("path") or "").strip()
+                if not path:
+                    # No file picked yet — compile will surface a clear error.
+                    continue
+                fr = self.load_directory_file(path, query_id=query_id)
+            elif typ == "appendfolder":
+                folder = (cfg.get("folder") or "").strip()
+                if not folder:
+                    continue
+                fr = self.load_folder_files(folder, query_id=query_id)
+            else:
+                continue
+            if fr.get("cancelled"):
+                raise nodeflow.NodeflowError("cancelled")
+            if fr.get("error") or not fr.get("ok"):
+                raise nodeflow.NodeflowError(
+                    'Could not refresh "%s" (%s): %s' % (
+                        label, typ, fr.get("error") or "unknown error"))
+            live = by_id.get(nid) or n
+            live_cfg = dict(live.get("config") or {})
+            live_cfg["table"] = fr.get("table") or live_cfg.get("table") or ""
+            if fr.get("engine"):
+                live_cfg["engine"] = fr.get("engine")
+            if fr.get("columns") is not None:
+                live_cfg["columns"] = fr.get("columns")
+            if fr.get("rows") is not None:
+                live_cfg["rows"] = fr.get("rows")
+            if typ == "appendfolder" and fr.get("files") is not None:
+                live_cfg["files"] = fr.get("files")
             live["config"] = live_cfg
 
     def _daterange_values(self, driver):
