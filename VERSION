@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-19.675
+Current build:   2026-07-19.676
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-19.676  (v2.16.4)
+
+FIX: Latest-data wins — pin TTL 15m, shred source epoch, disk auto-refresh.
+Default SAMQL_PINNED_STALE_MAX_SEC is 900 so expired pinned parquet reclaims
+sooner. Shred(refresh=false) re-flattens when the nested source's content
+epoch advances. Directory/appendfolder re-read on materialize/Run all when
+disk digests change (patches config.table). Refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-19.675  (v2.16.4)

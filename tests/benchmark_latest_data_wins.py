@@ -352,13 +352,25 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         and "notebookPaging.cancelPending()" in notebook)
     report["correctness"]["be_reclaim_stale_results"] = (
         "def _reclaim_stale_results" in session_py
-        and "self._reclaim_stale_results()" in session_py)
+        and "self._reclaim_stale_results()" in session_py
+        and "or 900" in session_py.split("def _reclaim_stale_results", 1)[1]
+            .split("def _note_flow_source_tables", 1)[0])
     report["correctness"]["be_invalidate_counts_clears_profiles"] = (
         "self._invalidate_profiles()" in session_py
         and "_invalidate_counts" in session_py
         and session_py.split("def _invalidate_counts", 1)[1]
             .split("def _reclaim_stale_results", 1)[0]
             .count("self._invalidate_profiles()") >= 1)
+    report["correctness"]["be_shred_source_epoch_refresh"] = (
+        "_shred_at" in session_py
+        and "_table_content_epoch" in session_py
+        and "content epoch" in session_py.lower())
+    report["correctness"]["be_disk_source_auto_refresh"] = (
+        "def _ensure_disk_source_nodes_fresh" in session_py
+        and "_ensure_disk_source_nodes_fresh(" in session_py
+        and "directory" in session_py.split(
+            "def _disk_source_nodes_upstream", 1)[1]
+            .split("def _ensure_disk_source_nodes_fresh", 1)[0])
     report["correctness"]["fe_nodeflow_epoch_clears"] = (
         "previewEpochRef" in exec_ctrl
         and "setPreview(null)" in exec_ctrl
