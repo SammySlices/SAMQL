@@ -44,6 +44,8 @@ export const NodeFlow: React.FC<{
   onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
   features: { duckdb?: boolean } | null;
   onTablesChanged?: () => void;
+  /** Apply Session data_epoch from Write / mutation responses immediately. */
+  onDataEpoch?: (value: unknown) => void;
   // when the tables panel is shown, the inspector is portaled into this host
   // (which replaces the tables list) instead of floating over the canvas
   showTables?: boolean;
@@ -83,6 +85,7 @@ export const NodeFlow: React.FC<{
   dataEpoch = 0,
   onToast,
   onTablesChanged,
+  onDataEpoch,
   showTables,
   inspectorHost,
   onSelectionChange,
@@ -443,6 +446,7 @@ export const NodeFlow: React.FC<{
     setNodeWarnings,
     onToast,
     onTablesChanged,
+    onDataEpoch,
     fireRipple,
   });
   documentStatusRef.current = setDocumentStatus;

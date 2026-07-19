@@ -3244,6 +3244,9 @@ console.log("OK");
         nbc = _notebook_cell_source()
         sb = rd("src", "components", "Sidebar.tsx")
         dash = rd("src", "components", "Dashboard.tsx")
+        nfexec = rd(
+            "src", "components", "nodeflow",
+            "useNodeFlowExecutionController.ts")
         ld = _load_data_source()
         pv = rd("src", "components", "PivotPanel.tsx")
         cp = rd("src", "components", "ChartPanel.tsx")
@@ -3434,6 +3437,12 @@ console.log("OK");
              "colFieldsEpochRef" in sb and "dataEpoch" in sb),
             ("dashboard clears widget results on dataEpoch",
              "resultsEpochRef" in dash and "dataEpoch" in dash),
+            ("Change Type applies data_epoch immediately",
+             "applyDataEpoch((r as { data_epoch?: number }).data_epoch)" in app
+             and "changeType" in app),
+            ("NodeFlow Write applies data_epoch immediately",
+             "onDataEpoch={applyDataEpoch}" in app
+             and "onDataEpoch?.(r.data_epoch)" in nfexec),
             ("reconcile auto-rerun gated by source size (M4)",
              "AUTO_RECON_MAX_ROWS" in nb and "reconAutoEligible" in nb
              and "reconNeedsManualRefresh" in nbc),

@@ -5784,7 +5784,8 @@ class Session:
         self._prime_count(_kind, nm, n)
         return {"ok": True, "table": nm, "mode": write_mode,
                 "engine": _kind,
-                "rows": n, "all": self.tables_tree()}
+                "rows": n, "all": self.tables_tree(),
+                "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
 
     # ---- iterator ---------------------------------------------------
     def _node_config(self, graph, node_id):

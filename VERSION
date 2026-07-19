@@ -2,12 +2,19 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-19.678
+Current build:   2026-07-19.679
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-19.679  (v2.16.4)
+
+FIX: Latest-data wins — Change Type / NodeFlow Write echo data_epoch.
+FE applyDataEpoch on change-type; write response + onDataEpoch so open
+grids badge/clear without waiting for /api/tables poll. Refresh samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-19.678  (v2.16.4)

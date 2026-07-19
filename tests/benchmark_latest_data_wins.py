@@ -401,6 +401,19 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         "dataEpoch" in dash
         and "setResults({})" in dash
         and "resultsEpochRef" in dash)
+    report["correctness"]["fe_change_type_applies_epoch"] = (
+        "applyDataEpoch" in app
+        and "changeType" in app
+        and "data_epoch" in api_ts.split("changeType:", 1)[1]
+            .split("materialize:", 1)[0])
+    report["correctness"]["fe_nodeflow_write_applies_epoch"] = (
+        "onDataEpoch" in exec_ctrl
+        and "onDataEpoch?.(r.data_epoch)" in exec_ctrl
+        and "data_epoch" in api_ts.split("nodeflowToTable:", 1)[1]
+            .split("directoryRead:", 1)[0]
+        and '"data_epoch"' in session_py.split(
+            "def run_nodeflow_to_table", 1)[1]
+            .split("def _node_config", 1)[0])
     report["correctness"]["be_disk_source_auto_refresh"] = (
         "def _ensure_disk_source_nodes_fresh" in session_py
         and "_ensure_disk_source_nodes_fresh(" in session_py
