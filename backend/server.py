@@ -1745,10 +1745,15 @@ class Api:
     @staticmethod
     def column_fields(s, m, body, ctx):
         # The nested field tree for one column, fetched lazily when the user
-        # expands a nested column in the tables tree.
+        # expands a nested column in the tables tree. Optional query_id lets
+        # collapse / supersede / Activity Cancel interrupt sample windows.
         b = body or {}
+        qid = b.get("query_id")
+        if qid:
+            _REQ_LOCAL.qid = qid
         return s.column_field_tree(b.get("engine", "duckdb"),
-                                   b.get("table", ""), b.get("column", ""))
+                                   b.get("table", ""), b.get("column", ""),
+                                   query_id=qid)
 
     @staticmethod
     def table_fields(s, m, body, ctx):

@@ -12,6 +12,7 @@ import {
   abortTableFieldsDiscovery,
   startTableFieldsDiscovery,
 } from "../lib/fieldTreeDiscovery";
+import { cancelOne, registerRun, unregisterRun } from "../lib/runController";
 import { runAfterPaint } from "../lib/prettyStruct";
 import { FlattenUidModal } from "./FlattenUidModal";
 
@@ -240,8 +241,12 @@ export const FieldExplorer: React.FC<Props> = ({
   const stopDiscovery = (engine?: string, table?: string) => {
     const qid = discoveryQidRef.current;
     discoveryQidRef.current = null;
-    if (engine && table) abortTableFieldsDiscovery(engine, table);
-    if (qid) void api.cancelQuery(qid).catch(() => {});
+    if (engine && table) {
+      // Slot carries query_id → cancelOne (abort + cancel_query).
+      abortTableFieldsDiscovery(engine, table);
+    } else if (qid) {
+      cancelOne(qid);
+    }
   };
 
   const reloadFields = (engine: string, table: string, key: string) => {
@@ -261,9 +266,11 @@ export const FieldExplorer: React.FC<Props> = ({
     setPreviewSample(null);
     setShredInfo(null);
     // Abort competing Sidebar column samples for this table, then own the slot.
-    const ctrl = startTableFieldsDiscovery(engine, table);
     const discoveryId = `fe-fields-${Date.now().toString(36)}-${gen}`;
+    const ctrl = startTableFieldsDiscovery(engine, table, discoveryId);
     discoveryQidRef.current = discoveryId;
+    // Register so Activity Cancel aborts the FE fetch AND interrupts backend.
+    registerRun(discoveryId, ctrl);
     // Defer fetch until after paint so opening FE shows loading, not a dead UI.
     // Soft budget chunks resume via after/next_after so nested keys already
     // found are kept; closing the modal cancels further search.
@@ -312,6 +319,7 @@ export const FieldExplorer: React.FC<Props> = ({
           if (discoveryQidRef.current === discoveryId) {
             discoveryQidRef.current = null;
           }
+          unregisterRun(discoveryId, ctrl);
           if (gen === fieldsFetchGen.current && key === srcKeyRef.current) {
             setBusy(false);
           }
@@ -348,7 +356,7 @@ export const FieldExplorer: React.FC<Props> = ({
   }, [srcKey, open, dataEpoch]);
 
   // Closing the Field Explorer modal cancels in-flight nested discovery
-  // (AbortController + backend query_id), matching Stop semantics.
+  // (registerRun + AbortController + backend query_id), matching Stop.
   useEffect(() => {
     if (open) return;
     const eng = src?.engine;

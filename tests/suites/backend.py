@@ -25004,6 +25004,38 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_column_field_tree_registers_query_id_for_cancel():
+        # Sidebar per-column expand must register query_id like table_field_tree
+        # so cancel_query / Activity Cancel interrupt JSON sample windows.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        import inspect
+        need("query_id" in inspect.signature(
+            S.Session.column_field_tree).parameters,
+             "column_field_tree accepts query_id")
+        s = _fresh_session()
+        try:
+            duck = s.get_duckdb()
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE sb_col_cxl AS "
+                "SELECT {'a': 1, 'b': {'c': 2}}::JSON AS payload")
+            duck.sync_catalog()
+            duck.interrupt()
+            need(duck._cancel.is_set(), "interrupt left sticky cancel set")
+            tree = s.column_field_tree(
+                "duckdb", "sb_col_cxl", "payload",
+                query_id="sb_after_stall")
+            need(not tree.get("error"),
+                 "column field tree must not auto-cancel after sticky: %r"
+                 % tree)
+            names = [f.get("name") for f in (tree.get("fields") or [])]
+            need("a" in names or "b" in names or "c" in names,
+                 "column field tree returned nested names: %r" % names)
+            need(not duck._cancel.is_set(),
+                 "fresh column field tree cleared sticky engine cancel")
+        finally:
+            s.shutdown()
+
     def t_field_tree_heterogeneous_keys_after_early_resolve():
         # CODE was wrong: once head rows resolved array shapes, mid/end probes
         # were skipped — keys that only appear on later records never showed.
@@ -38402,6 +38434,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_page_survives_sticky_engine_cancel),
         ("Field Explorer survives sticky cancel + registers interrupt",
          t_field_tree_survives_sticky_engine_cancel),
+        ("Sidebar column_field_tree registers query_id for cancel",
+         t_column_field_tree_registers_query_id_for_cancel),
         ("Field Explorer mid/end probes union late heterogeneous keys",
          t_field_tree_heterogeneous_keys_after_early_resolve),
         ("REST API fetch + MSSQL import cancel server-side",

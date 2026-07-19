@@ -10,7 +10,7 @@ import { NotebookCell, type RunCell } from "./NotebookCell";
 import { ProgressBar } from "./ProgressBar";
 import { Icon } from "./Icon";
 import { api, exportResultToFile, saveToDownloads, stampResultEpoch } from "../lib/api";
-import { cancelOne, cancelAllRuns, isCancelledError, registerRun, unregisterRun } from "../lib/runController";
+import { cancelOne, isCancelledError, registerRun, unregisterRun } from "../lib/runController";
 import { uid } from "../lib/ids";
 import { startPointerDrag } from "../lib/pointerDrag";
 import { usePagedResult, type PagedResultOperation } from "../lib/usePagedResult";
@@ -1097,16 +1097,14 @@ export const Notebook: React.FC<Props> = ({
     }
     patch(id, { running: false, reconRunning: false });
   };
-  // Stop a Run-all sweep: halt the loop (cancelAllRef) and cancel any cell that
-  // is currently in flight so the backend stops too.
+  // Stop a Run-all sweep: halt the loop (cancelAllRef) and cancel any Journal
+  // cell that is currently in flight. Scoped to Journal only — do not broadcast
+  // a global run cancel that would stop IDE / NodeFlow / Field Explorer / etc.
   const cancelAll = () => {
     cancelAllRef.current = true;
     const ids: string[] = [];
     aborts.current.forEach((_v, id) => ids.push(id));
     ids.forEach((id) => cancelCell(id));
-    // Free any other in-flight request (status polls, metadata) so a Stop-all
-    // can't leave the connection pool occupied.
-    cancelAllRuns();
   };
 
   const addCell = (

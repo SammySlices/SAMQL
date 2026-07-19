@@ -14,6 +14,10 @@ import {
   abortFieldTreeDiscoveriesForTable,
   startColumnFieldsDiscovery,
 } from "../lib/fieldTreeDiscovery";
+import {
+  registerRun,
+  unregisterRun,
+} from "../lib/runController";
 import { Icon } from "./Icon";
 import {
   familyJoinKeys,
@@ -246,9 +250,15 @@ const TablesTree: React.FC<
     // "no nested fields" forever.
     if (Object.prototype.hasOwnProperty.call(colFields, key)) return;
     setColFieldsBusy((p) => new Set(p).add(key));
-    const ctrl = startColumnFieldsDiscovery(engine, table, col);
+    // End-to-end cancel: query_id + registerRun so collapse / supersede /
+    // Activity Cancel abort the fetch AND interrupt backend sampling.
+    const qid = `sb-colfields-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    const ctrl = startColumnFieldsDiscovery(engine, table, col, qid);
+    registerRun(qid, ctrl);
     api
-      .columnFields(engine, table, col, ctrl.signal)
+      .columnFields(engine, table, col, ctrl.signal, qid)
       .then((r) => {
         if (ctrl.signal.aborted) return;
         setColFields((p) => ({ ...p, [key]: r.fields || [] }));
@@ -256,13 +266,14 @@ const TablesTree: React.FC<
       .catch(() => {
         /* leave unset so a later expand retries (also covers abort) */
       })
-      .finally(() =>
+      .finally(() => {
+        unregisterRun(qid, ctrl);
         setColFieldsBusy((p) => {
           const n = new Set(p);
           n.delete(key);
           return n;
-        }),
-      );
+        });
+      });
   };
   const toggleColFields = (engine: string, table: string, col: string) => {
     const key = colKey(engine, table, col);
