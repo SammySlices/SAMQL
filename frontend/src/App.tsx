@@ -2587,6 +2587,7 @@ export default function App() {
         return;
       }
       toast("ok", "Type changed", `${col} → ${newType}`);
+      applyDataEpoch((r as { data_epoch?: number }).data_epoch);
       await refreshTables();
       const act = activeResIdRef.current;
       if (act) await rerunResultTab(act);
@@ -3338,6 +3339,7 @@ export default function App() {
             <Sidebar
               onTableProps={(engine, name) => setTableProps({ engine, name })}
               tables={tables}
+              dataEpoch={dataEpoch}
               history={history}
               saved={saved}
               workflows={workflows}
@@ -3421,7 +3423,7 @@ export default function App() {
                 <div className="view-loading">Loading NodeFlow…</div>
               }
             >
-              <NodeFlow tables={tables} dataEpoch={dataEpoch} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} sphereMode={nodeSphere} snap={nodeSnap} />
+              <NodeFlow tables={tables} dataEpoch={dataEpoch} onToast={toast} features={feats || null} onTablesChanged={refreshTables} onDataEpoch={applyDataEpoch} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} sphereMode={nodeSphere} snap={nodeSnap} />
             </Suspense>
           ) : view === "dashboard" ? (
             <Suspense
@@ -3432,6 +3434,7 @@ export default function App() {
               <Dashboard
                 key={dashReloadKey}
                 onToast={toast}
+                dataEpoch={dataEpoch}
                 command={dashboardCmd}
                 onCommandConsumed={() => setDashboardCmd(null)}
                 loadRequest={dashboardLoad}

@@ -111,14 +111,15 @@ const MAX_RETAINED_ROWS = 50000;
 
 // A change-detection token for a reconcile cell: it changes when a source cell
 // is re-run (its resultId changes), a real-table source is reloaded (row_count
-// changes), or the keys/compare/balance/source selection changes. Editing an
-// upstream cell's SQL without re-running it does NOT change this (the cell's
-// result -- what reconcile compares -- only changes on run), so auto-rerun
-// tracks results, not keystrokes.
+// OR session data_epoch changes), or the keys/compare/balance/source selection
+// changes. Editing an upstream cell's SQL without re-running it does NOT change
+// this (the cell's result -- what reconcile compares -- only changes on run),
+// so auto-rerun tracks results, not keystrokes.
 function reconInputSig(
   c: RunCell,
   list: RunCell[],
   tables: TableInfo[],
+  dataEpoch = 0,
 ): string {
   const part = (name?: string) => {
     if (!name) return "\u2205";
@@ -135,6 +136,7 @@ function reconInputSig(
     r.keys.join(","),
     r.compare.join(","),
     r.balance || "",
+    `epoch:${dataEpoch}`,
   ].join("|");
 }
 
@@ -1352,7 +1354,7 @@ export const Notebook: React.FC<Props> = ({
         reconError: null,
         reconReport: report,
         reconRanSpec: ranSpec,
-        reconRanSig: reconInputSig(latest, cellsRef.current, tables),
+        reconRanSig: reconInputSig(latest, cellsRef.current, tables, dataEpoch),
         reconDetail: null,
       });
     } catch (e: any) {
@@ -1491,14 +1493,14 @@ export const Notebook: React.FC<Props> = ({
         .filter((c) => c.type === "reconcile")
         .map(
           (c) =>
-            `${c.id}=${reconInputSig(c, cells, tables)}@${
+            `${c.id}=${reconInputSig(c, cells, tables, dataEpoch)}@${
               c.reconRanSig || ""
             }${c.reconRunning ? "R" : ""}${
               c.reconReport || c.reconRanSpec ? "1" : "0"
             }`,
         )
         .join(";"),
-    [cells, tables],
+    [cells, tables, dataEpoch],
   );
   useEffect(() => {
     const t = setTimeout(() => {
@@ -1507,7 +1509,8 @@ export const Notebook: React.FC<Props> = ({
         if (!c.reconReport && !c.reconRanSpec) continue; // first run is manual
         if (!c.leftSource || !c.rightSource || !c.recon?.keys?.length) continue;
         if (
-          reconInputSig(c, cellsRef.current, tables) !== c.reconRanSig &&
+          reconInputSig(c, cellsRef.current, tables, dataEpoch) !==
+            c.reconRanSig &&
           reconAutoEligible(c, cellsRef.current, tables)
         )
           void runReconcile(c.id);
@@ -2333,7 +2336,7 @@ export const Notebook: React.FC<Props> = ({
               reconNeedsManualRefresh={
                 c.type === "reconcile" &&
                 !!c.reconRanSpec &&
-                reconInputSig(c, cells, tables) !== c.reconRanSig &&
+                reconInputSig(c, cells, tables, dataEpoch) !== c.reconRanSig &&
                 !reconAutoEligible(c, cells, tables)
               }
               onReorderStart={(e) => startCellDrag(c.id, e)}

@@ -308,6 +308,10 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
     exec_ctrl = (
         ROOT / "frontend" / "src" / "components" / "nodeflow"
         / "useNodeFlowExecutionController.ts").read_text(encoding="utf-8")
+    sidebar = (ROOT / "frontend" / "src" / "components"
+               / "Sidebar.tsx").read_text(encoding="utf-8")
+    dash = (ROOT / "frontend" / "src" / "components"
+            / "Dashboard.tsx").read_text(encoding="utf-8")
     rule = (ROOT / ".cursor" / "rules" / "latest-data-wins.mdc").read_text(
         encoding="utf-8")
     report["correctness"]["fe_journal_epoch_freshness"] = (
@@ -372,6 +376,44 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         and "_stamp_shred_sources_content_epoch(ep)" in session_py.split(
             "def _invalidate_counts", 1)[1]
             .split("def _reclaim_stale_results", 1)[0])
+    report["correctness"]["be_apinode_autofetch"] = (
+        '"apinode"' in session_py.split(
+            "def _volatile_source_nodes_upstream", 1)[1]
+            .split("def _ensure_source_nodes_fetched", 1)[0]
+        and "def _flow_begin" in session_py)
+    report["correctness"]["be_sql_external_reader_nocache"] = (
+        "read_csv" in session_py.split(
+            "def _graph_has_nondeterministic_ops", 1)[1]
+            .split("def _persistent_flow_salt", 1)[0]
+        and "read_parquet" in session_py.split(
+            "def _graph_has_nondeterministic_ops", 1)[1]
+            .split("def _persistent_flow_salt", 1)[0])
+    report["correctness"]["fe_recon_sig_includes_epoch"] = (
+        "reconInputSig" in notebook
+        and "epoch:${dataEpoch}" in notebook
+        and "dataEpoch" in notebook.split("function reconInputSig", 1)[1]
+            .split("function reconSourceRows", 1)[0])
+    report["correctness"]["fe_sidebar_colfields_epoch"] = (
+        "dataEpoch" in sidebar
+        and "setColFields({})" in sidebar
+        and "colFieldsEpochRef" in sidebar)
+    report["correctness"]["fe_dashboard_epoch_clears"] = (
+        "dataEpoch" in dash
+        and "setResults({})" in dash
+        and "resultsEpochRef" in dash)
+    report["correctness"]["fe_change_type_applies_epoch"] = (
+        "applyDataEpoch" in app
+        and "changeType" in app
+        and "data_epoch" in api_ts.split("changeType:", 1)[1]
+            .split("materialize:", 1)[0])
+    report["correctness"]["fe_nodeflow_write_applies_epoch"] = (
+        "onDataEpoch" in exec_ctrl
+        and "onDataEpoch?.(r.data_epoch)" in exec_ctrl
+        and "data_epoch" in api_ts.split("nodeflowToTable:", 1)[1]
+            .split("directoryRead:", 1)[0]
+        and '"data_epoch"' in session_py.split(
+            "def run_nodeflow_to_table", 1)[1]
+            .split("def _node_config", 1)[0])
     report["correctness"]["be_disk_source_auto_refresh"] = (
         "def _ensure_disk_source_nodes_fresh" in session_py
         and "_ensure_disk_source_nodes_fresh(" in session_py

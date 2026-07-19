@@ -76,6 +76,8 @@ interface UseNodeFlowExecutionControllerOptions {
     message?: string,
   ) => void;
   onTablesChanged?: () => void;
+  /** Apply Session data_epoch from mutation responses before tables poll. */
+  onDataEpoch?: (value: unknown) => void;
   fireRipple: () => void;
 }
 
@@ -104,6 +106,7 @@ export function useNodeFlowExecutionController({
   setNodeWarnings,
   onToast,
   onTablesChanged,
+  onDataEpoch,
   fireRipple,
 }: UseNodeFlowExecutionControllerOptions) {
   const [preview, setPreview] = useState<NodeFlowPreview | null>(null);
@@ -1254,6 +1257,7 @@ export function useNodeFlowExecutionController({
         `${r.table} (${r.engine}) — ${(r.rows ?? 0).toLocaleString()} rows`,
       );
       finishRun(id, r, `Wrote ${r.table}`);
+      onDataEpoch?.(r.data_epoch);
       onTablesChanged?.();
       return { ok: true };
     } catch (e: any) {

@@ -26968,6 +26968,28 @@ def backend_tests(datadir, csv_path, json_path):
             # Size should not grow from fingerprint materialisations either.
             need((info2.get("size") or 0) <= size_before + 0,
                  "non-deterministic sample should not populate flow cache")
+            # SQL nodes that read external files must not freeze either —
+            # file contents can change without a data_epoch bump.
+            g_csv = {"nodes": [
+                {"id": "s1", "type": "sql",
+                 "config": {"sql": "SELECT * FROM read_csv_auto('/tmp/x.csv')",
+                            "label": "csv"}},
+                {"id": "s2", "type": "output",
+                 "config": {"label": "out"}}],
+                 "edges": [
+                    {"from": {"node": "s1", "port": "out"},
+                     "to": {"node": "s2", "port": "in"}}]}
+            need(s._graph_has_nondeterministic_ops(g_csv, eng),
+                 "read_csv_auto SQL is non-deterministic for volatile cache")
+            g_pq = {"nodes": [
+                {"id": "s1", "type": "sql",
+                 "config": {"sql": "SELECT * FROM read_parquet('/tmp/x.pq')"}},
+                {"id": "s2", "type": "output", "config": {}}],
+                 "edges": [
+                    {"from": {"node": "s1", "port": "out"},
+                     "to": {"node": "s2", "port": "in"}}]}
+            need(s._graph_has_nondeterministic_ops(g_pq, eng),
+                 "read_parquet SQL is non-deterministic for volatile cache")
         finally:
             s.shutdown()
 
@@ -30492,6 +30514,36 @@ def backend_tests(datadir, csv_path, json_path):
             er = s.fetch_api_node("api3", {"url": "https://x.test/d"}, graph=g)
             need(er.get("error") and "boom" in er["error"],
                  "fetch error surfaced: %s" % er.get("error"))
+            # Run all / materialize auto-fetches API nodes (no prior Fetch).
+            calls = {"n": 0}
+
+            def fake2(url, auth_user=None, auth_pass=None, headers=None, **kw):
+                calls["n"] += 1
+                return (200, "application/json",
+                        [{"id": calls["n"], "name": "r%d" % calls["n"]}],
+                        "", None)
+
+            s._api_fetcher = fake2
+            g2 = {"nodes": [
+                {"id": "api", "type": "apinode", "config": {
+                    "url": "https://x.test/items", "json_path": "",
+                    "label": "api"}},
+                {"id": "f", "type": "select", "config": {}},
+            ], "edges": [{"from": {"node": "api", "port": "out"},
+                          "to": {"node": "f", "port": "in"}}]}
+            rr = s.run_nodeflow(g2, "api", "out")
+            need(not rr.get("error"),
+                 "apinode auto-fetch on run: %s" % rr.get("error"))
+            eq(calls["n"], 1, "auto-fetch called once on first run")
+            eq(rr.get("total_rows"), 1, "first payload rows")
+            # Second run re-fetches (latest-data wins — API can change).
+            rr2 = s.run_nodeflow(g2, "api", "out")
+            need(not rr2.get("error"),
+                 "apinode re-fetch on second run: %s" % rr2.get("error"))
+            eq(calls["n"], 2, "auto-fetch called again on re-run")
+            eq(rr2.get("total_rows"), 1, "second payload rows")
+            need((g2["nodes"][0]["config"] or {}).get("table"),
+                 "auto-fetch stamped config.table")
         finally:
             s.shutdown()
 

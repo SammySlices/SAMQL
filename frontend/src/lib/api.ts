@@ -1530,11 +1530,20 @@ export const api = {
     queryId?: string,
     signal?: AbortSignal,
   ) =>
-    jsonFetch<{ ok: boolean; cancelled?: boolean }>("/api/table/change-type", {
-      method: "POST",
-      body: JSON.stringify({ engine, table, col, new_type, query_id: queryId }),
-      signal,
-    }),
+    jsonFetch<{ ok: boolean; cancelled?: boolean; data_epoch?: number }>(
+      "/api/table/change-type",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          engine,
+          table,
+          col,
+          new_type,
+          query_id: queryId,
+        }),
+        signal,
+      },
+    ),
 
   // Materialise a SELECT into a named table (notebook reconcile cells stage
   // their cell inputs this way; the reconcile engine compares named tables).
@@ -2210,6 +2219,7 @@ export const api = {
       rows?: number;
       cancelled?: boolean;
       error?: string;
+      data_epoch?: number;
     }>("/api/nodeflow/write", {
       method: "POST",
       body: JSON.stringify({ graph, node, name, query_id: queryId }),
