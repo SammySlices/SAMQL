@@ -3243,6 +3243,7 @@ console.log("OK");
         nb = rd("src", "components", "Notebook.tsx")
         nbc = _notebook_cell_source()
         sb = rd("src", "components", "Sidebar.tsx")
+        dash = rd("src", "components", "Dashboard.tsx")
         ld = _load_data_source()
         pv = rd("src", "components", "PivotPanel.tsx")
         cp = rd("src", "components", "ChartPanel.tsx")
@@ -3427,7 +3428,12 @@ console.log("OK");
              and "api.materialize" in nb and "reconCellDrill" in nb),
             ("reconcile cell auto-reruns on input change",
              "reconInputSig" in nb and "reconAutoSig" in nb
-             and "reconRanSig" in nb),
+             and "reconRanSig" in nb
+             and "epoch:${dataEpoch}" in nb),
+            ("sidebar nested colFields clear on dataEpoch",
+             "colFieldsEpochRef" in sb and "dataEpoch" in sb),
+            ("dashboard clears widget results on dataEpoch",
+             "resultsEpochRef" in dash and "dataEpoch" in dash),
             ("reconcile auto-rerun gated by source size (M4)",
              "AUTO_RECON_MAX_ROWS" in nb and "reconAutoEligible" in nb
              and "reconNeedsManualRefresh" in nbc),

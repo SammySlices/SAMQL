@@ -418,6 +418,7 @@ export async function importDashboardBundle(
 
 export const Dashboard: React.FC<{
   onToast: ToastFn;
+  dataEpoch?: number;
   command?: DashboardCommand | null;
   onCommandConsumed?: () => void;
   loadRequest?: { id: number; name: string; graph: unknown } | null;
@@ -427,6 +428,7 @@ export const Dashboard: React.FC<{
   onSelectionChange?: (hasSelection: boolean) => void;
 }> = ({
   onToast,
+  dataEpoch = 0,
   command,
   onCommandConsumed,
   loadRequest,
@@ -474,6 +476,21 @@ export const Dashboard: React.FC<{
   } | null>(null);
   const { ui: confirmUi, ask: askConfirm } = useConfirmPop();
   const runRef = useRef<{ queryId: string; ctrl: AbortController } | null>(null);
+  // Latest-data wins: clear widget results when session tables mutate so a
+  // prior Run cannot keep showing pre-mutation grids/charts.
+  const resultsEpochRef = useRef(dataEpoch);
+  useEffect(() => {
+    if (resultsEpochRef.current === dataEpoch) return;
+    resultsEpochRef.current = dataEpoch;
+    const cur = runRef.current;
+    if (cur) {
+      cancelOne(cur.queryId, cur.ctrl);
+      runRef.current = null;
+    }
+    setResults({});
+    setRunning(false);
+    setAnimating({});
+  }, [dataEpoch]);
   const dragRef = useRef<{
     id: string;
     mode: "move" | "resize";

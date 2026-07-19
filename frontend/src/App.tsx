@@ -3338,6 +3338,7 @@ export default function App() {
             <Sidebar
               onTableProps={(engine, name) => setTableProps({ engine, name })}
               tables={tables}
+              dataEpoch={dataEpoch}
               history={history}
               saved={saved}
               workflows={workflows}
@@ -3432,6 +3433,7 @@ export default function App() {
               <Dashboard
                 key={dashReloadKey}
                 onToast={toast}
+                dataEpoch={dataEpoch}
                 command={dashboardCmd}
                 onCommandConsumed={() => setDashboardCmd(null)}
                 loadRequest={dashboardLoad}

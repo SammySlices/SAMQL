@@ -115,6 +115,8 @@ interface Props {
   onActiveTabChange?: (tab: Tab) => void;
   /** Fired when a side-tab is clicked (open drawer / switch content). */
   onSideTabClick?: (tab: Tab) => void;
+  /** Session data epoch — clear nested column-field cache on same-name reload. */
+  dataEpoch?: number;
 }
 
 const engineClass = (e: EngineKind) =>
@@ -182,6 +184,7 @@ const TablesTree: React.FC<
   Props & { q: string; setQ: (s: string) => void }
 > = ({
   tables,
+  dataEpoch = 0,
   q,
   setQ,
   onInsertTable,
@@ -548,6 +551,22 @@ const TablesTree: React.FC<
       freshTimer.current = null;
     }, 2300);
   }, [tables]);
+  // Latest-data wins: same-name reload/replace keeps engine:table keys, so
+  // catalog add/remove cleanup above is not enough — clear nested field cache
+  // whenever the session epoch advances.
+  const colFieldsEpochRef = React.useRef(dataEpoch);
+  React.useEffect(() => {
+    if (colFieldsEpochRef.current === dataEpoch) return;
+    colFieldsEpochRef.current = dataEpoch;
+    for (const t of tables) {
+      abortFieldTreeDiscoveriesForTable(t.engine, t.name);
+    }
+    setColFields({});
+    setColFieldsBusy(new Set());
+    setExpandedCols(new Set());
+    setOpenFields(new Set());
+    setClosedEls(new Set());
+  }, [dataEpoch, tables]);
   React.useEffect(
     () => () => {
       if (freshTimer.current != null)
@@ -1790,7 +1809,8 @@ function sidebarPropsEqual(a: Props, b: Props): boolean {
     a.saved === b.saved &&
     a.workflows === b.workflows &&
     a.activeView === b.activeView &&
-    a.activeTab === b.activeTab
+    a.activeTab === b.activeTab &&
+    a.dataEpoch === b.dataEpoch
   );
 }
 export const Sidebar = React.memo(SidebarImpl, sidebarPropsEqual);

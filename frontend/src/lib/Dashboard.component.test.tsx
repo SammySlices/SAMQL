@@ -706,6 +706,20 @@ describe("Dashboard", () => {
     });
   });
 
+  it("clears widget results when dataEpoch advances", async () => {
+    seedWorkspace();
+    apiMock.workflowLoad.mockResolvedValue({ graph: samqlGraph("browse") });
+    const { rerender } = render(
+      <Dashboard onToast={() => undefined} dataEpoch={1} />,
+    );
+    fireEvent.click(screen.getByTestId("dashboard-run"));
+    await waitFor(() => expect(screen.getByTestId("mock-grid")).toBeTruthy());
+    rerender(<Dashboard onToast={() => undefined} dataEpoch={2} />);
+    await waitFor(() =>
+      expect(screen.queryByTestId("mock-grid")).toBeNull(),
+    );
+  });
+
   it("shows persisted last-run date and duration on load", () => {
     seedWorkspace((ws) => {
       ws.dashboards[0].lastRunAt = Date.UTC(2026, 6, 13, 15, 30, 45);
