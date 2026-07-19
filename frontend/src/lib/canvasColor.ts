@@ -1,6 +1,7 @@
 /** Settings → Visual → Change Canvas Color.
- *  Per-surface workspace backgrounds: IDE (SQL editor), Journal, NodeFlow.
- *  When set, `--user-canvas-bg-*` on <html> wins over ivory / light hard-coded whites.
+ *  Per-surface workspace backgrounds + text: IDE (SQL editor), Journal, NodeFlow.
+ *  When set, `--user-canvas-bg-*` / `--user-canvas-text-*` on <html> win over
+ *  ivory / light hard-coded whites and theme `--text`.
  *
  *  NodeFlow snap-grid dots can also be customized (color + opacity) on the Node tab.
  */
@@ -18,10 +19,22 @@ export const CANVAS_COLOR_KEYS: Record<CanvasSurface, string> = {
   node: "samql.canvasColor.node",
 };
 
+export const CANVAS_TEXT_COLOR_KEYS: Record<CanvasSurface, string> = {
+  ide: "samql.canvasTextColor.ide",
+  journal: "samql.canvasTextColor.journal",
+  node: "samql.canvasTextColor.node",
+};
+
 export const USER_CANVAS_BG_VARS: Record<CanvasSurface, string> = {
   ide: "--user-canvas-bg-ide",
   journal: "--user-canvas-bg-journal",
   node: "--user-canvas-bg-node",
+};
+
+export const USER_CANVAS_TEXT_VARS: Record<CanvasSurface, string> = {
+  ide: "--user-canvas-text-ide",
+  journal: "--user-canvas-text-journal",
+  node: "--user-canvas-text-node",
 };
 
 export const HAS_USER_CANVAS_BG_CLASSES: Record<CanvasSurface, string> = {
@@ -30,8 +43,36 @@ export const HAS_USER_CANVAS_BG_CLASSES: Record<CanvasSurface, string> = {
   node: "has-user-canvas-bg-node",
 };
 
+export const HAS_USER_CANVAS_TEXT_CLASSES: Record<CanvasSurface, string> = {
+  ide: "has-user-canvas-text-ide",
+  journal: "has-user-canvas-text-journal",
+  node: "has-user-canvas-text-node",
+};
+
 /** Cool gray matching light chrome-strip / workspace gray (picker default). */
 export const DEFAULT_CANVAS_COLOR = "#d8d8d8";
+
+/** Dark-theme default ink (matches :root --text). */
+export const DEFAULT_CANVAS_TEXT_COLOR_DARK = "#e8eaef";
+
+/** Light-theme default ink (matches theme-light --text). */
+export const DEFAULT_CANVAS_TEXT_COLOR_LIGHT = "#111111";
+
+/** Theme-aware default for the text color wheel when unset. */
+export function defaultCanvasTextColor(): string {
+  try {
+    const root = document.documentElement;
+    if (
+      root.classList.contains("theme-light") ||
+      root.getAttribute("data-theme") === "light"
+    ) {
+      return DEFAULT_CANVAS_TEXT_COLOR_LIGHT;
+    }
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_CANVAS_TEXT_COLOR_DARK;
+}
 
 /** Default NodeFlow snap-grid dot color (matches CSS rgba(127,127,127,…)). */
 export const DEFAULT_NODE_DOT_COLOR = "#7f7f7f";
@@ -58,6 +99,9 @@ export const CANVAS_COLOR_PRESETS: CanvasColorPreset[] = [
 ];
 
 export type CanvasColors = Record<CanvasSurface, string | null>;
+
+/** Per-surface text ink. null = theme `--text` default. */
+export type CanvasTextColors = Record<CanvasSurface, string | null>;
 
 /** NodeFlow snap-grid dot style. null color/opacity means theme auto defaults. */
 export type NodeDotStyle = {
@@ -151,6 +195,23 @@ export function persistCanvasColor(
   writeKey(CANVAS_COLOR_KEYS[surface], n);
 }
 
+/** Read per-surface text colors (no legacy migration). */
+export function readPersistedCanvasTextColors(): CanvasTextColors {
+  const out: CanvasTextColors = { ide: null, journal: null, node: null };
+  for (const surface of CANVAS_SURFACES) {
+    out[surface] = readKey(CANVAS_TEXT_COLOR_KEYS[surface]);
+  }
+  return out;
+}
+
+export function persistCanvasTextColor(
+  surface: CanvasSurface,
+  color: string | null,
+): void {
+  const n = color == null ? null : normalizeHex(color);
+  writeKey(CANVAS_TEXT_COLOR_KEYS[surface], n);
+}
+
 export function readPersistedNodeDotStyle(): NodeDotStyle {
   return {
     color: readKey(NODE_DOT_COLOR_KEY),
@@ -210,6 +271,24 @@ export function applyCanvasColor(
   }
 }
 
+/** Apply or clear one surface's text ink CSS variable + class on <html>. */
+export function applyCanvasTextColor(
+  surface: CanvasSurface,
+  color: string | null,
+): void {
+  const root = document.documentElement;
+  const n = normalizeHex(color);
+  const varName = USER_CANVAS_TEXT_VARS[surface];
+  const cls = HAS_USER_CANVAS_TEXT_CLASSES[surface];
+  if (n) {
+    root.style.setProperty(varName, n);
+    root.classList.add(cls);
+  } else {
+    root.style.removeProperty(varName);
+    root.classList.remove(cls);
+  }
+}
+
 /**
  * Apply NodeFlow snap-grid dot color/opacity. When either value is set,
  * `.has-user-canvas-dot-node` overrides luminance-auto / ivory dot colors.
@@ -239,6 +318,12 @@ export function applyNodeDotStyle(style: NodeDotStyle): void {
 export function applyAllCanvasColors(colors: CanvasColors): void {
   for (const surface of CANVAS_SURFACES) {
     applyCanvasColor(surface, colors[surface]);
+  }
+}
+
+export function applyAllCanvasTextColors(colors: CanvasTextColors): void {
+  for (const surface of CANVAS_SURFACES) {
+    applyCanvasTextColor(surface, colors[surface]);
   }
 }
 
