@@ -1,9 +1,8 @@
 import React, { useCallback, useMemo, useRef } from "react";
 import type { ChartData } from "../../lib/types";
 import {
-  HEAD_H,
-  NODE_W,
   PORTS,
+  nodeSpawnOrigin,
   portsOf,
   portXY,
   type NbEdge,
@@ -415,10 +414,16 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
         if (createdId) {
           const definition = loadCreatedNodes().find((d) => d.id === createdId);
           if (!definition) return;
+          const origin = nodeSpawnOrigin(
+            "usernode",
+            point.x,
+            point.y,
+            sphereMode,
+          );
           addNodeAt(
             "usernode",
-            point.x - NODE_W / 2,
-            point.y - HEAD_H,
+            origin.x,
+            origin.y,
             usernodeConfigFromDefinition(definition),
           );
           return;
@@ -437,7 +442,8 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
           groupAddChild(group.id, type);
           return;
         }
-        addNodeAt(type, point.x - NODE_W / 2, point.y - HEAD_H);
+        const origin = nodeSpawnOrigin(type, point.x, point.y, sphereMode);
+        addNodeAt(type, origin.x, origin.y);
       }}
       zoom={zoom}
       snap={snap}

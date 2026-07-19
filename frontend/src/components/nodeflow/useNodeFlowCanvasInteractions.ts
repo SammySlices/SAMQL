@@ -20,7 +20,10 @@ import {
   PORTS,
   SQL_BODY_H,
   nodeHeight,
+  nodeUnderBodySize,
+  nodeUsesSphereChrome,
   nodeWidth,
+  nodeWorldBounds,
   portsOf,
   portXY,
   visibleInputCount,
@@ -188,17 +191,11 @@ export function useNodeFlowCanvasInteractions(
         );
       for (const node of nodes) {
         if (node.id === excludeId) continue;
-        if (
-          (node.type !== "group" && node.type !== "iterator")
-        ) {
-          continue;
-        }
-        if (
-          x >= node.x &&
-          x <= node.x + nodeWidth(node) &&
-          y >= node.y &&
-          y <= node.y + nodeHeight(node)
-        ) {
+        if (node.type !== "group" && node.type !== "iterator") continue;
+        // Include floating under-panel (sphere children list) so drops onto
+        // the window below the sphere still absorb into the container.
+        const b = nodeWorldBounds(node);
+        if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) {
           return node;
         }
       }
@@ -582,8 +579,16 @@ export function useNodeFlowCanvasInteractions(
     (event: React.PointerEvent, node: NbNode) => {
       event.preventDefault();
       event.stopPropagation();
-      const startW = nodeWidth(node);
+      // Sphere chart/dashboard: resize the floating under-node panel, not the
+      // sphere diameter (nodeWidth/Height stay at SPHERE_SIZE).
+      const under =
+        nodeUsesSphereChrome(node) &&
+        (node.type === "chart" || node.type === "dashboard")
+          ? nodeUnderBodySize(node)
+          : null;
+      const startW = under ? under.w : nodeWidth(node);
       const baseBodyH =
+        under?.h ??
         node.config.bodyH ??
         (node.type === "dashboard"
           ? DASH_BODY_H
@@ -598,7 +603,7 @@ export function useNodeFlowCanvasInteractions(
         startX: event.clientX,
         startY: event.clientY,
         startW,
-        startH: nodeHeight(node),
+        startH: under ? under.h : nodeHeight(node),
         baseBodyH: Number(baseBodyH) || SQL_BODY_H,
       };
     },

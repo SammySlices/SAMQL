@@ -1,7 +1,11 @@
 import React from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
 import type { NbNode } from "../lib/nodeFlowModel";
+import {
+  setNodeFlowSphereMode,
+  SPHERE_SIZE,
+} from "../lib/nodeFlowModel";
 import { CanvasNodeFrame, NodeMinimap, WireLayer } from "./NodeFlowCanvas";
 import { NodeFlowCanvasShell } from "./nodeflow/NodeFlowCanvasShell";
 
@@ -14,6 +18,89 @@ const inputNode: NbNode = {
 };
 
 describe("NodeFlow canvas components", () => {
+  afterEach(() => {
+    setNodeFlowSphereMode(false);
+  });
+
+  it("applies sphere chrome class and diameter when sphere mode is on", () => {
+    setNodeFlowSphereMode(true);
+    const created: NbNode = {
+      id: "u1",
+      type: "usernode",
+      x: 10,
+      y: 20,
+      config: { label: "Created", inputCount: 1, outputCount: 1 },
+    };
+    render(
+      <CanvasNodeFrame
+        node={created}
+        index={0}
+        selected={false}
+        dropHover={false}
+        error={undefined}
+        warning={undefined}
+        ripple={false}
+        snapped={false}
+        dying={false}
+        born={false}
+        lineageFlash={false}
+        denseMode={false}
+        sphereMode
+        renderVersion="g1"
+        chartVersion={0}
+        childSelection={null}
+        onPointerDown={vi.fn()}
+        onContextMenu={vi.fn()}
+      >
+        <span>body</span>
+      </CanvasNodeFrame>,
+    );
+    const el = screen.getByTestId("nodeflow-node");
+    expect(el).toHaveClass("sphere");
+    expect(el).toHaveAttribute("data-node-type", "usernode");
+    expect(el.style.width).toBe(`${SPHERE_SIZE}px`);
+    expect(el.style.height).toBe(`${SPHERE_SIZE}px`);
+  });
+
+  it("spheres a born Created Node from the prop even if html.nb-sphere lags", () => {
+    setNodeFlowSphereMode(false);
+    const created: NbNode = {
+      id: "created-1",
+      type: "usernode",
+      x: 40,
+      y: 50,
+      config: { label: "My macro", inputCount: 1, outputCount: 1, icon: "Sparkle" },
+    };
+    render(
+      <CanvasNodeFrame
+        node={created}
+        index={0}
+        selected={false}
+        dropHover={false}
+        error={undefined}
+        warning={undefined}
+        ripple={false}
+        snapped={false}
+        dying={false}
+        born
+        lineageFlash={false}
+        denseMode={false}
+        sphereMode
+        renderVersion="new"
+        chartVersion={0}
+        childSelection={null}
+        onPointerDown={vi.fn()}
+        onContextMenu={vi.fn()}
+      >
+        <span>face</span>
+      </CanvasNodeFrame>,
+    );
+    const el = screen.getByTestId("nodeflow-node");
+    expect(el).toHaveClass("sphere");
+    expect(el).toHaveClass("born");
+    expect(el.style.width).toBe(`${SPHERE_SIZE}px`);
+  });
+
   it("selects and deletes a connection through separate hit targets", () => {
     const onSelect = vi.fn();
     const onDelete = vi.fn();
@@ -222,9 +309,11 @@ describe("NodeFlow canvas components", () => {
 
   it("routes right-click to contextmenu without treating it as inspector open", () => {
     const onPointerDown = vi.fn();
-    const onContextMenu = vi.fn((e: React.MouseEvent) => {
-      e.preventDefault();
-    });
+    const onContextMenu = vi.fn(
+      (e: React.MouseEvent, _node: NbNode) => {
+        e.preventDefault();
+      },
+    );
     const onInspectorOpen = vi.fn();
     render(
       <CanvasNodeFrame

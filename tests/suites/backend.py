@@ -1876,13 +1876,15 @@ def backend_tests(datadir, csv_path, json_path):
         try:
             results = {
                 "r1": _t.SimpleNamespace(
-                    engine="duckdb", capped=False,
+                    engine="duckdb", capped=False, data_epoch=0,
                     store=_t.SimpleNamespace(_path=good.name)),
                 "r2": _t.SimpleNamespace(
-                    engine="duckdb", capped=True,
+                    engine="duckdb", capped=True, data_epoch=0,
                     store=_t.SimpleNamespace(_path=good.name)),
             }
-            sess = _t.SimpleNamespace(_results=results)
+            sess = _t.SimpleNamespace(_results=results, _data_epoch=0)
+            sess._live_cached_result = \
+                S.Session._live_cached_result.__get__(sess, S.Session)
             sess._reusable_store_path = \
                 S.Session._reusable_store_path.__get__(sess, S.Session)
             setup = S.Session._setup_reuse_views.__get__(sess, S.Session)
@@ -2330,6 +2332,9 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_filecache_sweep():
         # Sweep policy: abandoned temps, age-out, and LRU eviction to budget.
+        # Attach-aware: held paths survive budget pressure; soft-recent
+        # unheld can shrink under pressure; floor-recent (convert→attach)
+        # never budget-evicts.
         import tempfile as _tf
         import shutil as _sh
         import time as _time
@@ -2337,6 +2342,8 @@ def backend_tests(datadir, csv_path, json_path):
         tmpdir = _tf.mkdtemp(prefix="fc_sweep_")
         saved_dir = FC._DIR
         FC._DIR = tmpdir
+        saved_held = dict(FC._HELD)
+        FC._HELD.clear()
         now = _time.time()
 
         def mk(name, size, age_sec):
@@ -2353,7 +2360,10 @@ def backend_tests(datadir, csv_path, json_path):
             middle = mk("fc_2.parquet", 100, 2000)
             newest = mk("fc_3.parquet", 100, 1000)
             other = mk("unrelated.bin", 10, 30 * 86400)  # not ours
-            freshbig = mk("fc_fresh.parquet", 100, 120)  # live-session entry
+            soft = mk("fc_soft.parquet", 100, 120)       # soft-recent, unheld
+            floor = mk("fc_floor.parquet", 100, 10)      # floor-recent
+            held = mk("fc_held.parquet", 100, 3000)      # old but attached
+            FC.hold(held)
             os.environ["SAMQL_FILECACHE_GB"] = str(150 / (1024 ** 3))
             removed = FC.sweep()
             need(not os.path.exists(old_tmp),
@@ -2363,16 +2373,23 @@ def backend_tests(datadir, csv_path, json_path):
                  "an entry unused past the age limit is dropped")
             need(not os.path.exists(oldest) and not os.path.exists(middle),
                  "LRU eviction removes the least-recently-used first")
-            need(os.path.exists(newest),
-                 "the most recently used entry survives the budget")
+            need(not os.path.exists(newest),
+                 "under budget pressure older unheld entries are reclaimed")
+            need(not os.path.exists(soft),
+                 "under budget pressure soft-recent unheld shrinks "
+                 "(no blanket 600s exemption)")
+            need(os.path.exists(floor),
+                 "floor-recent unheld survives (convert→attach race)")
+            need(os.path.exists(held),
+                 "a held/attached entry survives budget eviction")
             need(os.path.exists(other),
                  "sweep only ever touches fc_* files")
-            need(os.path.exists(freshbig),
-                 "a very recent entry is exempt from BUDGET eviction "
-                 "(only age can take it)")
-            need(removed == 4, "removed count reflects the work: %d" % removed)
+            need(removed >= 5, "removed count reflects the work: %d" % removed)
+            FC.release(held)
         finally:
             os.environ.pop("SAMQL_FILECACHE_GB", None)
+            FC._HELD.clear()
+            FC._HELD.update(saved_held)
             FC._DIR = saved_dir
             _sh.rmtree(tmpdir, ignore_errors=True)
 
@@ -2518,11 +2535,50 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         need("filecache.sweep()" in srv,
              "startup runs the cache's budget/age sweep")
+        need("sweep_op_caches()" in srv,
+             "startup wipes flatten/shred staging caches")
         eng = open(os.path.join(ROOT, "backend", "samql_core", "engines.py"),
                    encoding="utf-8").read()
         need("filecache.lookup(" in eng and "filecache.commit(" in eng
-             and 'tmputil.new_tempfile("cache_"' in eng,
+             and 'tmputil.new_tempfile("cache_"' in eng
+             and "_fc.hold(" in eng and "_fc.release(" in eng,
              "the load consults the cache with a per-instance fallback")
+
+    def t_sweep_op_caches_startup():
+        # Startup wipes samql_flatten_cache / samql_shred_cache under system
+        # temp so crashed mid-op staging cannot accumulate across restarts.
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core import tmputil as T
+        parent = _tf.gettempdir()
+        fdir = os.path.join(parent, "samql_flatten_cache")
+        sdir = os.path.join(parent, "samql_shred_cache")
+        os.makedirs(fdir, exist_ok=True)
+        os.makedirs(sdir, exist_ok=True)
+        open(os.path.join(fdir, "orphan.parquet"), "wb").write(b"x")
+        open(os.path.join(sdir, "orphan.parquet"), "wb").write(b"y")
+        try:
+            n = T.sweep_op_caches()
+            need(n >= 1, "sweep_op_caches reports removals")
+            need(not os.path.isdir(fdir) and not os.path.isdir(sdir),
+                 "flatten/shred staging dirs are wiped at startup")
+        finally:
+            _sh.rmtree(fdir, ignore_errors=True)
+            _sh.rmtree(sdir, ignore_errors=True)
+
+    def t_send_json_no_store():
+        # API JSON responses must be no-store; static/download paths keep
+        # their own Cache-Control (favicon max-age, hashed assets, etc.).
+        srv = open(os.path.join(ROOT, "backend", "server.py"),
+                   encoding="utf-8").read()
+        seg = srv.split("def _send_json", 1)[1].split("def _send_bytes", 1)[0]
+        need('"Cache-Control": "no-store"' in seg
+             or "'Cache-Control': 'no-store'" in seg,
+             "_send_json sets Cache-Control: no-store")
+        need('"Cache-Control": "max-age=60"' in srv,
+             "favicon/brand paths still allow short caching")
+        need("def _send_file_download" in srv,
+             "file downloads stay on a separate send path")
 
     def t_reconcile_reuse_staging():
         # #4: reconcile input staging materializes from a FRESH source cell's
@@ -2550,18 +2606,20 @@ def backend_tests(datadir, csv_path, json_path):
         try:
             results = {
                 "fresh": _t.SimpleNamespace(
-                    engine="duckdb", capped=False,
+                    engine="duckdb", capped=False, data_epoch=0,
                     store=_t.SimpleNamespace(_path=good.name)),
                 "capped": _t.SimpleNamespace(
-                    engine="duckdb", capped=True,
+                    engine="duckdb", capped=True, data_epoch=0,
                     store=_t.SimpleNamespace(_path=good.name)),
             }
             eng = Eng()
             sess = _t.SimpleNamespace(
-                _results=results, duckdb=eng, db=None,
+                _results=results, duckdb=eng, db=None, _data_epoch=0,
                 _register_run=lambda *a, **k: None,
                 _unregister_run=lambda *a, **k: None,
                 _run_is_cancelled=lambda q: False)
+            sess._live_cached_result = \
+                S.Session._live_cached_result.__get__(sess, S.Session)
             sess._reusable_store_path = \
                 S.Session._reusable_store_path.__get__(sess, S.Session)
             mat = S.Session.materialize.__get__(sess, S.Session)
@@ -3368,7 +3426,7 @@ def backend_tests(datadir, csv_path, json_path):
         good.write(b"P")
         good.close()
         cr = _t.SimpleNamespace(
-            engine="duckdb", capped=False,
+            engine="duckdb", capped=False, data_epoch=0,
             store=_t.SimpleNamespace(_path=good.name),
             close=lambda: closed.append("r1"))
         drops = []
@@ -3380,9 +3438,12 @@ def backend_tests(datadir, csv_path, json_path):
                 return _t.SimpleNamespace()
         eng = _t.SimpleNamespace(conn=Conn(), table_columns={})
         sess = _t.SimpleNamespace(
-            _results={"r1": cr}, _results_order=["r1"],
+            _results={"r1": cr}, _results_order=["r1"], _data_epoch=0,
             _lock=_th.RLock(), _reuse_pins={}, _discard_deferred=set(),
-            _schedule_cleanup=lambda full=False: None)
+            _schedule_cleanup=lambda full=False: None,
+            _reclaim_stale_results=lambda: None)
+        sess._live_cached_result = \
+            S.Session._live_cached_result.__get__(sess, S.Session)
         sess._reusable_store_path = \
             S.Session._reusable_store_path.__get__(sess, S.Session)
         sess.discard_result = \
@@ -3414,6 +3475,49 @@ def backend_tests(datadir, csv_path, json_path):
                 os.unlink(good.name)
             except Exception:
                 pass
+
+    def t_reclaim_pinned_epoch_expired():
+        # Epoch-expired result stores reclaim once pins release; a young pin
+        # is kept while live; an aged pin on an expired epoch is bounded.
+        import threading as _th
+        import types as _t
+        from samql_core import session as S
+        closed = []
+
+        def mk(rid, epoch, created):
+            return _t.SimpleNamespace(
+                data_epoch=epoch, created=created,
+                close=lambda rid=rid: closed.append(rid))
+
+        sess = S.Session.__new__(S.Session)
+        sess._lock = _th.RLock()
+        sess._data_epoch = 5
+        sess._reuse_pins = {"live": 1, "aged": 1}
+        sess._reuse_pin_since = {
+            "live": __import__("time").time(),
+            "aged": __import__("time").time() - 7200,
+        }
+        sess._discard_deferred = set()
+        sess._results = {
+            "live": mk("live", 1, sess._reuse_pin_since["live"]),
+            "aged": mk("aged", 1, sess._reuse_pin_since["aged"]),
+            "free": mk("free", 1, __import__("time").time()),
+            "fresh": mk("fresh", 5, __import__("time").time()),
+        }
+        sess._results_order = ["live", "aged", "free", "fresh"]
+        os.environ["SAMQL_PINNED_STALE_MAX_SEC"] = "3600"
+        try:
+            S.Session._reclaim_stale_results(sess)
+            need("live" in sess._results and "fresh" in sess._results,
+                 "young pin and current-epoch stores survive")
+            need("free" not in sess._results and "aged" not in sess._results,
+                 "unpinned expired and aged-pin expired are reclaimed")
+            need("aged" in closed and "free" in closed,
+                 "reclaimed stores are closed")
+            need("aged" not in sess._reuse_pins,
+                 "aged pin is dropped when reclaiming")
+        finally:
+            os.environ.pop("SAMQL_PINNED_STALE_MAX_SEC", None)
 
     def t_shred_plan_and_sql():
         # Relational shred: one table per array level with hierarchical keys,
@@ -5291,8 +5395,10 @@ def backend_tests(datadir, csv_path, json_path):
              % eff_bad)
         need(not map_bad,
              "every ref map has a cleanup site: %r" % map_bad)
+        # Visual toggles on this branch: Sphere nodes (default on) + Node Snap (default off).
         eq(keys, {"samql.editorIvory", "samql.reduceMotion",
                   "samql.eyeCare", "samql.nodeFlowDense",
+                  "samql.nodeSphere", "samql.nodeSnap",
                   "samql.nbMinimapMini", "samql.nb2.paletteHidden",
                   "samql.canvasIvory", "samql.theme"},
            "the direct storage-key inventory is frozen and namespaced")
@@ -28866,6 +28972,21 @@ def backend_tests(datadir, csv_path, json_path):
             eq(len(res["rows"]), 3, "the folder node feeds downstream")
             eq(s.load_folder_files(d).get("table"), tbl,
                "an unchanged folder is cached")
+            # same size + preserved mtime rewrite of one folder file must miss
+            jan = os.path.join(d, "jan.csv")
+            st = os.stat(jan)
+            open(jan, "w", newline="").write(
+                "id,region,amt\n9,North,1\n8,South,2\n")
+            os.utime(jan, (st.st_atime, st.st_mtime))
+            r2 = s.load_folder_files(d)
+            need(r2.get("ok"), "folder rewrite reload ok: %s" % r2.get("error"))
+            eng = s.duckdb if r2.get("engine") == "duckdb" else s.db
+            need(eng is not None, "engine available after folder reload")
+            _c, got = eng.execute(
+                'SELECT COUNT(*) FROM "%s" WHERE id = 9' % r2["table"])
+            need(got and int(got[0][0]) == 1,
+                 "folder cache served rewritten content, not stale: %r"
+                 % (got,))
             need(s.load_folder_files("/no/such/folder/zz").get("error"),
                  "a missing folder errors")
         finally:
@@ -33491,6 +33612,21 @@ def backend_tests(datadir, csv_path, json_path):
             # re-reading the same unchanged file reuses the hidden table
             eq(s.load_directory_file(p).get("table"), tbl,
                "an unchanged file is cached, not reloaded")
+            # same size + preserved mtime but rewritten content must miss
+            # (bounded content samples in the directory cache token)
+            st = os.stat(p)
+            open(p, "w", newline="").write(
+                "id,region,amt\n9,North,999\n8,South,888\n7,North,777\n")
+            os.utime(p, (st.st_atime, st.st_mtime))
+            r2 = s.load_directory_file(p)
+            need(r2.get("ok"), "rewrite reload ok: %s" % r2.get("error"))
+            eng = s.duckdb if r2.get("engine") == "duckdb" else s.db
+            need(eng is not None, "engine available after directory reload")
+            _c, got = eng.execute(
+                'SELECT region FROM "%s" WHERE id = 9' % r2["table"])
+            need(got and got[0][0] == "North",
+                 "directory cache served rewritten content, not stale: %r"
+                 % (got,))
             # a missing file errors gracefully
             need(s.load_directory_file(os.path.join(d, "nope.csv")).get("error"),
                  "a missing file returns an error")
@@ -38365,6 +38501,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_sqlserver_node_fetch_and_autofetch),
         ("directory node (read a file from a folder)", t_directory_node),
         ("append-from-folder node (stack files)", t_appendfolder_node),
+        # content-signature coverage lives inside the two node tests above
+
         ("group node (linear child pipeline)", t_group_node),
         ("multi-join node (inner join 3+ inputs)", t_multijoin_node),
         ("json-extract node (paths -> columns)", t_jsonextract_node),
@@ -39153,6 +39291,12 @@ def backend_tests(datadir, csv_path, json_path):
          t_filecache_load_wiring),
         ("filecache: lifecycle (survives stray sweep; startup sweeps it)",
          t_filecache_lifecycle),
+        ("startup: wipe flatten/shred staging caches",
+         t_sweep_op_caches_startup),
+        ("API JSON: Cache-Control no-store on _send_json",
+         t_send_json_no_store),
+        ("results: reclaim pinned epoch-expired after pin age/release",
+         t_reclaim_pinned_epoch_expired),
         ("journal chain reuse: TEMP VIEWs over fresh upstream results",
          t_chain_reuse_views),
         ("load UI: flatten field checkboxes aren't stretched by .form-row",

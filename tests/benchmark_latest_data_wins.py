@@ -338,8 +338,9 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         and "staleById[id]" in notebook)
     report["correctness"]["fe_field_explorer_soft_clear"] = (
         "dataEpoch" in fe
-        and "setPreviewSample(null)" in fe
-        and "feEpochRef" in fe)
+        and "[srcKey, open, dataEpoch]" in fe
+        and "setFields(null)" in fe
+        and "reloadFields" in fe)
     report["correctness"]["fe_apply_data_epoch"] = (
         "applyDataEpoch" in app and "onDataEpoch" in notebook)
     report["correctness"]["be_reclaim_stale_results"] = (

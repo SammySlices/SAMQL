@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  HEAD_H,
-  NODE_W,
+  nodeSpawnOrigin,
   type NbEdge,
   type NbNode,
   nodeFlowDenseActive,
@@ -75,7 +74,7 @@ export const NodeFlow: React.FC<{
   onOpenLoad?: () => void;
   /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
   denseMode?: boolean;
-  /** Icon-sphere chrome (owned by App Settings → Visual). Default OFF. */
+  /** Icon-sphere chrome (owned by App Settings → Visual). Default ON. */
   sphereMode?: boolean;
   /** Canvas grid snap while dragging (owned by App Settings → Visual). Default OFF. */
   snap?: boolean;
@@ -97,7 +96,7 @@ export const NodeFlow: React.FC<{
   onToolsTablesOpenChange,
   onOpenLoad,
   denseMode = false,
-  sphereMode = false,
+  sphereMode = true,
   snap = false,
 }) => {
   // Keep densify() / sphere helpers aligned with App Settings before Scene paints
@@ -766,7 +765,8 @@ export const NodeFlow: React.FC<{
           ) {
             groupAddChild(group.id, type);
           } else {
-            addNodeAt(type, point.x - NODE_W / 2, point.y - HEAD_H);
+            const origin = nodeSpawnOrigin(type, point.x, point.y, sphereMode);
+            addNodeAt(type, origin.x, origin.y);
           }
         }}
       />

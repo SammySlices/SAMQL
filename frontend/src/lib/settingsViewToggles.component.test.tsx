@@ -228,11 +228,12 @@ describe("Settings View consolidations", () => {
     expect(dense).toHaveTextContent("Condensed NodeFlow");
     expect(snap).toHaveTextContent("Node Snap");
     expect(snap).toHaveAttribute("aria-pressed", "false");
-    expect(sphere).toHaveTextContent("Sphere nodes");
-    expect(sphere).toHaveAttribute("aria-pressed", "false");
+    expect(sphere).toHaveTextContent("Sphere nodes: on");
+    expect(sphere).toHaveAttribute("aria-pressed", "true");
     expect(canvasColor).toHaveTextContent("Change Canvas Color");
     expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
-    expect(localStorage.getItem("samql.nodeSphere")).toBe("0");
+    expect(localStorage.getItem("samql.nodeSphere")).toBe("1");
+    expect(document.documentElement.classList.contains("nb-sphere")).toBe(true);
 
     fireEvent.click(theme);
     await waitFor(() => {
@@ -274,6 +275,16 @@ describe("Settings View consolidations", () => {
 
     fireEvent.click(sphere);
     await waitFor(() => {
+      expect(sphere).toHaveAttribute("aria-pressed", "false");
+      expect(sphere).toHaveTextContent("Sphere nodes");
+      expect(localStorage.getItem("samql.nodeSphere")).toBe("0");
+      expect(document.documentElement.classList.contains("nb-sphere")).toBe(
+        false,
+      );
+    });
+
+    fireEvent.click(sphere);
+    await waitFor(() => {
       expect(sphere).toHaveAttribute("aria-pressed", "true");
       expect(sphere).toHaveTextContent("Sphere nodes: on");
       expect(localStorage.getItem("samql.nodeSphere")).toBe("1");
@@ -281,6 +292,39 @@ describe("Settings View consolidations", () => {
         true,
       );
     });
+  });
+
+  it("restores Sphere nodes off from explicit localStorage 0", async () => {
+    localStorage.setItem("samql.nodeSphere", "0");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    const sphere = screen.getByTestId("nodeflow-sphere-toggle");
+    expect(sphere).toHaveAttribute("aria-pressed", "false");
+    expect(sphere).toHaveTextContent("Sphere nodes");
+    expect(localStorage.getItem("samql.nodeSphere")).toBe("0");
+  });
+
+  it("defaults Sphere nodes on for missing or corrupt localStorage", async () => {
+    localStorage.setItem("samql.nodeSphere", "maybe");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    const sphere = screen.getByTestId("nodeflow-sphere-toggle");
+    expect(sphere).toHaveAttribute("aria-pressed", "true");
+    expect(localStorage.getItem("samql.nodeSphere")).toBe("1");
   });
 
   it("Change Canvas Color opens floating modal with surface tabs", async () => {

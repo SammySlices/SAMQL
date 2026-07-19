@@ -883,6 +883,71 @@ describe("FieldExplorer modal close cancels nested discovery", () => {
   });
 });
 
+describe("FieldExplorer dataEpoch rediscovery", () => {
+  beforeEach(() => {
+    localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
+    vi.mocked(api.tableFields).mockResolvedValue(arrayFieldTree as any);
+    vi.mocked(api.columnAccessPreview).mockResolvedValue({ ok: false } as any);
+  });
+
+  it("clears fields and re-runs nested discovery when dataEpoch advances", async () => {
+    const { rerender } = render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+        dataEpoch={1}
+      />,
+    );
+    await screen.findByText("json");
+    expect(api.tableFields).toHaveBeenCalledTimes(1);
+
+    const nextTree = {
+      fields: [
+        {
+          depth: 1,
+          name: "json",
+          type: "JSON",
+          kind: "struct",
+          column: "json",
+          path: "json",
+          access: { first: '"json"', sel: '"json"', unnests: [] },
+        },
+        {
+          depth: 1,
+          name: "new_after_reload",
+          type: "VARCHAR",
+          kind: "scalar",
+          column: "new_after_reload",
+          path: "new_after_reload",
+          access: {
+            first: '"new_after_reload"',
+            sel: '"new_after_reload"',
+            unnests: [],
+          },
+        },
+      ],
+    };
+    vi.mocked(api.tableFields).mockResolvedValue(nextTree as any);
+
+    rerender(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+        dataEpoch={2}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(api.tableFields).toHaveBeenCalledTimes(2);
+    });
+    expect(await screen.findByText("new_after_reload")).toBeTruthy();
+  });
+});
+
 describe("FieldExplorer minimize", () => {
   beforeEach(() => {
     localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);

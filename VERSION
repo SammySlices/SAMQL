@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.670
+Current build:   2026-07-18.671
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-18.671  (v2.16.4)
+
+BETA APPWINDOW: SPHERE POLISH + LATEST-DATA-WINS HARDENING.
+Sphere chrome for groups/iterators/SQL/variables with floating under-panels,
+rim port fan, and container minimize; Field Explorer and modal open polish;
+pinned stale-result age bound; filecache/session reclaim fixes. Refresh
+samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-18.670  (v2.16.4)

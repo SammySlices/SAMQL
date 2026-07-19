@@ -6,12 +6,14 @@ import {
   inputPortMark,
   isTopInput,
   nodeShowsBody,
+  nodeUnderBodySize,
   nodeUsesSphereChrome,
   portsOf,
   portTopOffset,
   sidePortLabel,
   sameCanvasNodeMemoState,
   spherePortOffset,
+  sphereUnderGap,
   type CanvasNodeMemoState,
   type NbEdge,
   type NbNode,
@@ -47,7 +49,150 @@ function SphereNodeIcon({ node }: { node: NbNode }) {
   const NodeIcon = (Icon[iconName] || Icon.Sparkle) as React.FC<{
     size?: number;
   }>;
-  return <NodeIcon size={22} />;
+  // Solid black Lucide glyph only (no glow / outline filter).
+  return (
+    <span className="nb2-sphere-icon" aria-hidden="true">
+      <NodeIcon size={22} />
+    </span>
+  );
+}
+
+type ChartDataBag = React.MutableRefObject<
+  Record<string, { data?: ChartData; loading?: boolean; error?: string }>
+>;
+
+function ChartNodeBody({
+  node,
+  chartDataRef,
+  ensureChartFor,
+}: {
+  node: NbNode;
+  chartDataRef: ChartDataBag;
+  ensureChartFor: (node: NbNode | null, force?: boolean) => Promise<void>;
+}) {
+  const current = chartDataRef.current[node.id];
+  return (
+    <div
+      className="nb2-node-chart"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      {current?.loading ? (
+        <div className="nb2-chart-msg">Rendering…</div>
+      ) : current?.error ? (
+        <div className="nb2-chart-msg">{current.error}</div>
+      ) : current?.data ? (
+        <ChartView
+          data={current.data}
+          chartType={node.config.chart_type}
+          style={node.config.style}
+          fallback={CHART_FALLBACK}
+        />
+      ) : (
+        <button
+          className="btn sm"
+          onClick={() => void ensureChartFor(node, true)}
+        >
+          <Icon.Chart size={13} /> Show chart
+        </button>
+      )}
+      <button
+        className="nb2-chart-refresh"
+        title="Refresh chart"
+        onClick={() => void ensureChartFor(node, true)}
+      >
+        <Icon.Refresh size={11} />
+      </button>
+    </div>
+  );
+}
+
+function DashboardNodeBody({
+  node,
+  chartDataRef,
+  actions,
+}: {
+  node: NbNode;
+  chartDataRef: ChartDataBag;
+  actions: {
+    ensureChartFor: (node: NbNode | null, force?: boolean) => Promise<void>;
+    upstreamChartNode: (dashboard: NbNode, inputPort: string) => NbNode | null;
+    setDashboardPane: (dashboard: NbNode, index: number, port: string) => void;
+  };
+}) {
+  return (
+    <div
+      className="nb2-dash"
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      {[0, 1, 2, 3].map((index) => {
+        const panes = node.config.panes || ["in1", "in2", "in3", "in4"];
+        const port = panes[index] || `in${index + 1}`;
+        const chartNode = actions.upstreamChartNode(node, port);
+        const current = chartNode
+          ? chartDataRef.current[chartNode.id]
+          : undefined;
+        return (
+          <div className="nb2-dash-pane" key={index}>
+            <div className="nb2-dash-bar">
+              <select
+                className="nb2-dash-sel"
+                value={port}
+                onPointerDown={(event) => event.stopPropagation()}
+                onChange={(event) =>
+                  actions.setDashboardPane(node, index, event.target.value)
+                }
+              >
+                {["in1", "in2", "in3", "in4"].map((inputPort) => {
+                  const upstream = actions.upstreamChartNode(node, inputPort);
+                  return (
+                    <option key={inputPort} value={inputPort}>
+                      {upstream
+                        ? upstream.config.label || "chart"
+                        : `in ${inputPort.slice(2)} (empty)`}
+                    </option>
+                  );
+                })}
+              </select>
+              {chartNode && (
+                <button
+                  className="nb2-chart-refresh"
+                  title="Refresh"
+                  onClick={() => void actions.ensureChartFor(chartNode, true)}
+                >
+                  <Icon.Refresh size={10} />
+                </button>
+              )}
+            </div>
+            <div className="nb2-dash-body">
+              {!chartNode ? (
+                <div className="nb2-chart-msg">
+                  Connect a chart to {PORT_LABEL[port] || port}
+                </div>
+              ) : current?.loading ? (
+                <div className="nb2-chart-msg">Rendering…</div>
+              ) : current?.error ? (
+                <div className="nb2-chart-msg">{current.error}</div>
+              ) : current?.data ? (
+                <ChartView
+                  data={current.data}
+                  chartType={chartNode.config.chart_type}
+                  style={chartNode.config.style}
+                  fallback={CHART_FALLBACK}
+                />
+              ) : (
+                <button
+                  className="btn sm"
+                  onClick={() => void actions.ensureChartFor(chartNode, true)}
+                >
+                  Show
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 export type NodeFlowCanvasCardActions = {
@@ -84,6 +229,137 @@ export type NodeFlowCanvasCardProps = CanvasNodeMemoState & {
   selectedIdsRef: React.RefObject<string[]>;
 };
 
+/** Group / iterator child pipeline list (classic body or sphere under-panel). */
+function ContainerChildrenBody({
+  node,
+  childSelection,
+  actions,
+  groupDnd,
+}: {
+  node: NbNode;
+  childSelection: string | null | undefined;
+  actions: Pick<
+    NodeFlowCanvasCardActions,
+    | "groupReorder"
+    | "groupAddChild"
+    | "extractChildToCanvas"
+    | "setSelectedId"
+    | "setSelectedIds"
+  >;
+  groupDnd: React.MutableRefObject<{
+    groupId: string;
+    from: number;
+    to?: number;
+  } | null>;
+}) {
+  return (
+    <div
+      className="nb2-group-body"
+      onPointerDown={(event) => event.stopPropagation()}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const drag = groupDnd.current;
+        if (drag && drag.groupId === node.id) {
+          actions.groupReorder(
+            node.id,
+            drag.from,
+            drag.to ?? (node.config.children || []).length,
+          );
+          groupDnd.current = null;
+          return;
+        }
+        const type = event.dataTransfer.getData(
+          "application/x-nb-node",
+        ) as NodeType;
+        if (type && PORTS[type]) actions.groupAddChild(node.id, type);
+      }}
+    >
+      {(node.config.children || []).length === 0 ? (
+        <div className="nb2-group-empty">
+          Drag nodes here to build a pipeline
+        </div>
+      ) : (
+        (node.config.children || []).map((child: any, index: number) => (
+          <div
+            key={child.id}
+            className={
+              "nb2-group-child" +
+              (childSelection === child.id ? " sel" : "")
+            }
+            draggable
+            onPointerDown={(event) => {
+              event.stopPropagation();
+              actions.setSelectedId(child.id);
+              actions.setSelectedIds([]);
+            }}
+            onDragStart={(event) => {
+              event.stopPropagation();
+              groupDnd.current = { groupId: node.id, from: index };
+              event.dataTransfer.effectAllowed = "move";
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const drag = groupDnd.current;
+              if (drag && drag.groupId === node.id) {
+                const rect = event.currentTarget.getBoundingClientRect();
+                drag.to =
+                  event.clientY > rect.top + rect.height / 2
+                    ? index + 1
+                    : index;
+              }
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const drag = groupDnd.current;
+              if (drag && drag.groupId === node.id) {
+                actions.groupReorder(node.id, drag.from, drag.to ?? index);
+                groupDnd.current = null;
+                return;
+              }
+              const type = event.dataTransfer.getData(
+                "application/x-nb-node",
+              ) as NodeType;
+              if (type && PORTS[type]) actions.groupAddChild(node.id, type);
+            }}
+            title="Drag to reorder · click to edit"
+          >
+            <span className="nb2-gc-idx">{index + 1}</span>
+            {(() => {
+              const item = NODE_BY_TYPE[child.type as NodeType];
+              const NodeIcon = item
+                ? (Icon[item.icon] as React.FC<{ size?: number }>)
+                : null;
+              return NodeIcon ? <NodeIcon size={12} /> : null;
+            })()}
+            <span className="nb2-gc-type">{child.type}</span>
+            <span className="nb2-gc-label">
+              {(child.config && child.config.label) || child.type}
+            </span>
+            <button
+              className="nb2-gc-x"
+              title="Take out of group (back to the canvas)"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                actions.extractChildToCanvas(node.id, child.id);
+              }}
+            >
+              ⤴
+            </button>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 function NodeFlowCanvasCardImpl({
   node,
   index,
@@ -111,10 +387,24 @@ function NodeFlowCanvasCardImpl({
 }: NodeFlowCanvasCardProps) {
   void renderVersion;
   void chartVersion;
-  void sphereMode;
+  void denseMode;
   const ports = portsOf(node);
-  const sphere = nodeUsesSphereChrome(node);
+  // Prop-driven: newly created cards must sphere on first paint.
+  const sphere = nodeUsesSphereChrome(node, sphereMode);
   const sphereTitle = sphereHoverTitle(node);
+  const isContainer = node.type === "group" || node.type === "iterator";
+  const containerOpen = isContainer && nodeShowsBody(node);
+  const childCount = isContainer
+    ? ((node.config && node.config.children) || []).length
+    : 0;
+  // Under-panel size is null when chart/dashboard/container body is hidden.
+  const underBody =
+    sphere &&
+    (isContainer ||
+      node.type === "chart" ||
+      node.type === "dashboard")
+      ? nodeUnderBodySize(node)
+      : null;
   return (
     <CanvasNodeFrameView
       node={node}
@@ -155,15 +445,103 @@ function NodeFlowCanvasCardImpl({
       }}
     >
             {sphere ? (
+              <>
               <div
-                className="nb2-sphere-face"
+                className={
+                  "nb2-sphere-face" +
+                  (isContainer && !containerOpen
+                    ? " nb2-sphere-face-minimized"
+                    : "")
+                }
                 data-testid="nodeflow-sphere-face"
                 title={sphereTitle}
                 aria-label={sphereTitle}
                 onPointerDown={(event) => actions.startNodeDrag(event, node)}
               >
                 <SphereNodeIcon node={node} />
+                {isContainer && (
+                  <button
+                    type="button"
+                    className="nb2-sphere-container-toggle"
+                    data-testid={
+                      containerOpen
+                        ? "nodeflow-container-minimize"
+                        : "nodeflow-container-expand"
+                    }
+                    title={
+                      containerOpen ? "Minimize children" : "Show children"
+                    }
+                    aria-label={
+                      containerOpen ? "Minimize children" : "Show children"
+                    }
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      actions.patchNode(node.id, {
+                        collapsed: containerOpen,
+                      });
+                    }}
+                  >
+                    <span className="nb2-sphere-container-badge" aria-hidden="true">
+                      {childCount}
+                    </span>
+                    <span className="nb2-sphere-container-caret" aria-hidden="true">
+                      {containerOpen ? "▾" : "▸"}
+                    </span>
+                  </button>
+                )}
               </div>
+              {underBody && (
+                <div
+                  className="nb2-sphere-under"
+                  data-testid="nodeflow-sphere-under"
+                  style={{
+                    width: underBody.w,
+                    height: underBody.h,
+                    top: `calc(100% + ${sphereUnderGap(node)}px)`,
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  {isContainer ? (
+                    <>
+                      <div className="nb2-sphere-under-bar">
+                        <span className="nb2-sphere-under-bar-label">
+                          {node.type === "iterator" ? "Iterator" : "Group"}
+                          {childCount > 0 ? ` · ${childCount}` : ""}
+                        </span>
+                      </div>
+                      <ContainerChildrenBody
+                        node={node}
+                        childSelection={childSelection}
+                        actions={actions}
+                        groupDnd={groupDnd}
+                      />
+                    </>
+                  ) : node.type === "chart" ? (
+                    <ChartNodeBody
+                      node={node}
+                      chartDataRef={chartDataRef}
+                      ensureChartFor={actions.ensureChartFor}
+                    />
+                  ) : (
+                    <DashboardNodeBody
+                      node={node}
+                      chartDataRef={chartDataRef}
+                      actions={actions}
+                    />
+                  )}
+                  {(node.type === "chart" || node.type === "dashboard") && (
+                    <div
+                      className="nb2-node-resize"
+                      title="Drag to resize"
+                      onPointerDown={(event) =>
+                        actions.startNodeResize(event, node)
+                      }
+                    />
+                  )}
+                </div>
+              )}
+              </>
             ) : (
               <>
             <div
@@ -201,15 +579,32 @@ function NodeFlowCanvasCardImpl({
                   }
                 />
               )}
-              {(node.type === "chart" || node.type === "dashboard") && (
+              {(node.type === "chart" ||
+                node.type === "dashboard" ||
+                isContainer) && (
                 <button
                   className="nb2-node-collapse"
-                  title={nodeShowsBody(node) ? "Hide output" : "Show output"}
+                  data-testid={
+                    isContainer
+                      ? nodeShowsBody(node)
+                        ? "nodeflow-container-minimize"
+                        : "nodeflow-container-expand"
+                      : undefined
+                  }
+                  title={
+                    isContainer
+                      ? nodeShowsBody(node)
+                        ? "Minimize children"
+                        : "Show children"
+                      : nodeShowsBody(node)
+                        ? "Hide output"
+                        : "Show output"
+                  }
                   onPointerDown={(event) => event.stopPropagation()}
                   onClick={() => {
                     const shown = nodeShowsBody(node);
                     actions.patchNode(node.id, { collapsed: shown });
-                    if (!shown) {
+                    if (!shown && !isContainer) {
                       if (node.type === "chart") void actions.ensureChartFor(node);
                       else {
                         (node.config.panes || ["in1", "in2", "in3", "in4"]).forEach(
@@ -248,110 +643,15 @@ function NodeFlowCanvasCardImpl({
                   </div>
                 )}
               </div>
-            ) : node.type === "group" || node.type === "iterator" ? (
-              <div
-                className="nb2-group-body"
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = "copy";
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const drag = groupDnd.current;
-                  if (drag && drag.groupId === node.id) {
-                    actions.groupReorder(
-                      node.id,
-                      drag.from,
-                      drag.to ?? (node.config.children || []).length,
-                    );
-                    groupDnd.current = null;
-                    return;
-                  }
-                  const type = event.dataTransfer.getData(
-                    "application/x-nb-node",
-                  ) as NodeType;
-                  if (type && PORTS[type]) actions.groupAddChild(node.id, type);
-                }}
-              >
-                {(node.config.children || []).length === 0 ? (
-                  <div className="nb2-group-empty">
-                    Drag nodes here to build a pipeline
-                  </div>
-                ) : (
-                  (node.config.children || []).map((child: any, index: number) => (
-                    <div
-                      key={child.id}
-                      className={
-                        "nb2-group-child" +
-                        (childSelection === child.id ? " sel" : "")
-                      }
-                      draggable
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                        actions.setSelectedId(child.id);
-                        actions.setSelectedIds([]);
-                      }}
-                      onDragStart={(event) => {
-                        event.stopPropagation();
-                        groupDnd.current = { groupId: node.id, from: index };
-                        event.dataTransfer.effectAllowed = "move";
-                      }}
-                      onDragOver={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const drag = groupDnd.current;
-                        if (drag && drag.groupId === node.id) {
-                          const rect = event.currentTarget.getBoundingClientRect();
-                          drag.to =
-                            event.clientY > rect.top + rect.height / 2
-                              ? index + 1
-                              : index;
-                        }
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const drag = groupDnd.current;
-                        if (drag && drag.groupId === node.id) {
-                          actions.groupReorder(node.id, drag.from, drag.to ?? index);
-                          groupDnd.current = null;
-                          return;
-                        }
-                        const type = event.dataTransfer.getData(
-                          "application/x-nb-node",
-                        ) as NodeType;
-                        if (type && PORTS[type]) actions.groupAddChild(node.id, type);
-                      }}
-                      title="Drag to reorder · click to edit"
-                    >
-                      <span className="nb2-gc-idx">{index + 1}</span>
-                      {(() => {
-                        const item = NODE_BY_TYPE[child.type as NodeType];
-                        const NodeIcon = item
-                          ? (Icon[item.icon] as React.FC<{ size?: number }>)
-                          : null;
-                        return NodeIcon ? <NodeIcon size={12} /> : null;
-                      })()}
-                      <span className="nb2-gc-type">{child.type}</span>
-                      <span className="nb2-gc-label">
-                        {(child.config && child.config.label) || child.type}
-                      </span>
-                      <button
-                        className="nb2-gc-x"
-                        title="Take out of group (back to the canvas)"
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          actions.extractChildToCanvas(node.id, child.id);
-                        }}
-                      >
-                        ⤴
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
+            ) : isContainer ? (
+              containerOpen ? (
+                <ContainerChildrenBody
+                  node={node}
+                  childSelection={childSelection}
+                  actions={actions}
+                  groupDnd={groupDnd}
+                />
+              ) : null
             ) : node.type === "sql" || node.type === "python" ? null : (
               <div className="nb2-node-sub">
                 {getNodeCardSummary(node, incomingEdges as NbEdge[])}
@@ -383,119 +683,19 @@ function NodeFlowCanvasCardImpl({
             )}
 
             {node.type === "chart" && nodeShowsBody(node) && (
-              <div
-                className="nb2-node-chart"
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                {(() => {
-                  const current = chartDataRef.current[node.id];
-                  if (current?.loading) {
-                    return <div className="nb2-chart-msg">Rendering…</div>;
-                  }
-                  if (current?.error) {
-                    return <div className="nb2-chart-msg">{current.error}</div>;
-                  }
-                  if (current?.data) {
-                    return (
-                      <ChartView
-                        data={current.data}
-                        chartType={node.config.chart_type}
-                        style={node.config.style}
-                        fallback={CHART_FALLBACK}
-                      />
-                    );
-                  }
-                  return (
-                    <button
-                      className="btn sm"
-                      onClick={() => void actions.ensureChartFor(node, true)}
-                    >
-                      <Icon.Chart size={13} /> Show chart
-                    </button>
-                  );
-                })()}
-                <button
-                  className="nb2-chart-refresh"
-                  title="Refresh chart"
-                  onClick={() => void actions.ensureChartFor(node, true)}
-                >
-                  <Icon.Refresh size={11} />
-                </button>
-              </div>
+              <ChartNodeBody
+                node={node}
+                chartDataRef={chartDataRef}
+                ensureChartFor={actions.ensureChartFor}
+              />
             )}
 
             {node.type === "dashboard" && nodeShowsBody(node) && (
-              <div
-                className="nb2-dash"
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                {[0, 1, 2, 3].map((index) => {
-                  const panes =
-                    node.config.panes || ["in1", "in2", "in3", "in4"];
-                  const port = panes[index] || `in${index + 1}`;
-                  const chartNode = actions.upstreamChartNode(node, port);
-                  const current = chartNode ? chartDataRef.current[chartNode.id] : undefined;
-                  return (
-                    <div className="nb2-dash-pane" key={index}>
-                      <div className="nb2-dash-bar">
-                        <select
-                          className="nb2-dash-sel"
-                          value={port}
-                          onPointerDown={(event) => event.stopPropagation()}
-                          onChange={(event) =>
-                            actions.setDashboardPane(node, index, event.target.value)
-                          }
-                        >
-                          {["in1", "in2", "in3", "in4"].map((inputPort) => {
-                            const upstream = actions.upstreamChartNode(node, inputPort);
-                            return (
-                              <option key={inputPort} value={inputPort}>
-                                {upstream
-                                  ? upstream.config.label || "chart"
-                                  : `in ${inputPort.slice(2)} (empty)`}
-                              </option>
-                            );
-                          })}
-                        </select>
-                        {chartNode && (
-                          <button
-                            className="nb2-chart-refresh"
-                            title="Refresh"
-                            onClick={() => void actions.ensureChartFor(chartNode, true)}
-                          >
-                            <Icon.Refresh size={10} />
-                          </button>
-                        )}
-                      </div>
-                      <div className="nb2-dash-body">
-                        {!chartNode ? (
-                          <div className="nb2-chart-msg">
-                            Connect a chart to {PORT_LABEL[port] || port}
-                          </div>
-                        ) : current?.loading ? (
-                          <div className="nb2-chart-msg">Rendering…</div>
-                        ) : current?.error ? (
-                          <div className="nb2-chart-msg">{current.error}</div>
-                        ) : current?.data ? (
-                          <ChartView
-                            data={current.data}
-                            chartType={chartNode.config.chart_type}
-                            style={chartNode.config.style}
-                            fallback={CHART_FALLBACK}
-                          />
-                        ) : (
-                          <button
-                            className="btn sm"
-                            onClick={() => void actions.ensureChartFor(chartNode, true)}
-                          >
-                            Show
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <DashboardNodeBody
+                node={node}
+                chartDataRef={chartDataRef}
+                actions={actions}
+              />
             )}
 
             {(((node.type === "chart" || node.type === "dashboard") &&
@@ -513,7 +713,8 @@ function NodeFlowCanvasCardImpl({
 
             {ports.inputs
               .slice(0, visibleInputCount)
-              .filter((port) => !isTopInput(node.type, port))
+              // Sphere: classic top-edge ports (iterator vars) join the left rim fan.
+              .filter((port) => sphere || !isTopInput(node.type, port))
               .map((port, index, leftPorts) => {
                 const mark = inputPortMark(port);
                 const label =
@@ -525,6 +726,14 @@ function NodeFlowCanvasCardImpl({
                 const pos = sphere
                   ? spherePortOffset(node, "in", index, leftPorts.length)
                   : null;
+                const portTitle =
+                  port === "vars"
+                    ? "Wire a table here — its rows drive the loop (one pass per row, columns bound as ${vars})"
+                    : mark
+                      ? mark === "L"
+                        ? "Left input"
+                        : "Right input"
+                      : label || port;
                 return (
                   <div
                     key={`i${port}`}
@@ -547,13 +756,7 @@ function NodeFlowCanvasCardImpl({
                     }
                     onPointerEnter={() => actions.setHoveredInput(node.id, port)}
                     onPointerLeave={() => actions.setHoveredInput(node.id, null)}
-                    title={
-                      mark
-                        ? mark === "L"
-                          ? "Left input"
-                          : "Right input"
-                        : label || port
-                    }
+                    title={portTitle}
                   >
                     <span className="nb2-dot">
                       {mark && (
@@ -588,10 +791,10 @@ function NodeFlowCanvasCardImpl({
                 </div>
               ))}
 
-            {ports.outputs.map((port, index) => {
+            {ports.outputs.map((port, index, outs) => {
               const label = sidePortLabel(port);
               const pos = sphere
-                ? spherePortOffset(node, "out", index)
+                ? spherePortOffset(node, "out", index, outs.length)
                 : null;
               return (
                 <div

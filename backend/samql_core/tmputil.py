@@ -223,6 +223,11 @@ def _sweep_temp_root():
     for name in entries:
         if not name.startswith(("samql_", "jf_export_")):
             continue
+        # One-shot flatten/shred staging dirs are wiped on startup via
+        # sweep_op_caches(); skip them here so age-based rules do not race
+        # a live mid-session flatten.
+        if name in ("samql_flatten_cache", "samql_shred_cache"):
+            continue
         path = os.path.join(parent, name)
         try:
             if os.path.realpath(path) == os.path.realpath(_ROOT):
@@ -234,6 +239,29 @@ def _sweep_temp_root():
             else:
                 os.unlink(path)
             removed += 1
+        except Exception:
+            continue
+    return removed
+
+
+def sweep_op_caches():
+    """Wipe one-shot flatten/shred staging dirs under system temp.
+
+    Call at process startup only: these caches are per-operation staging
+    (not shared across sessions). A crash can leave multi-GB leftovers;
+    nothing live holds them across a restart.
+    """
+    removed = 0
+    parent = tempfile.gettempdir()
+    for name in ("samql_flatten_cache", "samql_shred_cache"):
+        path = os.path.join(parent, name)
+        try:
+            if os.path.isdir(path):
+                _rmtree(path)
+                removed += 1
+            elif os.path.isfile(path):
+                os.unlink(path)
+                removed += 1
         except Exception:
             continue
     return removed

@@ -912,6 +912,8 @@ class Session:
         # (rid -> refcount); pinned results are never evicted / freed, and an
         # explicit discard is DEFERRED until the run's views are dropped
         self._reuse_pins = {}
+        # First-pin wall time per result id (leaked-pin age bound).
+        self._reuse_pin_since = {}
         self._discard_deferred = set()
         self._lock = threading.RLock()
         # DuckDB on disk (bounded memory; cold data spilled to a temp DB
@@ -2202,20 +2204,32 @@ class Session:
             self._reclaim_stale_results()
 
     def _reclaim_stale_results(self):
-        """Close unpinned result snapshots whose data_epoch no longer matches.
+        """Close result snapshots whose data_epoch no longer matches.
 
         Live checks already refuse them; reclaiming frees parquet/slots so
         frequent mutations do not pile dead stores until ordinary eviction.
-        Pinned Journal-reuse results are left alone until pins release.
+        Pinned Journal-reuse results are kept while the pin is live and
+        younger than ``SAMQL_PINNED_STALE_MAX_SEC`` (default 1h). Once pins
+        release — or a pin ages out — epoch-expired stores are reclaimed so
+        wrong data is never served from a leaked pin.
         """
         try:
             cur = int(getattr(self, "_data_epoch", 0) or 0)
         except Exception:
             cur = 0
+        try:
+            max_pin = float(os.environ.get("SAMQL_PINNED_STALE_MAX_SEC")
+                            or 3600)
+        except Exception:
+            max_pin = 3600.0
+        if max_pin < 0:
+            max_pin = 3600.0
+        now = time.time()
+        pin_since = getattr(self, "_reuse_pin_since", None)
+        if pin_since is None:
+            self._reuse_pin_since = pin_since = {}
         with self._lock:
             for rid in list(self._results_order):
-                if self._reuse_pins.get(rid):
-                    continue
                 cr = self._results.get(rid)
                 if cr is None:
                     if rid in self._results_order:
@@ -2227,6 +2241,17 @@ class Session:
                     got = -1
                 if got == cur:
                     continue
+                if self._reuse_pins.get(rid):
+                    since = pin_since.get(rid)
+                    if since is None:
+                        since = float(getattr(cr, "created", now) or now)
+                        pin_since[rid] = since
+                    if (now - since) < max_pin:
+                        continue
+                    # Aged pin on an expired epoch: drop the pin and reclaim.
+                    self._reuse_pins.pop(rid, None)
+                    pin_since.pop(rid, None)
+                    self._discard_deferred.discard(rid)
                 self._results.pop(rid, None)
                 if rid in self._results_order:
                     self._results_order.remove(rid)
@@ -6834,9 +6859,14 @@ class Session:
         pinned = []
         pins = getattr(self, "_reuse_pins", None)
         lock = getattr(self, "_lock", None)
+        pin_since = getattr(self, "_reuse_pin_since", None)
+        if pin_since is None and pins is not None:
+            self._reuse_pin_since = pin_since = {}
         if pins is not None and lock is not None:
             with lock:
                 for _n, rid in (reuse or {}).items():
+                    if pins.get(rid, 0) <= 0 and pin_since is not None:
+                        pin_since[rid] = time.time()
                     pins[rid] = pins.get(rid, 0) + 1
                     pinned.append(rid)
 
@@ -6859,11 +6889,15 @@ class Session:
                 time.sleep(0.05)
             if pins is not None and lock is not None:
                 flush = []
+                released = False
                 with lock:
                     for rid in pinned:
                         n = pins.get(rid, 0) - 1
                         if n <= 0:
                             pins.pop(rid, None)
+                            if pin_since is not None:
+                                pin_since.pop(rid, None)
+                            released = True
                             if rid in self._discard_deferred:
                                 self._discard_deferred.discard(rid)
                                 flush.append(rid)
@@ -6872,6 +6906,13 @@ class Session:
                 for rid in flush:
                     try:
                         self.discard_result(rid)
+                    except Exception:
+                        pass
+                # Pins released: reclaim epoch-expired stores that were
+                # held only by the pin (do not serve wrong data).
+                if released:
+                    try:
+                        self._reclaim_stale_results()
                     except Exception:
                         pass
         try:
@@ -13544,12 +13585,19 @@ class Session:
             return {"error": "That file no longer exists."}
         try:
             st = os.stat(path)
-            # size/ctime/ino catch in-place rewrites that preserve mtime.
+            # size/ctime/ino + bounded content samples (filecache posture):
+            # same-mtime in-place rewrites must miss the directory cache.
+            from . import filecache as _fc
+            try:
+                digest = _fc.content_digest(path, int(st.st_size))
+            except Exception:
+                digest = ""
             file_token = (
                 int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
                 int(st.st_size),
                 int(getattr(st, "st_ctime_ns", 0) or 0),
                 int(getattr(st, "st_ino", 0) or 0),
+                digest,
             )
         except OSError as e:
             return {"error": err_str(e)}
@@ -14264,16 +14312,25 @@ class Session:
                     "(CSV, TSV, JSON, Parquet, Excel)."}
         paths = [os.path.join(folder, n) for n in names]
         try:
-            # Include size/ctime/ino so same-mtime rewrites miss the cache.
-            sig = tuple(
-                (n,
-                 int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
-                 int(st.st_size),
-                 int(getattr(st, "st_ctime_ns", 0) or 0),
-                 int(getattr(st, "st_ino", 0) or 0))
-                for n, p in zip(names, paths)
-                for st in (os.stat(p),)
-            )
+            # size/ctime/ino + bounded content samples (filecache posture)
+            # so same-mtime in-place rewrites miss the folder cache.
+            from . import filecache as _fc
+            sig_rows = []
+            for n, p in zip(names, paths):
+                st = os.stat(p)
+                try:
+                    digest = _fc.content_digest(p, int(st.st_size))
+                except Exception:
+                    digest = ""
+                sig_rows.append((
+                    n,
+                    int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
+                    int(st.st_size),
+                    int(getattr(st, "st_ctime_ns", 0) or 0),
+                    int(getattr(st, "st_ino", 0) or 0),
+                    digest,
+                ))
+            sig = tuple(sig_rows)
         except OSError as e:
             return {"error": err_str(e)}
 

@@ -723,13 +723,16 @@ export default function App() {
       /* ignore */
     }
   }, [nodeSnap]);
-  // Icon-sphere NodeFlow chrome (vs classic box cards). Default OFF; Settings → Visual.
+  // Icon-sphere NodeFlow chrome (vs classic box cards). Default ON; Settings → Visual.
+  // Missing/corrupt preference → on; only explicit "0" stays off.
   const [nodeSphere, setNodeSphere] = useState(() => {
-    let on = false;
+    let on = true;
     try {
-      on = window.localStorage?.getItem("samql.nodeSphere") === "1";
+      const saved = window.localStorage?.getItem("samql.nodeSphere");
+      if (saved === "0") on = false;
+      else if (saved === "1") on = true;
     } catch {
-      on = false;
+      on = true;
     }
     setNodeFlowSphereMode(on);
     return on;
@@ -3214,7 +3217,7 @@ export default function App() {
                     data-testid="nodeflow-sphere-toggle"
                     aria-checked={nodeSphere}
                     aria-pressed={nodeSphere}
-                    title="Show NodeFlow nodes as icon spheres with ports around the rim (groups, notes, SQL, and expanded charts stay boxes)"
+                    title="Show NodeFlow nodes as icon spheres with ports around the rim (notes stay boxes; group/iterator/chart bodies float under the sphere)"
                     onClick={() =>
                       setNodeSphere((v) => {
                         const next = !v;

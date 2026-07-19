@@ -3217,6 +3217,16 @@ class DuckDBManager:
                     self.table_columns[final] = cols
                     self._types_cache_drop(final)
                     self.table_sources[final] = path
+                    # Keep persistent filecache entries alive while a view
+                    # is attached so budget sweep cannot unlink them.
+                    try:
+                        from . import filecache as _fc
+                        if path and _fc.enabled() and os.path.dirname(
+                                os.path.realpath(path)) == os.path.realpath(
+                                    _fc._DIR):
+                            _fc.hold(path)
+                    except Exception:
+                        pass
                     return final
                 except Exception as e:
                     if _is_interrupt(e):
@@ -3520,6 +3530,7 @@ class DuckDBManager:
     def drop_table(self, name):
         self._types_cache_drop(name)
         backing = None
+        src = None
         with self.write_lock:
             kind = None
             try:
@@ -3542,9 +3553,17 @@ class DuckDBManager:
                 except Exception:
                     continue
             self.table_columns.pop(name, None)
-            self.table_sources.pop(name, None)
+            src = self.table_sources.pop(name, None)
             self.table_origins.pop(name, None)
             backing = getattr(self, "view_backing", {}).pop(name, None)
+        if src:
+            try:
+                from . import filecache as _fc
+                if _fc.enabled() and os.path.dirname(
+                        os.path.realpath(src)) == os.path.realpath(_fc._DIR):
+                    _fc.release(src)
+            except Exception:
+                pass
         if backing:
             try:
                 os.unlink(backing)

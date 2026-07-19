@@ -1,8 +1,7 @@
 import {
   PORTS,
   isTopInput,
-  nodeHeight,
-  nodeWidth,
+  nodeWorldBounds,
   portsOf,
   portXY,
   type NbEdge,
@@ -412,17 +411,11 @@ export function selectVisibleCanvasNodes(
   if (nodes.length <= threshold) return nodes as NbNode[];
   const bounds = nodeFlowViewBounds(viewport, zoom, overscanPx);
   if (!bounds) return nodes as NbNode[];
-  return nodes.filter(
-    (node) =>
-      forcedIds.has(node.id) ||
-      intersects(
-        node.x,
-        node.y,
-        node.x + nodeWidth(node),
-        node.y + nodeHeight(node),
-        bounds,
-      ),
-  );
+  return nodes.filter((node) => {
+    if (forcedIds.has(node.id)) return true;
+    const b = nodeWorldBounds(node);
+    return intersects(b.x0, b.y0, b.x1, b.y1, bounds);
+  });
 }
 
 export function selectVisibleCanvasWires(

@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "./Icon";
 
 interface Props {
@@ -16,8 +17,8 @@ interface Props {
   testId?: string;
   /**
    * Cheaper open/close for large interactive shells (Load File, file browser):
-   * opacity-only motion, lighter shadow, paint containment. Visual language
-   * stays the same; skips scale/translate that thrash with the dimmed app.
+   * opacity-only motion, lighter shadow. Visual language stays the same;
+   * skips scale/translate that thrash with the dimmed app.
    */
   fast?: boolean;
 }
@@ -115,7 +116,10 @@ export const Modal: React.FC<Props> = ({
     return () => window.removeEventListener("keydown", onKey);
   }, [beginClose]);
 
-  return (
+  // Portal to body so nested shells (Load File → Browse) are not trapped by
+  // an ancestor's contain/overflow/radius — fixed backdrops must cover the
+  // viewport, not the parent modal's padding box.
+  return createPortal(
     <div
       className={
         "modal-backdrop" +
@@ -154,6 +158,7 @@ export const Modal: React.FC<Props> = ({
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-foot">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };

@@ -7,7 +7,7 @@ Durable dogfood line for soak testing before a stable AppWindow cut.
 | Item | Value |
 |------|--------|
 | Branch | `beta` |
-| Current tip (as of channel setup) | build **2026-07-18.644** (v2.16.4) |
+| Current tip (as of channel setup) | build **2026-07-18.671** (v2.16.4) |
 | GitHub prerelease tag pattern | `app-beta-<build>` |
 | Stable (unchanged) | `master` + `app-<build>` **Latest** |
 
@@ -37,4 +37,4 @@ Confirm `/api/health` (or the AppWindow top bar) shows the expected `build`.
 
 ## What’s on beta today
 
-Faster Load File / file-browser modals (fast opacity-only open, no backdrop blur, deferred FS listing), plus prior cancel reclaim / Field Explorer chunking / snap-default-OFF work. See VERSION for the detailed build log.
+NodeFlow sphere polish (groups/iterators/SQL as spheres with under-panels and rim port fan), container minimize, Field Explorer / modal responsiveness, and latest-data-wins pin reclaim / filecache hardening. See `VERSION` for the detailed build log.

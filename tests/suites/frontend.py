@@ -721,8 +721,20 @@ def frontend_tests(do_build):
         grid = _read_fe("src", "components", "DataGrid.tsx")
         watchdog = _read_fe("src", "components", "ServerWatchdog.tsx")
         need('role="dialog"' in modal and 'aria-modal="true"' in modal
-             and "previousFocus" in modal and "FOCUSABLE" in modal,
-             "Modal source lacks focus containment/restoration")
+             and "previousFocus" in modal and "FOCUSABLE" in modal
+             and "createPortal" in modal
+             and "document.body" in modal,
+             "Modal source lacks focus containment/restoration/portal")
+        css = _read_fe("src", "styles.css")
+        # .modal.fast must NOT use layout/paint contain (clips nested Browse).
+        import re as _re_modal
+        mfast = _re_modal.search(
+            r"\.modal\.fast\s*\{([^}]*)\}", css)
+        need(mfast and "contain:" not in mfast.group(1),
+             ".modal.fast must not set CSS contain (portal + no contain)")
+        need("portals to document.body" in combined
+             or "portals to document.body so nested browse" in combined,
+             "Modal portal behavior is covered by a component test")
         need("viewerRequestSeq" in grid
              and "request !== viewerRequestSeq.current" in grid,
              "DataGrid full-value fetch lacks latest-wins protection")
@@ -1013,22 +1025,29 @@ console.log("OK");
              and "cancelQuery" in fx
              and "openRef" in fx
              and "next_after" in fx
-             and "[srcKey, open]" in fx),
+             and "[srcKey, open, dataEpoch]" in fx),
+            ("dataEpoch advances clear fields and re-run nested discovery",
+             "dataEpoch" in fx
+             and "[srcKey, open, dataEpoch]" in fx
+             and "setFields(null)" in fx
+             and "reloadFields" in fx),
             ("right pane assembles first / all-rows / recursive queries",
              ("Peek one value" in fx or "First record" in fx)
              and "All rows" in fx
              and "recursive" in fx
              and ("formatFieldSql" in fx or "acc.unnests" in fx)
-             and "buildUnnestPipelineSql" in fx),
+             and ("buildUnnestPipelineSql" in fx
+                  or "buildUnnestPipelineSql" in
+                  _read_fe("src", "lib", "fieldExplorerSql.ts"))),
             ("copy buttons use the shared copyText helper",
              "copyText" in fx),
             ("App renders it OUTSIDE the view switch so it persists",
              "<FieldExplorer" in app
              and "fieldExplorerOpen" in app),
-            ("Tools & Tables hosts JSON Field Explorer entry (not Settings)",
-             "onOpenJsonFieldExplorer" in app
-             and "JSON Field Explorer" in tools
-             and "tools-tables-tab-fields" in tools
+            ("Settings → Tools hosts JSON Field Explorer entry",
+             "settings-json-field-explorer" in app
+             and "JSON Field Explorer" in app
+             and "setFieldExplorerOpen(true)" in app
              and "Field explorer…" not in app),
             ("command palette opens JSON Field Explorer (not view-gated)",
              "Open JSON Field Explorer" in app),
@@ -3770,6 +3789,16 @@ console.log("OK");
                      css.find(".nb2-port.out .nb2-dot {"):
                      css.find("}", css.find(".nb2-port.out .nb2-dot {"))]
              ))(rd("src", "styles.css"))),
+            # Wiring pulse must target the arrow glyph, not .nb2-port.in —
+            # sphere ports use transform for rim placement; animating
+            # transform on the port overrides translate and jumps the handle.
+            ("node ports: wiring pulse animates .nb2-dot, not the port box",
+             (lambda css: (
+                 ".nb2-canvas-wrap.wiring .nb2-port.in > .nb2-dot" in css
+                 and "nb-port-hot" in css
+                 and ".nb2-canvas-wrap.wiring .nb2-port.in {\n"
+                     "  animation: nb-port-hot" not in css
+             ))(rd("src", "styles.css"))),
             ("node/journal load requests are cleared after consuming (no replay on view re-mount)",
              # children signal consumption...
              "onLoadConsumed?.()" in _read_nodebook_source()
@@ -5398,6 +5427,90 @@ console.log("OK");
         need(not missing,
              "Dense NodeFlow incomplete: " + "; ".join(missing))
 
+    def t_nodeflow_sphere():
+        # Settings → Visual → Sphere nodes: icon spheres, rim ports, floating
+        # under-panels for chart/group/iterator. Notes stay boxes.
+        css = _read_fe("src", "styles.css")
+        app = _read_fe("src", "App.tsx")
+        model = _read_fe("src", "lib", "nodeFlowModel.ts")
+        card = _read_fe(
+            "src", "components", "nodeflow", "NodeFlowCanvasCard.tsx")
+        scene = _read_fe("src", "components", "nodeflow", "NodeFlowScene.tsx")
+        nf = _read_fe("src", "components", "NodeFlow.tsx")
+        vitest = os.path.join(
+            FRONTEND, "src", "lib", "nodeFlowSphere.component.test.ts")
+        missing = []
+        if "nodeflow-sphere-toggle" not in app or "Sphere nodes" not in app:
+            missing.append("Settings Sphere nodes toggle")
+        if "samql.nodeSphere" not in app:
+            missing.append("samql.nodeSphere persistence")
+        if "Default ON" not in app or 'saved === "0"' not in app:
+            missing.append("samql.nodeSphere defaults on (missing/corrupt); honors explicit 0")
+        if "sphereMode = true" not in nf:
+            missing.append("NodeFlow sphereMode prop defaults on")
+        if "setNodeFlowSphereMode" not in app or "setNodeFlowSphereMode" not in model:
+            missing.append("sphere mode layout flag")
+        if "nodeUsesSphereChrome" not in model:
+            missing.append("nodeUsesSphereChrome helper")
+        if 'n.type === "text"' not in model:
+            missing.append("text nodes stay boxes in sphere mode")
+        if "SPHERE_RING" not in model or "spherePortOffset" not in model:
+            missing.append("SPHERE_RING / spherePortOffset wire anchors")
+        if "SPHERE_UNDER_GAP_CONTAINER" not in model or "sphereUnderGap" not in model:
+            missing.append("container under-panel gap clears bottom ports")
+        if "nodeUnderBodySize" not in model or "nodeWorldBounds" not in model:
+            missing.append("under-panel sizing / world bounds")
+        if "sphereMode" not in model or "a.sphereMode === b.sphereMode" not in model:
+            missing.append("sphereMode canvas memo key")
+        if "sphereMode" not in scene:
+            missing.append("NodeFlowScene sphereMode prop")
+        if "setNodeFlowSphereMode(sphereMode)" not in nf:
+            missing.append("NodeFlow syncs sphereMode before paint")
+        if "nb2-sphere-under" not in card or "sphereUnderGap" not in card:
+            missing.append("floating under-panel on canvas cards")
+        if "nb2-sphere-icon" not in card or "nb2-sphere-face" not in card:
+            missing.append("sphere face + icon chrome")
+        # Classic group body top:38 must not leak into the under-panel.
+        # (Shared margin rule also matches the selector — pin the reset block.)
+        reset_idx = css.find(
+            "Classic .nb2-group-body is absolute under the 30px head")
+        reset_blk = css[reset_idx:reset_idx + 450] if reset_idx >= 0 else ""
+        if "top: auto" not in reset_blk and "top:auto" not in reset_blk:
+            missing.append("sphere under-panel clears classic top:38 group body")
+        icon_blk = _block_css(css, ".nb2-sphere-icon")
+        if "#111111" not in icon_blk and "color: #111" not in icon_blk:
+            missing.append("sphere icons solid black (#111111)")
+        if "filter: none" not in icon_blk and "filter:none" not in icon_blk:
+            missing.append("sphere icons have no glow filter")
+        # Selected/dragged cards stack above under-panel hosts.
+        if ".nb2-node.sphere:has(> .nb2-sphere-under)" not in css:
+            missing.append("under-panel host z-index stacking")
+        if "z-index: 5" not in _block_css(css, ".nb2-node.sel"):
+            missing.append("selected node z-index above under-panel hosts")
+        # Wiring pulse scales the glyph, not the port (keeps rim translate).
+        if ".nb2-canvas-wrap.wiring .nb2-port.in > .nb2-dot" not in css:
+            missing.append("wiring pulse targets .nb2-dot")
+        if ".nb2-canvas-wrap.wiring .nb2-port.in {\n  animation: nb-port-hot" in css:
+            missing.append("wiring pulse must not animate .nb2-port.in")
+        if "nodeSpawnOrigin" not in model:
+            missing.append("nodeSpawnOrigin centers new sphere drops")
+        if not os.path.isfile(vitest):
+            missing.append("Vitest nodeFlowSphere.component.test.ts")
+        else:
+            sphere_test = open(vitest, encoding="utf-8").read()
+            for tok in (
+                "fans Join three outputs",
+                "SPHERE_UNDER_GAP_CONTAINER",
+                "usernode",
+                "SPHERE_RING",
+                "nodeSpawnOrigin",
+                "honors sphereMode prop",
+            ):
+                if tok not in sphere_test:
+                    missing.append("Vitest sphere coverage: " + tok)
+        need(not missing,
+             "Sphere NodeFlow incomplete: " + "; ".join(missing))
+
     def t_more_animations():
         # Second animation batch: node placement scale-in + drag lift, the
         # toast auto-dismiss countdown bar, the editor tab bar's sliding
@@ -6818,6 +6931,8 @@ console.log("OK");
          t_eye_care_scaling),
         ("Dense NodeFlow shrinks canvas geometry (pairs with Eye Care)",
          t_nodeflow_dense),
+        ("Sphere NodeFlow: icon spheres, rim fans, under-panels",
+         t_nodeflow_sphere),
         ("second animation batch (nodes/toast-bar/tab-slide/run-flash)",
          t_more_animations),
         ("pivot result grid: sortable + resizable columns + red remove-x",

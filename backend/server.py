@@ -4556,8 +4556,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, status, payload):
         try:
+            # API JSON must not be browser-cached: stale tables/results after
+            # replace/reload would violate latest-data-wins. File downloads
+            # and static assets use their own Cache-Control paths.
             self._send_bytes(status, _encode_json(payload),
-                             "application/json; charset=utf-8")
+                             "application/json; charset=utf-8",
+                             {"Cache-Control": "no-store"})
         finally:
             # .514: this thread's send is over -- drop the op tag so a
             # keep-alive follow-up on the same thread can't inherit it
@@ -5343,6 +5347,9 @@ def main(argv=None):
         # onefile launch leftovers: a kill/crash strands a few hundred MB of
         # _MEI* extraction in the system temp EVERY time -- reclaim them
         tmputil.sweep_mei_orphans()
+        # One-shot flatten/shred staging under system temp (not per-pid):
+        # wipe leftovers from crashed mid-op sessions.
+        tmputil.sweep_op_caches()
         from samql_core import watchdog as _wd
         _wd.set_reinterrupt(
             lambda qid: get_session().reinterrupt_if_cancelled(qid))

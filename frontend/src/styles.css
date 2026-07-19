@@ -992,6 +992,11 @@ html.nb-dense .nb2-node-label {
       calc(10px * var(--eye-care-scale));
     min-width: calc(160px * var(--eye-care-scale));
   }
+  /* Sphere diameter is inline; classic min-width would squash circles into pills. */
+  html.eye-care .nb2-node.sphere {
+    padding: 0;
+    min-width: 0;
+  }
 }
 
 * {
@@ -2721,14 +2726,13 @@ body.editor-ivory .code textarea.ta::placeholder {
 .modal.wide {
   max-width: min(760px, 94vw);
 }
-/* Load File / file browser: keep the panel look, drop expensive open paint. */
+/* Load File / file browser: keep the panel look, drop expensive open paint.
+   Do NOT use layout/paint containment here: with overflow:hidden +
+   border-radius it becomes a containing block for position:fixed and clips
+   nested Browse (FileBrowser) chrome into the top-left of the Load modal.
+   Perf stays from no backdrop-filter + opacity-only motion + lighter shadow. */
 .modal.fast {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
-  contain: layout style paint;
-}
-.modal-backdrop.fast {
-  /* Paint/layout isolation only — avoid size containment on fixed inset:0. */
-  contain: layout style paint;
 }
 .modal-head {
   display: flex;
@@ -6155,15 +6159,25 @@ kbd {
 /* Settings → Visual → Sphere nodes: icon in a transparent circle; ports on the rim. */
 .nb2-node.sphere {
   background: color-mix(in srgb, var(--panel) 28%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+  border: 3px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
   border-radius: 50%;
-  border-top-width: 1px;
+  border-top-width: 3px;
   box-shadow: none;
   overflow: visible;
+  /* Inline diameter must win over classic card min-width / padding. */
+  min-width: 0;
+  padding: 0;
+  /* Base .nb2-node uses contain:layout; that + border-radius can clip
+     absolutely positioned ports that sit outside the circle. Ports must
+     paint past the rim, so drop layout containment for spheres. */
+  contain: style;
 }
 .nb2-node.sphere.sel {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-fade);
+  /* Outer halo + main 3px stroke = readable double-ring when selected */
+  box-shadow: 0 0 0 3px var(--accent-fade);
+  /* Same elevation as .nb2-node.sel; beats :has(under) host z-index 2. */
+  z-index: 5;
 }
 .nb2-node.sphere.input,
 .nb2-node.sphere.filter,
@@ -6182,7 +6196,7 @@ kbd {
 .nb2-node.sphere.unpivot,
 .nb2-node.sphere.window,
 .nb2-node.sphere.browse {
-  border-top: 1px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+  border-top: 3px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
 }
 .nb2-node.sphere.sel.input,
 .nb2-node.sphere.sel.filter,
@@ -6210,28 +6224,199 @@ kbd {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  color: var(--text);
+  /* Solid black glyph — not var(--chrome-ink) (undefined in dark :root) */
+  color: #111111;
   cursor: grab;
 }
 .nb2-sphere-face:active {
   cursor: grabbing;
 }
+.nb2-sphere-icon {
+  position: relative;
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  color: #111111;
+  pointer-events: none;
+  /* Solid black Lucide only — no outline / glow / drop-shadow */
+  filter: none;
+}
+.nb2-sphere-icon svg {
+  color: #111111;
+  fill: none;
+  stroke: currentColor;
+}
 .nb2-node.sphere .nb2-port.sphere-port {
-  left: auto;
-  right: auto;
+  /* left/top come from inline spherePortOffset — do NOT reset left:auto
+     (that fought the fan and could collapse every port to one spot). */
   margin-top: 0;
   height: auto;
   transform: translate(-50%, -50%);
   z-index: 2;
 }
-.nb2-node.sphere .nb2-port.sphere-port.in,
+.nb2-node.sphere .nb2-port.sphere-port.in {
+  /* Clear classic .nb2-port.in { left: -14px } so inline left wins cleanly. */
+  right: auto;
+}
 .nb2-node.sphere .nb2-port.sphere-port.out {
+  /* Clear classic .nb2-port.out { right: -14px }; position via inline left. */
+  right: auto;
+}
+/* Floating chart/dashboard window centered under the sphere (does not replace chrome). */
+.nb2-node.sphere .nb2-sphere-under {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  /* Above sphere ports (2) inside this host; host z-index (below) owns
+     cross-node stacking vs idle / selected siblings. */
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  pointer-events: auto;
+}
+/* Canvas sibling stack: idle (auto) < under-panel hosts (2) < selected /
+   active drag (5 via .nb2-node.sel / .nb2-node.sphere.sel). Lineage-flash
+   / marquee stay at 6. Wires paint under cards (WireLayer first). Group
+   drop hit-tests are geometric, not DOM. */
+.nb2-node.sphere:has(> .nb2-sphere-under) {
+  z-index: 2;
+}
+.nb2-node.sphere .nb2-sphere-under .nb2-node-chart,
+.nb2-node.sphere .nb2-sphere-under .nb2-dash,
+.nb2-node.sphere .nb2-sphere-under .nb2-group-body {
+  margin: 0;
+  flex: 1;
+  min-height: 0;
+  border-radius: 0;
+  border: none;
+}
+/* Classic .nb2-group-body is absolute under the 30px head (top:38px).
+   Inside the floating under-panel there is no head — reset insets so the
+   child list fills the panel (group + iterator share this path). */
+.nb2-node.sphere .nb2-sphere-under .nb2-group-body {
+  position: relative;
   left: auto;
   right: auto;
+  top: auto;
+  bottom: auto;
+  width: 100%;
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 4px;
+  gap: 4px;
+  overflow: auto;
+  background: transparent;
+}
+/* Compact chrome when group/iterator children window is minimized. */
+.nb2-sphere-face-minimized .nb2-sphere-icon {
+  transform: scale(0.92);
+}
+.nb2-sphere-container-toggle {
+  /* Hang below the lowest fanned left-rim input (outset 14 + 14×16
+     triangle + ring + margin). Must match SPHERE_CONTAINER_PILL_BOTTOM.
+     Stays mounted when the under-panel is open (toggle ▾/▸).
+     Fixed outer box: left:50% + margin-left:-32px (half of width 64px;
+     no translateX(-50%)), so open/closed content (count digits, ▾/▸)
+     cannot recenter the pill. Width fits "99 ▾" and "99 ▸". */
+  position: absolute;
+  left: 50%;
+  right: auto;
+  bottom: -44px;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: minmax(1.5em, 1fr) 1em;
+  align-items: center;
+  justify-items: center;
+  column-gap: 4px;
+  width: 64px;
+  margin: 0 0 0 -32px;
+  padding: 5px 10px;
+  min-height: 26px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.1;
+  transform: none;
+  /* No transform transition — global button:active scale must not apply. */
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+.nb2-sphere-container-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* Beat button:not(:disabled):active { transform: scale(0.97) } (0,2,1). */
+button.nb2-sphere-container-toggle:not(:disabled):active,
+button.nb2-sphere-container-toggle:focus,
+button.nb2-sphere-container-toggle:focus-visible {
+  transform: none;
+  outline: none;
+}
+.nb2-sphere-container-toggle:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-fade), var(--shadow);
+}
+.nb2-sphere-container-badge {
+  width: 100%;
+  min-width: 0;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.nb2-sphere-container-caret {
+  display: inline-block;
+  width: 1em;
+  text-align: center;
+}
+.nb2-sphere-under-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2, var(--panel));
+  box-sizing: border-box;
+}
+.nb2-sphere-under-bar-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.2;
+  color: var(--text-faint);
+}
+.nb2-sphere-under-bar .nb2-node-collapse {
+  margin-left: 0;
+  font-size: 14px;
+  padding: 2px 4px;
 }
 .nb2-node.sel {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-fade), var(--shadow);
+  /* Above under-panel hosts (z-index 2). Drag selects first, so the
+     dragged sphere stays in front of iterator/group windows. */
+  z-index: 5;
 }
 .nb2-node.input {
   border-top: 3px solid #5aa9e6;
@@ -7105,6 +7290,14 @@ select.nb2-col-missing {
 .nb2-node.unpivot { border-top: 3px solid #d98bc8; }
 .nb2-node.window { border-top: 3px solid #9a8bd9; }
 .nb2-node.browse { border-top: 3px solid #6ab8d9; }
+/* After every classic type-colored top: keep sphere rings uniform
+   (Created Node / group / iterator / sql / …). Element+class beats .nb2-node.TYPE. */
+div.nb2-node.sphere {
+  border-top: 3px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+}
+div.nb2-node.sphere.sel {
+  border-top-color: var(--accent);
+}
 .nb2-window {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -7931,15 +8124,15 @@ html[data-theme="light"] .nb2-statusbar.error .nb2-status-text {
 .nb2-minimap.mini { display: flex; align-items: center; justify-content: center; }
 .nb2-minimap.mini .nb2-mm-toggle { position: static; width: 100%; height: 100%; border: 0; background: transparent; font-size: 13px; }
 .nb2-mm-node {
-  fill: #8aa0b8;
+  fill: color-mix(in srgb, var(--accent) 50%, var(--text-faint));
   stroke: none;
 }
 .nb2-mm-node.sel {
-  fill: #3b6ea5;
+  fill: var(--accent);
 }
 .nb2-mm-view {
-  fill: rgba(59, 110, 165, 0.12);
-  stroke: #3b6ea5;
+  fill: var(--accent-fade);
+  stroke: var(--accent);
   stroke-width: 1.2;
 }
 
@@ -8086,11 +8279,13 @@ html[data-theme="light"] .nb2-statusbar.error .nb2-status-text {
 }
 
 /* group highlighted as a drop target while dragging a node over it */
-.nb2-node.group.drophover {
+.nb2-node.group.drophover,
+.nb2-node.iterator.drophover {
   outline: 2px dashed var(--accent);
   outline-offset: 2px;
 }
-.nb2-node.group.drophover .nb2-group-body {
+.nb2-node.group.drophover .nb2-group-body,
+.nb2-node.iterator.drophover .nb2-group-body {
   border-color: var(--accent);
   background: rgba(59, 110, 165, 0.12);
 }
@@ -9627,8 +9822,13 @@ body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
   0%, 100% { transform: scale(1); opacity: 1; }
   50% { transform: scale(1.18); opacity: 0.88; }
 }
-.nb2-canvas-wrap.wiring .nb2-port.in {
+/* Pulse the arrow glyph only — never the .nb2-port box. Sphere (and
+   top) ports position with transform: translate(...); animating
+   transform on the port itself overrides that and jumps the handle
+   (inputs appear to slide down when a connector approaches). */
+.nb2-canvas-wrap.wiring .nb2-port.in > .nb2-dot {
   animation: nb-port-hot 0.9s ease-in-out infinite;
+  transform-origin: center;
 }
 
 /* -- an edge snapping home gives its node a tiny elastic pop -- */
