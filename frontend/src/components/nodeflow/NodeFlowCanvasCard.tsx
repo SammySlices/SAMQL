@@ -49,7 +49,7 @@ function SphereNodeIcon({ node }: { node: NbNode }) {
   const NodeIcon = (Icon[iconName] || Icon.Sparkle) as React.FC<{
     size?: number;
   }>;
-  // Solid black Lucide glyph only (no glow / outline filter).
+  // Theme-ink Lucide glyph (white in dark / black in light; CSS currentColor).
   return (
     <span className="nb2-sphere-icon" aria-hidden="true">
       <NodeIcon size={22} />

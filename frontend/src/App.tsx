@@ -84,14 +84,19 @@ import { uid } from "./lib/ids";
 import { setNodeFlowDenseMode, setNodeFlowSphereMode } from "./lib/nodeFlowModel";
 import {
   applyAllCanvasColors,
+  applyAllCanvasTextColors,
   applyCanvasColor,
+  applyCanvasTextColor,
   applyNodeDotStyle,
   persistCanvasColor,
+  persistCanvasTextColor,
   persistNodeDotStyle,
   readPersistedCanvasColors,
+  readPersistedCanvasTextColors,
   readPersistedNodeDotStyle,
   type CanvasColors,
   type CanvasSurface,
+  type CanvasTextColors,
   type NodeDotStyle,
 } from "./lib/canvasColor";
 import { ReconcileModal, ReconSpec } from "./components/ReconcileModal";
@@ -782,12 +787,19 @@ export default function App() {
     }
   }, [lightTheme]);
   // Per-surface canvas colors (IDE / Journal / NodeFlow). When set,
-  // --user-canvas-bg-* wins over ivory / light hard-coded whites.
+  // --user-canvas-bg-* / --user-canvas-text-* win over ivory / theme defaults.
   const [canvasColors, setCanvasColors] = useState<CanvasColors>(() => {
     const saved = readPersistedCanvasColors();
     applyAllCanvasColors(saved);
     return saved;
   });
+  const [canvasTextColors, setCanvasTextColors] = useState<CanvasTextColors>(
+    () => {
+      const saved = readPersistedCanvasTextColors();
+      applyAllCanvasTextColors(saved);
+      return saved;
+    },
+  );
   // NodeFlow snap-grid dots (color + opacity) — Settings → Canvas Color → Node.
   const [nodeDots, setNodeDots] = useState<NodeDotStyle>(() => {
     const saved = readPersistedNodeDotStyle();
@@ -805,10 +817,23 @@ export default function App() {
     },
     [],
   );
+  const pickCanvasTextColor = useCallback(
+    (surface: CanvasSurface, raw: string) => {
+      const next = raw.trim().toLowerCase();
+      if (!/^#[0-9a-f]{6}$/.test(next)) return;
+      setCanvasTextColors((prev) => ({ ...prev, [surface]: next }));
+      applyCanvasTextColor(surface, next);
+      persistCanvasTextColor(surface, next);
+    },
+    [],
+  );
   const resetCanvasColor = useCallback((surface: CanvasSurface) => {
     setCanvasColors((prev) => ({ ...prev, [surface]: null }));
+    setCanvasTextColors((prev) => ({ ...prev, [surface]: null }));
     applyCanvasColor(surface, null);
+    applyCanvasTextColor(surface, null);
     persistCanvasColor(surface, null);
+    persistCanvasTextColor(surface, null);
   }, []);
   const pickNodeDotColor = useCallback((raw: string) => {
     const next = raw.trim().toLowerCase();
@@ -4552,8 +4577,10 @@ export default function App() {
       <CanvasColorModal
         open={canvasColorPanelOpen}
         colors={canvasColors}
+        textColors={canvasTextColors}
         nodeDots={nodeDots}
         onPick={pickCanvasColor}
+        onPickText={pickCanvasTextColor}
         onReset={resetCanvasColor}
         onPickNodeDotColor={pickNodeDotColor}
         onPickNodeDotOpacity={pickNodeDotOpacity}

@@ -5478,10 +5478,24 @@ console.log("OK");
         if "top: auto" not in reset_blk and "top:auto" not in reset_blk:
             missing.append("sphere under-panel clears classic top:38 group body")
         icon_blk = _block_css(css, ".nb2-sphere-icon")
-        if "#111111" not in icon_blk and "color: #111" not in icon_blk:
-            missing.append("sphere icons solid black (#111111)")
+        if "color: var(--text)" not in icon_blk and "color:var(--text)" not in icon_blk:
+            missing.append("sphere icons use theme --text (white dark / black light)")
+        if "html.theme-light .nb2-sphere-icon" not in css:
+            missing.append("light-mode sphere icons force black (#111111)")
         if "filter: none" not in icon_blk and "filter:none" not in icon_blk:
             missing.append("sphere icons have no glow filter")
+        if "has-user-canvas-text-node" not in css or "--user-canvas-text-node" not in css:
+            missing.append("Node canvas text color overrides sphere glyphs")
+        if "has-user-canvas-text-ide" not in css or "has-user-canvas-text-journal" not in css:
+            missing.append("IDE/Journal canvas text color CSS hooks")
+        if "settings-canvas-text-input" not in open(
+                os.path.join(FRONTEND, "src", "components",
+                             "CanvasColorModal.tsx"), encoding="utf-8").read():
+            missing.append("Canvas Color modal text picker")
+        if "persistCanvasTextColor" not in open(
+                os.path.join(FRONTEND, "src", "lib", "canvasColor.ts"),
+                encoding="utf-8").read():
+            missing.append("canvasTextColor persist/apply helpers")
         # Selected/dragged cards stack above under-panel hosts.
         if ".nb2-node.sphere:has(> .nb2-sphere-under)" not in css:
             missing.append("under-panel host z-index stacking")

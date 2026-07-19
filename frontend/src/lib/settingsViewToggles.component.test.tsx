@@ -351,6 +351,7 @@ describe("Settings View consolidations", () => {
     expect(screen.getByTestId("settings-canvas-tab-journal")).toBeTruthy();
     expect(screen.getByTestId("settings-canvas-tab-node")).toBeTruthy();
     expect(screen.getByTestId("settings-canvas-color-input")).toBeTruthy();
+    expect(screen.getByTestId("settings-canvas-text-input")).toBeTruthy();
 
     const swatch = screen.getByTestId("settings-canvas-swatch-e4ebe4");
     fireEvent.click(swatch);
@@ -362,6 +363,19 @@ describe("Settings View consolidations", () => {
       expect(
         document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
       ).toBe("#e4ebe4");
+    });
+
+    fireEvent.click(screen.getByTestId("settings-canvas-text-swatch-ffffff"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasTextColor.ide")).toBe("#ffffff");
+      expect(
+        document.documentElement.classList.contains("has-user-canvas-text-ide"),
+      ).toBe(true);
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-text-ide",
+        ),
+      ).toBe("#ffffff");
     });
 
     fireEvent.click(screen.getByTestId("settings-canvas-tab-journal"));
@@ -381,6 +395,18 @@ describe("Settings View consolidations", () => {
       expect(localStorage.getItem("samql.canvasColor.ide")).toBe("#e4ebe4");
     });
 
+    fireEvent.click(screen.getByTestId("settings-canvas-text-swatch-111111"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasTextColor.journal")).toBe(
+        "#111111",
+      );
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-text-journal",
+        ),
+      ).toBe("#111111");
+    });
+
     fireEvent.click(screen.getByTestId("settings-canvas-tab-node"));
     const wheel = screen.getByTestId(
       "settings-canvas-color-input",
@@ -391,6 +417,20 @@ describe("Settings View consolidations", () => {
       expect(
         document.documentElement.style.getPropertyValue("--user-canvas-bg-node"),
       ).toBe("#ececec");
+    });
+    const textWheel = screen.getByTestId(
+      "settings-canvas-text-input",
+    ) as HTMLInputElement;
+    fireEvent.input(textWheel, { target: { value: "#54b949" } });
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasTextColor.node")).toBe(
+        "#54b949",
+      );
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-text-node",
+        ),
+      ).toBe("#54b949");
     });
     expect(screen.getByTestId("settings-canvas-dots")).toBeTruthy();
     expect(screen.getByTestId("settings-canvas-dot-color")).toBeTruthy();
@@ -527,6 +567,7 @@ describe("Settings View consolidations", () => {
 
   it("resets a surface canvas color to default", async () => {
     localStorage.setItem("samql.canvasColor.ide", "#ffffff");
+    localStorage.setItem("samql.canvasTextColor.ide", "#111111");
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -543,11 +584,20 @@ describe("Settings View consolidations", () => {
     fireEvent.click(screen.getByTestId("settings-canvas-color-reset"));
     await waitFor(() => {
       expect(localStorage.getItem("samql.canvasColor.ide")).toBeNull();
+      expect(localStorage.getItem("samql.canvasTextColor.ide")).toBeNull();
       expect(
         document.documentElement.classList.contains("has-user-canvas-bg-ide"),
       ).toBe(false);
       expect(
+        document.documentElement.classList.contains("has-user-canvas-text-ide"),
+      ).toBe(false);
+      expect(
         document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
+      ).toBe("");
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-text-ide",
+        ),
       ).toBe("");
     });
   });

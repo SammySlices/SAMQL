@@ -6224,8 +6224,8 @@ kbd {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  /* Solid black glyph — not var(--chrome-ink) (undefined in dark :root) */
-  color: #111111;
+  /* Theme ink: light on dark (:root --text), black in light mode */
+  color: var(--text);
   cursor: grab;
 }
 .nb2-sphere-face:active {
@@ -6238,15 +6238,41 @@ kbd {
   height: 22px;
   align-items: center;
   justify-content: center;
-  color: #111111;
+  color: var(--text);
   pointer-events: none;
-  /* Solid black Lucide only — no outline / glow / drop-shadow */
+  /* Solid Lucide only — no outline / glow / drop-shadow */
   filter: none;
 }
 .nb2-sphere-icon svg {
-  color: #111111;
+  color: var(--text);
   fill: none;
   stroke: currentColor;
+}
+/* Explicit light-mode black (matches --text under theme-light). */
+html.theme-light .nb2-sphere-face,
+html.theme-light .nb2-sphere-icon,
+html.theme-light .nb2-sphere-icon svg,
+html[data-theme="light"] .nb2-sphere-face,
+html[data-theme="light"] .nb2-sphere-icon,
+html[data-theme="light"] .nb2-sphere-icon svg {
+  color: #111111;
+}
+/* Custom Node canvas luminance: keep glyphs readable on the paint. */
+html.canvas-node-luma-dark .nb2-sphere-face,
+html.canvas-node-luma-dark .nb2-sphere-icon,
+html.canvas-node-luma-dark .nb2-sphere-icon svg,
+html[data-canvas-node-luma="dark"] .nb2-sphere-face,
+html[data-canvas-node-luma="dark"] .nb2-sphere-icon,
+html[data-canvas-node-luma="dark"] .nb2-sphere-icon svg {
+  color: #ffffff;
+}
+html.canvas-node-luma-light .nb2-sphere-face,
+html.canvas-node-luma-light .nb2-sphere-icon,
+html.canvas-node-luma-light .nb2-sphere-icon svg,
+html[data-canvas-node-luma="light"] .nb2-sphere-face,
+html[data-canvas-node-luma="light"] .nb2-sphere-icon,
+html[data-canvas-node-luma="light"] .nb2-sphere-icon svg {
+  color: #111111;
 }
 .nb2-node.sphere .nb2-port.sphere-port {
   /* left/top come from inline spherePortOffset — do NOT reset left:auto
@@ -12296,8 +12322,9 @@ html.theme-light .nb2-zoom .btn.primary:hover {
 
 /* ---- Settings → Visual → Change Canvas Color ----
    Floating modal (useWinDrag + win-float). Per-surface vars on <html>
-   (--user-canvas-bg-ide|journal|node + .has-user-canvas-bg-*) paint IDE
-   editor, Journal, and NodeFlow. Wins over ivory / light hard-coded whites.
+   (--user-canvas-bg-* / --user-canvas-text-* + .has-user-canvas-bg-* /
+   .has-user-canvas-text-*) paint IDE editor, Journal, and NodeFlow.
+   Wins over ivory / light hard-coded whites and theme --text.
    Dot grid on the canvas is preserved. */
 .canvas-color-win {
   position: fixed;
@@ -12481,6 +12508,105 @@ html[data-theme="light"].has-user-canvas-bg-ide body.editor-ivory .code,
 html[data-theme="light"].has-user-canvas-bg-ide .nb-ed .code {
   background-color: var(--user-canvas-bg-ide) !important;
   background: var(--user-canvas-bg-ide) !important;
+}
+
+/* ---- Per-surface canvas TEXT (Settings → Canvas Color) ---- */
+html.has-user-canvas-text-ide .code,
+html.has-user-canvas-text-ide .code pre.hl,
+html.has-user-canvas-text-ide .code textarea.ta,
+html.has-user-canvas-text-ide body.editor-ivory .code,
+html.has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html.has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html.has-user-canvas-text-ide .nb-ed .code,
+html.has-user-canvas-text-ide .nb-ed .code pre.hl,
+html.has-user-canvas-text-ide .nb-ed .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide .code,
+html.theme-light.has-user-canvas-text-ide .code pre.hl,
+html.theme-light.has-user-canvas-text-ide .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code pre.hl,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide .code,
+html[data-theme="light"].has-user-canvas-text-ide .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code textarea.ta {
+  color: var(--user-canvas-text-ide) !important;
+  caret-color: var(--user-canvas-text-ide);
+}
+
+html.has-user-canvas-text-journal .nb,
+html.has-user-canvas-text-journal .nb-scroll,
+html.has-user-canvas-text-journal .nb-groups,
+html.has-user-canvas-text-journal .nb-card,
+html.has-user-canvas-text-journal .nb-out,
+html.has-user-canvas-text-journal .nb-viz-empty,
+html.has-user-canvas-text-journal .nb-ed .code,
+html.has-user-canvas-text-journal .nb-ed .code pre.hl,
+html.has-user-canvas-text-journal .nb-ed .code textarea.ta,
+html.theme-light.has-user-canvas-text-journal .nb,
+html.theme-light.has-user-canvas-text-journal .nb-scroll,
+html.theme-light.has-user-canvas-text-journal .nb-groups,
+html.theme-light.has-user-canvas-text-journal .nb-card,
+html.theme-light.has-user-canvas-text-journal .nb-out,
+html.theme-light.has-user-canvas-text-journal .nb-viz-empty,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code pre.hl,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-journal .nb,
+html[data-theme="light"].has-user-canvas-text-journal .nb-scroll,
+html[data-theme="light"].has-user-canvas-text-journal .nb-groups,
+html[data-theme="light"].has-user-canvas-text-journal .nb-card,
+html[data-theme="light"].has-user-canvas-text-journal .nb-out,
+html[data-theme="light"].has-user-canvas-text-journal .nb-viz-empty,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code textarea.ta {
+  color: var(--user-canvas-text-journal) !important;
+  caret-color: var(--user-canvas-text-journal);
+}
+
+html.has-user-canvas-text-node .nb2-canvas-wrap,
+html.has-user-canvas-text-node .nb2-empty,
+html.has-user-canvas-text-node .nb2-hint,
+html.has-user-canvas-text-node .nb2-hint-sm,
+html.has-user-canvas-text-node .nb2-sphere-face,
+html.has-user-canvas-text-node .nb2-sphere-icon,
+html.has-user-canvas-text-node .nb2-sphere-icon svg,
+html.theme-light.has-user-canvas-text-node .nb2-canvas-wrap,
+html.theme-light.has-user-canvas-text-node .nb2-empty,
+html.theme-light.has-user-canvas-text-node .nb2-hint,
+html.theme-light.has-user-canvas-text-node .nb2-hint-sm,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-face,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-icon,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-theme="light"].has-user-canvas-text-node .nb2-canvas-wrap,
+html[data-theme="light"].has-user-canvas-text-node .nb2-empty,
+html[data-theme="light"].has-user-canvas-text-node .nb2-hint,
+html[data-theme="light"].has-user-canvas-text-node .nb2-hint-sm,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-icon svg,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-face,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-icon,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-icon svg,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-face,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-icon,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-icon svg {
+  color: var(--user-canvas-text-node) !important;
 }
 
 html.theme-light .canvas-color-head,
