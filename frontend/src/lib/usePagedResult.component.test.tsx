@@ -262,6 +262,44 @@ describe("shared IDE/Journal paging controller", () => {
     expect(state.page?.rows).toEqual([[1]]);
   });
 
+  it("cancelPending drops a late page so it cannot repaint after epoch clear", async () => {
+    const state = makeState({ page: page([[1]], 3) });
+    const pending = deferred<ResultPage>();
+    const requestSignals: AbortSignal[] = [];
+    const fetchPage = vi.fn(
+      (_resultId: string, _options: PageRequestOptions, signal: AbortSignal) => {
+        requestSignals.push(signal);
+        return pending.promise;
+      },
+    );
+    const { result } = renderHook(() =>
+      usePagedResult({
+        getItem: () => state,
+        patchItem: (_id, patch) => patchState(state, patch),
+        fetchPage,
+      }),
+    );
+
+    let run!: Promise<void>;
+    act(() => {
+      run = result.current.refresh(state.id);
+    });
+    // Simulate dataEpoch bump: IDE/Journal clear rows + cancelPending.
+    act(() => {
+      patchState(state, { page: page([], 0) });
+      result.current.cancelPending();
+    });
+    expect(requestSignals[0]?.aborted).toBe(true);
+
+    await act(async () => {
+      pending.resolve(page([[99], [100]], 2));
+      await run;
+    });
+    // Late response must not repaint the cleared grid.
+    expect(state.page?.rows).toEqual([]);
+    expect(state.page?.total_rows).toBe(0);
+  });
+
   it("survives React StrictMode effect replay", async () => {
     const state = makeState();
     const fetchPage = vi.fn(async () => page([[7]], 1));

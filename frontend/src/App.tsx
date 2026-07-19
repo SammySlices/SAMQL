@@ -15,6 +15,7 @@ import { ServerWatchdog } from "./components/ServerWatchdog";
 import { api,
   ApiError,
   exportResultToFile,
+  nextMonotonicDataEpoch,
   saveToDownloads,
   stampResultEpoch } from "./lib/api";
 import type { RootIdChoice } from "./lib/api";
@@ -996,7 +997,9 @@ export default function App() {
 
   // Latest-data wins: when catalog content mutates, mark IDE tabs stale and
   // drop retained payloads so prior grids/reports cannot look current.
+  // Also abort in-flight page fetches so a late page cannot repaint old rows.
   useEffect(() => {
+    resultPaging.cancelPending();
     setResTabs((tabs) => {
       let changed = false;
       const next = tabs.map((tab) => {
@@ -1057,12 +1060,16 @@ export default function App() {
       });
       return changed ? next : tabs;
     });
-  }, [dataEpoch, setResTabs]);
+    // cancelPending is stable; do not depend on the whole paging object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataEpoch, setResTabs, resultPaging.cancelPending]);
 
   const applyDataEpoch = useCallback(
     (value: unknown) => {
-      const n = Number(value);
-      if (Number.isFinite(n)) setDataEpoch(n);
+      setDataEpoch((prev) => {
+        const next = nextMonotonicDataEpoch(prev, value);
+        return next == null ? prev : next;
+      });
     },
     [setDataEpoch],
   );

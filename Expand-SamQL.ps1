@@ -7,7 +7,7 @@
 
   Recommended upgrade command:
       powershell -ExecutionPolicy Bypass -File .\Expand-SamQL[.]ps1 `
-        -Source .\samql_full_source_all_tests_ui_2026-07-19.674.txt `
+        -Source .\samql_full_source_all_tests_ui_2026-07-19.675.txt `
         -Dest C:\SamQL\samql -Force
 
   When -Source is omitted, the script examines every *full_source*.txt beside

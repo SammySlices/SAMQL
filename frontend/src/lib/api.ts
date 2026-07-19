@@ -19,6 +19,23 @@ export function stampResultEpoch(
   return Number.isFinite(n) ? n : fallback;
 }
 
+/**
+ * Latest-data wins: catalog/mutation echoes must never move the FE epoch
+ * backwards. A slow /api/tables poll can otherwise overwrite a newer
+ * mutation-echoed epoch. Returns null when ``incoming`` is not a finite
+ * number (caller leaves state unchanged). Hard resets use setDataEpoch(0)
+ * directly — they do not go through this helper.
+ */
+export function nextMonotonicDataEpoch(
+  prev: number,
+  incoming: unknown,
+): number | null {
+  const n = Number(incoming);
+  if (!Number.isFinite(n)) return null;
+  const p = Number.isFinite(prev) ? prev : 0;
+  return Math.max(p, n);
+}
+
 // All requests are same-origin: in production the Python server serves
 // both the static app and /api; in dev Vite proxies /api to the backend.
 const BASE = "";
