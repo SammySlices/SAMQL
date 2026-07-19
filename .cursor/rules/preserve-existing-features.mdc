@@ -9,7 +9,7 @@ SamQL is **production ready**. Further work must **only enhance**, never degrade
 
 1. **Judge every change against prior code** for a real improvement in **correctness and/or performance**. If it is not clearly better on those axes (or a user-requested fix/feature that preserves them), do not ship it.
 2. **No silent tradeoffs.** Any downside (slower path, narrower behavior, weaker UX, higher memory, risk to another area) must be **explained before applying** the change.
-3. **Cross-cutting impact must be checked.** Before editing, identify other SamQL areas that could be affected. If another area would regress: **rethink the approach**, or **enhance both** — do not accept a local win that quietly hurts joins, load, Field Explorer, Profile, View Formatted, NodeFlow, diagnostics, Parquet cache/`table_origins`, sticky cancel, or paging.
+3. **Cross-cutting impact must be checked.** Before editing, identify other SamQL areas that could be affected. If another area would regress: **rethink the approach**, or **enhance both** — do not accept a local win that quietly hurts joins, load, Field Explorer, Profile, View Formatted, NodeFlow, diagnostics, Parquet cache/`table_origins`, sticky cancel, **end-to-end Cancel/Stop (frontend + backend)**, or paging.
 4. Prefer **additive** fixes on shared paths over rewriting or narrowing the happy path.
 
 # Preserve existing functionality and performance

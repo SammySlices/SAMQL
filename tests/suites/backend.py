@@ -14195,6 +14195,30 @@ def backend_tests(datadir, csv_path, json_path):
              and "def _chart_data_inner" in sql
              and "def _end_run_keep_cancel" in sql,
              "pivot/chart cancel binds the store connection and soft-cancels")
+        # ParquetResultStore._run must register private cursors in _native_ops
+        # so Stop interrupts mid-aggregate (conn.cursor() alone is invisible).
+        rws = open(os.path.join(BACKEND, "samql_core", "rows.py"),
+                   encoding="utf-8").read()
+        run_idx = rws.find("def _run(self, sql, params=None):")
+        need(run_idx > 0, "ParquetResultStore._run present")
+        run_body = rws[run_idx:run_idx + 1800]
+        need("_native_ops" in run_body and "_BeatScope" in run_body,
+             "ParquetResultStore._run registers private cursor for Stop")
+        need("Bind the live engine so cancel_query interrupts this"
+             in sql,
+             "iterator/while rebind engine for mid-pass cancel")
+        need(os.path.isfile(os.path.join(
+                os.path.dirname(BACKEND), "tests",
+                "test_parquet_agg_cancel.py")),
+             "parquet agg cancel unit test present")
+        fe_rc = open(os.path.join(FRONTEND, "src", "lib",
+                                  "runController.ts"), encoding="utf-8").read()
+        need("MANTRA: Cancel must ALWAYS stop BOTH" in fe_rc,
+             "frontend cancel mantra in runController")
+        need(os.path.isfile(os.path.join(
+                os.path.dirname(BACKEND), ".cursor", "rules",
+                "cancel-immediate.mdc")),
+             "cancel-immediate cursor rule present")
         pr = rd("Profiler.tsx")
         need("PROF_DEFAULT_W" in pr and "col-rz" in pr
              and "setColW((w) => w.map(" in pr

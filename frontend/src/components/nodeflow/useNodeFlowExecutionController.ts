@@ -1528,12 +1528,17 @@ export function useNodeFlowExecutionController({
     // is set, so we don't pre-require a loop-variable name here — a container
     // iterator binds each values row's columns as ${vars} and uses no var name.
     const id = startRun(`Iterating ${node.config.label}…`, [node.id]);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.iteratorRun({
-        node_id: node.id,
-        graph: graphForRun(),
-        query_id: id,
-      });
+      const r = await api.iteratorRun(
+        {
+          node_id: node.id,
+          graph: graphForRun(),
+          query_id: id,
+        },
+        ctrl.signal,
+      );
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
         return { ok: false };
@@ -1578,6 +1583,8 @@ export function useNodeFlowExecutionController({
       onToast("error", "Iterator failed", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
       return { ok: false };
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
@@ -1587,12 +1594,17 @@ export function useNodeFlowExecutionController({
       return { ok: false };
     }
     const id = startRun(`Repeating ${node.config.label}…`, [node.id]);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.whileRun({
-        node_id: node.id,
-        graph: graphForRun(),
-        query_id: id,
-      });
+      const r = await api.whileRun(
+        {
+          node_id: node.id,
+          graph: graphForRun(),
+          query_id: id,
+        },
+        ctrl.signal,
+      );
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
         return { ok: false };
@@ -1628,6 +1640,8 @@ export function useNodeFlowExecutionController({
       onToast("error", "Controller failed", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
       return { ok: false };
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 

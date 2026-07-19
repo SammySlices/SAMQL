@@ -6009,6 +6009,11 @@ class Session:
                             "err_table": fr.get("err_table")})
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
+                    # Bind the live engine so cancel_query interrupts this
+                    # pass's materialize (register(None) only set the flag).
+                    self._register_run(
+                        query_id, eng, kind="iterator", surface="nodeflow",
+                        label="iterator")
                     tmp = self._materialize_flow(rg, bn, bp, et, created)
                     mode = "overwrite" if (first and reset_first) else "append"
                     self._write_into_table(eng, accum, tmp, mode, replace_keys)
@@ -6265,6 +6270,11 @@ class Session:
                                              query_id)
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
+                    # Bind the live engine so cancel_query interrupts this
+                    # pass's materialize (register(None) only set the flag).
+                    self._register_run(
+                        query_id, eng, kind="iterator", surface="nodeflow",
+                        label="iterator")
                     tmp = self._materialize_flow(
                         rg, "__iter_body", "out", et, created)
                     mode = "overwrite" if (first and reset_first) else "append"
@@ -6396,6 +6406,11 @@ class Session:
                             "err_table": fr.get("err_table")})
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
+                    # Bind the live engine so cancel_query interrupts this
+                    # pass's materialize (register(None) only set the flag).
+                    self._register_run(
+                        query_id, eng, kind="while", surface="nodeflow",
+                        label="while")
                     tmp = self._materialize_flow(rg, bn, bp, et, created)
                     mode = "overwrite" if (first and reset_first) else "append"
                     before = 0

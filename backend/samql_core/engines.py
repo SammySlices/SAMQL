@@ -2350,8 +2350,30 @@ class DuckDBManager:
         # access (holding write_lock) for the cursor's lifetime, and must NOT
         # close it -- closing would close the engine's own connection.
         cur = self.conn if same_conn else self.conn.cursor()
+        tid = threading.get_ident()
+        registered = False
+        if not same_conn:
+            # Private cursor must join _native_ops so cancel_query / Stop can
+            # interrupt the statement (same as execute_read / ParquetResultStore).
+            try:
+                with self._native_ops_lock:
+                    self._native_ops[tid] = cur
+                registered = True
+            except Exception:
+                registered = False
+
+        def _unregister():
+            if not registered:
+                return
+            try:
+                with self._native_ops_lock:
+                    if self._native_ops.get(tid) is cur:
+                        self._native_ops.pop(tid, None)
+            except Exception:
+                pass
 
         def _close():
+            _unregister()
             if not same_conn:
                 try:
                     cur.close()
@@ -2369,6 +2391,11 @@ class DuckDBManager:
             if len(first) < batch:
                 _close()
                 return cols, first, None
+            # Caller drains the live cursor — wrap so unregister runs on close
+            # (DuckDB cursor.close is read-only; cannot reassign).
+            if registered and not same_conn:
+                from .rows import _NativeOpsCursor
+                return cols, first, _NativeOpsCursor(cur, _unregister)
             return cols, first, cur
         except Exception:
             _close()
@@ -3077,7 +3104,7 @@ class DuckDBManager:
             if _cancelled():
                 raise LoadCancelled()
             try:
-                with _ExecKeepalive(self.conn, self._cancel,
+                with _ExecKeepalive(exec_conn, self._cancel,
                                     threading.get_ident()):
                     last = None
                     for rdr in readers:

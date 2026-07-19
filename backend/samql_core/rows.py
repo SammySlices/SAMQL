@@ -514,6 +514,49 @@ class DiskBackedRows:
             pass
 
 
+
+class _NativeOpsCursor:
+    """Thin handle around a DuckDB cursor that unregisters on close.
+
+    DuckDB's cursor ``.close`` cannot be reassigned; callers of
+    ``ParquetResultStore._run`` always ``close()`` in ``finally``, so this
+    keeps ``_native_ops`` accurate through execute + fetch.
+    """
+
+    __slots__ = ("_cur", "_unregister", "_closed")
+
+    def __init__(self, cur, unregister):
+        self._cur = cur
+        self._unregister = unregister
+        self._closed = False
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchmany(self, size=None):
+        if size is None:
+            return self._cur.fetchmany()
+        return self._cur.fetchmany(size)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._unregister()
+        finally:
+            try:
+                self._cur.close()
+            except Exception:
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
 class ParquetResultStore:
     """A query result materialized to a temporary Parquet file by DuckDB.
 
@@ -568,12 +611,65 @@ class ParquetResultStore:
                          for c in self._cols)
 
     def _run(self, sql, params=None):
-        cur = self._engine.conn.cursor()
-        if params:
-            cur.execute(sql, list(params))
-        else:
-            cur.execute(sql)
-        return cur
+        """Execute SQL on a private DuckDB cursor that Stop can interrupt.
+
+        A bare ``conn.cursor()`` is its own connection — ``DuckDBManager.interrupt``
+        only reaches the main connection plus ``_native_ops``. Register here
+        (same posture as ``execute_read``) so pivot/chart/page/export cancel
+        mid-statement. Unregister when the caller closes the returned handle
+        (DuckDB cursor ``.close`` is read-only, so we wrap).
+        """
+        eng = self._engine
+        cur = eng.conn.cursor()
+        tid = threading.get_ident()
+        ops = getattr(eng, "_native_ops", None)
+        lk = getattr(eng, "_native_ops_lock", None)
+        registered = False
+        if ops is not None:
+            try:
+                if lk is not None:
+                    with lk:
+                        ops[tid] = cur
+                else:
+                    ops[tid] = cur
+                registered = True
+            except Exception:
+                registered = False
+
+        def _unregister():
+            if not registered:
+                return
+            try:
+                if lk is not None:
+                    with lk:
+                        if ops.get(tid) is cur:
+                            ops.pop(tid, None)
+                elif ops.get(tid) is cur:
+                    ops.pop(tid, None)
+            except Exception:
+                pass
+
+        try:
+            try:
+                from .engines import _BeatScope
+                scope = _BeatScope(eng, cur)
+            except Exception:
+                scope = nullcontext()
+            with scope:
+                if params:
+                    cur.execute(sql, list(params))
+                else:
+                    cur.execute(sql)
+        except Exception:
+            _unregister()
+            try:
+                cur.close()
+            except Exception:
+                pass
+            raise
+        if not registered:
+            return cur
+        return _NativeOpsCursor(cur, _unregister)
 
     def __len__(self):
         if self._n is None:
@@ -789,18 +885,32 @@ class ParquetResultStore:
         cancel = getattr(eng, "_cancel", None)
         # Prefer a private cursor so SET + COPY do not hold write_lock and
         # stall loads/DDL. Fall back to the locked main connection.
+        # Register in _native_ops so cancel_query interrupts THIS cursor
+        # (keepalive alone only helps after eng._cancel is set).
         own_cur = None
         exec_conn = eng.conn
         lock = getattr(eng, "write_lock", None)
+        tid = threading.get_ident()
+        ops = getattr(eng, "_native_ops", None)
+        ops_lk = getattr(eng, "_native_ops_lock", None)
+        registered = False
         if getattr(eng, "concurrent_reads", True):
             try:
                 own_cur = eng.conn.cursor()
                 exec_conn = own_cur
                 lock = None
+                if ops is not None:
+                    if ops_lk is not None:
+                        with ops_lk:
+                            ops[tid] = own_cur
+                    else:
+                        ops[tid] = own_cur
+                    registered = True
             except Exception:
                 own_cur = None
                 exec_conn = eng.conn
                 lock = getattr(eng, "write_lock", None)
+                registered = False
         ctx = lock if lock is not None else nullcontext()
         try:
             with ctx:
@@ -809,7 +919,7 @@ class ParquetResultStore:
                 except Exception:
                     pass
                 try:
-                    with _ExecKeepalive(exec_conn, cancel, threading.get_ident(),
+                    with _ExecKeepalive(exec_conn, cancel, tid,
                                         interval=0.25):
                         if params:
                             exec_conn.execute(sql, list(params))
@@ -822,6 +932,16 @@ class ParquetResultStore:
                     except Exception:
                         pass
         finally:
+            if registered and ops is not None:
+                try:
+                    if ops_lk is not None:
+                        with ops_lk:
+                            if ops.get(tid) is own_cur:
+                                ops.pop(tid, None)
+                    elif ops.get(tid) is own_cur:
+                        ops.pop(tid, None)
+                except Exception:
+                    pass
             if own_cur is not None:
                 try:
                     own_cur.close()
