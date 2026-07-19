@@ -365,6 +365,13 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         "_shred_at" in session_py
         and "_table_content_epoch" in session_py
         and "content epoch" in session_py.lower())
+    report["correctness"]["be_freeform_write_stamps_shred_epoch"] = (
+        "def _stamp_shred_sources_content_epoch" in session_py
+        and "_mutation_table_names(sql)" in session_py.split(
+            "def _run_query_inner", 1)[1].split("\n    def ", 1)[0]
+        and "_stamp_shred_sources_content_epoch(ep)" in session_py.split(
+            "def _invalidate_counts", 1)[1]
+            .split("def _reclaim_stale_results", 1)[0])
     report["correctness"]["be_disk_source_auto_refresh"] = (
         "def _ensure_disk_source_nodes_fresh" in session_py
         and "_ensure_disk_source_nodes_fresh(" in session_py

@@ -4271,6 +4271,48 @@ def backend_tests(datadir, csv_path, json_path):
             s.run_nodeflow(g, "f", "out")
             eq(calls, [("big", "built_root")],
                "source content epoch advance re-flattens with refresh off")
+            # Free-form INSERT into the nested source stamps TCE the same way
+            # a scoped load/replace does (refresh=false must rebuild).
+            class _DuckWrap(object):
+                def __init__(self, real):
+                    self._real = real
+
+                @property
+                def table_columns(self):
+                    d = dict(getattr(self._real, "table_columns",
+                                     {}) or {})
+                    d["built_root"] = ["x"]
+                    return d
+
+                def __getattr__(self, name):
+                    return getattr(self._real, name)
+
+            s.duckdb = _DuckWrap(_orig_duck)
+            s.run_query("CREATE TABLE IF NOT EXISTS big (x INTEGER)")
+            calls.clear()
+            s._shred_at = {("big", "built_root"): int(s._data_epoch)}
+            s._table_content_epoch = {"big": int(s._data_epoch)}
+            r = s.run_query("INSERT INTO big VALUES (42)")
+            need(not r.get("error"),
+                 "free-form INSERT into shred source: %r" % r.get("error"))
+            need(int(s._table_content_epoch.get("big", 0))
+                 > int(s._shred_at[("big", "built_root")]),
+                 "free-form INSERT stamps _table_content_epoch for source")
+            s.run_nodeflow(g, "f", "out")
+            eq(calls, [("big", "built_root")],
+               "free-form INSERT re-flattens with refresh off")
+            # Unparseable / unknown write surface: fail-closed stamps every
+            # shred source currently tracked in _shred_at.
+            calls.clear()
+            s._shred_at = {("big", "built_root"): int(s._data_epoch)}
+            s._table_content_epoch = {}
+            s._invalidate_counts()
+            need(int(s._table_content_epoch.get("big", 0))
+                 == int(s._data_epoch),
+                 "keys=None invalidate fail-closed stamps shred sources")
+            s.run_nodeflow(g, "f", "out")
+            eq(calls, [("big", "built_root")],
+               "unknown write fail-closed re-flattens with refresh off")
         finally:
             try:
                 s.duckdb = _orig_duck

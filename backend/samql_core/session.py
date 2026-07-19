@@ -2194,6 +2194,33 @@ class Session:
             if rows is not None:
                 self._prime_count(eng, nm, rows)
 
+    def _stamp_shred_sources_content_epoch(self, ep=None):
+        """Stamp every nested source currently tracked by shred families.
+
+        Fail-closed for unknown / free-form mutations: ``refresh=false`` shred
+        must rebuild rather than serve a flat family that predates the write.
+        Scoped mutations stamp only the touched names via
+        :meth:`_invalidate_counts` instead.
+        """
+        if ep is None:
+            try:
+                ep = int(getattr(self, "_data_epoch", 0) or 0)
+            except Exception:
+                ep = 0
+        shred_at = getattr(self, "_shred_at", None) or {}
+        if not shred_at:
+            return
+        tce = getattr(self, "_table_content_epoch", None)
+        if tce is None:
+            self._table_content_epoch = tce = {}
+        for key in shred_at:
+            try:
+                src = key[0] if isinstance(key, (tuple, list)) else key
+                if src:
+                    tce[str(src).lower()] = ep
+            except Exception:
+                pass
+
     def _invalidate_counts(self, keys=None):
         """Drop sidebar COUNT(*) cache entries after a mutation.
 
@@ -2209,6 +2236,10 @@ class Session:
         Clear the flow cache whenever the epoch advances, reclaim
         unpinned result snapshots from older epochs, and drop the profile
         cache so a write that returns columns cannot serve stale stats.
+
+        Shred freshness: scoped keys stamp ``_table_content_epoch`` for the
+        touched names. Unknown mutations (``keys=None``) fail-closed by
+        stamping every source currently recorded in ``_shred_at``.
         """
         touched = []
         if keys is None:
@@ -2230,18 +2261,18 @@ class Session:
             ep = int(self._data_epoch)
             # Stamp which tables changed so shred(refresh=false) can re-flatten
             # only when its nested source moved — not on every unrelated bump.
-            # Free-form writes (keys=None) still bump _data_epoch / flow cache;
-            # they do not force every shred family to rebuild (use refresh=true
-            # or a scoped load/replace of the nested source for that).
+            tce = getattr(self, "_table_content_epoch", None)
+            if tce is None:
+                self._table_content_epoch = tce = {}
             if keys is not None:
-                tce = getattr(self, "_table_content_epoch", None)
-                if tce is None:
-                    self._table_content_epoch = tce = {}
                 for name in touched:
                     try:
                         tce[str(name).lower()] = ep
                     except Exception:
                         pass
+            else:
+                # Unknown mutation surface: fail-closed for shred families.
+                self._stamp_shred_sources_content_epoch(ep)
             if hasattr(self, "_flow_cache"):
                 self._flow_cache_clear()
             self._reclaim_stale_results()
@@ -7240,9 +7271,15 @@ class Session:
             # for the remainder of this session; the next restart reloads the
             # source and safely re-enables it.
             self._persistent_cache_tainted = True
-            # a write may change row counts -> drop the cached counts so the
-            # next /api/tables recomputes them
-            self._invalidate_counts()
+            # Prefer scoped count / shred-source stamps when the write names
+            # its target; otherwise clear counts and fail-closed for shred.
+            names = self._mutation_table_names(sql)
+            if names:
+                keys = (self._count_keys_for_tables("duckdb", *names)
+                        + self._count_keys_for_tables("sqlite", *names))
+                self._invalidate_counts(keys=keys)
+            else:
+                self._invalidate_counts()
 
         # Capture freshness before materialization. Concurrent mutations that
         # bump `_data_epoch` while this query runs must expire the snapshot.
