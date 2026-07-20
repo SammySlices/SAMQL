@@ -42,6 +42,10 @@ export interface TableInfo {
   group?: string; // grouping label for the sidebar (usually the database)
   col_count?: number; // number of columns (remote tables list this; columns are lazy)
   parent?: string | null; // .501: flatten parentage (family tree; path-only child names)
+  /** Source file on disk changed after this table was loaded (debounced watcher). */
+  source_changed?: boolean;
+  /** Last in-place auto-reload failure for this table (surfaced on the badge). */
+  source_reload_error?: string;
 }
 
 export interface Features {
@@ -117,6 +121,8 @@ export interface Health {
   features: Features;
   concurrent_reads?: boolean; // DuckDB light-read concurrency (async reads)
   flatten_json?: boolean; // when true, JSON loads shred into relational tables (default off)
+  /** When true, loads skip persistent file→Parquet filecache (Fresh load). */
+  fresh_load?: boolean;
   frontend_built: boolean;
   warming?: boolean; // HTTP up, Session() still constructing (launcher-ready)
   restoring?: boolean; // session restore is replaying the load manifest

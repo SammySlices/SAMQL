@@ -399,10 +399,13 @@ html.theme-light .about-body,
 html.theme-light .props-body,
 html.theme-light .ctx-menu,
 html.theme-light .settings-menu,
+html.theme-light .nb2-node-menu,
 html[data-theme="light"] .modal,
 html[data-theme="light"] .modal-body,
-html[data-theme="light"] .ctx-menu {
-  color: #111111;
+html[data-theme="light"] .ctx-menu,
+html[data-theme="light"] .settings-menu,
+html[data-theme="light"] .nb2-node-menu {
+  color: var(--chrome-ink);
 }
 /* Modal / settings section headers: near-black (beat base opacity: 0.6) */
 html.theme-light .modal-head h2,
@@ -426,8 +429,25 @@ html.theme-light .about-row,
 html.theme-light .form-row label,
 html.theme-light .modal .label,
 html.theme-light .ctx-menu button,
-html[data-theme="light"] .modal .label {
-  color: #111111;
+html.theme-light .ctx-menu .chev,
+html.theme-light .ctx-menu svg,
+html.theme-light .settings-menu button,
+html.theme-light .settings-menu .chev,
+html.theme-light .settings-menu svg,
+html.theme-light .nb2-node-menu button,
+html.theme-light .nb2-node-menu svg,
+html.theme-light .nb2-node-menu .nb2-cm-caret,
+html[data-theme="light"] .modal .label,
+html[data-theme="light"] .ctx-menu button,
+html[data-theme="light"] .ctx-menu .chev,
+html[data-theme="light"] .ctx-menu svg,
+html[data-theme="light"] .settings-menu button,
+html[data-theme="light"] .settings-menu .chev,
+html[data-theme="light"] .settings-menu svg,
+html[data-theme="light"] .nb2-node-menu button,
+html[data-theme="light"] .nb2-node-menu svg,
+html[data-theme="light"] .nb2-node-menu .nb2-cm-caret {
+  color: var(--chrome-ink);
 }
 /* Secondary copy inside modals / settings menus */
 html.theme-light .modal .dim,
@@ -435,11 +455,16 @@ html.theme-light .modal .faint,
 html.theme-light .modal .hint,
 html.theme-light .modal .muted,
 html.theme-light .ctx-menu .label,
+html.theme-light .ctx-menu .ctx-head,
+html.theme-light .settings-menu .label,
 html.theme-light .about-ver,
 html[data-theme="light"] .modal .dim,
 html[data-theme="light"] .modal .faint,
 html[data-theme="light"] .modal .hint,
-html[data-theme="light"] .modal .muted {
+html[data-theme="light"] .modal .muted,
+html[data-theme="light"] .ctx-menu .label,
+html[data-theme="light"] .ctx-menu .ctx-head,
+html[data-theme="light"] .settings-menu .label {
   color: #444444;
   opacity: 1;
 }
@@ -1319,8 +1344,8 @@ textarea:focus {
 
 /* ---- Tables / History / Workflows slide-out drawer ---- */
 /* Overlay on the left of .body so Journal / NodeFlow / Dashboard keep full
-   width when the rail is peeked closed. The folder-handle hamburger always
-   remains available (no Settings hide-rail toggle). */
+   width when the rail is closed. Closed = thin left-edge hit strip only;
+   hover / focus / click slides the panel out (no Settings hide-rail toggle). */
 .tables-sidebar-drawer {
   position: absolute;
   left: 0;
@@ -1328,6 +1353,38 @@ textarea:focus {
   bottom: 0;
   z-index: 45;
   pointer-events: none;
+}
+/* Full-height left hit strip while closed — nearly invisible until hover. */
+.tables-sidebar-edge {
+  pointer-events: auto;
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 4;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.tables-sidebar-edge:hover,
+.tables-sidebar-edge:focus-visible {
+  background: linear-gradient(
+    90deg,
+    var(--accent-line, rgba(84, 185, 73, 0.35)),
+    transparent
+  );
+  outline: none;
+}
+.tables-sidebar-drawer.is-open .tables-sidebar-edge {
+  width: 0;
+  pointer-events: none;
+  opacity: 0;
 }
 .tables-sidebar-panel {
   position: absolute;
@@ -1362,11 +1419,11 @@ textarea:focus {
   flex: 0 0 5px;
   pointer-events: auto;
 }
-/* Short folder-handle tab — nested on the panel's right edge (left: 100%) so
-   closed = visible at the viewport left (panel translateX(-100%)), open =
-   glued to the panel during resize (no separate left / CSS-var lag). */
+/* Folder-handle on the panel's right edge (left: 100%). Hidden while closed;
+   edge approach (is-peek) shows only this handle; when open it stays glued
+   to the panel during resize. */
 .tables-sidebar-peek {
-  pointer-events: auto;
+  pointer-events: none;
   position: absolute;
   left: 100%;
   top: 50%;
@@ -1383,6 +1440,13 @@ textarea:focus {
   border-radius: 0 10px 10px 0;
   box-shadow: 3px 0 12px rgba(0, 0, 0, 0.18);
   z-index: 3;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.tables-sidebar-drawer.is-peek .tables-sidebar-peek,
+.tables-sidebar-drawer.is-open .tables-sidebar-peek {
+  pointer-events: auto;
+  opacity: 1;
 }
 .tables-sidebar-peek-menu {
   border: none;
@@ -1405,13 +1469,15 @@ textarea:focus {
   background: var(--raised);
 }
 
-/* NodeFlow node press/drag: folder-handle must not steal the gesture. */
+/* NodeFlow node press/drag: edge strip + folder-handle must not steal the gesture. */
+html[data-samql-nf-drag="1"] .tables-sidebar-edge,
 html[data-samql-nf-drag="1"] .tables-sidebar-peek {
   pointer-events: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tables-sidebar-panel {
+  .tables-sidebar-panel,
+  .tables-sidebar-peek {
     transition: none;
   }
 }
@@ -6224,8 +6290,9 @@ kbd {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  /* Solid black glyph — not var(--chrome-ink) (undefined in dark :root) */
-  color: #111111;
+  /* Theme ink: dark :root --text (#e8eaef), light #111111.
+     Custom canvas text (--user-canvas-text-node) wins via .has-user-canvas-text-node. */
+  color: var(--text);
   cursor: grab;
 }
 .nb2-sphere-face:active {
@@ -6238,13 +6305,13 @@ kbd {
   height: 22px;
   align-items: center;
   justify-content: center;
-  color: #111111;
+  color: var(--text);
   pointer-events: none;
-  /* Solid black Lucide only — no outline / glow / drop-shadow */
+  /* Solid Lucide via currentColor — no outline / glow / drop-shadow */
   filter: none;
 }
 .nb2-sphere-icon svg {
-  color: #111111;
+  color: inherit;
   fill: none;
   stroke: currentColor;
 }
@@ -9147,6 +9214,34 @@ body.motion-reduced *, body.motion-reduced *::before, body.motion-reduced *::aft
   font-size: 12px;
 }
 .join-btn:hover { opacity: 1; }
+.source-changed-badge {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: #5a3d00;
+  background: #f0c14b;
+  border: 1px solid #c9a227;
+  white-space: nowrap;
+}
+html.theme-light .source-changed-badge {
+  color: #4a3200;
+  background: #ffe08a;
+  border-color: #d4a017;
+}
+.source-reload-error-badge {
+  color: #5a1010;
+  background: #f0a0a0;
+  border-color: #c04040;
+}
+html.theme-light .source-reload-error-badge {
+  color: #4a0808;
+  background: #ffc8c8;
+  border-color: #c04040;
+}
 
 .storage-panel { min-width: 0; }
 @media (min-width: 781px) {
@@ -12294,10 +12389,130 @@ html.theme-light .nb2-zoom .btn.primary:hover {
   color: var(--btn-hover-fg) !important;
 }
 
+/* Light mode context / settings menus: black ink on light panels.
+   Beats .topbar { color: chrome-fg } inheritance (Settings lives in the
+   black splash row) and any chrome-white !important from nearby strips.
+   Scoped to menu shells only — does not touch canvas / sphere text. */
+html.theme-light .ctx-menu,
+html.theme-light .settings-menu,
+html.theme-light .nb2-node-menu,
+html.theme-light .nb-export-menu,
+html.theme-light .nb-runmenu-pop,
+html.theme-light .topbar .ctx-menu,
+html.theme-light .topbar .settings-menu,
+html[data-theme="light"] .ctx-menu,
+html[data-theme="light"] .settings-menu,
+html[data-theme="light"] .nb2-node-menu,
+html[data-theme="light"] .nb-export-menu,
+html[data-theme="light"] .nb-runmenu-pop,
+html[data-theme="light"] .topbar .ctx-menu,
+html[data-theme="light"] .topbar .settings-menu {
+  color: var(--chrome-ink) !important;
+}
+html.theme-light .ctx-menu button,
+html.theme-light .ctx-menu .label,
+html.theme-light .ctx-menu .chev,
+html.theme-light .ctx-menu .ctx-head,
+html.theme-light .ctx-menu svg,
+html.theme-light .settings-menu button,
+html.theme-light .settings-menu .label,
+html.theme-light .settings-menu .chev,
+html.theme-light .settings-menu svg,
+html.theme-light .nb2-node-menu button,
+html.theme-light .nb2-node-menu svg,
+html.theme-light .nb2-node-menu .nb2-cm-caret,
+html.theme-light .nb-export-menu button,
+html.theme-light .nb-export-menu svg,
+html.theme-light .nb-runmenu-pop button,
+html.theme-light .nb-runmenu-pop svg,
+html.theme-light .topbar .ctx-menu button,
+html.theme-light .topbar .ctx-menu .label,
+html.theme-light .topbar .ctx-menu .chev,
+html.theme-light .topbar .ctx-menu svg,
+html.theme-light .topbar .settings-menu button,
+html.theme-light .topbar .settings-menu .label,
+html.theme-light .topbar .settings-menu .chev,
+html.theme-light .topbar .settings-menu svg,
+html[data-theme="light"] .ctx-menu button,
+html[data-theme="light"] .ctx-menu .label,
+html[data-theme="light"] .ctx-menu .chev,
+html[data-theme="light"] .ctx-menu .ctx-head,
+html[data-theme="light"] .ctx-menu svg,
+html[data-theme="light"] .settings-menu button,
+html[data-theme="light"] .settings-menu .label,
+html[data-theme="light"] .settings-menu .chev,
+html[data-theme="light"] .settings-menu svg,
+html[data-theme="light"] .nb2-node-menu button,
+html[data-theme="light"] .nb2-node-menu svg,
+html[data-theme="light"] .nb2-node-menu .nb2-cm-caret,
+html[data-theme="light"] .nb-export-menu button,
+html[data-theme="light"] .nb-export-menu svg,
+html[data-theme="light"] .nb-runmenu-pop button,
+html[data-theme="light"] .nb-runmenu-pop svg,
+html[data-theme="light"] .topbar .ctx-menu button,
+html[data-theme="light"] .topbar .ctx-menu .label,
+html[data-theme="light"] .topbar .ctx-menu .chev,
+html[data-theme="light"] .topbar .ctx-menu svg,
+html[data-theme="light"] .topbar .settings-menu button,
+html[data-theme="light"] .topbar .settings-menu .label,
+html[data-theme="light"] .topbar .settings-menu .chev,
+html[data-theme="light"] .topbar .settings-menu svg {
+  color: var(--chrome-ink) !important;
+}
+html.theme-light .ctx-menu .label,
+html.theme-light .ctx-menu .ctx-head,
+html.theme-light .settings-menu .label,
+html.theme-light .ctx-menu button.has-sub .chev,
+html.theme-light .nb2-node-menu .nb2-cm-caret,
+html[data-theme="light"] .ctx-menu .label,
+html[data-theme="light"] .ctx-menu .ctx-head,
+html[data-theme="light"] .settings-menu .label,
+html[data-theme="light"] .ctx-menu button.has-sub .chev,
+html[data-theme="light"] .nb2-node-menu .nb2-cm-caret {
+  color: #444444 !important;
+}
+html.theme-light .ctx-menu button:hover,
+html.theme-light .ctx-menu button:hover svg,
+html.theme-light .settings-menu button:hover,
+html.theme-light .settings-menu button:hover svg,
+html.theme-light .nb2-node-menu button:hover,
+html.theme-light .nb2-node-menu button:hover svg,
+html.theme-light .nb2-node-menu button.active,
+html.theme-light .nb-export-menu button:hover,
+html.theme-light .nb-runmenu-pop button:hover,
+html[data-theme="light"] .ctx-menu button:hover,
+html[data-theme="light"] .ctx-menu button:hover svg,
+html[data-theme="light"] .settings-menu button:hover,
+html[data-theme="light"] .settings-menu button:hover svg,
+html[data-theme="light"] .nb2-node-menu button:hover,
+html[data-theme="light"] .nb2-node-menu button:hover svg,
+html[data-theme="light"] .nb2-node-menu button.active,
+html[data-theme="light"] .nb-export-menu button:hover,
+html[data-theme="light"] .nb-runmenu-pop button:hover {
+  color: var(--menu-hl-text) !important;
+}
+html.theme-light .ctx-menu button.danger,
+html.theme-light .nb2-node-menu button.danger,
+html[data-theme="light"] .ctx-menu button.danger,
+html[data-theme="light"] .nb2-node-menu button.danger {
+  color: var(--error) !important;
+}
+html.theme-light .ctx-menu button.danger:hover,
+html.theme-light .nb2-node-menu button.danger:hover,
+html[data-theme="light"] .ctx-menu button.danger:hover,
+html[data-theme="light"] .nb2-node-menu button.danger:hover {
+  color: var(--error) !important;
+}
+html.theme-light .nb2-node-menu .nb2-cm-stop,
+html[data-theme="light"] .nb2-node-menu .nb2-cm-stop {
+  color: var(--error) !important;
+}
+
 /* ---- Settings → Visual → Change Canvas Color ----
    Floating modal (useWinDrag + win-float). Per-surface vars on <html>
-   (--user-canvas-bg-ide|journal|node + .has-user-canvas-bg-*) paint IDE
-   editor, Journal, and NodeFlow. Wins over ivory / light hard-coded whites.
+   (--user-canvas-bg-* / --user-canvas-text-* + .has-user-canvas-bg-* /
+   .has-user-canvas-text-*) paint IDE editor, Journal, and NodeFlow.
+   Wins over ivory / light hard-coded whites and theme --text.
    Dot grid on the canvas is preserved. */
 .canvas-color-win {
   position: fixed;
@@ -12481,6 +12696,141 @@ html[data-theme="light"].has-user-canvas-bg-ide body.editor-ivory .code,
 html[data-theme="light"].has-user-canvas-bg-ide .nb-ed .code {
   background-color: var(--user-canvas-bg-ide) !important;
   background: var(--user-canvas-bg-ide) !important;
+}
+
+/* ---- Per-surface canvas TEXT (Settings → Canvas Color) ----
+   Highlight layer (pre.hl + .t-ident) carries ink; textarea stays
+   transparent so the caret/selection overlay is not double-painted. */
+html.has-user-canvas-text-ide .code,
+html.has-user-canvas-text-ide .code pre.hl,
+html.has-user-canvas-text-ide .code .t-ident,
+html.has-user-canvas-text-ide body.editor-ivory .code,
+html.has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html.has-user-canvas-text-ide body.editor-ivory .code .t-ident,
+html.has-user-canvas-text-ide .nb-ed .code,
+html.has-user-canvas-text-ide .nb-ed .code pre.hl,
+html.has-user-canvas-text-ide .nb-ed .code .t-ident,
+html.theme-light.has-user-canvas-text-ide .code,
+html.theme-light.has-user-canvas-text-ide .code pre.hl,
+html.theme-light.has-user-canvas-text-ide .code .t-ident,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code .t-ident,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code pre.hl,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code .t-ident,
+html[data-theme="light"].has-user-canvas-text-ide .code,
+html[data-theme="light"].has-user-canvas-text-ide .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide .code .t-ident,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code .t-ident,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code .t-ident {
+  color: var(--user-canvas-text-ide) !important;
+}
+html.has-user-canvas-text-ide .code textarea.ta,
+html.has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html.has-user-canvas-text-ide .nb-ed .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code textarea.ta {
+  color: transparent !important;
+  caret-color: var(--user-canvas-text-ide);
+}
+
+html.has-user-canvas-text-journal .nb,
+html.has-user-canvas-text-journal .nb-scroll,
+html.has-user-canvas-text-journal .nb-groups,
+html.has-user-canvas-text-journal .nb-card,
+html.has-user-canvas-text-journal .nb-out,
+html.has-user-canvas-text-journal .nb-viz-empty,
+html.has-user-canvas-text-journal .nb-note,
+html.has-user-canvas-text-journal .nb-note-edit,
+html.has-user-canvas-text-journal .nb-note-view,
+html.has-user-canvas-text-journal .nb-note-h,
+html.has-user-canvas-text-journal .nb-note-p,
+html.has-user-canvas-text-journal .nb-note-ul,
+html.has-user-canvas-text-journal .nb-ed .code,
+html.has-user-canvas-text-journal .nb-ed .code pre.hl,
+html.has-user-canvas-text-journal .nb-ed .code .t-ident,
+html.theme-light.has-user-canvas-text-journal .nb,
+html.theme-light.has-user-canvas-text-journal .nb-scroll,
+html.theme-light.has-user-canvas-text-journal .nb-groups,
+html.theme-light.has-user-canvas-text-journal .nb-card,
+html.theme-light.has-user-canvas-text-journal .nb-out,
+html.theme-light.has-user-canvas-text-journal .nb-viz-empty,
+html.theme-light.has-user-canvas-text-journal .nb-note,
+html.theme-light.has-user-canvas-text-journal .nb-note-edit,
+html.theme-light.has-user-canvas-text-journal .nb-note-view,
+html.theme-light.has-user-canvas-text-journal .nb-note-h,
+html.theme-light.has-user-canvas-text-journal .nb-note-p,
+html.theme-light.has-user-canvas-text-journal .nb-note-ul,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code pre.hl,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code .t-ident,
+html[data-theme="light"].has-user-canvas-text-journal .nb,
+html[data-theme="light"].has-user-canvas-text-journal .nb-scroll,
+html[data-theme="light"].has-user-canvas-text-journal .nb-groups,
+html[data-theme="light"].has-user-canvas-text-journal .nb-card,
+html[data-theme="light"].has-user-canvas-text-journal .nb-out,
+html[data-theme="light"].has-user-canvas-text-journal .nb-viz-empty,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-edit,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-view,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-h,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-p,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-ul,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code .t-ident {
+  color: var(--user-canvas-text-journal) !important;
+}
+html.has-user-canvas-text-journal .nb-ed .code textarea.ta,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code textarea.ta {
+  color: transparent !important;
+  caret-color: var(--user-canvas-text-journal);
+}
+
+html.has-user-canvas-text-node .nb2-canvas-wrap,
+html.has-user-canvas-text-node .nb2-empty,
+html.has-user-canvas-text-node .nb2-hint,
+html.has-user-canvas-text-node .nb2-hint-sm,
+html.has-user-canvas-text-node .nb2-sphere-face,
+html.has-user-canvas-text-node .nb2-sphere-icon,
+html.has-user-canvas-text-node .nb2-sphere-icon svg,
+html.theme-light.has-user-canvas-text-node .nb2-canvas-wrap,
+html.theme-light.has-user-canvas-text-node .nb2-empty,
+html.theme-light.has-user-canvas-text-node .nb2-hint,
+html.theme-light.has-user-canvas-text-node .nb2-hint-sm,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-face,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-icon,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-theme="light"].has-user-canvas-text-node .nb2-canvas-wrap,
+html[data-theme="light"].has-user-canvas-text-node .nb2-empty,
+html[data-theme="light"].has-user-canvas-text-node .nb2-hint,
+html[data-theme="light"].has-user-canvas-text-node .nb2-hint-sm,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-icon svg,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-face,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-icon,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-icon svg,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-face,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-icon,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-icon svg {
+  color: var(--user-canvas-text-node) !important;
 }
 
 html.theme-light .canvas-color-head,

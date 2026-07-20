@@ -243,18 +243,24 @@ Path(os.environ["SAMQL_WAVE3_READY"]).write_text(
     encoding="utf-8")
 httpd.serve_forever(poll_interval=0.05)
 '''
+    localapp = Path(home) / "localapp"
+    config_dir = localapp / "SamQL"
     env = os.environ.copy()
     env.update({
         "HOME": str(home),
         "USERPROFILE": str(home),
-        "LOCALAPPDATA": str(Path(home) / "localapp"),
+        "LOCALAPPDATA": str(localapp),
         "APPDATA": str(Path(home) / "appdata"),
+        # Isolate durable config under the child LOCALAPPDATA so the parent
+        # can assert the restart manifest without reading the host profile.
+        "SAMQL_CONFIG_DIR": str(config_dir),
         "SAMQL_WAVE3_BACKEND": backend,
         "SAMQL_WAVE3_READY": str(ready_path),
         "PYTHONDONTWRITEBYTECODE": "1",
     })
     env.pop("SAMQL_API_TOKEN", None)
-    Path(env["LOCALAPPDATA"]).mkdir(parents=True, exist_ok=True)
+    localapp.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
     Path(env["APPDATA"]).mkdir(parents=True, exist_ok=True)
     return subprocess.Popen(
         [sys.executable, "-u", "-c", code], env=env,
@@ -299,8 +305,8 @@ def _subprocess_crash_restart_manifest(root, csv_path, _skip):
             return body if body.get("state") == "done" else None
 
         _wait_until(load_done, timeout=30, message="fixture load completion")
-        from samql_core.stores import app_config_dir
-        manifest = app_config_dir() / "session_manifest.json"
+        manifest = (Path(home) / "localapp" / "SamQL"
+                    / "session_manifest.json")
         _wait_until(manifest.exists, timeout=5, message="manifest write")
         entries = json.loads(manifest.read_text(encoding="utf-8"))
         _need(any(e.get("path") == str(stable_csv) for e in entries),

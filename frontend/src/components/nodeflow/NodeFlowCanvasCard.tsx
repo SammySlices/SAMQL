@@ -49,7 +49,7 @@ function SphereNodeIcon({ node }: { node: NbNode }) {
   const NodeIcon = (Icon[iconName] || Icon.Sparkle) as React.FC<{
     size?: number;
   }>;
-  // Solid black Lucide glyph only (no glow / outline filter).
+  // Solid Lucide glyph via CSS currentColor (theme --text; no glow / outline).
   return (
     <span className="nb2-sphere-icon" aria-hidden="true">
       <NodeIcon size={22} />
@@ -215,7 +215,7 @@ export type NodeFlowCanvasCardActions = {
 export type NodeFlowCanvasCardProps = CanvasNodeMemoState & {
   visibleInputCount: number;
   incomingCount: number;
-  incomingEdges: NbEdge[];
+  incomingEdges: readonly NbEdge[];
   /** Stable dispatcher bag — identity must not change across Scene renders. */
   actions: NodeFlowCanvasCardActions;
   groupDnd: React.MutableRefObject<{

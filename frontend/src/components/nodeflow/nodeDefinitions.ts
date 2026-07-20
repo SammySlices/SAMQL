@@ -328,7 +328,12 @@ export const NODE_DEFINITIONS = {
     label: "python",
   }), true),
   group: define("group", "Group", "Group", () => ({ children: [], label: "group", note: "" }), true),
-  write: define("write", "Write to table", "ArrowDownToLine", () => ({ name: "flow_result", label: "write" })),
+  write: define("write", "Write to table", "ArrowDownToLine", () => ({
+    name: "flow_result",
+    dest: "duckdb",
+    mode: "overwrite",
+    label: "write",
+  })),
   output: define("output", "Output", "FileDown", () => ({ folder: "", format: "csv", base_name: "output", label: "output" })),
   samqldash: define("samqldash", "SamQL Dashboard", "Pin", () => ({ label: "dashboard out" })),
   dyn_input: define("dyn_input", "Dynamic Input", "Upload", () => ({ label: "dyn in" })),

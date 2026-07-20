@@ -45,6 +45,7 @@ backend/samql_core/load_thresholds.py
 backend/samql_core/loaders.py
 backend/samql_core/mssql.py
 backend/samql_core/nodeflow.py
+backend/samql_core/originwatch.py
 backend/samql_core/profiler.py
 backend/samql_core/progress.py
 backend/samql_core/python_node.py

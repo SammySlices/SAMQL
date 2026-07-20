@@ -2,12 +2,21 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.671
+Current build:   2026-07-20.672
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-20.672  (v2.16.4)
+
+MASTER APPWINDOW: ORIGIN WATCH + FRESH LOAD/RUN + UI HARDENING.
+File-origin watcher with in-place reload, source_changed / reload-error
+badges, table reload API, Fresh load and Fresh run settings; canvas color
+and tables sidebar/drawer polish; NodeFlow execution-controller and sphere
+UX; suite/harness pins. Refresh samql_txt full-source bundle.
 
 ----------------------------------------------------------------------
 build 2026-07-18.671  (v2.16.4)

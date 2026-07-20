@@ -309,12 +309,11 @@ describe("NodeFlow canvas components", () => {
 
   it("routes right-click to contextmenu without treating it as inspector open", () => {
     const onPointerDown = vi.fn();
-    const onContextMenu = vi.fn(
+    const onContextMenuMock = vi.fn(
       (e: React.MouseEvent, _node: NbNode) => {
         e.preventDefault();
       },
     );
-    const onInspectorOpen = vi.fn();
     render(
       <CanvasNodeFrame
         node={inputNode}
@@ -339,8 +338,8 @@ describe("NodeFlow canvas components", () => {
           onPointerDown(e, n);
         }}
         onContextMenu={(e, n) => {
-          // Mirror Scene: menu only — never open inspector.
-          onContextMenu(e, n);
+          // Mirror CanvasCard: menu only — never open inspector.
+          onContextMenuMock(e, n);
         }}
       >
         <span>node body</span>
@@ -351,8 +350,7 @@ describe("NodeFlow canvas components", () => {
     fireEvent.pointerDown(node, { button: 2 });
     fireEvent.contextMenu(node);
     expect(onPointerDown).not.toHaveBeenCalled();
-    expect(onContextMenu).toHaveBeenCalledTimes(1);
-    expect(onInspectorOpen).not.toHaveBeenCalled();
+    expect(onContextMenuMock).toHaveBeenCalledTimes(1);
   });
 
   it("exposes minimap collapse and pan behavior", () => {

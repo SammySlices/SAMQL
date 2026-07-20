@@ -1614,6 +1614,7 @@ def _health_payload(session=None):
     base["features"] = session.optional_features()
     base["concurrent_reads"] = session.concurrent_reads_enabled()
     base["flatten_json"] = session.flatten_json_enabled()
+    base["fresh_load"] = session.fresh_load_enabled()
     base["restoring"] = bool(getattr(session, "restoring", False))
     base["restored"] = int(getattr(session, "_restored_count", 0))
     base["warming"] = False
@@ -1696,6 +1697,15 @@ class Api:
         if "on" in b:
             s.set_flatten_json(bool(b.get("on")))
         return {"flatten_json": s.flatten_json_enabled()}
+
+    @staticmethod
+    def fresh_load_setting(s, m, body, ctx):
+        # Fresh load: skip persistent file→Parquet filecache. Default off.
+        # Per-load ``fresh`` on /api/load/* still wins when supplied.
+        b = body or {}
+        if "on" in b:
+            s.set_fresh_load(bool(b.get("on")))
+        return {"fresh_load": s.fresh_load_enabled()}
 
     @staticmethod
     def docs_functions(s, m, body, ctx):
@@ -1916,6 +1926,27 @@ class Api:
         return res
 
     @staticmethod
+    def table_reload(s, m, body, ctx):
+        """Reload a file-backed table from disk.
+
+        Default creates a new uniquified name (latest-data / uniquify-on-load).
+        ``replace: true`` drops the existing table first (explicit only).
+        """
+        b = body or {}
+        eng = _reqstr(b, "engine")
+        name = _reqstr(b, "table")
+        replace = bool(b.get("replace"))
+        fresh = b.get("fresh")
+        if fresh is not None and not isinstance(fresh, bool):
+            raise ApiError(400, "fresh must be true or false")
+        res = s.reload_table_from_source(
+            eng, name, replace=replace,
+            fresh=None if fresh is None else bool(fresh))
+        if res.get("error"):
+            raise ApiError(400, res["error"])
+        return res
+
+    @staticmethod
     def focus(s, m, body, ctx):
         """Bring this instance's native window to the front. A second launch
         calls this so double-clicking the exe surfaces the running copy
@@ -2006,7 +2037,7 @@ class Api:
             raise ApiError(400, "enabled must be true or false")
         bool_fields = ("adaptive_resources", "parallel_nodeflows",
                        "persistent_enabled", "clear", "reset_stats",
-                       "clear_persistent")
+                       "clear_persistent", "fresh_run")
         for key in bool_fields:
             if key in b and not isinstance(b.get(key), bool):
                 raise ApiError(400, "%s must be true or false" % key)
@@ -2043,7 +2074,8 @@ class Api:
             persistent_enabled=b.get("persistent_enabled"),
             persistent_max_mb=persistent_max_mb,
             persistent_days=persistent_days,
-            clear_persistent=b.get("clear_persistent", False))
+            clear_persistent=b.get("clear_persistent", False),
+            fresh_run=b.get("fresh_run"))
 
     @staticmethod
     def memory_free(s, m, body, ctx):
@@ -2140,6 +2172,8 @@ class Api:
         flatten = (None if _fl == "" else _fl in ("1", "true", "on", "yes"))
         shred = (fields.get("shred") or "").strip().lower() in (
             "1", "true", "on", "yes")
+        _fr = (fields.get("fresh") or "").strip().lower()
+        fresh = (None if _fr == "" else _fr in ("1", "true", "on", "yes"))
         root_id = None
         _ridf = fields.get("root_id")
         if _ridf:
@@ -2179,7 +2213,7 @@ class Api:
                                      mode=mode, sheet=sheet,
                                      header_row=header_row, exclude=exclude,
                                      flatten=flatten, shred=shred,
-                                     root_id=root_id)
+                                     root_id=root_id, fresh=fresh)
                 # only a registered view needs the file kept on disk; a
                 # materialized load (including the no-DuckDB fallback) has
                 # already copied the data, so its upload can go.
@@ -2218,6 +2252,8 @@ class Api:
         flatten = (None if _fl == "" else _fl in ("1", "true", "on", "yes"))
         shred = (fields.get("shred") or "").strip().lower() in (
             "1", "true", "on", "yes")
+        _fr = (fields.get("fresh") or "").strip().lower()
+        fresh = (None if _fr == "" else _fr in ("1", "true", "on", "yes"))
         root_id = None
         _ridf = fields.get("root_id")
         if _ridf:
@@ -2278,7 +2314,8 @@ class Api:
                "shred": bool(locals().get("shred")), "bytes_done": 0,
                "bytes_total": total, "rows": None, "name": name0,
                "error": None, "engine": destination, "started": time.time(),
-               "loaded": None, "root_id": root_id, "cancel": False}
+               "loaded": None, "root_id": root_id, "fresh": fresh,
+               "cancel": False}
         with JOBS_LOCK:
             for k, v in list(JOBS.items()):
                 if v.get("done_at") and time.time() - v["done_at"] > 300:
@@ -2318,7 +2355,8 @@ class Api:
                         progress=prog, delimiter=delimiter, mode=mode,
                         sheet=sheet, header_row=header_row, exclude=exclude,
                         flatten=flatten, shred=shred,
-                        root_id=job.get("root_id"))
+                        root_id=job.get("root_id"),
+                        fresh=job.get("fresh"))
                     if isinstance(loaded, list) and any(
                             isinstance(t, dict) and t.get("view")
                             for t in loaded):
@@ -2471,6 +2509,10 @@ class Api:
         root_id = b.get("root_id") if isinstance(b.get("root_id"), dict) \
             else None                    # .521: validated again server-side
         shred = bool(b.get("shred"))
+        # Fresh load: tri-state — None uses session setting; True/False wins.
+        fresh = b.get("fresh")
+        if fresh is not None:
+            fresh = bool(fresh)
         _exc = b.get("exclude")
         if isinstance(_exc, str):
             _exc = [t.strip() for t in _exc.split(",") if t.strip()]
@@ -2485,7 +2527,7 @@ class Api:
                "bytes_total": total, "rows": None,
                "name": os.path.basename(path), "error": None,
                "engine": dest, "started": time.time(), "loaded": None,
-               "root_id": root_id, "cancel": False}
+               "root_id": root_id, "fresh": fresh, "cancel": False}
         with JOBS_LOCK:
             for k, v in list(JOBS.items()):
                 if v.get("done_at") and time.time() - v["done_at"] > 300:
@@ -2518,7 +2560,8 @@ class Api:
                                      sheet=sheet, header_row=header_row,
                                      exclude=exclude, flatten=flatten,
                                      shred=shred,
-                                     root_id=job.get("root_id"))
+                                     root_id=job.get("root_id"),
+                                     fresh=job.get("fresh"))
                 job["loaded"] = loaded
                 _shred_note(job, loaded)
                 job["rows"] = sum((t.get("rows") or 0) for t in loaded)
@@ -4269,10 +4312,12 @@ ROUTES = [
     ("POST", r"^/api/engine/reset$", Api.engine_reset),
     ("POST", r"^/api/settings/concurrent-reads$", Api.concurrent_reads),
     ("POST", r"^/api/settings/flatten-json$", Api.flatten_json_setting),
+    ("POST", r"^/api/settings/fresh-load$", Api.fresh_load_setting),
     ("GET", r"^/api/settings/load-thresholds$", Api.load_thresholds_settings),
     ("POST", r"^/api/settings/load-thresholds$", Api.load_thresholds_settings),
     ("GET", r"^/api/tables$", Api.tables),
     ("POST", r"^/api/tables/reorder$", Api.tables_reorder),
+    ("POST", r"^/api/table/reload$", Api.table_reload),
     ("POST", r"^/api/column/fields$", Api.column_fields),
     ("POST", r"^/api/column/access-preview$", Api.column_access_preview),
     ("POST", r"^/api/load/files$", Api.load_files),

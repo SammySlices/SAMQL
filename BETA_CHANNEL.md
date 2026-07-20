@@ -7,7 +7,7 @@ Durable dogfood line for soak testing before a stable AppWindow cut.
 | Item | Value |
 |------|--------|
 | Branch | `beta` |
-| Current tip (as of channel setup) | build **2026-07-18.671** (v2.16.4) |
+| Current tip (as of channel setup) | build **2026-07-20.672** (v2.16.4) |
 | GitHub prerelease tag pattern | `app-beta-<build>` |
 | Stable (unchanged) | `master` + `app-<build>` **Latest** |
 
@@ -37,4 +37,4 @@ Confirm `/api/health` (or the AppWindow top bar) shows the expected `build`.
 
 ## What’s on beta today
 
-NodeFlow sphere polish (groups/iterators/SQL as spheres with under-panels and rim port fan), container minimize, Field Explorer / modal responsiveness, and latest-data-wins pin reclaim / filecache hardening. See `VERSION` for the detailed build log.
+Promoted to master as AppWindow **2026-07-20.672**: file-origin watch (in-place reload, source_changed badges), Fresh load / Fresh run, table reload API, canvas color + tables sidebar polish, NodeFlow execution / sphere UX. See `VERSION` for the detailed build log.

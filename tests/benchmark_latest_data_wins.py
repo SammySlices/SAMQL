@@ -336,7 +336,8 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
         "!r.dataStale" in app
         and "disabled={!!props.stale}" in sql_cell
         and "staleById[id]" in notebook)
-    report["correctness"]["fe_field_explorer_soft_clear"] = (
+    # Full rediscovery on dataEpoch (not preview soft-clear alone).
+    report["correctness"]["fe_field_explorer_rediscovery"] = (
         "dataEpoch" in fe
         and "[srcKey, open, dataEpoch]" in fe
         and "setFields(null)" in fe

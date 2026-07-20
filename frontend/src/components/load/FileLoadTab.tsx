@@ -14,7 +14,12 @@ export const FileLoadTab: React.FC<{
     sheet?: string,
     headerRow?: number,
     exclude?: string,
-    opts?: { flatten?: boolean; shred?: boolean; root_id?: RootIdChoice },
+    opts?: {
+      flatten?: boolean;
+      shred?: boolean;
+      root_id?: RootIdChoice;
+      fresh?: boolean;
+    },
   ) => void;
   onBeginLoadFolder: (
     dir: string,
@@ -27,6 +32,24 @@ export const FileLoadTab: React.FC<{
   const [dest, setDest] = useState("auto");
   const [delim, setDelim] = useState("");
   const [loadMode, setLoadMode] = useState("materialize");
+  // Fresh load: skip persistent file→Parquet filecache. Seeded from the
+  // session setting; the checkbox also persists via setFreshLoad so the
+  // next load (and folder/API paths that omit per-call fresh) stay aligned.
+  const [freshOn, setFreshOn] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getFreshLoad()
+      .then((r) => {
+        if (!cancelled) setFreshOn(!!r.fresh_load);
+      })
+      .catch(() => {
+        /* keep local default off */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // JSON + DuckDB: flatten into RELATIONAL tables (the shred engine) --
   // replaces the old global Settings toggle; the load itself stays a nested
   // query-in-place table either way.
@@ -189,6 +212,18 @@ export const FileLoadTab: React.FC<{
     const merged = new Set(skip);
     for (const t of manualSkip.split(","))
       if (t.trim()) merged.add(t.trim());
+    const loadOpts: {
+      flatten?: boolean;
+      shred?: boolean;
+      root_id?: RootIdChoice;
+      fresh?: boolean;
+    } = {};
+    if (shredEligible) {
+      loadOpts.flatten = false;
+      loadOpts.shred = shredOn;
+      if (rootId) loadOpts.root_id = rootId;
+    }
+    if (freshOn) loadOpts.fresh = true;
     onBeginLoad(
       path.trim(),
       dest,
@@ -199,13 +234,7 @@ export const FileLoadTab: React.FC<{
       !shredEligible && isJson && merged.size
         ? Array.from(merged).join(",")
         : undefined,
-      shredEligible
-        ? {
-            flatten: false,
-            shred: shredOn,
-            ...(rootId ? { root_id: rootId } : {}),
-          }
-        : undefined,
+      Object.keys(loadOpts).length ? loadOpts : undefined,
     );
   };
 
@@ -296,6 +325,26 @@ export const FileLoadTab: React.FC<{
           onChange={(e) => setDelim(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && go()}
         />
+      </div>
+      <div className="form-row">
+        <label
+          className="chk"
+          title="Skip the persistent file→Parquet conversion cache for this load. Always re-reads the source. Default stays cache-on for speed."
+        >
+          <input
+            type="checkbox"
+            data-testid="fresh-load-checkbox"
+            checked={freshOn}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setFreshOn(on);
+              void api.setFreshLoad(on).catch(() => {
+                /* local checkbox still drives this load via opts.fresh */
+              });
+            }}
+          />{" "}
+          Fresh load — re-convert from source (skip file cache)
+        </label>
       </div>
       {shredEligible && (
         <div className="form-row">

@@ -2,6 +2,7 @@ import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NbNode } from "../../lib/nodeFlowModel";
+import { reconcileSelectFields } from "../../lib/selectFields";
 import type { TableInfo } from "../../lib/types";
 import {
   NodeFlowInspector,
@@ -306,12 +307,10 @@ describe("NodeFlowInspector", () => {
       },
     };
     const patch = vi.fn();
-    const runAll = vi.fn();
     render(
       <NodeFlowInspector
         context={context(node, {
           patch,
-          runAll,
           staleColRefs: [{ area: "sort", columns: ["old_name"] }],
           inspCols: { in: ["keep_me", "a"] },
         })}
@@ -325,7 +324,6 @@ describe("NodeFlowInspector", () => {
         sorts: [{ col: "keep_me", dir: "asc" }],
       }),
     );
-    expect(runAll).not.toHaveBeenCalled();
   });
 
   it("Clear missing on Select drops missing fields only (local-only)", () => {
@@ -344,12 +342,10 @@ describe("NodeFlowInspector", () => {
       },
     };
     const patch = vi.fn();
-    const runAll = vi.fn();
     render(
       <NodeFlowInspector
         context={context(node, {
           patch,
-          runAll,
           inspCols: { in: ["a", "b"] },
         })}
       />,
@@ -366,7 +362,173 @@ describe("NodeFlowInspector", () => {
         { name: "b", keep: true, rename: "bee" },
       ],
     });
-    expect(runAll).not.toHaveBeenCalled();
+  });
+
+  it("Select rename commits on blur only — intermediate A→Hi→Hi My→Hi My Name do not patch", () => {
+    const node: NbNode = {
+      id: "sel-1",
+      type: "select",
+      x: 0,
+      y: 0,
+      config: {
+        label: "select",
+        fields: [{ name: "A", keep: true }],
+      },
+    };
+    const patch = vi.fn();
+    render(
+      <NodeFlowInspector
+        context={context(node, {
+          patch,
+          nodes: [node],
+          inspCols: { in: ["A"] },
+        })}
+      />,
+    );
+    const input = screen.getByTestId("select-field-rename-A");
+    fireEvent.focus(input);
+    for (const value of ["Hi", "Hi My", "Hi My Name"]) {
+      fireEvent.change(input, { target: { value } });
+      expect(patch).not.toHaveBeenCalled();
+    }
+    fireEvent.blur(input);
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith("sel-1", {
+      fields: [{ name: "A", keep: true, rename: "Hi My Name" }],
+    });
+  });
+
+  it("Select rename Escape discards the draft without patching", () => {
+    const node: NbNode = {
+      id: "sel-1",
+      type: "select",
+      x: 0,
+      y: 0,
+      config: {
+        label: "select",
+        fields: [{ name: "A", keep: true, rename: "kept" }],
+      },
+    };
+    const patch = vi.fn();
+    render(
+      <NodeFlowInspector
+        context={context(node, {
+          patch,
+          nodes: [node],
+          inspCols: { in: ["A"] },
+        })}
+      />,
+    );
+    const input = screen.getByTestId("select-field-rename-A");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "scratch" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    fireEvent.blur(input);
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("Select rename sticks on the draft node when selection changes before blur", () => {
+    // Canvas selects on pointerdown, often before the rename input blurs.
+    // The draft must commit to sel-1 (not the newly selected sel-2).
+    const sel1: NbNode = {
+      id: "sel-1",
+      type: "select",
+      x: 0,
+      y: 0,
+      config: {
+        label: "select-1",
+        fields: [{ name: "A", keep: true }],
+      },
+    };
+    const sel2: NbNode = {
+      id: "sel-2",
+      type: "select",
+      x: 120,
+      y: 0,
+      config: {
+        label: "select-2",
+        fields: [{ name: "A", keep: true }],
+      },
+    };
+    const patch = vi.fn();
+    const { rerender } = render(
+      <NodeFlowInspector
+        context={context(sel1, {
+          patch,
+          nodes: [sel1, sel2],
+          inspCols: { in: ["A"] },
+        })}
+      />,
+    );
+    const input = screen.getByTestId("select-field-rename-A");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "Hi My Name" } });
+    expect(patch).not.toHaveBeenCalled();
+    // Selection change without blur (pointerdown path).
+    rerender(
+      <NodeFlowInspector
+        context={context(sel2, {
+          patch,
+          nodes: [sel1, sel2],
+          inspCols: { in: ["A"] },
+        })}
+      />,
+    );
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith("sel-1", {
+      fields: [{ name: "A", keep: true, rename: "Hi My Name" }],
+    });
+  });
+
+  it("Select rename blur commits final name that downstream reconcile can see", () => {
+    const sel1: NbNode = {
+      id: "sel-1",
+      type: "select",
+      x: 0,
+      y: 0,
+      config: {
+        label: "select-1",
+        fields: [{ name: "A", keep: true }],
+      },
+    };
+    const patch = vi.fn();
+    render(
+      <NodeFlowInspector
+        context={context(sel1, {
+          patch,
+          nodes: [sel1],
+          inspCols: { in: ["A"] },
+        })}
+      />,
+    );
+    const input = screen.getByTestId("select-field-rename-A");
+    fireEvent.focus(input);
+    for (const value of ["Hi", "Hi My", "Hi My Name"]) {
+      fireEvent.change(input, { target: { value } });
+    }
+    fireEvent.blur(input);
+    const committed = patch.mock.calls[0][1].fields as {
+      name: string;
+      rename?: string;
+    }[];
+    expect(committed).toEqual([
+      { name: "A", keep: true, rename: "Hi My Name" },
+    ]);
+    // Downstream Select sees only the final output name (no Hi / Hi My).
+    const down = reconcileSelectFields(
+      ["Hi My Name", "amount"],
+      [
+        { name: "A", keep: true },
+        { name: "amount", keep: true },
+      ],
+    );
+    expect(down.map((f: { name: string }) => f.name)).toEqual([
+      "A",
+      "amount",
+      "Hi My Name",
+    ]);
+    expect(down.map((f: { name: string }) => f.name)).not.toContain("Hi");
+    expect(down.map((f: { name: string }) => f.name)).not.toContain("Hi My");
   });
 
   it("Clear blanks filter field + condition for dropped / spaced headers", () => {

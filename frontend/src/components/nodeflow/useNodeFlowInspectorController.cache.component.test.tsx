@@ -8,9 +8,14 @@ import {
 } from "./useNodeFlowInspectorController";
 
 const nodeflowColumnsBatch = vi.hoisted(() =>
-  vi.fn(async () => ({
-    results: [{ node: "in-1", port: "out", columns: ["a", "b"] }],
-  })),
+  vi.fn(
+    async (
+      _graph?: unknown,
+      _reqs?: { node: string; port: string }[],
+    ) => ({
+      results: [{ node: "in-1", port: "out", columns: ["a", "b"] }],
+    }),
+  ),
 );
 
 vi.mock("../../lib/api", () => ({
@@ -256,13 +261,15 @@ describe("useNodeFlowInspectorController column probe cache", () => {
       "in-top": ["alpha", "beta"],
       "in-bot": ["gamma", "delta"],
     };
-    nodeflowColumnsBatch.mockImplementation(async (_graph: unknown, reqs: any[]) => ({
-      results: (reqs || []).map((q: any) => ({
-        node: q.node,
-        port: q.port || "out",
-        columns: colsByNode[q.node] || [],
-      })),
-    }));
+    nodeflowColumnsBatch.mockImplementation(
+      async (_graph?: unknown, reqs?: { node: string; port: string }[]) => ({
+        results: (reqs || []).map((q) => ({
+          node: q.node,
+          port: q.port || "out",
+          columns: colsByNode[q.node] || [],
+        })),
+      }),
+    );
 
     const patch = vi.fn((id: string, config: Record<string, any>) => {
       const n = nodes.find((x) => x.id === id);
@@ -448,13 +455,15 @@ describe("useNodeFlowInspectorController column probe cache", () => {
       "sum-a": ["region", "total"],
       "sel-b": ["sku", "qty"],
     };
-    nodeflowColumnsBatch.mockImplementation(async (_graph: unknown, reqs: any[]) => ({
-      results: (reqs || []).map((q: any) => ({
-        node: q.node,
-        port: q.port || "out",
-        columns: colsByNode[q.node] || [],
-      })),
-    }));
+    nodeflowColumnsBatch.mockImplementation(
+      async (_graph?: unknown, reqs?: { node: string; port: string }[]) => ({
+        results: (reqs || []).map((q) => ({
+          node: q.node,
+          port: q.port || "out",
+          columns: colsByNode[q.node] || [],
+        })),
+      }),
+    );
 
     const patch = vi.fn((id: string, config: Record<string, any>) => {
       const n = nodes.find((x) => x.id === id);

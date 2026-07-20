@@ -12,6 +12,8 @@ export interface LoadFormOptions {
   flatten?: boolean;
   shred?: boolean;
   rootId?: unknown;
+  /** Skip persistent file→Parquet filecache for this upload. */
+  fresh?: boolean;
 }
 
 export function buildLoadForm(
@@ -23,6 +25,9 @@ export function buildLoadForm(
     form.append("flatten", options.flatten ? "1" : "0");
   }
   if (options.shred) form.append("shred", "1");
+  if (options.fresh !== undefined) {
+    form.append("fresh", options.fresh ? "1" : "0");
+  }
   if (options.rootId != null) {
     form.append("root_id", JSON.stringify(options.rootId));
   }

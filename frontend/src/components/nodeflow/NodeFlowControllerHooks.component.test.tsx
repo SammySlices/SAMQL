@@ -96,7 +96,11 @@ describe("NodeFlow controller hooks", () => {
       deleteMany: vi.fn(),
       deleteNode: vi.fn(),
     };
-    const { unmount } = renderHook(() => useNodeFlowKeyboardShortcuts(actions));
+    const { unmount, rerender } = renderHook(
+      (props: { enabled?: boolean }) =>
+        useNodeFlowKeyboardShortcuts({ ...actions, enabled: props.enabled }),
+      { initialProps: { enabled: true as boolean | undefined } },
+    );
 
     fireEvent.keyDown(window, { key: "z", ctrlKey: true });
     fireEvent.keyDown(window, { key: "z", ctrlKey: true, shiftKey: true });
@@ -109,6 +113,13 @@ describe("NodeFlow controller hooks", () => {
     expect(actions.copy).toHaveBeenCalledTimes(1);
     expect(actions.paste).toHaveBeenCalledTimes(1);
     expect(actions.deleteNode).toHaveBeenCalledWith("node-a");
+
+    rerender({ enabled: false });
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "Delete" });
+    expect(actions.undo).toHaveBeenCalledTimes(1);
+    expect(actions.deleteNode).toHaveBeenCalledTimes(1);
+    rerender({ enabled: true });
 
     const input = document.createElement("input");
     document.body.appendChild(input);

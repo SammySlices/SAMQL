@@ -465,10 +465,11 @@ def check_flatten_cancel(
                 "flatten result unexpected: %r" % r)
     _assert(not new_jf, "jf_ spill left after flatten: %r" % new_jf)
     # Sticky cancel must not poison a follow-up flatten of a trivial table.
+    from samql_core.session import DUCKDB_TARGET
     session.run_query(
         'CREATE OR REPLACE TABLE "stall_flat_tiny" AS '
         "SELECT 1 AS a, [{'x': 1}, {'x': 2}] AS arr",
-        target="duckdb")
+        target=DUCKDB_TARGET)
     fr = session.flatten_table("stall_flat_tiny", base="stall_flat_tiny",
                                query_id="stall-flatten-fresh")
     _assert(not fr.get("cancelled"),

@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 
 interface NodeFlowKeyboardActions {
+  /** When false, shortcuts are registered but ignored (hidden keep-mounted view). */
+  enabled?: boolean;
   selectedId: string | null;
   selectedEdgeRef: React.RefObject<string | null>;
   selectedIdsRef: React.RefObject<string[]>;
@@ -22,6 +24,7 @@ export function useNodeFlowKeyboardShortcuts(actions: NodeFlowKeyboardActions) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const current = actionsRef.current;
+      if (current.enabled === false) return;
       const target = event.target as HTMLElement | null;
       const typing = !!target && /INPUT|TEXTAREA|SELECT/.test(target.tagName);
 

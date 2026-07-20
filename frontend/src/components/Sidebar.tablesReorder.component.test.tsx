@@ -205,6 +205,31 @@ describe("Sidebar loaded-tables drag reorder", () => {
   });
 });
 
+describe("Sidebar source-changed badge copy", () => {
+  it("shows Updating… for auto-reload and Reload failed on error", () => {
+    renderSidebar([
+      tbl("fresh"),
+      tbl("pending", { source_changed: true }),
+      tbl("broken", {
+        source_changed: true,
+        source_reload_error: "No reloadable source file",
+      }),
+    ]);
+    expect(screen.getByTestId("source-changed-badge")).toHaveTextContent(
+      "Updating…",
+    );
+    expect(screen.getByTestId("source-changed-badge").getAttribute("title")).toMatch(
+      /Updating this table in place/i,
+    );
+    expect(screen.getByTestId("source-reload-error-badge")).toHaveTextContent(
+      "Reload failed",
+    );
+    expect(
+      screen.getByTestId("source-reload-error-badge").getAttribute("title"),
+    ).toMatch(/Auto-reload failed/i);
+  });
+});
+
 describe("Sidebar Open / Save section", () => {
   it("lists Open, Save, then Save As under Open / Save", () => {
     const onOpen = vi.fn();

@@ -178,6 +178,7 @@ def run_suite(*, rows: int, work_dir: Path, self_test: bool) -> dict[str, Any]:
     s3 = Session()
     try:
         s3.flow_cache = True
+        s3.fresh_run = False  # isolate from persisted Fresh-run setting
         s3.run_query(
             "CREATE TABLE flow_src AS SELECT 1 AS g, 10 AS v "
             "UNION ALL SELECT 1, 20",

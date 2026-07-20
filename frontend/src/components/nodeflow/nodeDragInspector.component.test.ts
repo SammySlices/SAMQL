@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "fs";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 import { describe, expect, it, vi } from "vitest";
 
 /**
@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
  * - left quick click (up under threshold) opens the panel
  * - right-click / contextmenu must not open the panel (node menu only)
  * Implementation: useNodeFlowCanvasInteractions onInspectorOpen;
- * NodeFlowScene onContextMenu must not call onInspectorOpen.
+ * NodeFlowCanvasCard onContextMenu must not call onInspectorOpen.
  */
 describe("node drag vs inspector open contract", () => {
   const THRESHOLD = 5;
@@ -54,11 +54,11 @@ describe("node drag vs inspector open contract", () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it("NodeFlowScene contextmenu must not open inspector (menu only)", () => {
-    const scene = readFileSync(resolve(here, "./NodeFlowScene.tsx"), "utf8");
-    const ctxIdx = scene.indexOf("onContextMenu={(event, currentNode)");
+  it("NodeFlowCanvasCard contextmenu must not open inspector (menu only)", () => {
+    const card = readFileSync(resolve(here, "./NodeFlowCanvasCard.tsx"), "utf8");
+    const ctxIdx = card.indexOf("onContextMenu={(event, currentNode)");
     expect(ctxIdx).toBeGreaterThan(-1);
-    const ctxBlock = scene.slice(ctxIdx, ctxIdx + 700);
+    const ctxBlock = card.slice(ctxIdx, ctxIdx + 700);
     expect(ctxBlock).toMatch(/setNodeMenu\s*\(/);
     expect(ctxBlock).not.toMatch(/onInspectorOpen/);
 

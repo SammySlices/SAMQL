@@ -772,8 +772,8 @@ describe("FieldExplorer modal close cancels nested discovery", () => {
   });
 
   it("aborts fetch and cancelQuery when the panel closes mid-discovery", async () => {
-    let resolveFields: ((v: unknown) => void) | null = null;
-    const pending = new Promise((resolve) => {
+    let resolveFields: ((v: unknown) => void) | undefined;
+    const pending = new Promise<unknown>((resolve) => {
       resolveFields = resolve;
     });
     vi.mocked(api.tableFields).mockImplementation(
@@ -820,7 +820,7 @@ describe("FieldExplorer modal close cancels nested discovery", () => {
       ),
     );
     // Unblock the hanging promise so the test does not leak.
-    resolveFields?.({ fields: [] });
+    resolveFields!({ fields: [] });
   });
 
   it("resumes with after when a chunk returns partial + next_after", async () => {

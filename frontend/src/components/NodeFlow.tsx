@@ -78,6 +78,8 @@ export const NodeFlow: React.FC<{
   sphereMode?: boolean;
   /** Canvas grid snap while dragging (owned by App Settings → Visual). Default OFF. */
   snap?: boolean;
+  /** When false, NodeFlow is hidden but kept mounted — pause global shortcuts. */
+  active?: boolean;
 }> = ({
   tables,
   dataEpoch = 0,
@@ -98,6 +100,7 @@ export const NodeFlow: React.FC<{
   denseMode = false,
   sphereMode = true,
   snap = false,
+  active = true,
 }) => {
   // Keep densify() / sphere helpers aligned with App Settings before Scene paints
   // (also syncs a lazy-chunk module copy if Rollup ever duplicates nodeFlowModel).
@@ -481,6 +484,7 @@ export const NodeFlow: React.FC<{
   });
 
   useNodeFlowKeyboardShortcuts({
+    enabled: active,
     selectedId: selId,
     selectedEdgeRef: selEdgeRef,
     selectedIdsRef: selIdsRef,

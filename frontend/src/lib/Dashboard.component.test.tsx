@@ -847,7 +847,8 @@ describe("Dashboard", () => {
     await waitFor(() => expect(screen.getByText("Cancel")).toBeTruthy());
     fireEvent.click(screen.getByTestId("dashboard-run"));
     await waitFor(() => expect(cancelOneMock).toHaveBeenCalled());
-    expect(apiMock.cancelAll).toHaveBeenCalled();
+    // Scoped cancel only — must not kill concurrent IDE/Journal/NodeFlow runs.
+    expect(apiMock.cancelAll).not.toHaveBeenCalled();
     expect(toast).toHaveBeenCalledWith(
       "warn",
       "Cancelled",

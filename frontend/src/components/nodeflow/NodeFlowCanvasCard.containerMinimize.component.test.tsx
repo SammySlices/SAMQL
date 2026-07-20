@@ -1,6 +1,7 @@
 import React from "react";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync } from "fs";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import {
@@ -11,12 +12,12 @@ import { NodeFlowCanvasCard } from "./NodeFlowCanvasCard";
 import type { NodeFlowCanvasCardActions } from "./NodeFlowCanvasCard";
 
 const STYLES_CSS = readFileSync(
-  resolve(__dirname, "../../styles.css"),
+  resolve(dirname(fileURLToPath(import.meta.url)), "../../styles.css"),
   "utf8",
 );
 
 function makeActions(
-  patchNode: ReturnType<typeof vi.fn>,
+  patchNode: (id: string, config: Record<string, unknown>) => void,
 ): NodeFlowCanvasCardActions {
   return {
     startNodeDrag: vi.fn(),

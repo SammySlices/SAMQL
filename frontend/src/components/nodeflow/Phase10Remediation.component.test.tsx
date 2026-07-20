@@ -183,14 +183,20 @@ describe("post-Phase-10 remediation", () => {
     vi.spyOn(api, "nodeflowRun").mockReturnValue(
       request.promise as ReturnType<typeof api.nodeflowRun>,
     );
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
     vi.spyOn(api, "cancelAll").mockResolvedValue({ ok: true } as any);
     vi.spyOn(api, "cancelQuery").mockResolvedValue({ ok: true } as any);
     const source = makeNode("source-a");
     const { result } = renderHook(() => useExecutionHarness("tab-a", source));
 
     let pending!: Promise<void>;
-    act(() => {
-      pending = result.current.doPreview(source, "out", "preview");
+    await act(async () => {
+      pending = result.current.runAll();
+      // Let runAll pass flowCacheInfo and enter startRun before Stop.
+      await Promise.resolve();
+      await Promise.resolve();
       void result.current.cancelRun();
     });
     await act(async () => {
@@ -213,6 +219,9 @@ describe("post-Phase-10 remediation", () => {
       signal = args[4] as AbortSignal;
       return request.promise as ReturnType<typeof api.nodeflowRun>;
     });
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
     vi.spyOn(api, "cancelQuery").mockResolvedValue({ ok: true } as any);
     const source = makeNode("source-a");
     const { result, unmount } = renderHook(() =>
@@ -220,8 +229,10 @@ describe("post-Phase-10 remediation", () => {
     );
 
     let pending!: Promise<void>;
-    act(() => {
-      pending = result.current.doPreview(source, "out", "preview");
+    await act(async () => {
+      pending = result.current.runAll();
+      await Promise.resolve();
+      await Promise.resolve();
     });
     expect(signal?.aborted).toBe(false);
     unmount();
