@@ -2,12 +2,23 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-20.674
+Current build:   2026-07-20.675
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-20.675  (v2.16.4)
+
+MASTER APPWINDOW: SPLASH ALWAYS VISIBLE ON BOOT.
+The startup splash is forced to the top of the z-order (lift + re-assert
+topmost + SetForegroundWindow) so it is no longer created BEHIND a maximized
+browser/editor and left invisible, and it is held on screen for a minimum
+~0.9 s so a warm/reused-server boot cannot flash it sub-perceptibly. pump()
+re-lifts periodically so a native/browser window appearing mid-boot cannot
+bury it. Launcher-only change; no functional app changes since .674.
 
 ----------------------------------------------------------------------
 build 2026-07-20.674  (v2.16.4)

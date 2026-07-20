@@ -205,6 +205,11 @@ class Splash:
         import tkinter as tk
         from tkinter import ttk
         self._tk = tk
+        # Guarantee the splash is on screen long enough to be seen even when a
+        # warm/reused server makes boot near-instant (otherwise it flashes
+        # sub-perceptibly). Enforced in close().
+        self._created = time.time()
+        self._min_visible = 0.9
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -249,6 +254,34 @@ class Splash:
         self.bar.pack()
         self.bar.start(12)
         self.root.update()
+        self._bring_to_front()
+
+    def _bring_to_front(self):
+        """Force the borderless splash to the very top of the z-order.
+
+        The launcher is spawned without foreground rights, so Windows creates
+        its topmost window BEHIND a maximized foreground app (the browser or
+        editor the user is looking at). The window is WS_VISIBLE but fully
+        occluded -- which reads as "no splash at all". Toggling topmost
+        re-inserts it at the top of the topmost band even when another topmost
+        app currently owns the foreground; a Win32 SetForegroundWindow on the
+        toplevel HWND backs it up. Best-effort throughout; never fatal."""
+        try:
+            self.root.lift()
+            self.root.focus_force()
+            self.root.update_idletasks()
+            self.root.attributes("-topmost", False)
+            self.root.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            import ctypes
+            # overrideredirect windows expose their toplevel HWND via winfo_id.
+            hwnd = int(self.root.winfo_id())
+            if hwnd:
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
 
     def set_text(self, text, error=False):
         try:
@@ -260,11 +293,20 @@ class Splash:
             pass
 
     def pump(self, seconds=0.0):
-        """Keep the window painting through a wait."""
+        """Keep the window painting through a wait, re-asserting z-order so a
+        native/browser window appearing mid-boot cannot bury the splash."""
         end = time.time() + seconds
+        last_lift = 0.0
         while True:
             try:
                 self.root.update()
+                now = time.time()
+                # Re-lift periodically (no focus_force -- that would repeatedly
+                # steal focus from the booting app window).
+                if now - last_lift > 0.75:
+                    self.root.lift()
+                    self.root.attributes("-topmost", True)
+                    last_lift = now
             except Exception:
                 return
             if time.time() >= end:
@@ -272,6 +314,15 @@ class Splash:
             time.sleep(0.05)
 
     def close(self):
+        # Hold the splash for a minimum on-screen time so a fast boot does not
+        # flash it sub-perceptibly. pump() keeps it painted and on top.
+        try:
+            shown = time.time() - getattr(self, "_created", 0.0)
+            remaining = getattr(self, "_min_visible", 0.0) - shown
+            if remaining > 0:
+                self.pump(remaining)
+        except Exception:
+            pass
         try:
             self.root.destroy()
         except Exception:
