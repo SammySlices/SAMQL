@@ -886,6 +886,22 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         need(isinstance(d.get("instance_bytes"), int) and d["instance_bytes"] >= 0,
              "instance_bytes is a non-negative integer")
 
+    def t_launcher_keep_on_close():
+        # Exit → keep server: mark survives on /api/health so AppWindow
+        # can leave a launcher-started backend running for reconnect.
+        st, h0 = c.js("GET", "/api/health")
+        eq(st, 200, "health before keep-on-close")
+        need(h0.get("keep_on_close") is False,
+             "keep_on_close defaults false: %r" % h0.get("keep_on_close"))
+        st, d = c.js("POST", "/api/launcher/keep-on-close")
+        eq(st, 200, "keep-on-close status")
+        need(d.get("ok") is True and d.get("keep_on_close") is True,
+             "keep-on-close ack: %r" % d)
+        st, h1 = c.js("GET", "/api/health")
+        eq(st, 200, "health after keep-on-close")
+        need(h1.get("keep_on_close") is True,
+             "health surfaces keep_on_close: %r" % h1.get("keep_on_close"))
+
     def t_rename_change_drop():
         st, d = c.js("POST", "/api/table/rename",
                      {"engine": "sqlite", "old": "data", "new": "data2"})
@@ -1867,6 +1883,7 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             ("graceful shutdown cleans + sweeps temp dirs", t_graceful_shutdown_cleans_temp),
             ("GET/POST /api/memory", t_memory),
             ("POST /api/maintenance/sweep-temp", t_sweep_temp),
+            ("POST /api/launcher/keep-on-close", t_launcher_keep_on_close),
             ("rename / change-type / drop", t_rename_change_drop),
             ("POST /api/clear", t_clear),
             ("GET /api/mssql/drivers", t_mssql_drivers),

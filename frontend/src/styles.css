@@ -6164,6 +6164,13 @@ kbd {
   stroke-width: 2;
   opacity: 0.85;
 }
+/* Filter True/False edges match their port arrows (green / red). */
+.nb2-wire.from-true .nb2-wire-line {
+  stroke: var(--accent);
+}
+.nb2-wire.from-false .nb2-wire-line {
+  stroke: var(--error);
+}
 .nb2-wire-line.pending {
   stroke-dasharray: 5 4;
   opacity: 0.7;
@@ -6183,6 +6190,14 @@ kbd {
   stroke: var(--accent-hi);
   stroke-width: 3;
   opacity: 1;
+}
+.nb2-wire.from-true:hover .nb2-wire-line,
+.nb2-wire.from-true.sel .nb2-wire-line {
+  stroke: var(--accent-hi);
+}
+.nb2-wire.from-false:hover .nb2-wire-line,
+.nb2-wire.from-false.sel .nb2-wire-line {
+  stroke: color-mix(in srgb, var(--error) 72%, #fff);
 }
 .nb2-wire-del {
   cursor: pointer;
@@ -6595,6 +6610,25 @@ button.nb2-sphere-container-toggle:focus-visible {
   white-space: nowrap;
   font-family: var(--mono);
 }
+/* Sphere Input: table name under the icon (classic cards use .nb2-node-sub). */
+.nb2-node.sphere .nb2-sphere-caption {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 4px);
+  transform: translateX(-50%);
+  max-width: 108px;
+  padding: 0 2px;
+  font-size: 10.5px;
+  line-height: 1.2;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 1;
+}
 .nb2-port {
   position: absolute;
   display: flex;
@@ -6662,23 +6696,34 @@ button.nb2-sphere-container-toggle:focus-visible {
   border-right: 8px solid transparent;
 }
 .nb2-port.out .nb2-dot {
-  border-left-color: #e5484d; /* output arrows are red */
+  border-left-color: #e5484d; /* default output arrows are red */
 }
-.nb2-port.out.false .nb2-dot,
+/* Filter branch ports: True = accent green, False = error red (theme-aware). */
+.nb2-port.out.true .nb2-dot {
+  border-left-color: var(--accent);
+}
+.nb2-port.out.false .nb2-dot {
+  border-left-color: var(--error);
+}
 .nb2-port.out.right_only .nb2-dot,
 .nb2-port.out.left_only .nb2-dot {
   border-left-color: #e0a458; /* secondary join outputs stay amber */
 }
-/* hover brightens the arrow in its OWN colour -- inputs green, outputs red
-   (and amber for a join's secondary outputs) -- never the green accent on a
-   red output */
+/* hover brightens the arrow in its OWN colour -- inputs/True green, default
+   outputs + False red (and amber for a join's secondary outputs) -- never
+   the green accent on a red output */
 .nb2-port.in:hover .nb2-dot {
   border-left-color: var(--accent-hi);
 }
 .nb2-port.out:hover .nb2-dot {
   border-left-color: #f2555a;
 }
-.nb2-port.out.false:hover .nb2-dot,
+.nb2-port.out.true:hover .nb2-dot {
+  border-left-color: var(--accent-hi);
+}
+.nb2-port.out.false:hover .nb2-dot {
+  border-left-color: color-mix(in srgb, var(--error) 72%, #fff);
+}
 .nb2-port.out.right_only:hover .nb2-dot,
 .nb2-port.out.left_only:hover .nb2-dot {
   border-left-color: #e8b86a;
@@ -9867,6 +9912,9 @@ html[data-theme="light"] .col-lineage-value-chip.on {
   opacity: 0; /* invisible unless the canvas is running and this wire is active */
   pointer-events: none;
   /* No filter: drop-shadow — per-edge animated filters re-blur every frame. */
+}
+.nb2-wire.from-false .nb2-wire-glow {
+  stroke: color-mix(in srgb, var(--error) 88%, #fff);
 }
 .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
   opacity: 0.78;

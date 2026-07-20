@@ -1167,10 +1167,19 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, []);
 
-  const exitKeepServer = useCallback(() => {
+  const exitKeepServer = useCallback(async () => {
     exitGuard.current = false;
     setExitOpen(false);
     setExiting("kept");
+    // Await the mark so AppWindow's post-close health check sees
+    // keep_on_close before it decides whether to stop_server (.622).
+    // Best-effort: if the ping fails we still close; reconnect may
+    // cold-start.
+    try {
+      await api.keepServerOnClose();
+    } catch {
+      /* ignore */
+    }
     // user-opened tabs usually can't be closed by script; the goodbye
     // screen covers that case.
     setTimeout(() => {

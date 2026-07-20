@@ -1591,6 +1591,13 @@ export const api = {
       method: "POST",
     }),
 
+  /** Exit → keep server: ask AppWindow launcher to leave the backend up. */
+  keepServerOnClose: () =>
+    jsonFetch<{ ok: boolean; keep_on_close?: boolean }>(
+      "/api/launcher/keep-on-close",
+      { method: "POST" },
+    ),
+
   // --- memory ---
   memory: () => jsonFetch<MemInfo>("/api/memory"),
   freeMemory: () =>

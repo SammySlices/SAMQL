@@ -36,11 +36,21 @@ const WireRow = React.memo(
     const d = wirePath(w.ax, w.ay, w.bx, w.by);
     const mx = (w.ax + w.bx) / 2;
     const my = (w.ay + w.by) / 2;
+    const branchClass =
+      w.fromPort === "true"
+        ? " from-true"
+        : w.fromPort === "false"
+          ? " from-false"
+          : "";
     return (
       <g
         className={
-          "nb2-wire" + (selected ? " sel" : "") + (retracting ? " retract" : "")
+          "nb2-wire" +
+          (selected ? " sel" : "") +
+          (retracting ? " retract" : "") +
+          branchClass
         }
+        data-from-port={w.fromPort || undefined}
         data-testid={retracting ? "nodeflow-wire-retracting" : undefined}
       >
         <path

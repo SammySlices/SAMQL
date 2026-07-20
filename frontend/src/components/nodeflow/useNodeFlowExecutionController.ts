@@ -41,6 +41,22 @@ const LAST_RUN_SEED_SKIP = new Set([
 ]);
 
 /**
+ * Output port to request when a node is a Run-all leaf (no Output/Write).
+ * Most nodes expose ``out``; Filter only has ``true``/``false``. Hardcoding
+ * ``out`` for Filter yields backend ``Unknown filter output: out`` and empty
+ * previews. Join still accepts legacy ``out`` even though the palette shows
+ * named ports — keep that so leaf Join behavior is unchanged.
+ */
+export function leafRunPort(type: string): string {
+  const outs = (PORTS as Record<string, { outputs?: string[] } | undefined>)[type]
+    ?.outputs;
+  if (!outs?.length) return "out";
+  if (outs.includes("out")) return "out";
+  if (type === "join") return "out";
+  return outs[0];
+}
+
+/**
  * (node, port) pairs to seed after a successful Run all / leaf run.
  * Wired outgoing ports for intermediates; all declared outs for leaves.
  */
@@ -727,12 +743,14 @@ export function useNodeFlowExecutionController({
       ? partialGroupGraph(cctx.groupId, cctx.index + 1)
       : graphForRun();
     const runNode = cctx ? cctx.groupId : node.id;
+    // Filter (and similar) leaves must use a declared output — not hardcoded "out".
+    const port = leafRunPort(node.type);
     try {
       const ctrl = new AbortController();
       registerRun(id, ctrl);
       let r;
       try {
-        r = await api.nodeflowRun(graph, runNode, "out", id, ctrl.signal);
+        r = await api.nodeflowRun(graph, runNode, port, id, ctrl.signal);
       } finally {
         unregisterRun(id, ctrl);
       }
@@ -753,8 +771,8 @@ export function useNodeFlowExecutionController({
       // Seed last-run cache so a later output click reuses this run's rows.
       rememberTableLastRun(
         runNode,
-        "out",
-        `${node.config.label || node.id} · out`,
+        port,
+        `${node.config.label || node.id} · ${port}`,
         r,
       );
       finishRun(id, r, `${(r.total_rows || 0).toLocaleString()} rows`);
@@ -785,7 +803,7 @@ export function useNodeFlowExecutionController({
     try {
       const r = await api.nodeflowRunBatch(
         graphForRun(),
-        leaves.map((n) => ({ node: n.id, port: "out" })),
+        leaves.map((n) => ({ node: n.id, port: leafRunPort(n.type) })),
         id,
         ctrl.signal,
       );
@@ -820,10 +838,11 @@ export function useNodeFlowExecutionController({
           const { [n.id]: _drop, ...rest } = prev;
           return rest;
         });
+        const port = x.port || leafRunPort(n.type);
         rememberTableLastRun(
           n.id,
-          "out",
-          `${n.config.label || n.id} · out`,
+          port,
+          `${n.config.label || n.id} · ${port}`,
           x,
         );
         return { ok: true };
@@ -1823,11 +1842,15 @@ export function useNodeFlowExecutionController({
     // fine in the IDE.
     const hasIn = (n: NbNode) => runEdges.some((e) => e.to.node === n.id);
     const hasOut = (n: NbNode) => runEdges.some((e) => e.from.node === n.id);
-    // sources can run with no input; these never run as a bare leaf
+    // Zero-input sources may be Run-all leaves with no inbound wire.
+    // Connectors (apinode / sqlserver / sharepoint / webscrape) stay off this
+    // list — they materialize via Fetch, not bare nodeflowRun.
     const SOURCES = new Set([
       "input",
+      "shred",
       "directory",
       "appendfolder",
+      "filebrowser",
       "createtable",
       "sql",
     ]);

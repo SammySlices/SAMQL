@@ -172,6 +172,7 @@ frontend/src/components/nodeflow/InspectorControls.component.test.tsx
 frontend/src/components/nodeflow/InspectorControls.tsx
 frontend/src/components/nodeflow/InspectorShell.tsx
 frontend/src/components/nodeflow/NodeFlowCanvasCard.containerMinimize.component.test.tsx
+frontend/src/components/nodeflow/NodeFlowCanvasCard.inputTable.component.test.tsx
 frontend/src/components/nodeflow/NodeFlowCanvasCard.tsx
 frontend/src/components/nodeflow/NodeFlowCanvasShell.tsx
 frontend/src/components/nodeflow/NodeFlowChrome.component.test.tsx

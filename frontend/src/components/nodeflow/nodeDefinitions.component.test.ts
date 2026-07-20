@@ -83,6 +83,9 @@ describe("node definition registry", () => {
 
   it("builds card summaries from node configuration and edges", () => {
     expect(getNodeCardSummary(node("input", { table: "orders" }), [])).toBe("orders");
+    expect(getNodeCardSummary(node("input", { table: "" }), [])).toBe(
+      "(pick a table)",
+    );
     expect(
       getNodeCardSummary(
         node("join", { keys: [{ left: "id", right: "order_id" }] }),

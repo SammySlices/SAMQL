@@ -127,6 +127,8 @@ export interface Health {
   warming?: boolean; // HTTP up, Session() still constructing (launcher-ready)
   restoring?: boolean; // session restore is replaying the load manifest
   restored?: number; // tables rebuilt by the last restore
+  /** Exit → keep server: AppWindow launcher should not stop this backend. */
+  keep_on_close?: boolean;
 }
 
 export type Cell = string | number | boolean | null;

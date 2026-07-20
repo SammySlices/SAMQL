@@ -79,6 +79,11 @@ _MUTEX_BOOT_WAIT_S = float(SERVER_BOOT_TIMEOUT_S)
 # its window (WebView2 cold start) before opening a window of our own on that
 # server. Scaled with the 300 s boot budget (was 60 s at 180 s).
 _MUTEX_WINDOW_GRACE_S = 100.0
+# When a healthy SamQL server was ALREADY up at mutex-wait entry and no peer
+# AppWindow process exists (Exit → keep server + zombie mutex holder), do not
+# burn the full WebView2 cold-start grace waiting for a window that will never
+# appear. A short beat still catches a racing first-click about to show.
+_MUTEX_RECONNECT_WINDOW_GRACE_S = 2.5
 # .546: the launcher supervises the server it started while the window is
 # open -- if the backend dies (a standby suspend/kill, a crash), the
 # supervisor respawns it so the window's Reconnect finds a live server
@@ -935,6 +940,49 @@ def _acquire_single_instance():
         return bool(h), already
     except Exception:
         return True, False
+
+
+def _peer_appwindow_process_alive():
+    """True when another SamQL-AppWindow.exe (not this PID) is running.
+
+    Distinguishes a live first-click still opening WebView2 (wait for its
+    window) from a zombie mutex holder after Exit → keep server (reconnect
+    immediately). Best-effort; unknown -> False so reconnect stays fast.
+    Source ``python launcher_app.py`` runs are not detected (dev-only).
+    """
+    if os.name != "nt":
+        return False
+    try:
+        own = os.getpid()
+        out = subprocess.check_output(
+            ["tasklist", "/FI", "IMAGENAME eq SamQL-AppWindow.exe",
+             "/FO", "CSV", "/NH"],
+            stderr=subprocess.DEVNULL, timeout=2.0)
+        text = out.decode("utf-8", "replace") if isinstance(out, bytes) \
+            else str(out)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.upper().startswith("INFO:"):
+                continue
+            # CSV: "SamQL-AppWindow.exe","1234","Session Name","0","12,345 K"
+            parts = [p.strip().strip('"') for p in line.split(",")]
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[1])
+            except (TypeError, ValueError):
+                continue
+            if pid and pid != own:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _keep_server_requested(port):
+    """True when Exit → keep server marked this backend via /api/health."""
+    data = _fetch_health(port)
+    return bool(data) and bool(data.get("keep_on_close"))
 
 
 def _ping_maintenance(port):
@@ -2460,8 +2508,16 @@ def main(argv=None):
         # keeps waiting for its window (and, failing that, REUSES the
         # live server -- never starts another). Only no-window AND
         # no-server for the full boot budget reads as a stale mutex.
+        # Reconnect: if the server was already healthy when we entered
+        # (Exit → keep server) and no peer AppWindow is alive, use a
+        # short window grace -- do not sit on "SamQL is starting" for
+        # the full WebView2 cold-start budget waiting on a ghost.
         t0 = time.time()
         saw_server = False
+        server_preexisting = (port_open(args.port)
+                              and _is_samql(args.port))
+        peer_alive = (_peer_appwindow_process_alive()
+                      if server_preexisting else False)
         window_grace = t0 + _MUTEX_WAIT_S
         boot_grace = t0 + _MUTEX_BOOT_WAIT_S
         while True:
@@ -2475,11 +2531,20 @@ def main(argv=None):
             if not saw_server and port_open(args.port) \
                     and _is_samql(args.port):
                 saw_server = True
-                window_grace = now + _MUTEX_WINDOW_GRACE_S
-                splash.set_text("SamQL is starting -- waiting for its "
-                                "window...")
-                write_log("INFO waiting for the first launch's server "
-                          "on port %d to show its window" % args.port)
+                if server_preexisting and not peer_alive:
+                    window_grace = now + _MUTEX_RECONNECT_WINDOW_GRACE_S
+                    splash.set_text("Reconnecting to SamQL...")
+                    write_log("INFO healthy server already on port %d "
+                              "with no peer AppWindow -- short "
+                              "reconnect wait (%.1fs)"
+                              % (args.port,
+                                 _MUTEX_RECONNECT_WINDOW_GRACE_S))
+                else:
+                    window_grace = now + _MUTEX_WINDOW_GRACE_S
+                    splash.set_text("SamQL is starting -- waiting for its "
+                                    "window...")
+                    write_log("INFO waiting for the first launch's server "
+                              "on port %d to show its window" % args.port)
             if saw_server and now >= window_grace:
                 write_log("WARN the first launch's server is up but its "
                           "window never appeared -- reusing that server "
@@ -2559,15 +2624,21 @@ def main(argv=None):
         stop_supervisor()  # .546/.629: window closed -> stop + join supervisor
         write_log("INFO native window closed; launcher done")
         # Window close must not leave SamQL.exe / python / llama-server in
-        # Task Manager. Stop the server WE started (graceful /api/shutdown
-        # + reap). A server we only reattached to is left alone -- the
-        # in-app Exit modal still offers "keep server" / "stop server".
+        # Task Manager by default. Stop the server WE started (graceful
+        # /api/shutdown + reap) unless Exit → keep server marked the
+        # backend (keep_on_close on /api/health) for instant reopen.
+        # A server we only reattached to is always left alone.
         # .629: join supervisor BEFORE stop_server so a mid-flight respawn
         # cannot outlive the window after Exit & stop.
         if we_started_server:
-            stop_server(args.port)
-            write_log("INFO window closed; stopped the server on port %d"
-                      % args.port)
+            if _keep_server_requested(args.port):
+                write_log("INFO window closed; leaving the server on "
+                          "port %d running (Exit → keep server) -- "
+                          "reopen AppWindow to reconnect" % args.port)
+            else:
+                stop_server(args.port)
+                write_log("INFO window closed; stopped the server on port %d"
+                          % args.port)
         # .537: END THE PROCESS. pythonnet/WinForms can leave non-daemon
         # threads after webview.start() returns; a launcher that lingers
         # holds the single-instance mutex (and its _MEI extraction)

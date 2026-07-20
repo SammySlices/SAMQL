@@ -9499,11 +9499,22 @@ def backend_tests(datadir, csv_path, json_path):
             ("treating it as stale", "F crash-stale mutex"),
             ("ignored a phantom", "ghost windows"),
             # .622: close stops the server we started (no lingering Task
-            # Manager / llama-server). Reattach still works when a server
-            # was left up by another path (e.g. Exit → keep server).
+            # Manager / llama-server) unless Exit → keep server marked
+            # keep_on_close. Reattach reuses that left-up backend.
             ("stopped the server on port", "close stops server we started"),
+            ("leaving the server on", "Exit → keep server leaves backend"),
+            ("_MUTEX_RECONNECT_WINDOW_GRACE_S", "fast reconnect grace"),
+            ("Reconnecting to SamQL...", "reconnect splash text"),
         ):
             need(frag in la, "lifecycle anchor for %s" % scen)
+        api_ts = open(os.path.join(FRONTEND, "src", "lib", "api.ts"),
+                      encoding="utf-8").read()
+        app_tsx = open(os.path.join(FRONTEND, "src", "App.tsx"),
+                       encoding="utf-8").read()
+        need("keepServerOnClose" in api_ts
+             and "/api/launcher/keep-on-close" in api_ts
+             and "await api.keepServerOnClose()" in app_tsx,
+             "Exit → keep server marks the backend before window.close()")
 
         # ---- Path D behaviorally: second click during a slow boot ----
         def fake_main(port_flip_at, boot_wait, expect_start):
@@ -10733,7 +10744,9 @@ def backend_tests(datadir, csv_path, json_path):
                 ("write_log", "find_samql_window", "focus_window",
                  "_acquire_single_instance", "port_open", "_is_samql",
                  "make_splash", "open_native_window", "find_browser",
-                 "_MUTEX_WAIT_S", "_MUTEX_WINDOW_GRACE_S")}
+                 "_MUTEX_WAIT_S", "_MUTEX_WINDOW_GRACE_S",
+                 "_MUTEX_RECONNECT_WINDOW_GRACE_S",
+                 "_peer_appwindow_process_alive")}
         logs = []
         try:
             _LA.write_log = lambda m: logs.append(m)
@@ -10742,6 +10755,8 @@ def backend_tests(datadir, csv_path, json_path):
             _LA._acquire_single_instance = lambda: (True, True)
             _LA._MUTEX_WAIT_S = 0.05
             _LA._MUTEX_WINDOW_GRACE_S = 0.1
+            _LA._MUTEX_RECONNECT_WINDOW_GRACE_S = 0.05
+            _LA._peer_appwindow_process_alive = lambda: False
             _LA.port_open = lambda p, **k: True
             _LA._is_samql = lambda p: True
             _LA.open_native_window = lambda url, a, sp: True
@@ -10754,16 +10769,18 @@ def backend_tests(datadir, csv_path, json_path):
             for n, v in keep.items():
                 setattr(_LA, n, v)
         need(rc == 0, "the stale-mutex launch completes: rc=%r" % rc)
-        # .544 repoint: with a LIVE server behind the held mutex, the
-        # port-aware wait reuses it (window-of-our-own WARN); the
-        # "treating it as stale" cold path is t_lifecycle_544's zombie
-        # case, where nothing answers at all.
-        need(any("reusing that server with a window of our own" in l
-                 for l in logs)
+        # .544 repoint + reconnect: with a LIVE server already up and no
+        # peer AppWindow, the short reconnect grace reuses it (not the
+        # 100s WebView2 cold-start wait). The "treating it as stale" cold
+        # path is t_lifecycle_544's zombie case, where nothing answers.
+        need(any("short reconnect wait" in l for l in logs)
+             and any("reusing that server with a window of our own" in l
+                     for l in logs)
              and any("reusing the SamQL server already on port 8765"
                      in l for l in logs),
-             "live-server holder -> port-aware reuse: %r"
-             % [l for l in logs if "WARN" in l or "reusing" in l])
+             "live-server holder -> fast reconnect reuse: %r"
+             % [l for l in logs if "WARN" in l or "reusing" in l
+                or "reconnect" in l])
 
     
     def t_selfserve_535():
@@ -13240,6 +13257,8 @@ def backend_tests(datadir, csv_path, json_path):
         sys.modules["System"] = smC
         sys.modules["System.Drawing"] = sdC
         stops = []
+        logs_k = []
+        stops_k = []
         keep_c = {n: getattr(_LA, n) for n in
                   ("write_log", "_bundled_asset", "set_app_user_model_id",
                    "apply_app_icon", "set_relaunch_icon",
@@ -13248,7 +13267,8 @@ def backend_tests(datadir, csv_path, json_path):
                    "stop_supervisor", "stop_server", "find_browser",
                    "make_splash", "_ping_maintenance", "find_samql_window",
                    "focus_window", "_acquire_single_instance",
-                   "_sweep_stale_mei_early", "_set_process_aumid")}
+                   "_sweep_stale_mei_early", "_set_process_aumid",
+                   "_keep_server_requested")}
         try:
             _LA.write_log = lambda m: None
             _LA._bundled_asset = lambda name: None
@@ -13269,6 +13289,7 @@ def backend_tests(datadir, csv_path, json_path):
             _LA.start_supervisor = lambda p: None
             _LA.stop_supervisor = lambda: None
             _LA.stop_server = lambda p: stops.append(p)
+            _LA._keep_server_requested = lambda p: False
             _LA.find_browser = lambda w: None
             _LA._ping_maintenance = lambda p: None
             _LA.make_splash = lambda: _tyC.SimpleNamespace(
@@ -13278,6 +13299,21 @@ def backend_tests(datadir, csv_path, json_path):
             eq(rc, 0, "launcher exits after native close")
             eq(stops, [8765],
                "window close stops the server we started: %r" % stops)
+
+            # Exit → keep server: keep_on_close means leave backend up.
+            _LA.write_log = lambda m: logs_k.append(m)
+            _LA.stop_server = lambda p: stops_k.append(p)
+            _LA._keep_server_requested = lambda p: True
+            rc_k = _LA.main(["--port", "8765"])
+            eq(rc_k, 0, "keep-server launch exits after native close")
+            eq(stops_k, [],
+               "Exit → keep server leaves backend running: stops=%r"
+               % stops_k)
+            need(any("leaving the server on port 8765 running" in l
+                     for l in logs_k),
+                 "keep-server announces leave-running: %r"
+                 % [l for l in logs_k if "window closed" in l
+                    or "leaving" in l])
         finally:
             for n, v in keep_c.items():
                 setattr(_LA, n, v)
@@ -19098,7 +19134,9 @@ def backend_tests(datadir, csv_path, json_path):
              "we_started_server = True" in la
              and "if we_started_server:" in la
              and "stop_server(args.port)" in la
-             and "stopped the server on port" in la),
+             and "stopped the server on port" in la
+             and "_keep_server_requested" in la
+             and "leaving the server on" in la),
             ("the server honours that request with a graceful shutdown route",
              "_graceful_shutdown()" in srv and "^/api/shutdown$" in srv),
             ("graceful shutdown stops the llama-server sidecar",
@@ -29422,6 +29460,15 @@ def backend_tests(datadir, csv_path, json_path):
                 "config": {"condition": "[region] = 'EMEA'"}}],
                 [("i", "out", "fl", "in")], "fl", "true")["total_rows"], 2,
                 "filter region='EMEA' keeps 2 rows")
+            # Filter has no "out" port (only true/false). A mis-aimed Run-all
+            # leaf used to request "out" and surface this clean NodeflowError
+            # ("no python traceback") with empty previews.
+            bad = run([IN, {"id": "fl", "type": "filter",
+                "config": {"condition": "[qty] >= 10"}}],
+                [("i", "out", "fl", "in")], "fl", "out")
+            need(bad.get("error"), "filter port out must error")
+            need("Unknown filter output" in (bad.get("error") or ""),
+                 "filter rejects legacy out: %r" % bad.get("error"))
 
             # -- select: drop columns + rename -------------------------------
             g = run([IN, {"id": "se", "type": "select", "config": {"fields": [

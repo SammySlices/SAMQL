@@ -259,6 +259,7 @@ describe("connector delete animation", () => {
             by: 100,
             fromN: "n1",
             toN: "n2",
+            fromPort: "out",
           },
         ]}
         selectedId={null}

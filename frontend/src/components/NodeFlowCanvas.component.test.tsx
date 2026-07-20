@@ -106,7 +106,18 @@ describe("NodeFlow canvas components", () => {
     const onDelete = vi.fn();
     const { container } = render(
       <WireLayer
-        wires={[{ id: "w1", ax: 0, ay: 0, bx: 100, by: 100, fromN: "n1", toN: "n2" }]}
+        wires={[
+          {
+            id: "w1",
+            ax: 0,
+            ay: 0,
+            bx: 100,
+            by: 100,
+            fromN: "n1",
+            toN: "n2",
+            fromPort: "out",
+          },
+        ]}
         selectedId={null}
         onSelect={onSelect}
         onDelete={onDelete}
@@ -180,7 +191,18 @@ describe("NodeFlow canvas components", () => {
   it("gives every connector a directional running-glow overlay", () => {
     const { container } = render(
       <WireLayer
-        wires={[{ id: "w1", ax: 0, ay: 0, bx: 100, by: 100, fromN: "n1", toN: "n2" }]}
+        wires={[
+          {
+            id: "w1",
+            ax: 0,
+            ay: 0,
+            bx: 100,
+            by: 100,
+            fromN: "n1",
+            toN: "n2",
+            fromPort: "out",
+          },
+        ]}
         selectedId={null}
         onSelect={vi.fn()}
         onDelete={vi.fn()}
@@ -196,9 +218,36 @@ describe("NodeFlow canvas components", () => {
 
   it("only activates input-edge glow for currently running target nodes", () => {
     const wires = [
-      { id: "into-running", ax: 0, ay: 0, bx: 100, by: 40, fromN: "n1", toN: "n2" },
-      { id: "from-running", ax: 100, ay: 40, bx: 200, by: 80, fromN: "n2", toN: "n3" },
-      { id: "unrelated", ax: 0, ay: 80, bx: 100, by: 120, fromN: "n4", toN: "n5" },
+      {
+        id: "into-running",
+        ax: 0,
+        ay: 0,
+        bx: 100,
+        by: 40,
+        fromN: "n1",
+        toN: "n2",
+        fromPort: "out",
+      },
+      {
+        id: "from-running",
+        ax: 100,
+        ay: 40,
+        bx: 200,
+        by: 80,
+        fromN: "n2",
+        toN: "n3",
+        fromPort: "out",
+      },
+      {
+        id: "unrelated",
+        ax: 0,
+        ay: 80,
+        bx: 100,
+        by: 120,
+        fromN: "n4",
+        toN: "n5",
+        fromPort: "out",
+      },
     ];
     const { container, rerender } = render(
       <WireLayer
@@ -227,6 +276,56 @@ describe("NodeFlow canvas components", () => {
     expect([...container.querySelectorAll(".nb2-wire-glow.active")]).toHaveLength(0);
   });
 
+  it("tags Filter true/false wires for green/red branch styling", () => {
+    const { container } = render(
+      <WireLayer
+        wires={[
+          {
+            id: "true-edge",
+            ax: 0,
+            ay: 0,
+            bx: 80,
+            by: 0,
+            fromN: "flt",
+            toN: "yes",
+            fromPort: "true",
+          },
+          {
+            id: "false-edge",
+            ax: 0,
+            ay: 40,
+            bx: 80,
+            by: 40,
+            fromN: "flt",
+            toN: "no",
+            fromPort: "false",
+          },
+          {
+            id: "plain",
+            ax: 0,
+            ay: 80,
+            bx: 80,
+            by: 80,
+            fromN: "a",
+            toN: "b",
+            fromPort: "out",
+          },
+        ]}
+        selectedId={null}
+        onSelect={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+    const wires = [...container.querySelectorAll(".nb2-wire")];
+    expect(wires[0]).toHaveClass("from-true");
+    expect(wires[0]).toHaveAttribute("data-from-port", "true");
+    expect(wires[1]).toHaveClass("from-false");
+    expect(wires[1]).toHaveAttribute("data-from-port", "false");
+    expect(wires[2]).not.toHaveClass("from-true");
+    expect(wires[2]).not.toHaveClass("from-false");
+    expect(wires[2]).toHaveAttribute("data-from-port", "out");
+  });
+
   it("marks the canvas .flowing only while a workflow runs", () => {
     const shellProps = {
       isWiring: false,
@@ -238,7 +337,18 @@ describe("NodeFlow canvas components", () => {
       onDrop: vi.fn(),
       zoom: 1,
       snap: false,
-      wires: [{ id: "w1", ax: 0, ay: 0, bx: 100, by: 100, fromN: "n1", toN: "n2" }],
+      wires: [
+        {
+          id: "w1",
+          ax: 0,
+          ay: 0,
+          bx: 100,
+          by: 100,
+          fromN: "n1",
+          toN: "n2",
+          fromPort: "out",
+        },
+      ],
       dyingIds: new Set<string>(),
       dyingEdgeIds: new Set<string>(),
       runningNodeIds: new Set<string>(),

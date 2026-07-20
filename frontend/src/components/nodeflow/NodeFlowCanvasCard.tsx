@@ -35,8 +35,12 @@ const CHART_FALLBACK = (
 
 function sphereHoverTitle(node: NbNode): string {
   const custom = String(node.config.label || node.config.name || "").trim();
-  if (custom) return custom;
-  return getNodeDefinition(node.type).label || node.type;
+  const base = custom || getNodeDefinition(node.type).label || node.type;
+  if (node.type === "input") {
+    const table = String(node.config.table || "").trim();
+    return table ? `${base}: ${table}` : `${base} (pick a table)`;
+  }
+  return base;
 }
 
 function SphereNodeIcon({ node }: { node: NbNode }) {
@@ -405,6 +409,11 @@ function NodeFlowCanvasCardImpl({
       node.type === "dashboard")
       ? nodeUnderBodySize(node)
       : null;
+  // Sphere leaves omit classic .nb2-node-sub; Input still needs the table name.
+  const inputTableCaption =
+    sphere && node.type === "input"
+      ? getNodeCardSummary(node, incomingEdges as NbEdge[])
+      : null;
   return (
     <CanvasNodeFrameView
       node={node}
@@ -491,6 +500,15 @@ function NodeFlowCanvasCardImpl({
                   </button>
                 )}
               </div>
+              {inputTableCaption != null && (
+                <div
+                  className="nb2-sphere-caption"
+                  data-testid="nodeflow-input-table"
+                  title={inputTableCaption}
+                >
+                  {inputTableCaption}
+                </div>
+              )}
               {underBody && (
                 <div
                   className="nb2-sphere-under"

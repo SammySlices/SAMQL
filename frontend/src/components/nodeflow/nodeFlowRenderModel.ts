@@ -20,6 +20,8 @@ export interface NodeFlowWire {
   by: number;
   fromN: string;
   toN: string;
+  /** Source output port — used to style Filter True/False edges. */
+  fromPort: string;
 }
 
 export interface NodeFlowViewport {
@@ -172,6 +174,7 @@ export function buildNodeFlowRenderModel(
       by: end.y,
       fromN: edge.from.node,
       toN: edge.to.node,
+      fromPort: edge.from.port,
     });
     edgeById.set(edge.id, edge);
     const fromList = incidentMutable.get(edge.from.node) || [];
@@ -273,6 +276,7 @@ export function patchNodeFlowRenderModelForDirtyNodes(
       by: end.y,
       fromN: wire.fromN,
       toN: wire.toN,
+      fromPort: edge.from.port,
     };
   }
 

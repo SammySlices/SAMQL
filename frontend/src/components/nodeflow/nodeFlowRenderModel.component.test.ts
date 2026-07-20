@@ -79,6 +79,7 @@ describe("NodeFlow render model", () => {
       by: 10,
       fromN: `a${index}`,
       toN: `b${index}`,
+      fromPort: "out",
     }));
     expect(
       selectVisibleCanvasWires(underWire, { x: 0, y: 0, w: 1, h: 1 }, 1, new Set(), null, 220, 0),
@@ -115,6 +116,7 @@ describe("NodeFlow render model", () => {
       by: index < 2 ? index * 40 : 5200 + index,
       fromN: `a${index}`,
       toN: `b${index}`,
+      fromPort: "out",
     }));
     const visible = selectVisibleCanvasWires(
       wires,
@@ -168,6 +170,25 @@ describe("NodeFlow render model", () => {
       first.incidentWireIndexesByNode,
     );
     expect(first.incidentWireIndexesByNode.get("b")?.length).toBe(2);
+  });
+
+  it("carries Filter true/false source ports onto wire paint models", () => {
+    const nodes = [
+      node("src", 0, 0, "input"),
+      node("flt", 200, 0, "filter"),
+      node("yes", 400, 0, "output"),
+      node("no", 400, 120, "output"),
+    ];
+    const edges = [
+      edge("in", "src", "flt", "out", "in"),
+      edge("t", "flt", "yes", "true", "in"),
+      edge("f", "flt", "no", "false", "in"),
+    ];
+    const model = buildNodeFlowRenderModel(nodes, edges);
+    const byId = Object.fromEntries(model.wires.map((w) => [w.id, w]));
+    expect(byId.in.fromPort).toBe("out");
+    expect(byId.t.fromPort).toBe("true");
+    expect(byId.f.fromPort).toBe("false");
   });
 
   it("treats position-only dirty nodes as geometry-only (config edits are not)", () => {

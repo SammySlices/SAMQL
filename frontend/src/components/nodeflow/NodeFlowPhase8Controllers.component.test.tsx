@@ -2,11 +2,12 @@ import React, { useLayoutEffect, useRef, useState } from "react";
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../lib/api";
-import type { NbEdge, NbNode } from "../../lib/nodeFlowModel";
+import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import { useNodeFlowDocumentController } from "./useNodeFlowDocumentController";
 import {
   clearLastRunPreviewCacheForTests,
   lastRunSeedRequests,
+  leafRunPort,
   useNodeFlowExecutionController,
 } from "./useNodeFlowExecutionController";
 
@@ -824,5 +825,330 @@ describe("Phase 8 NodeFlow controllers", () => {
     expect(result.current.controller.tabs.some((tab) => tab.name === "First")).toBe(false);
     expect(toast).toHaveBeenCalledWith("ok", "Workflow loaded", "Second");
     expect(toast).not.toHaveBeenCalledWith("ok", "Workflow loaded", "First");
+  });
+});
+
+describe("leafRunPort / Filter leaf Run all", () => {
+  it("maps Filter to true (not out) so backend never sees Unknown filter output", () => {
+    expect(leafRunPort("filter")).toBe("true");
+    expect(leafRunPort("select")).toBe("out");
+    expect(leafRunPort("input")).toBe("out");
+    // Join keeps legacy out even though palette ports are named.
+    expect(leafRunPort("join")).toBe("out");
+  });
+
+  it("leafRunPort picks a declared output for every PORTS type", () => {
+    // Contract: Run-all never invents a port the backend will reject the way
+    // Filter used to reject "out". Join keeps the intentional legacy "out".
+    for (const type of Object.keys(PORTS) as (keyof typeof PORTS)[]) {
+      const outs = PORTS[type].outputs;
+      const port = leafRunPort(type);
+      if (!outs.length) {
+        expect(port).toBe("out");
+        continue;
+      }
+      if (type === "join") {
+        expect(port).toBe("out");
+        continue;
+      }
+      expect(outs).toContain(port);
+    }
+    expect(leafRunPort("usernode")).toBe("out1");
+    expect(leafRunPort("apinode")).toBe("out");
+  });
+
+  it("Run all on Input→Filter leaf requests port true and seeds True preview", async () => {
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["score"],
+      rows: [[80]],
+      total_rows: 1,
+    } as any);
+    const runBatch = vi.spyOn(api, "nodeflowRunBatch").mockResolvedValue({
+      ok: true,
+      results: [
+        {
+          node: "src",
+          port: "out",
+          columns: ["score"],
+          rows: [[80], [30]],
+          total_rows: 2,
+        },
+        {
+          node: "flt",
+          port: "true",
+          columns: ["score"],
+          rows: [[80]],
+          total_rows: 1,
+        },
+        {
+          node: "flt",
+          port: "false",
+          columns: ["score"],
+          rows: [[30]],
+          total_rows: 1,
+        },
+      ],
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+
+    const src: NbNode = {
+      id: "src",
+      type: "input",
+      x: 0,
+      y: 0,
+      config: { label: "Source", table: "t" },
+    };
+    const flt: NbNode = {
+      id: "flt",
+      type: "filter",
+      x: 160,
+      y: 0,
+      config: { label: "Filter", condition: "score > 50", filterMode: "custom" },
+    };
+    const edges: NbEdge[] = [
+      {
+        id: "e1",
+        from: { node: "src", port: "out" },
+        to: { node: "flt", port: "in" },
+      },
+    ];
+    // Unwired Filter leaf: seed both True and False after a successful run.
+    expect(lastRunSeedRequests([src, flt], edges, ["flt"])).toEqual(
+      expect.arrayContaining([
+        { node: "src", port: "out" },
+        { node: "flt", port: "true" },
+        { node: "flt", port: "false" },
+      ]),
+    );
+
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes: [src, flt], edges },
+    };
+    const setNodeErrors = vi.fn();
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-filter",
+        nodes: [src, flt],
+        edges,
+        liveRef,
+        graphSig: "graph-filter",
+        dataEpoch: 1,
+        graphForApi: () => ({ nodes: [src, flt], edges }),
+        graphForRun: () => ({ nodes: [src, flt], edges }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors,
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.runAll();
+    });
+
+    // Single Filter leaf → runLeaf (not batch of ≥2 leaves).
+    expect(run).toHaveBeenCalled();
+    const leafCall = run.mock.calls.find(
+      (c) => c[1] === "flt" || (typeof c[1] === "string" && c[1].includes("flt")),
+    );
+    // nodeflowRun(graph, node, port, ...)
+    expect(leafCall?.[2]).toBe("true");
+    expect(leafCall?.[2]).not.toBe("out");
+
+    await act(async () => {
+      await result.current.doPreview(flt, "true", "Filter · True");
+    });
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        columns: ["score"],
+        rows: [[80]],
+        total: 1,
+        sourcePort: "true",
+      }),
+    );
+    // Must not surface the historical Unknown filter output error.
+    const errPayloads = setNodeErrors.mock.calls.flatMap((c) => c[0]);
+    const errTexts = JSON.stringify(errPayloads);
+    expect(errTexts).not.toMatch(/Unknown filter output/i);
+  });
+
+  it("Run-all batch of two Filter leaves requests port true (not out)", async () => {
+    const runBatch = vi.spyOn(api, "nodeflowRunBatch").mockImplementation(
+      async (_graph, requests: { node: string; port?: string }[]) => {
+        // Terminal batch first, then last-run seed batch.
+        return {
+          ok: true,
+          results: requests.map((q) => ({
+            node: q.node,
+            port: q.port || "out",
+            columns: ["x"],
+            rows: [[1]],
+            total_rows: 1,
+          })),
+        } as any;
+      },
+    );
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+
+    const mk = (id: string): NbNode => ({
+      id,
+      type: "filter",
+      x: 0,
+      y: 0,
+      config: { label: id, condition: "x > 0", filterMode: "custom" },
+    });
+    // Two independent Input→Filter chains so Run all uses runLeafBatch (≥2 leaves).
+    const inA: NbNode = {
+      id: "in-a",
+      type: "input",
+      x: 0,
+      y: 0,
+      config: { label: "A", table: "t" },
+    };
+    const inB: NbNode = {
+      id: "in-b",
+      type: "input",
+      x: 0,
+      y: 80,
+      config: { label: "B", table: "t" },
+    };
+    const fa = mk("fa");
+    const fb = mk("fb");
+    const edges: NbEdge[] = [
+      {
+        id: "e1",
+        from: { node: "in-a", port: "out" },
+        to: { node: "fa", port: "in" },
+      },
+      {
+        id: "e2",
+        from: { node: "in-b", port: "out" },
+        to: { node: "fb", port: "in" },
+      },
+    ];
+    const nodes = [inA, inB, fa, fb];
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes, edges },
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-batch-filter",
+        nodes,
+        edges,
+        liveRef,
+        graphSig: "graph-batch-filter",
+        dataEpoch: 1,
+        graphForApi: () => ({ nodes, edges }),
+        graphForRun: () => ({ nodes, edges }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.runAll();
+    });
+
+    expect(runBatch.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const terminalReqs = runBatch.mock.calls[0][1] as {
+      node: string;
+      port?: string;
+    }[];
+    expect(terminalReqs).toEqual(
+      expect.arrayContaining([
+        { node: "fa", port: "true" },
+        { node: "fb", port: "true" },
+      ]),
+    );
+    expect(terminalReqs.every((q) => q.port !== "out" || q.node.startsWith("in"))).toBe(
+      true,
+    );
+    // Filter terminals must never request "out".
+    expect(terminalReqs.filter((q) => q.node === "fa" || q.node === "fb")).toEqual([
+      { node: "fa", port: "true" },
+      { node: "fb", port: "true" },
+    ]);
+  });
+
+  it("Run all treats lone shred and filebrowser as runnable sources", async () => {
+    // Code was wrong: SOURCES omitted shred/filebrowser, so a lone source with
+    // no outbound wire showed "Nothing to run" even though backend can execute
+    // port "out". Connectors stay Fetch-only and are not covered here.
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["x"],
+      rows: [[1]],
+      total_rows: 1,
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+    const toast = vi.fn();
+
+    for (const type of ["shred", "filebrowser"] as const) {
+      run.mockClear();
+      toast.mockClear();
+      const n: NbNode = {
+        id: `lone-${type}`,
+        type,
+        x: 0,
+        y: 0,
+        config:
+          type === "shred"
+            ? { label: "Shred", table: "big", base: "built" }
+            : { label: "Files", pattern: "*.csv" },
+      };
+      const liveRef: React.MutableRefObject<{
+        nodes: NbNode[];
+        edges: NbEdge[];
+      }> = { current: { nodes: [n], edges: [] } };
+      const { result } = renderHook(() =>
+        useNodeFlowExecutionController({
+          activeTabId: `tab-${type}`,
+          nodes: [n],
+          edges: [],
+          liveRef,
+          graphSig: `graph-${type}`,
+          dataEpoch: 1,
+          graphForApi: () => ({ nodes: [n], edges: [] }),
+          graphForRun: () => ({ nodes: [n], edges: [] }),
+          childCtx: () => null,
+          partialGroupGraph: () => ({ nodes: [], edges: [] }),
+          patch: vi.fn(),
+          setNodes: vi.fn(),
+          setNodeErrors: vi.fn(),
+          setNodeWarnings: vi.fn(),
+          onToast: toast,
+          fireRipple: vi.fn(),
+        }),
+      );
+
+      await act(async () => {
+        await result.current.runAll();
+      });
+
+      expect(toast).not.toHaveBeenCalledWith(
+        "warn",
+        "Nothing to run",
+        expect.anything(),
+      );
+      expect(run).toHaveBeenCalled();
+      expect(run.mock.calls[0][1]).toBe(n.id);
+      expect(run.mock.calls[0][2]).toBe("out");
+    }
   });
 });

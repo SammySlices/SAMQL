@@ -1580,6 +1580,13 @@ def _boot_stage_label():
     return None
 
 
+# Exit → keep server: UI asks the backend to survive AppWindow close so the
+# next launch can reconnect instead of cold-starting. Cleared only by process
+# exit (/api/shutdown). Default X-close never sets this -- launcher still
+# stops a server it started (.622 Task Manager cleanup).
+_KEEP_ON_CLOSE = False
+
+
 def _health_payload(session=None):
     """Build the /api/health JSON body.
 
@@ -1595,6 +1602,10 @@ def _health_payload(session=None):
     splash/logs can show more than static "Waiting..." text. ``warming``
     remains True until a Session exists; the launcher opens once ``app``
     is SamQL and does not wait for warming to clear.
+
+    ``keep_on_close`` is read by the AppWindow launcher after the native
+    window closes (token-free /api/health) so Exit → keep server can leave
+    a launcher-started backend running for instant reopen.
     """
     base = {
         "ok": True,
@@ -1602,6 +1613,7 @@ def _health_payload(session=None):
         "version": __version__,
         "build": BUILD,
         "frontend_built": _FRONTEND_DIR is not None,
+        "keep_on_close": bool(_KEEP_ON_CLOSE),
     }
     stage = _boot_stage_label()
     if session is None:
@@ -1860,6 +1872,19 @@ class Api:
             os._exit(0)
         threading.Thread(target=_later, daemon=True).start()
         return {"ok": True, "stopping": True}
+
+    @staticmethod
+    def launcher_keep_on_close(s, m, body, ctx):
+        """Exit → keep server: mark this backend to survive AppWindow close.
+
+        The AppWindow launcher always stops a server *it* started on window
+        close (.622), which made the Exit modal's keep-server path a cold
+        restart. Setting this flag (surfaced on /api/health) lets the
+        launcher leave the process up for instant reconnect.
+        """
+        global _KEEP_ON_CLOSE
+        _KEEP_ON_CLOSE = True
+        return {"ok": True, "keep_on_close": True}
 
     @staticmethod
     def about(s, m, body, ctx):
@@ -4367,6 +4392,7 @@ ROUTES = [
     ("POST", r"^/api/materialize$", Api.materialize),
     ("POST", r"^/api/clear$", Api.clear_all),
     ("POST", r"^/api/shutdown$", Api.shutdown),
+    ("POST", r"^/api/launcher/keep-on-close$", Api.launcher_keep_on_close),
     ("POST", r"^/api/focus$", Api.focus),
     ("GET", r"^/api/about$", Api.about),
     ("POST", r"^/api/table/properties$", Api.table_properties),
