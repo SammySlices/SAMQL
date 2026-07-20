@@ -399,10 +399,13 @@ html.theme-light .about-body,
 html.theme-light .props-body,
 html.theme-light .ctx-menu,
 html.theme-light .settings-menu,
+html.theme-light .nb2-node-menu,
 html[data-theme="light"] .modal,
 html[data-theme="light"] .modal-body,
-html[data-theme="light"] .ctx-menu {
-  color: #111111;
+html[data-theme="light"] .ctx-menu,
+html[data-theme="light"] .settings-menu,
+html[data-theme="light"] .nb2-node-menu {
+  color: var(--chrome-ink);
 }
 /* Modal / settings section headers: near-black (beat base opacity: 0.6) */
 html.theme-light .modal-head h2,
@@ -426,8 +429,25 @@ html.theme-light .about-row,
 html.theme-light .form-row label,
 html.theme-light .modal .label,
 html.theme-light .ctx-menu button,
-html[data-theme="light"] .modal .label {
-  color: #111111;
+html.theme-light .ctx-menu .chev,
+html.theme-light .ctx-menu svg,
+html.theme-light .settings-menu button,
+html.theme-light .settings-menu .chev,
+html.theme-light .settings-menu svg,
+html.theme-light .nb2-node-menu button,
+html.theme-light .nb2-node-menu svg,
+html.theme-light .nb2-node-menu .nb2-cm-caret,
+html[data-theme="light"] .modal .label,
+html[data-theme="light"] .ctx-menu button,
+html[data-theme="light"] .ctx-menu .chev,
+html[data-theme="light"] .ctx-menu svg,
+html[data-theme="light"] .settings-menu button,
+html[data-theme="light"] .settings-menu .chev,
+html[data-theme="light"] .settings-menu svg,
+html[data-theme="light"] .nb2-node-menu button,
+html[data-theme="light"] .nb2-node-menu svg,
+html[data-theme="light"] .nb2-node-menu .nb2-cm-caret {
+  color: var(--chrome-ink);
 }
 /* Secondary copy inside modals / settings menus */
 html.theme-light .modal .dim,
@@ -435,11 +455,16 @@ html.theme-light .modal .faint,
 html.theme-light .modal .hint,
 html.theme-light .modal .muted,
 html.theme-light .ctx-menu .label,
+html.theme-light .ctx-menu .ctx-head,
+html.theme-light .settings-menu .label,
 html.theme-light .about-ver,
 html[data-theme="light"] .modal .dim,
 html[data-theme="light"] .modal .faint,
 html[data-theme="light"] .modal .hint,
-html[data-theme="light"] .modal .muted {
+html[data-theme="light"] .modal .muted,
+html[data-theme="light"] .ctx-menu .label,
+html[data-theme="light"] .ctx-menu .ctx-head,
+html[data-theme="light"] .settings-menu .label {
   color: #444444;
   opacity: 1;
 }
@@ -952,6 +977,10 @@ html.nb-dense .nb2-port {
   height: calc(18px * var(--nb-dense-scale, 0.85));
   margin-top: calc(-9px * var(--nb-dense-scale, 0.85));
 }
+html.nb-dense .nb2-node.sphere .nb2-port.sphere-port {
+  height: auto;
+  margin-top: 0;
+}
 html.nb-dense .nb2-node-label {
   font-size: 11px;
 }
@@ -987,6 +1016,11 @@ html.nb-dense .nb2-node-label {
     padding: calc(8px * var(--eye-care-scale))
       calc(10px * var(--eye-care-scale));
     min-width: calc(160px * var(--eye-care-scale));
+  }
+  /* Sphere diameter is inline; classic min-width would squash circles into pills. */
+  html.eye-care .nb2-node.sphere {
+    padding: 0;
+    min-width: 0;
   }
 }
 
@@ -1310,8 +1344,8 @@ textarea:focus {
 
 /* ---- Tables / History / Workflows slide-out drawer ---- */
 /* Overlay on the left of .body so Journal / NodeFlow / Dashboard keep full
-   width when the rail is peeked closed. The folder-handle hamburger always
-   remains available (no Settings hide-rail toggle). */
+   width when the rail is closed. Closed = thin left-edge hit strip only;
+   hover / focus / click slides the panel out (no Settings hide-rail toggle). */
 .tables-sidebar-drawer {
   position: absolute;
   left: 0;
@@ -1319,6 +1353,38 @@ textarea:focus {
   bottom: 0;
   z-index: 45;
   pointer-events: none;
+}
+/* Full-height left hit strip while closed — nearly invisible until hover. */
+.tables-sidebar-edge {
+  pointer-events: auto;
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 4;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.tables-sidebar-edge:hover,
+.tables-sidebar-edge:focus-visible {
+  background: linear-gradient(
+    90deg,
+    var(--accent-line, rgba(84, 185, 73, 0.35)),
+    transparent
+  );
+  outline: none;
+}
+.tables-sidebar-drawer.is-open .tables-sidebar-edge {
+  width: 0;
+  pointer-events: none;
+  opacity: 0;
 }
 .tables-sidebar-panel {
   position: absolute;
@@ -1353,11 +1419,11 @@ textarea:focus {
   flex: 0 0 5px;
   pointer-events: auto;
 }
-/* Short folder-handle tab — nested on the panel's right edge (left: 100%) so
-   closed = visible at the viewport left (panel translateX(-100%)), open =
-   glued to the panel during resize (no separate left / CSS-var lag). */
+/* Folder-handle on the panel's right edge (left: 100%). Hidden while closed;
+   edge approach (is-peek) shows only this handle; when open it stays glued
+   to the panel during resize. */
 .tables-sidebar-peek {
-  pointer-events: auto;
+  pointer-events: none;
   position: absolute;
   left: 100%;
   top: 50%;
@@ -1374,6 +1440,13 @@ textarea:focus {
   border-radius: 0 10px 10px 0;
   box-shadow: 3px 0 12px rgba(0, 0, 0, 0.18);
   z-index: 3;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.tables-sidebar-drawer.is-peek .tables-sidebar-peek,
+.tables-sidebar-drawer.is-open .tables-sidebar-peek {
+  pointer-events: auto;
+  opacity: 1;
 }
 .tables-sidebar-peek-menu {
   border: none;
@@ -1396,13 +1469,15 @@ textarea:focus {
   background: var(--raised);
 }
 
-/* NodeFlow node press/drag: folder-handle must not steal the gesture. */
+/* NodeFlow node press/drag: edge strip + folder-handle must not steal the gesture. */
+html[data-samql-nf-drag="1"] .tables-sidebar-edge,
 html[data-samql-nf-drag="1"] .tables-sidebar-peek {
   pointer-events: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tables-sidebar-panel {
+  .tables-sidebar-panel,
+  .tables-sidebar-peek {
     transition: none;
   }
 }
@@ -2717,14 +2792,13 @@ body.editor-ivory .code textarea.ta::placeholder {
 .modal.wide {
   max-width: min(760px, 94vw);
 }
-/* Load File / file browser: keep the panel look, drop expensive open paint. */
+/* Load File / file browser: keep the panel look, drop expensive open paint.
+   Do NOT use layout/paint containment here: with overflow:hidden +
+   border-radius it becomes a containing block for position:fixed and clips
+   nested Browse (FileBrowser) chrome into the top-left of the Load modal.
+   Perf stays from no backdrop-filter + opacity-only motion + lighter shadow. */
 .modal.fast {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
-  contain: layout style paint;
-}
-.modal-backdrop.fast {
-  /* Paint/layout isolation only — avoid size containment on fixed inset:0. */
-  contain: layout style paint;
 }
 .modal-head {
   display: flex;
@@ -6148,9 +6222,268 @@ kbd {
   box-shadow: var(--shadow);
   user-select: none;
 }
+/* Settings → Visual → Sphere nodes: icon in a transparent circle; ports on the rim. */
+.nb2-node.sphere {
+  background: color-mix(in srgb, var(--panel) 28%, transparent);
+  border: 3px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+  border-radius: 50%;
+  border-top-width: 3px;
+  box-shadow: none;
+  overflow: visible;
+  /* Inline diameter must win over classic card min-width / padding. */
+  min-width: 0;
+  padding: 0;
+  /* Base .nb2-node uses contain:layout; that + border-radius can clip
+     absolutely positioned ports that sit outside the circle. Ports must
+     paint past the rim, so drop layout containment for spheres. */
+  contain: style;
+}
+.nb2-node.sphere.sel {
+  border-color: var(--accent);
+  /* Outer halo + main 3px stroke = readable double-ring when selected */
+  box-shadow: 0 0 0 3px var(--accent-fade);
+  /* Same elevation as .nb2-node.sel; beats :has(under) host z-index 2. */
+  z-index: 5;
+}
+.nb2-node.sphere.input,
+.nb2-node.sphere.filter,
+.nb2-node.sphere.output,
+.nb2-node.sphere.select,
+.nb2-node.sphere.join,
+.nb2-node.sphere.union,
+.nb2-node.sphere.formula,
+.nb2-node.sphere.summarize,
+.nb2-node.sphere.pivot,
+.nb2-node.sphere.chart,
+.nb2-node.sphere.reconcile,
+.nb2-node.sphere.sort,
+.nb2-node.sphere.sample,
+.nb2-node.sphere.unique,
+.nb2-node.sphere.unpivot,
+.nb2-node.sphere.window,
+.nb2-node.sphere.browse {
+  border-top: 3px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+}
+.nb2-node.sphere.sel.input,
+.nb2-node.sphere.sel.filter,
+.nb2-node.sphere.sel.output,
+.nb2-node.sphere.sel.select,
+.nb2-node.sphere.sel.join,
+.nb2-node.sphere.sel.union,
+.nb2-node.sphere.sel.formula,
+.nb2-node.sphere.sel.summarize,
+.nb2-node.sphere.sel.pivot,
+.nb2-node.sphere.sel.chart,
+.nb2-node.sphere.sel.reconcile,
+.nb2-node.sphere.sel.sort,
+.nb2-node.sphere.sel.sample,
+.nb2-node.sphere.sel.unique,
+.nb2-node.sphere.sel.unpivot,
+.nb2-node.sphere.sel.window,
+.nb2-node.sphere.sel.browse {
+  border-top-color: var(--accent);
+}
+.nb2-sphere-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  /* Theme ink: dark :root --text (#e8eaef), light #111111.
+     Custom canvas text (--user-canvas-text-node) wins via .has-user-canvas-text-node. */
+  color: var(--text);
+  cursor: grab;
+}
+.nb2-sphere-face:active {
+  cursor: grabbing;
+}
+.nb2-sphere-icon {
+  position: relative;
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  pointer-events: none;
+  /* Solid Lucide via currentColor — no outline / glow / drop-shadow */
+  filter: none;
+}
+.nb2-sphere-icon svg {
+  color: inherit;
+  fill: none;
+  stroke: currentColor;
+}
+.nb2-node.sphere .nb2-port.sphere-port {
+  /* left/top come from inline spherePortOffset — do NOT reset left:auto
+     (that fought the fan and could collapse every port to one spot). */
+  margin-top: 0;
+  height: auto;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+}
+.nb2-node.sphere .nb2-port.sphere-port.in {
+  /* Clear classic .nb2-port.in { left: -14px } so inline left wins cleanly. */
+  right: auto;
+}
+.nb2-node.sphere .nb2-port.sphere-port.out {
+  /* Clear classic .nb2-port.out { right: -14px }; position via inline left. */
+  right: auto;
+}
+/* Floating chart/dashboard window centered under the sphere (does not replace chrome). */
+.nb2-node.sphere .nb2-sphere-under {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  /* Above sphere ports (2) inside this host; host z-index (below) owns
+     cross-node stacking vs idle / selected siblings. */
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  pointer-events: auto;
+}
+/* Canvas sibling stack: idle (auto) < under-panel hosts (2) < selected /
+   active drag (5 via .nb2-node.sel / .nb2-node.sphere.sel). Lineage-flash
+   / marquee stay at 6. Wires paint under cards (WireLayer first). Group
+   drop hit-tests are geometric, not DOM. */
+.nb2-node.sphere:has(> .nb2-sphere-under) {
+  z-index: 2;
+}
+.nb2-node.sphere .nb2-sphere-under .nb2-node-chart,
+.nb2-node.sphere .nb2-sphere-under .nb2-dash,
+.nb2-node.sphere .nb2-sphere-under .nb2-group-body {
+  margin: 0;
+  flex: 1;
+  min-height: 0;
+  border-radius: 0;
+  border: none;
+}
+/* Classic .nb2-group-body is absolute under the 30px head (top:38px).
+   Inside the floating under-panel there is no head — reset insets so the
+   child list fills the panel (group + iterator share this path). */
+.nb2-node.sphere .nb2-sphere-under .nb2-group-body {
+  position: relative;
+  left: auto;
+  right: auto;
+  top: auto;
+  bottom: auto;
+  width: 100%;
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 4px;
+  gap: 4px;
+  overflow: auto;
+  background: transparent;
+}
+/* Compact chrome when group/iterator children window is minimized. */
+.nb2-sphere-face-minimized .nb2-sphere-icon {
+  transform: scale(0.92);
+}
+.nb2-sphere-container-toggle {
+  /* Hang below the lowest fanned left-rim input (outset 14 + 14×16
+     triangle + ring + margin). Must match SPHERE_CONTAINER_PILL_BOTTOM.
+     Stays mounted when the under-panel is open (toggle ▾/▸).
+     Fixed outer box: left:50% + margin-left:-32px (half of width 64px;
+     no translateX(-50%)), so open/closed content (count digits, ▾/▸)
+     cannot recenter the pill. Width fits "99 ▾" and "99 ▸". */
+  position: absolute;
+  left: 50%;
+  right: auto;
+  bottom: -44px;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: minmax(1.5em, 1fr) 1em;
+  align-items: center;
+  justify-items: center;
+  column-gap: 4px;
+  width: 64px;
+  margin: 0 0 0 -32px;
+  padding: 5px 10px;
+  min-height: 26px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.1;
+  transform: none;
+  /* No transform transition — global button:active scale must not apply. */
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+.nb2-sphere-container-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* Beat button:not(:disabled):active { transform: scale(0.97) } (0,2,1). */
+button.nb2-sphere-container-toggle:not(:disabled):active,
+button.nb2-sphere-container-toggle:focus,
+button.nb2-sphere-container-toggle:focus-visible {
+  transform: none;
+  outline: none;
+}
+.nb2-sphere-container-toggle:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-fade), var(--shadow);
+}
+.nb2-sphere-container-badge {
+  width: 100%;
+  min-width: 0;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.nb2-sphere-container-caret {
+  display: inline-block;
+  width: 1em;
+  text-align: center;
+}
+.nb2-sphere-under-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2, var(--panel));
+  box-sizing: border-box;
+}
+.nb2-sphere-under-bar-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.2;
+  color: var(--text-faint);
+}
+.nb2-sphere-under-bar .nb2-node-collapse {
+  margin-left: 0;
+  font-size: 14px;
+  padding: 2px 4px;
+}
 .nb2-node.sel {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-fade), var(--shadow);
+  /* Above under-panel hosts (z-index 2). Drag selects first, so the
+     dragged sphere stays in front of iterator/group windows. */
+  z-index: 5;
 }
 .nb2-node.input {
   border-top: 3px solid #5aa9e6;
@@ -7024,6 +7357,14 @@ select.nb2-col-missing {
 .nb2-node.unpivot { border-top: 3px solid #d98bc8; }
 .nb2-node.window { border-top: 3px solid #9a8bd9; }
 .nb2-node.browse { border-top: 3px solid #6ab8d9; }
+/* After every classic type-colored top: keep sphere rings uniform
+   (Created Node / group / iterator / sql / …). Element+class beats .nb2-node.TYPE. */
+div.nb2-node.sphere {
+  border-top: 3px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+}
+div.nb2-node.sphere.sel {
+  border-top-color: var(--accent);
+}
 .nb2-window {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -7850,15 +8191,15 @@ html[data-theme="light"] .nb2-statusbar.error .nb2-status-text {
 .nb2-minimap.mini { display: flex; align-items: center; justify-content: center; }
 .nb2-minimap.mini .nb2-mm-toggle { position: static; width: 100%; height: 100%; border: 0; background: transparent; font-size: 13px; }
 .nb2-mm-node {
-  fill: #8aa0b8;
+  fill: color-mix(in srgb, var(--accent) 50%, var(--text-faint));
   stroke: none;
 }
 .nb2-mm-node.sel {
-  fill: #3b6ea5;
+  fill: var(--accent);
 }
 .nb2-mm-view {
-  fill: rgba(59, 110, 165, 0.12);
-  stroke: #3b6ea5;
+  fill: var(--accent-fade);
+  stroke: var(--accent);
   stroke-width: 1.2;
 }
 
@@ -8005,11 +8346,13 @@ html[data-theme="light"] .nb2-statusbar.error .nb2-status-text {
 }
 
 /* group highlighted as a drop target while dragging a node over it */
-.nb2-node.group.drophover {
+.nb2-node.group.drophover,
+.nb2-node.iterator.drophover {
   outline: 2px dashed var(--accent);
   outline-offset: 2px;
 }
-.nb2-node.group.drophover .nb2-group-body {
+.nb2-node.group.drophover .nb2-group-body,
+.nb2-node.iterator.drophover .nb2-group-body {
   border-color: var(--accent);
   background: rgba(59, 110, 165, 0.12);
 }
@@ -8871,6 +9214,34 @@ body.motion-reduced *, body.motion-reduced *::before, body.motion-reduced *::aft
   font-size: 12px;
 }
 .join-btn:hover { opacity: 1; }
+.source-changed-badge {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: #5a3d00;
+  background: #f0c14b;
+  border: 1px solid #c9a227;
+  white-space: nowrap;
+}
+html.theme-light .source-changed-badge {
+  color: #4a3200;
+  background: #ffe08a;
+  border-color: #d4a017;
+}
+.source-reload-error-badge {
+  color: #5a1010;
+  background: #f0a0a0;
+  border-color: #c04040;
+}
+html.theme-light .source-reload-error-badge {
+  color: #4a0808;
+  background: #ffc8c8;
+  border-color: #c04040;
+}
 
 .storage-panel { min-width: 0; }
 @media (min-width: 781px) {
@@ -9546,8 +9917,13 @@ body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
   0%, 100% { transform: scale(1); opacity: 1; }
   50% { transform: scale(1.18); opacity: 0.88; }
 }
-.nb2-canvas-wrap.wiring .nb2-port.in {
+/* Pulse the arrow glyph only — never the .nb2-port box. Sphere (and
+   top) ports position with transform: translate(...); animating
+   transform on the port itself overrides that and jumps the handle
+   (inputs appear to slide down when a connector approaches). */
+.nb2-canvas-wrap.wiring .nb2-port.in > .nb2-dot {
   animation: nb-port-hot 0.9s ease-in-out infinite;
+  transform-origin: center;
 }
 
 /* -- an edge snapping home gives its node a tiny elastic pop -- */
@@ -12013,10 +12389,130 @@ html.theme-light .nb2-zoom .btn.primary:hover {
   color: var(--btn-hover-fg) !important;
 }
 
+/* Light mode context / settings menus: black ink on light panels.
+   Beats .topbar { color: chrome-fg } inheritance (Settings lives in the
+   black splash row) and any chrome-white !important from nearby strips.
+   Scoped to menu shells only — does not touch canvas / sphere text. */
+html.theme-light .ctx-menu,
+html.theme-light .settings-menu,
+html.theme-light .nb2-node-menu,
+html.theme-light .nb-export-menu,
+html.theme-light .nb-runmenu-pop,
+html.theme-light .topbar .ctx-menu,
+html.theme-light .topbar .settings-menu,
+html[data-theme="light"] .ctx-menu,
+html[data-theme="light"] .settings-menu,
+html[data-theme="light"] .nb2-node-menu,
+html[data-theme="light"] .nb-export-menu,
+html[data-theme="light"] .nb-runmenu-pop,
+html[data-theme="light"] .topbar .ctx-menu,
+html[data-theme="light"] .topbar .settings-menu {
+  color: var(--chrome-ink) !important;
+}
+html.theme-light .ctx-menu button,
+html.theme-light .ctx-menu .label,
+html.theme-light .ctx-menu .chev,
+html.theme-light .ctx-menu .ctx-head,
+html.theme-light .ctx-menu svg,
+html.theme-light .settings-menu button,
+html.theme-light .settings-menu .label,
+html.theme-light .settings-menu .chev,
+html.theme-light .settings-menu svg,
+html.theme-light .nb2-node-menu button,
+html.theme-light .nb2-node-menu svg,
+html.theme-light .nb2-node-menu .nb2-cm-caret,
+html.theme-light .nb-export-menu button,
+html.theme-light .nb-export-menu svg,
+html.theme-light .nb-runmenu-pop button,
+html.theme-light .nb-runmenu-pop svg,
+html.theme-light .topbar .ctx-menu button,
+html.theme-light .topbar .ctx-menu .label,
+html.theme-light .topbar .ctx-menu .chev,
+html.theme-light .topbar .ctx-menu svg,
+html.theme-light .topbar .settings-menu button,
+html.theme-light .topbar .settings-menu .label,
+html.theme-light .topbar .settings-menu .chev,
+html.theme-light .topbar .settings-menu svg,
+html[data-theme="light"] .ctx-menu button,
+html[data-theme="light"] .ctx-menu .label,
+html[data-theme="light"] .ctx-menu .chev,
+html[data-theme="light"] .ctx-menu .ctx-head,
+html[data-theme="light"] .ctx-menu svg,
+html[data-theme="light"] .settings-menu button,
+html[data-theme="light"] .settings-menu .label,
+html[data-theme="light"] .settings-menu .chev,
+html[data-theme="light"] .settings-menu svg,
+html[data-theme="light"] .nb2-node-menu button,
+html[data-theme="light"] .nb2-node-menu svg,
+html[data-theme="light"] .nb2-node-menu .nb2-cm-caret,
+html[data-theme="light"] .nb-export-menu button,
+html[data-theme="light"] .nb-export-menu svg,
+html[data-theme="light"] .nb-runmenu-pop button,
+html[data-theme="light"] .nb-runmenu-pop svg,
+html[data-theme="light"] .topbar .ctx-menu button,
+html[data-theme="light"] .topbar .ctx-menu .label,
+html[data-theme="light"] .topbar .ctx-menu .chev,
+html[data-theme="light"] .topbar .ctx-menu svg,
+html[data-theme="light"] .topbar .settings-menu button,
+html[data-theme="light"] .topbar .settings-menu .label,
+html[data-theme="light"] .topbar .settings-menu .chev,
+html[data-theme="light"] .topbar .settings-menu svg {
+  color: var(--chrome-ink) !important;
+}
+html.theme-light .ctx-menu .label,
+html.theme-light .ctx-menu .ctx-head,
+html.theme-light .settings-menu .label,
+html.theme-light .ctx-menu button.has-sub .chev,
+html.theme-light .nb2-node-menu .nb2-cm-caret,
+html[data-theme="light"] .ctx-menu .label,
+html[data-theme="light"] .ctx-menu .ctx-head,
+html[data-theme="light"] .settings-menu .label,
+html[data-theme="light"] .ctx-menu button.has-sub .chev,
+html[data-theme="light"] .nb2-node-menu .nb2-cm-caret {
+  color: #444444 !important;
+}
+html.theme-light .ctx-menu button:hover,
+html.theme-light .ctx-menu button:hover svg,
+html.theme-light .settings-menu button:hover,
+html.theme-light .settings-menu button:hover svg,
+html.theme-light .nb2-node-menu button:hover,
+html.theme-light .nb2-node-menu button:hover svg,
+html.theme-light .nb2-node-menu button.active,
+html.theme-light .nb-export-menu button:hover,
+html.theme-light .nb-runmenu-pop button:hover,
+html[data-theme="light"] .ctx-menu button:hover,
+html[data-theme="light"] .ctx-menu button:hover svg,
+html[data-theme="light"] .settings-menu button:hover,
+html[data-theme="light"] .settings-menu button:hover svg,
+html[data-theme="light"] .nb2-node-menu button:hover,
+html[data-theme="light"] .nb2-node-menu button:hover svg,
+html[data-theme="light"] .nb2-node-menu button.active,
+html[data-theme="light"] .nb-export-menu button:hover,
+html[data-theme="light"] .nb-runmenu-pop button:hover {
+  color: var(--menu-hl-text) !important;
+}
+html.theme-light .ctx-menu button.danger,
+html.theme-light .nb2-node-menu button.danger,
+html[data-theme="light"] .ctx-menu button.danger,
+html[data-theme="light"] .nb2-node-menu button.danger {
+  color: var(--error) !important;
+}
+html.theme-light .ctx-menu button.danger:hover,
+html.theme-light .nb2-node-menu button.danger:hover,
+html[data-theme="light"] .ctx-menu button.danger:hover,
+html[data-theme="light"] .nb2-node-menu button.danger:hover {
+  color: var(--error) !important;
+}
+html.theme-light .nb2-node-menu .nb2-cm-stop,
+html[data-theme="light"] .nb2-node-menu .nb2-cm-stop {
+  color: var(--error) !important;
+}
+
 /* ---- Settings → Visual → Change Canvas Color ----
    Floating modal (useWinDrag + win-float). Per-surface vars on <html>
-   (--user-canvas-bg-ide|journal|node + .has-user-canvas-bg-*) paint IDE
-   editor, Journal, and NodeFlow. Wins over ivory / light hard-coded whites.
+   (--user-canvas-bg-* / --user-canvas-text-* + .has-user-canvas-bg-* /
+   .has-user-canvas-text-*) paint IDE editor, Journal, and NodeFlow.
+   Wins over ivory / light hard-coded whites and theme --text.
    Dot grid on the canvas is preserved. */
 .canvas-color-win {
   position: fixed;
@@ -12200,6 +12696,141 @@ html[data-theme="light"].has-user-canvas-bg-ide body.editor-ivory .code,
 html[data-theme="light"].has-user-canvas-bg-ide .nb-ed .code {
   background-color: var(--user-canvas-bg-ide) !important;
   background: var(--user-canvas-bg-ide) !important;
+}
+
+/* ---- Per-surface canvas TEXT (Settings → Canvas Color) ----
+   Highlight layer (pre.hl + .t-ident) carries ink; textarea stays
+   transparent so the caret/selection overlay is not double-painted. */
+html.has-user-canvas-text-ide .code,
+html.has-user-canvas-text-ide .code pre.hl,
+html.has-user-canvas-text-ide .code .t-ident,
+html.has-user-canvas-text-ide body.editor-ivory .code,
+html.has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html.has-user-canvas-text-ide body.editor-ivory .code .t-ident,
+html.has-user-canvas-text-ide .nb-ed .code,
+html.has-user-canvas-text-ide .nb-ed .code pre.hl,
+html.has-user-canvas-text-ide .nb-ed .code .t-ident,
+html.theme-light.has-user-canvas-text-ide .code,
+html.theme-light.has-user-canvas-text-ide .code pre.hl,
+html.theme-light.has-user-canvas-text-ide .code .t-ident,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code .t-ident,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code pre.hl,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code .t-ident,
+html[data-theme="light"].has-user-canvas-text-ide .code,
+html[data-theme="light"].has-user-canvas-text-ide .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide .code .t-ident,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code .t-ident,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code .t-ident {
+  color: var(--user-canvas-text-ide) !important;
+}
+html.has-user-canvas-text-ide .code textarea.ta,
+html.has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html.has-user-canvas-text-ide .nb-ed .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html.theme-light.has-user-canvas-text-ide .nb-ed .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide body.editor-ivory .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-ide .nb-ed .code textarea.ta {
+  color: transparent !important;
+  caret-color: var(--user-canvas-text-ide);
+}
+
+html.has-user-canvas-text-journal .nb,
+html.has-user-canvas-text-journal .nb-scroll,
+html.has-user-canvas-text-journal .nb-groups,
+html.has-user-canvas-text-journal .nb-card,
+html.has-user-canvas-text-journal .nb-out,
+html.has-user-canvas-text-journal .nb-viz-empty,
+html.has-user-canvas-text-journal .nb-note,
+html.has-user-canvas-text-journal .nb-note-edit,
+html.has-user-canvas-text-journal .nb-note-view,
+html.has-user-canvas-text-journal .nb-note-h,
+html.has-user-canvas-text-journal .nb-note-p,
+html.has-user-canvas-text-journal .nb-note-ul,
+html.has-user-canvas-text-journal .nb-ed .code,
+html.has-user-canvas-text-journal .nb-ed .code pre.hl,
+html.has-user-canvas-text-journal .nb-ed .code .t-ident,
+html.theme-light.has-user-canvas-text-journal .nb,
+html.theme-light.has-user-canvas-text-journal .nb-scroll,
+html.theme-light.has-user-canvas-text-journal .nb-groups,
+html.theme-light.has-user-canvas-text-journal .nb-card,
+html.theme-light.has-user-canvas-text-journal .nb-out,
+html.theme-light.has-user-canvas-text-journal .nb-viz-empty,
+html.theme-light.has-user-canvas-text-journal .nb-note,
+html.theme-light.has-user-canvas-text-journal .nb-note-edit,
+html.theme-light.has-user-canvas-text-journal .nb-note-view,
+html.theme-light.has-user-canvas-text-journal .nb-note-h,
+html.theme-light.has-user-canvas-text-journal .nb-note-p,
+html.theme-light.has-user-canvas-text-journal .nb-note-ul,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code pre.hl,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code .t-ident,
+html[data-theme="light"].has-user-canvas-text-journal .nb,
+html[data-theme="light"].has-user-canvas-text-journal .nb-scroll,
+html[data-theme="light"].has-user-canvas-text-journal .nb-groups,
+html[data-theme="light"].has-user-canvas-text-journal .nb-card,
+html[data-theme="light"].has-user-canvas-text-journal .nb-out,
+html[data-theme="light"].has-user-canvas-text-journal .nb-viz-empty,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-edit,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-view,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-h,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-p,
+html[data-theme="light"].has-user-canvas-text-journal .nb-note-ul,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code pre.hl,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code .t-ident {
+  color: var(--user-canvas-text-journal) !important;
+}
+html.has-user-canvas-text-journal .nb-ed .code textarea.ta,
+html.theme-light.has-user-canvas-text-journal .nb-ed .code textarea.ta,
+html[data-theme="light"].has-user-canvas-text-journal .nb-ed .code textarea.ta {
+  color: transparent !important;
+  caret-color: var(--user-canvas-text-journal);
+}
+
+html.has-user-canvas-text-node .nb2-canvas-wrap,
+html.has-user-canvas-text-node .nb2-empty,
+html.has-user-canvas-text-node .nb2-hint,
+html.has-user-canvas-text-node .nb2-hint-sm,
+html.has-user-canvas-text-node .nb2-sphere-face,
+html.has-user-canvas-text-node .nb2-sphere-icon,
+html.has-user-canvas-text-node .nb2-sphere-icon svg,
+html.theme-light.has-user-canvas-text-node .nb2-canvas-wrap,
+html.theme-light.has-user-canvas-text-node .nb2-empty,
+html.theme-light.has-user-canvas-text-node .nb2-hint,
+html.theme-light.has-user-canvas-text-node .nb2-hint-sm,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-face,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-icon,
+html.theme-light.has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-theme="light"].has-user-canvas-text-node .nb2-canvas-wrap,
+html[data-theme="light"].has-user-canvas-text-node .nb2-empty,
+html[data-theme="light"].has-user-canvas-text-node .nb2-hint,
+html[data-theme="light"].has-user-canvas-text-node .nb2-hint-sm,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-theme="light"].has-user-canvas-text-node .nb2-sphere-icon svg,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-face,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-icon,
+html.canvas-node-luma-dark.has-user-canvas-text-node .nb2-sphere-icon svg,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-face,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-icon,
+html.canvas-node-luma-light.has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-canvas-node-luma="dark"].has-user-canvas-text-node .nb2-sphere-icon svg,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-face,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-icon,
+html[data-canvas-node-luma="light"].has-user-canvas-text-node .nb2-sphere-icon svg {
+  color: var(--user-canvas-text-node) !important;
 }
 
 html.theme-light .canvas-color-head,

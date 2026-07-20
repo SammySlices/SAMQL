@@ -65,7 +65,12 @@ def _nodeflow_source() -> str:
 
 def _fresh_session(**kw):
     from samql_core import Session
-    return Session(**kw)
+    s = Session(**kw)
+    # Isolate from a persisted user config that may have Fresh run / Fresh
+    # load toggled on (those skip caches and break population assertions).
+    s.fresh_run = False
+    s.fresh_load = False
+    return s
 
 
 def _loaded_session(**kw):
@@ -633,13 +638,13 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_flow_cache_clears_on_unrelated_table_drop():
-        # CODE was incomplete: scoped flow clear + epoch-salted fingerprints
-        # left orphaned entries that could never hit. Unrelated drops must
-        # still advance data_epoch AND clear volatile flow cache.
+        # Latest-data: content-touching drops advance data_epoch and clear
+        # volatile flow cache so fingerprints cannot leave orphan hits.
         from samql_core.session import LOCAL_TARGET
         s = _fresh_session()
         try:
             s.flow_cache = True
+            s.fresh_run = False
             s.run_query("CREATE TABLE flow_src AS SELECT 1 AS g, 10 AS v",
                         target=LOCAL_TARGET)
             s.run_query("CREATE TABLE other_tbl AS SELECT 1 AS x",
@@ -684,6 +689,7 @@ def backend_tests(datadir, csv_path, json_path):
         s = _fresh_session()
         try:
             s.flow_cache = True
+            s.fresh_run = False
             s._flow_source_tables = set()
             s._note_flow_source_tables({
                 "nodes": [
@@ -1752,9 +1758,9 @@ def backend_tests(datadir, csv_path, json_path):
             calls = {"n": 0}
             real = s.column_field_tree
 
-            def tracked(engine, table, column):
+            def tracked(engine, table, column, **kwargs):
                 calls["n"] += 1
-                return real(engine, table, column)
+                return real(engine, table, column, **kwargs)
 
             s.column_field_tree = tracked  # type: ignore[method-assign]
             try:
@@ -1876,13 +1882,15 @@ def backend_tests(datadir, csv_path, json_path):
         try:
             results = {
                 "r1": _t.SimpleNamespace(
-                    engine="duckdb", capped=False,
+                    engine="duckdb", capped=False, data_epoch=0,
                     store=_t.SimpleNamespace(_path=good.name)),
                 "r2": _t.SimpleNamespace(
-                    engine="duckdb", capped=True,
+                    engine="duckdb", capped=True, data_epoch=0,
                     store=_t.SimpleNamespace(_path=good.name)),
             }
-            sess = _t.SimpleNamespace(_results=results)
+            sess = _t.SimpleNamespace(_results=results, _data_epoch=0)
+            sess._live_cached_result = \
+                S.Session._live_cached_result.__get__(sess, S.Session)
             sess._reusable_store_path = \
                 S.Session._reusable_store_path.__get__(sess, S.Session)
             setup = S.Session._setup_reuse_views.__get__(sess, S.Session)
@@ -2121,6 +2129,7 @@ def backend_tests(datadir, csv_path, json_path):
         class CR:
             cols = ["id", "payload"]
             total = 3
+            data_epoch = 0
 
             def view(self, sort_col, descending):
                 calls["view"] = (sort_col, descending)
@@ -2132,7 +2141,9 @@ def backend_tests(datadir, csv_path, json_path):
                 calls["filtered"] = (filters, sort_col, descending)
                 sub = [r for r in base if r[0] != "r1"]
                 return sub, len(sub)
-        sess = _t.SimpleNamespace(_results={"rid": CR()})
+        sess = _t.SimpleNamespace(_results={"rid": CR()}, _data_epoch=0)
+        sess._live_cached_result = \
+            S.Session._live_cached_result.__get__(sess, S.Session)
         cv = S.Session.cell_value.__get__(sess, S.Session)
         # plain view: value comes back whole (under the fetch bound)
         r = cv("rid", 1, "payload")
@@ -2161,6 +2172,7 @@ def backend_tests(datadir, csv_path, json_path):
         class CRN:
             cols = ["n"]
             total = 1
+            data_epoch = 0
 
             def view(self, sort_col, descending):
                 return [(12345,)]
@@ -2330,6 +2342,9 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_filecache_sweep():
         # Sweep policy: abandoned temps, age-out, and LRU eviction to budget.
+        # Attach-aware: held paths survive budget pressure; soft-recent
+        # unheld can shrink under pressure; floor-recent (convert→attach)
+        # never budget-evicts.
         import tempfile as _tf
         import shutil as _sh
         import time as _time
@@ -2337,6 +2352,8 @@ def backend_tests(datadir, csv_path, json_path):
         tmpdir = _tf.mkdtemp(prefix="fc_sweep_")
         saved_dir = FC._DIR
         FC._DIR = tmpdir
+        saved_held = dict(FC._HELD)
+        FC._HELD.clear()
         now = _time.time()
 
         def mk(name, size, age_sec):
@@ -2353,7 +2370,10 @@ def backend_tests(datadir, csv_path, json_path):
             middle = mk("fc_2.parquet", 100, 2000)
             newest = mk("fc_3.parquet", 100, 1000)
             other = mk("unrelated.bin", 10, 30 * 86400)  # not ours
-            freshbig = mk("fc_fresh.parquet", 100, 120)  # live-session entry
+            soft = mk("fc_soft.parquet", 100, 120)       # soft-recent, unheld
+            floor = mk("fc_floor.parquet", 100, 10)      # floor-recent
+            held = mk("fc_held.parquet", 100, 3000)      # old but attached
+            FC.hold(held)
             os.environ["SAMQL_FILECACHE_GB"] = str(150 / (1024 ** 3))
             removed = FC.sweep()
             need(not os.path.exists(old_tmp),
@@ -2363,16 +2383,23 @@ def backend_tests(datadir, csv_path, json_path):
                  "an entry unused past the age limit is dropped")
             need(not os.path.exists(oldest) and not os.path.exists(middle),
                  "LRU eviction removes the least-recently-used first")
-            need(os.path.exists(newest),
-                 "the most recently used entry survives the budget")
+            need(not os.path.exists(newest),
+                 "under budget pressure older unheld entries are reclaimed")
+            need(not os.path.exists(soft),
+                 "under budget pressure soft-recent unheld shrinks "
+                 "(no blanket 600s exemption)")
+            need(os.path.exists(floor),
+                 "floor-recent unheld survives (convert→attach race)")
+            need(os.path.exists(held),
+                 "a held/attached entry survives budget eviction")
             need(os.path.exists(other),
                  "sweep only ever touches fc_* files")
-            need(os.path.exists(freshbig),
-                 "a very recent entry is exempt from BUDGET eviction "
-                 "(only age can take it)")
-            need(removed == 4, "removed count reflects the work: %d" % removed)
+            need(removed >= 5, "removed count reflects the work: %d" % removed)
+            FC.release(held)
         finally:
             os.environ.pop("SAMQL_FILECACHE_GB", None)
+            FC._HELD.clear()
+            FC._HELD.update(saved_held)
             FC._DIR = saved_dir
             _sh.rmtree(tmpdir, ignore_errors=True)
 
@@ -2483,11 +2510,742 @@ def backend_tests(datadir, csv_path, json_path):
             load("t4", src.name, "csv", delimiter=",")
             need(len(copies) == 5 and tmpdir not in views[-1][1],
                  "disabled: conversion falls back outside the cache dir")
+            os.environ.pop("SAMQL_FILECACHE", None)
+            # Fresh load (skip_cache) must re-COPY even when a cache hit exists
+            with open(src.name, "wb") as fh:
+                fh.write(b"a,b\n1,2\n")  # restore a known key
+            load("t_warm", src.name, "csv", delimiter=",")
+            copies_before = len(copies)
+            load("t_fresh", src.name, "csv", delimiter=",",
+                 skip_cache=True)
+            need(len(copies) == copies_before + 1,
+                 "skip_cache=True re-converts despite a warm filecache entry")
         finally:
             os.environ.pop("SAMQL_FILECACHE", None)
             FC._DIR = saved_dir
             _sh.rmtree(tmpdir, ignore_errors=True)
             os.unlink(src.name)
+
+    def t_uniquify_origin_watch_fresh_reload():
+        # Colliding File Open loads uniquify; manual Reload-as-new uniquifies;
+        # watcher idle sync replaces in place under the same name.
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core.session import Session
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_")
+        try:
+            p = os.path.join(d, "sales.csv")
+            open(p, "w", newline="").write("id,amt\n1,10\n2,20\n")
+            a = s.load_file(p, destination="duckdb")
+            b = s.load_file(p, destination="duckdb")
+            na = a[0]["name"]
+            nb = b[0]["name"]
+            need(na != nb, "second load uniquifies (got %r and %r)" % (na, nb))
+            need(nb == na + "_2" or nb.startswith(na + "_"),
+                 "uniquified name uses numeric suffix: %r" % nb)
+            rel = s.reload_table_from_source("duckdb", na, replace=False,
+                                             fresh=True)
+            need(rel.get("ok"), "manual reload ok: %s" % rel.get("error"))
+            need(rel.get("name") != na,
+                 "default reload uniquifies into a new table name")
+            need(na in s.duckdb.table_columns,
+                 "prior table remains until the user drops it")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_watcher_clears_last_run_ide_journal_nodeflow():
+        # Unified watcher: file change → reload input in place + clear last-run
+        # (IDE/Journal result_ids expire; NodeFlow volatile cache drops).
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core.session import Session, DUCKDB_TARGET
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_clear_")
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,region\n1,East\n2,West\n")
+            loaded = s.load_file(p, destination="duckdb")
+            tbl = loaded[0]["name"]
+            q = s.run_query('SELECT * FROM "%s"' % tbl, target=DUCKDB_TARGET)
+            need(not q.get("error"), "seed select: %s" % q.get("error"))
+            rid = q["result_id"]
+            need(not s.page(rid, 0, 10).get("error"), "fresh page works")
+            ep0 = s._data_epoch
+            s.flow_cache = True
+            s._flow_cache_clear()
+            g = {"nodes": [
+                {"id": "in", "type": "input", "config": {"table": tbl}},
+                {"id": "f", "type": "filter",
+                 "config": {"condition": "region = 'East'"}}],
+                "edges": [{"from": {"node": "in", "port": "out"},
+                           "to": {"node": "f", "port": "in"}}]}
+            r1 = s.run_nodeflow(g, "f", "true")
+            need(not r1.get("error"), "nodeflow seed: %s" % r1.get("error"))
+            eq(len(r1.get("rows") or []), 1, "one East row")
+            # Warm a volatile hit, then rewrite the source file.
+            s.run_nodeflow(g, "f", "true")
+            hits_warm = s.flow_cache_info().get("hits", 0)
+            open(p, "w", newline="").write(
+                "id,region\n1,East\n2,West\n3,East\n4,East\n")
+            # tables_tree drives the unified watcher sync.
+            s.tables_tree()
+            need(s._data_epoch > ep0, "watcher advances data_epoch")
+            eq(s.page(rid, 0, 10).get("error"), "result expired",
+               "IDE/Journal last-run expires after file-change clear")
+            # Same table name (in-place) — Select missing-field identity.
+            need(tbl in s.duckdb.table_columns,
+                 "watcher reloads in place under the same table name")
+            _c, got = s.duckdb.execute(
+                'SELECT COUNT(*) FROM "%s" WHERE region = \'East\'' % tbl)
+            eq(int(got[0][0]), 3, "reloaded input has newest East rows")
+            # Next NodeFlow run sees new data; prior volatile reuse was cleared.
+            size_after = s.flow_cache_info().get("size", 0)
+            need(size_after == 0 or s.flow_cache_info().get("hits", 0)
+                 <= hits_warm,
+                 "last-run NodeFlow cache cleared on file change")
+            r2 = s.run_nodeflow(g, "f", "true")
+            need(not r2.get("error"), "post-watch run: %s" % r2.get("error"))
+            eq(len(r2.get("rows") or []), 3,
+               "next NodeFlow run uses newest input rows")
+            eq((g["nodes"][0].get("config") or {}).get("table"), tbl,
+               "Input table name unchanged (missing-field UX)")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_input_signature_recheck_and_fresh_run():
+        # NodeFlow Input recheck on run: replace in place + clear last-run.
+        # Optional fresh_run skips volatile hits between unchanged runs.
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core.session import Session
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="in_fresh_")
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,region\n1,East\n2,West\n")
+            loaded = s.load_file(p, destination="duckdb")
+            tbl = loaded[0]["name"]
+            g = {"nodes": [
+                {"id": "in", "type": "input", "config": {"table": tbl}},
+                {"id": "f", "type": "filter",
+                 "config": {"condition": "region = 'East'"}}],
+                "edges": [{"from": {"node": "in", "port": "out"},
+                           "to": {"node": "f", "port": "in"}}]}
+            r1 = s.run_nodeflow(g, "f", "true")
+            need(not r1.get("error"), "initial run: %s" % r1.get("error"))
+            eq(len(r1.get("rows") or []), 1, "one East row initially")
+            open(p, "w", newline="").write(
+                "id,region\n1,East\n2,West\n3,East\n4,East\n")
+            # Force a stale baseline so run-time recheck (not idle watcher) fires.
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                if ent:
+                    ent["token"] = (0, 0, 0, 0, "stale")
+                    ent["changed"] = False
+            r2 = s.run_nodeflow(g, "f", "true")
+            need(not r2.get("error"), "recheck run: %s" % r2.get("error"))
+            eq(len(r2.get("rows") or []), 3,
+               "Input recheck reloads so filter sees new East rows")
+            eq((g["nodes"][0].get("config") or {}).get("table"), tbl,
+               "Input keeps same table name after in-place reload")
+            # Fresh run optional: warm a hit, then force fresh.
+            s.flow_cache = True
+            s.fresh_run = False
+            s._flow_cache_clear()
+            g2 = {"nodes": [
+                {"id": "in", "type": "input", "config": {"table": tbl}},
+                {"id": "f", "type": "filter",
+                 "config": {"condition": "id >= 1"}}],
+                "edges": [{"from": {"node": "in", "port": "out"},
+                           "to": {"node": "f", "port": "in"}}]}
+            s.run_nodeflow(g2, "f", "true")
+            info1 = s.flow_cache_info()
+            s.run_nodeflow(g2, "f", "true")
+            info2 = s.flow_cache_info()
+            need(info2.get("hits", 0) > info1.get("hits", 0),
+                 "second run hits volatile cache when fresh_run is off")
+            hits_before = info2.get("hits", 0)
+            s.set_fresh_run(True)
+            s.run_nodeflow(g2, "f", "true")
+            info3 = s.flow_cache_info()
+            eq(info3.get("hits", 0), hits_before,
+               "fresh_run skips volatile cache hits")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_origin_reload_error_surfaced():
+        # Watcher reload failures must not be silent — badge/error field set.
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core.session import Session
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_err_")
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,v\n1,a\n")
+            tbl = s.load_file(p, destination="duckdb")[0]["name"]
+            # Remove the source file so in-place reload cannot succeed
+            # (watchable_path / table_origins would otherwise still find it).
+            os.unlink(p)
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                need(ent is not None, "origin registered")
+                ent["changed"] = True
+                ent["token"] = (0, 0, 0, 0, "stale")
+            # Also clear engine origin pointers that still name the deleted file.
+            try:
+                s.duckdb.table_origins.pop(tbl, None)
+            except Exception:
+                pass
+            try:
+                s.duckdb.table_sources[tbl] = p  # deleted path
+            except Exception:
+                pass
+            s._sync_changed_file_origins([("duckdb", tbl)], clear_caches=False)
+            errs = s._origin_watch.snapshot_errors()
+            need(("duckdb", tbl) in errs,
+                 "reload failure recorded on origin watch")
+            tree = s.tables_tree()
+            row = next(t for t in tree if t.get("name") == tbl)
+            need(row.get("source_changed"), "badge still updating/changed")
+            need(row.get("source_reload_error"),
+                 "tables_tree exposes source_reload_error")
+            need(s._origin_reload_log,
+                 "session keeps a short reload-error log trail")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_ide_journal_recheck_before_run():
+        # IDE/Journal surface runs recheck origins and see newest rows
+        # (never silent success on known-stale catalog).
+        import tempfile as _tf
+        import shutil as _sh
+        import time as _time
+        from samql_core.session import Session, DUCKDB_TARGET
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_ide_")
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,region\n1,East\n2,West\n")
+            tbl = s.load_file(p, destination="duckdb")[0]["name"]
+            sql = 'SELECT COUNT(*) AS n FROM "%s" WHERE region = \'East\'' % tbl
+            r0 = s.run_query(sql, target=DUCKDB_TARGET, surface="ide",
+                             query_id="ide0")
+            need(not r0.get("error"), "seed ide: %s" % r0.get("error"))
+            open(p, "w", newline="").write(
+                "id,region\n1,East\n2,West\n3,East\n4,East\n")
+            # Stale baseline without idle tables_tree sync.
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                if ent:
+                    ent["token"] = (0, 0, 0, 0, "stale")
+                    ent["changed"] = False
+            t0 = _time.monotonic()
+            r1 = s.run_query(sql, target=DUCKDB_TARGET, surface="ide",
+                             query_id="ide1")
+            elapsed = _time.monotonic() - t0
+            need(not r1.get("error"),
+                 "ide recheck run: %s" % r1.get("error"))
+            need(elapsed < 2.0,
+                 "tiny-file ide recheck under 2s budget (got %.3fs)" % elapsed)
+            # Prefer rows from result envelope or a follow-up count.
+            _c, got = s.duckdb.execute(
+                'SELECT COUNT(*) FROM "%s" WHERE region = \'East\'' % tbl)
+            eq(int(got[0][0]), 3, "ide recheck reloaded newest East rows")
+            # Journal surface likewise.
+            open(p, "w", newline="").write(
+                "id,region\n1,East\n2,West\n3,East\n4,East\n5,East\n")
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                if ent:
+                    ent["token"] = (0, 0, 0, 0, "stale2")
+                    ent["changed"] = False
+            r2 = s.run_query(sql, target=DUCKDB_TARGET, surface="journal",
+                             query_id="j1")
+            need(not r2.get("error"),
+                 "journal recheck: %s" % r2.get("error"))
+            _c, got2 = s.duckdb.execute(
+                'SELECT COUNT(*) FROM "%s" WHERE region = \'East\'' % tbl)
+            eq(int(got2[0][0]), 4, "journal recheck sees newest rows")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_busy_half_updated_no_stale_success():
+        # Mid-flight change: next IDE run must refresh or fail with retry —
+        # never silent success on known-stale catalog.
+        import tempfile as _tf
+        import shutil as _sh
+        import threading as _th
+        import time as _time
+        from samql_core.session import Session, DUCKDB_TARGET
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_busy_")
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,region\n1,East\n")
+            tbl = s.load_file(p, destination="duckdb")[0]["name"]
+            sql = 'SELECT COUNT(*) AS n FROM "%s"' % tbl
+            # Simulate a long-running peer holding _running.
+            hold = _th.Event()
+            release = _th.Event()
+
+            def _holder():
+                with s._running_lock:
+                    s._running["busy-peer"] = {"surface": "ide"}
+                hold.set()
+                release.wait(2.0)
+                with s._running_lock:
+                    s._running.pop("busy-peer", None)
+
+            thr = _th.Thread(target=_holder, daemon=True)
+            thr.start()
+            need(hold.wait(1.0), "peer registered as running")
+            open(p, "w", newline="").write(
+                "id,region\n1,East\n2,West\n3,East\n")
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                if ent:
+                    ent["token"] = (0, 0, 0, 0, "stale")
+                    ent["changed"] = True
+            # Idle watcher sync skips reload while busy.
+            s.tables_tree()
+            need(s._origin_watch.is_changed("duckdb", tbl),
+                 "change stays pending while busy")
+            # Pre-run path: brief wait then clear retry OR reload after release.
+            # Release peer quickly so reload-then-run can succeed.
+            _time.sleep(0.05)
+            release.set()
+            thr.join(1.0)
+            r = s.run_query(sql, target=DUCKDB_TARGET, surface="ide",
+                            query_id="after-busy")
+            if r.get("error"):
+                need("updating" in (r.get("error") or "").lower()
+                     or "retry" in (r.get("error") or "").lower()
+                     or "refresh" in (r.get("error") or "").lower(),
+                     "busy/stale path returns clear retry/refresh error, "
+                     "not silent success: %s" % r.get("error"))
+            else:
+                _c, got = s.duckdb.execute('SELECT COUNT(*) FROM "%s"' % tbl)
+                eq(int(got[0][0]), 3,
+                   "reload-then-run sees newest row count after busy clears")
+            # Explicit retry-error path: force budget=0 with pending change.
+            open(p, "w", newline="").write(
+                "id,region\n1,East\n2,West\n3,East\n4,East\n")
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                if ent:
+                    ent["token"] = (0, 0, 0, 0, "stale3")
+                    ent["changed"] = True
+            # Hold peer again and demand immediate fail-fast via tiny budget.
+            with s._running_lock:
+                s._running["busy-peer2"] = {"surface": "ide"}
+            try:
+                err = s._ensure_origins_fresh_for_run(budget_sec=0.05)
+                need(err and err.get("error"),
+                     "tiny budget while busy yields retry error")
+                need("updating" in err["error"].lower()
+                     or "retry" in err["error"].lower(),
+                     "retry wording: %s" % err.get("error"))
+            finally:
+                with s._running_lock:
+                    s._running.pop("busy-peer2", None)
+        finally:
+            try:
+                with s._running_lock:
+                    s._running.clear()
+            except Exception:
+                pass
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_origin_poll_single_flight_and_budget():
+        # Overlapping poll / sync must not spawn unbounded work; recheck
+        # on tiny files completes under the wall-clock budget.
+        import tempfile as _tf
+        import shutil as _sh
+        import time as _time
+        from samql_core import originwatch as OW
+        from samql_core.session import Session
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_sf_")
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,v\n1,a\n")
+            tbl = s.load_file(p, destination="duckdb")[0]["name"]
+            # Single-flight poll: second concurrent poll returns [].
+            need(s._origin_watch._poll_lock.acquire(blocking=False),
+                 "acquire poll lock for overlap test")
+            try:
+                empty = s._origin_watch.poll(force=True)
+                eq(empty, [], "overlapping poll is single-flight (returns [])")
+            finally:
+                s._origin_watch._poll_lock.release()
+            # Sync single-flight: overlapping sync no-ops.
+            need(s._origin_sync_lock.acquire(blocking=False),
+                 "acquire sync lock")
+            try:
+                s._sync_changed_file_origins(
+                    [("duckdb", tbl)], clear_caches=False)
+                # No crash; sync skipped while lock held.
+            finally:
+                s._origin_sync_lock.release()
+            # Budget: force stale + recheck completes quickly on tiny CSV.
+            open(p, "w", newline="").write("id,v\n1,a\n2,b\n")
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                if ent:
+                    ent["token"] = (0, 0, 0, 0, "stale")
+                    ent["changed"] = False
+            t0 = _time.monotonic()
+            err = s._ensure_origins_fresh_for_run(budget_sec=2.0)
+            elapsed = _time.monotonic() - t0
+            need(err is None, "recheck ok: %s" % (err or {}))
+            need(elapsed < 2.0,
+                 "tiny-file recheck under budget (got %.3fs)" % elapsed)
+            _c, got = s.duckdb.execute('SELECT COUNT(*) FROM "%s"' % tbl)
+            eq(int(got[0][0]), 2, "recheck loaded newest rows")
+            # Constants documented for FE poll alignment.
+            need(OW.RECHECK_BUDGET_SEC > 0, "recheck budget constant set")
+            need(OW.POLL_INTERVAL_SEC > 0, "poll debounce constant set")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_nodeflow_same_name_input_smoke_after_recheck():
+        # Regression: missing-field / same-name Input identity still holds
+        # after in-place origin recheck (smoke).
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core.session import Session
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_nf_smoke_")
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,region\n1,East\n2,West\n")
+            tbl = s.load_file(p, destination="duckdb")[0]["name"]
+            g = {"nodes": [
+                {"id": "in", "type": "input", "config": {"table": tbl}},
+                {"id": "f", "type": "filter",
+                 "config": {"condition": "region = 'East'"}}],
+                "edges": [{"from": {"node": "in", "port": "out"},
+                           "to": {"node": "f", "port": "in"}}]}
+            r1 = s.run_nodeflow(g, "f", "true")
+            need(not r1.get("error"), "smoke run: %s" % r1.get("error"))
+            open(p, "w", newline="").write(
+                "id,region\n1,East\n2,West\n3,East\n")
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                if ent:
+                    ent["token"] = (0, 0, 0, 0, "stale")
+                    ent["changed"] = False
+            r2 = s.run_nodeflow(g, "f", "true")
+            need(not r2.get("error"),
+                 "post-recheck smoke: %s" % r2.get("error"))
+            eq((g["nodes"][0].get("config") or {}).get("table"), tbl,
+               "Input table name unchanged after recheck")
+            need(tbl in s.duckdb.table_columns,
+                 "same-name table still present for missing-field UX")
+            eq(len(r2.get("rows") or []), 2,
+               "smoke run sees newest East rows after recheck")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_origin_size_scaled_budget():
+        # Tiny files keep the short floor; large sizes scale up; hard cap.
+        from samql_core import originwatch as OW
+        tiny = OW.recheck_budget_sec([1024])
+        need(abs(tiny - OW.RECHECK_BUDGET_MIN_SEC) < 0.01,
+             "tiny budget is MIN (got %s)" % tiny)
+        mid = OW.recheck_budget_sec([80 * 1024 * 1024])
+        need(mid > OW.RECHECK_BUDGET_MIN_SEC,
+             "80 MiB budget scales above MIN (got %s)" % mid)
+        need(mid < OW.RECHECK_BUDGET_MAX_SEC,
+             "80 MiB budget below MAX (got %s)" % mid)
+        huge = OW.recheck_budget_sec([10 * 1024 * 1024 * 1024])
+        eq(huge, OW.RECHECK_BUDGET_MAX_SEC,
+           "multi-GB budget hard-capped at MAX")
+        need(OW.RECHECK_BUDGET_MAX_SEC >= 30.0, "MAX allows large reloads")
+        need(OW.MAX_RELOADS_PER_SYNC >= 1, "idle sync reload cap set")
+        need(OW.MAX_DIGESTS_PER_POLL >= 1, "digest-per-poll cap set")
+
+    def t_origin_cheap_stat_short_circuit():
+        # Unchanged cheap stats must not invoke content_digest on poll /
+        # file_token(prior=...).
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core import filecache as _fc
+        from samql_core import originwatch as OW
+        from samql_core.session import Session
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_cheap_")
+        real_digest = _fc.content_digest
+        calls = {"n": 0}
+
+        def counting_digest(path, size=None):
+            calls["n"] += 1
+            return real_digest(path, size)
+
+        _fc.content_digest = counting_digest
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,v\n1,a\n")
+            tbl = s.load_file(p, destination="duckdb")[0]["name"]
+            after_load = calls["n"]
+            need(after_load >= 1, "register/load digests once")
+            # file_token with prior matching cheap stats → no new digest.
+            prior = s._origin_watch.token_for("duckdb", tbl)
+            n0 = calls["n"]
+            tok2 = OW.file_token(p, prior=prior)
+            eq(tok2, prior, "prior token reused on cheap match")
+            eq(calls["n"], n0, "file_token short-circuit skips digest")
+            # poll of unchanged origins → no digests.
+            n1 = calls["n"]
+            s._origin_watch.poll(force=True)
+            eq(calls["n"], n1, "unchanged poll skips content digest")
+            eq(s._origin_watch._last_poll_digests, 0,
+               "poll digest counter stays 0 on cheap match")
+        finally:
+            _fc.content_digest = real_digest
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_origin_single_flight_reuse_on_run():
+        # Watcher reload in flight for table X: Run joins that job (body once).
+        import tempfile as _tf
+        import shutil as _sh
+        import threading as _th
+        import time as _time
+        from samql_core.session import Session, DUCKDB_TARGET
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_sf_run_")
+        try:
+            p = os.path.join(d, "vals.csv")
+            open(p, "w", newline="").write("id,v\n1,a\n")
+            tbl = s.load_file(p, destination="duckdb")[0]["name"]
+            open(p, "w", newline="").write("id,v\n1,a\n2,b\n")
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", tbl))
+                if ent:
+                    ent["token"] = (0, 0, 0, 0, "stale")
+                    ent["changed"] = True
+            body_calls = {"n": 0}
+            real_body = s._reload_origin_inplace_body
+            started = _th.Event()
+            release = _th.Event()
+
+            def slow_body(eng_name, table):
+                body_calls["n"] += 1
+                started.set()
+                release.wait(2.0)
+                return real_body(eng_name, table)
+
+            s._reload_origin_inplace_body = slow_body
+            thr = _th.Thread(
+                target=lambda: s._reload_origin_inplace("duckdb", tbl),
+                daemon=True)
+            thr.start()
+            need(started.wait(1.0), "watcher-style reload started")
+            # Run path must join while the first job is still in flight.
+            joined = {"err": "unset"}
+
+            def _run_ensure():
+                joined["err"] = s._ensure_origins_fresh_for_run(
+                    sql='SELECT * FROM "%s"' % tbl, budget_sec=5.0)
+
+            thr2 = _th.Thread(target=_run_ensure, daemon=True)
+            t0 = _time.monotonic()
+            thr2.start()
+            _time.sleep(0.05)  # ensure parks on the in-flight Event
+            release.set()
+            thr2.join(3.0)
+            thr.join(2.0)
+            elapsed = _time.monotonic() - t0
+            err = joined["err"]
+            need(err is None, "joined recheck ok: %s" % (err or {}))
+            eq(body_calls["n"], 1,
+               "single-flight: reload body ran once (got %d)" % body_calls["n"])
+            need(elapsed < 5.0, "join finished under budget")
+            _c, got = s.duckdb.execute('SELECT COUNT(*) FROM "%s"' % tbl)
+            eq(int(got[0][0]), 2, "joined reload produced newest rows")
+            # IDE surface uses the same join path (no second convert).
+            r = s.run_query('SELECT COUNT(*) AS n FROM "%s"' % tbl,
+                            target=DUCKDB_TARGET, surface="ide",
+                            query_id="sf1")
+            need(not r.get("error"), "ide after join: %s" % r.get("error"))
+        finally:
+            try:
+                release.set()
+            except Exception:
+                pass
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_origin_in_use_scoped_recheck():
+        # Pre-run recheck refreshes only tables referenced by this SQL —
+        # not every dirty sidebar origin.
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core.session import Session, DUCKDB_TARGET
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_scope_")
+        try:
+            pa = os.path.join(d, "a.csv")
+            pb = os.path.join(d, "b.csv")
+            open(pa, "w", newline="").write("id,v\n1,a\n")
+            open(pb, "w", newline="").write("id,v\n1,b\n")
+            ta = s.load_file(pa, destination="duckdb")[0]["name"]
+            tb = s.load_file(pb, destination="duckdb")[0]["name"]
+            open(pa, "w", newline="").write("id,v\n1,a\n2,a\n")
+            open(pb, "w", newline="").write("id,v\n1,b\n2,b\n3,b\n")
+            with s._origin_watch._lock:
+                for name in (ta, tb):
+                    ent = s._origin_watch._entries.get(("duckdb", name))
+                    if ent:
+                        ent["token"] = (0, 0, 0, 0, "stale")
+                        ent["changed"] = True
+            r = s.run_query('SELECT COUNT(*) AS n FROM "%s"' % ta,
+                            target=DUCKDB_TARGET, surface="ide",
+                            query_id="scope1")
+            need(not r.get("error"), "scoped ide run: %s" % r.get("error"))
+            _c, got_a = s.duckdb.execute('SELECT COUNT(*) FROM "%s"' % ta)
+            eq(int(got_a[0][0]), 2, "referenced table A reloaded")
+            need(s._origin_watch.is_changed("duckdb", tb),
+                 "unrelated dirty table B stays pending (not forced)")
+            _c, got_b = s.duckdb.execute('SELECT COUNT(*) FROM "%s"' % tb)
+            eq(int(got_b[0][0]), 1,
+               "unrelated B not reloaded by A's run (still old rows)")
+            need(ta in (s._origin_in_use_names or set()),
+                 "run records A as in-use for poll priority")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
+
+    def t_origin_many_tiny_no_hang():
+        # Many tiny watched origins: cheap-stat poll stays fast; budget still
+        # fails closed (retry wording) rather than silent stale success.
+        import tempfile as _tf
+        import shutil as _sh
+        import time as _time
+        from samql_core.session import Session
+        from samql_core.engines import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            return
+        s = Session()
+        d = _tf.mkdtemp(prefix="ow_many_")
+        try:
+            names = []
+            for i in range(40):
+                p = os.path.join(d, "t%d.csv" % i)
+                open(p, "w", newline="").write("id,v\n1,%d\n" % i)
+                names.append(s.load_file(p, destination="duckdb")[0]["name"])
+            t0 = _time.monotonic()
+            s._origin_watch.poll(force=True)
+            elapsed = _time.monotonic() - t0
+            need(elapsed < 1.5,
+                 "40-origin cheap poll under 1.5s (got %.3fs)" % elapsed)
+            # Fail-closed: pending + tiny budget + busy → retry, not success.
+            with s._origin_watch._lock:
+                ent = s._origin_watch._entries.get(("duckdb", names[0]))
+                if ent:
+                    ent["changed"] = True
+                    ent["token"] = (0, 0, 0, 0, "stale")
+            with s._running_lock:
+                s._running["peer"] = {"surface": "ide"}
+            try:
+                err = s._ensure_origins_fresh_for_run(
+                    table_names=[names[0]], budget_sec=0.05)
+                need(err and err.get("error"),
+                     "busy+tiny budget fails closed")
+                need("updating" in err["error"].lower()
+                     or "retry" in err["error"].lower(),
+                     "retry wording: %s" % err.get("error"))
+            finally:
+                with s._running_lock:
+                    s._running.pop("peer", None)
+        finally:
+            try:
+                with s._running_lock:
+                    s._running.clear()
+            except Exception:
+                pass
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+            _sh.rmtree(d, ignore_errors=True)
 
     def t_filecache_lifecycle():
         # The stable cache dir survives the stray-dir age sweep, and startup
@@ -2518,11 +3276,50 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         need("filecache.sweep()" in srv,
              "startup runs the cache's budget/age sweep")
+        need("sweep_op_caches()" in srv,
+             "startup wipes flatten/shred staging caches")
         eng = open(os.path.join(ROOT, "backend", "samql_core", "engines.py"),
                    encoding="utf-8").read()
         need("filecache.lookup(" in eng and "filecache.commit(" in eng
-             and 'tmputil.new_tempfile("cache_"' in eng,
+             and 'tmputil.new_tempfile("cache_"' in eng
+             and "_fc.hold(" in eng and "_fc.release(" in eng,
              "the load consults the cache with a per-instance fallback")
+
+    def t_sweep_op_caches_startup():
+        # Startup wipes samql_flatten_cache / samql_shred_cache under system
+        # temp so crashed mid-op staging cannot accumulate across restarts.
+        import tempfile as _tf
+        import shutil as _sh
+        from samql_core import tmputil as T
+        parent = _tf.gettempdir()
+        fdir = os.path.join(parent, "samql_flatten_cache")
+        sdir = os.path.join(parent, "samql_shred_cache")
+        os.makedirs(fdir, exist_ok=True)
+        os.makedirs(sdir, exist_ok=True)
+        open(os.path.join(fdir, "orphan.parquet"), "wb").write(b"x")
+        open(os.path.join(sdir, "orphan.parquet"), "wb").write(b"y")
+        try:
+            n = T.sweep_op_caches()
+            need(n >= 1, "sweep_op_caches reports removals")
+            need(not os.path.isdir(fdir) and not os.path.isdir(sdir),
+                 "flatten/shred staging dirs are wiped at startup")
+        finally:
+            _sh.rmtree(fdir, ignore_errors=True)
+            _sh.rmtree(sdir, ignore_errors=True)
+
+    def t_send_json_no_store():
+        # API JSON responses must be no-store; static/download paths keep
+        # their own Cache-Control (favicon max-age, hashed assets, etc.).
+        srv = open(os.path.join(ROOT, "backend", "server.py"),
+                   encoding="utf-8").read()
+        seg = srv.split("def _send_json", 1)[1].split("def _send_bytes", 1)[0]
+        need('"Cache-Control": "no-store"' in seg
+             or "'Cache-Control': 'no-store'" in seg,
+             "_send_json sets Cache-Control: no-store")
+        need('"Cache-Control": "max-age=60"' in srv,
+             "favicon/brand paths still allow short caching")
+        need("def _send_file_download" in srv,
+             "file downloads stay on a separate send path")
 
     def t_reconcile_reuse_staging():
         # #4: reconcile input staging materializes from a FRESH source cell's
@@ -2550,18 +3347,23 @@ def backend_tests(datadir, csv_path, json_path):
         try:
             results = {
                 "fresh": _t.SimpleNamespace(
-                    engine="duckdb", capped=False,
+                    engine="duckdb", capped=False, data_epoch=0,
                     store=_t.SimpleNamespace(_path=good.name)),
                 "capped": _t.SimpleNamespace(
-                    engine="duckdb", capped=True,
+                    engine="duckdb", capped=True, data_epoch=0,
                     store=_t.SimpleNamespace(_path=good.name)),
             }
             eng = Eng()
             sess = _t.SimpleNamespace(
-                _results=results, duckdb=eng, db=None,
+                _results=results, duckdb=eng, db=None, _data_epoch=0,
                 _register_run=lambda *a, **k: None,
                 _unregister_run=lambda *a, **k: None,
-                _run_is_cancelled=lambda q: False)
+                _run_is_cancelled=lambda q: False,
+                _invalidate_profiles=lambda: None,
+                _invalidate_counts=lambda *a, **k: None,
+                _count_keys_for_tables=lambda *a, **k: [])
+            sess._live_cached_result = \
+                S.Session._live_cached_result.__get__(sess, S.Session)
             sess._reusable_store_path = \
                 S.Session._reusable_store_path.__get__(sess, S.Session)
             mat = S.Session.materialize.__get__(sess, S.Session)
@@ -2640,22 +3442,27 @@ def backend_tests(datadir, csv_path, json_path):
             eq(r.get("stmt_kind"), "read",
                "a SELECT result carries stmt_kind='read'")
             r2 = s.run_query("CREATE TABLE t_skip1(x INTEGER)")
-            need(r2.get("statement") == "ok" and "stmt_kind" not in r2,
-                 "the DDL branch keeps its own shape (client refreshes it "
-                 "unconditionally)")
+            need(r2.get("statement") == "ok"
+                 and r2.get("stmt_kind") == "write",
+                 "DDL reports statement=ok with stmt_kind=write "
+                 "(clients refresh non-read)")
             r3 = s.run_query("INSERT INTO t_skip1 VALUES (1)")
-            need(r3.get("statement") == "ok",
-                 "DML also lands on the unconditional branch")
+            need(r3.get("statement") == "ok"
+                 and r3.get("stmt_kind") == "write",
+                 "DML also reports stmt_kind=write")
         finally:
             s.shutdown()
         def rd(*parts):
             return open(os.path.join(ROOT, *parts), encoding="utf-8").read()
         nb = rd("frontend", "src", "components", "Notebook.tsx")
         app = rd("frontend", "src", "App.tsx")
-        need('(res as any).stmt_kind !== "read") onTablesMaybeChanged?.()'
-             in nb,
+        # Gate may span lines (epoch stamp + refresh); require the predicate
+        # and the refresh call in the same SELECT-result branch.
+        need('(res as any).stmt_kind !== "read"' in nb
+             and "onTablesMaybeChanged?.()" in nb,
              "the journal gates its SELECT-branch refresh")
-        need('(res as any).stmt_kind !== "read") refreshTables()' in app,
+        need('(res as any).stmt_kind !== "read"' in app
+             and "refreshTables()" in app,
              "the IDE gates its SELECT-branch refresh")
         # the non-SELECT branches must remain UNGATED (a write always
         # refreshes) -- there is still a bare call in each file
@@ -3175,8 +3982,10 @@ def backend_tests(datadir, csv_path, json_path):
                  "a table_columns write without cache invalidation near: "
                  + src[m.start():m.start() + 80].strip())
         sc = inspect.getsource(DuckDBManager.sync_catalog)
-        # May be a thin wrapper; also check the incremental helper.
-        helpers = sc + inspect.getsource(DuckDBManager._duck_sync_catalog)
+        # May be a thin wrapper; list/describe helpers hold the columns SQL.
+        helpers = (sc
+                   + inspect.getsource(DuckDBManager._duck_sync_catalog)
+                   + inspect.getsource(DuckDBManager._duck_fetch_catalog_lists))
         need("_types_cache.clear()" not in helpers,
              "sync_catalog must not wipe all cached types each refresh")
         need("information_schema.columns" in helpers,
@@ -3368,7 +4177,7 @@ def backend_tests(datadir, csv_path, json_path):
         good.write(b"P")
         good.close()
         cr = _t.SimpleNamespace(
-            engine="duckdb", capped=False,
+            engine="duckdb", capped=False, data_epoch=0,
             store=_t.SimpleNamespace(_path=good.name),
             close=lambda: closed.append("r1"))
         drops = []
@@ -3380,9 +4189,12 @@ def backend_tests(datadir, csv_path, json_path):
                 return _t.SimpleNamespace()
         eng = _t.SimpleNamespace(conn=Conn(), table_columns={})
         sess = _t.SimpleNamespace(
-            _results={"r1": cr}, _results_order=["r1"],
+            _results={"r1": cr}, _results_order=["r1"], _data_epoch=0,
             _lock=_th.RLock(), _reuse_pins={}, _discard_deferred=set(),
-            _schedule_cleanup=lambda full=False: None)
+            _schedule_cleanup=lambda full=False: None,
+            _reclaim_stale_results=lambda: None)
+        sess._live_cached_result = \
+            S.Session._live_cached_result.__get__(sess, S.Session)
         sess._reusable_store_path = \
             S.Session._reusable_store_path.__get__(sess, S.Session)
         sess.discard_result = \
@@ -3414,6 +4226,49 @@ def backend_tests(datadir, csv_path, json_path):
                 os.unlink(good.name)
             except Exception:
                 pass
+
+    def t_reclaim_pinned_epoch_expired():
+        # Epoch-expired result stores reclaim once pins release; a young pin
+        # is kept while live; an aged pin on an expired epoch is bounded.
+        import threading as _th
+        import types as _t
+        from samql_core import session as S
+        closed = []
+
+        def mk(rid, epoch, created):
+            return _t.SimpleNamespace(
+                data_epoch=epoch, created=created,
+                close=lambda rid=rid: closed.append(rid))
+
+        sess = S.Session.__new__(S.Session)
+        sess._lock = _th.RLock()
+        sess._data_epoch = 5
+        sess._reuse_pins = {"live": 1, "aged": 1}
+        sess._reuse_pin_since = {
+            "live": __import__("time").time(),
+            "aged": __import__("time").time() - 7200,
+        }
+        sess._discard_deferred = set()
+        sess._results = {
+            "live": mk("live", 1, sess._reuse_pin_since["live"]),
+            "aged": mk("aged", 1, sess._reuse_pin_since["aged"]),
+            "free": mk("free", 1, __import__("time").time()),
+            "fresh": mk("fresh", 5, __import__("time").time()),
+        }
+        sess._results_order = ["live", "aged", "free", "fresh"]
+        os.environ["SAMQL_PINNED_STALE_MAX_SEC"] = "3600"
+        try:
+            S.Session._reclaim_stale_results(sess)
+            need("live" in sess._results and "fresh" in sess._results,
+                 "young pin and current-epoch stores survive")
+            need("free" not in sess._results and "aged" not in sess._results,
+                 "unpinned expired and aged-pin expired are reclaimed")
+            need("aged" in closed and "free" in closed,
+                 "reclaimed stores are closed")
+            need("aged" not in sess._reuse_pins,
+                 "aged pin is dropped when reclaiming")
+        finally:
+            os.environ.pop("SAMQL_PINNED_STALE_MAX_SEC", None)
 
     def t_shred_plan_and_sql():
         # Relational shred: one table per array level with hierarchical keys,
@@ -3516,8 +4371,10 @@ def backend_tests(datadir, csv_path, json_path):
             duckdb=mgr, db=None,
             _register_run=lambda *a, **k: None,
             _unregister_run=lambda *a, **k: None,
-            _invalidate_counts=lambda: None,
+            _invalidate_counts=lambda *a, **k: None,
             _invalidate_profiles=lambda: None,
+            _clear_stale_engine_cancel=lambda *a, **k: None,
+            _count_keys_for_tables=lambda *a, **k: [],
             _run_is_cancelled=lambda q: (
                 cancelled["after"] is not None
                 and len([r for r in ran
@@ -3617,6 +4474,8 @@ def backend_tests(datadir, csv_path, json_path):
             sess = _t.SimpleNamespace(
                 duckdb=mgr,
                 default_destination=lambda: "duckdb",
+                fresh_load=False,
+                fresh_load_enabled=lambda: False,
                 _invalidate_profiles=lambda: None,
                 _invalidate_counts=lambda: None,
                 _schedule_cleanup=lambda full=False: None,
@@ -3689,10 +4548,15 @@ def backend_tests(datadir, csv_path, json_path):
              "const shredEligible = isJson && duck" in file_tab
              and 'dest !== "sqlite"' in file_tab
              and "Flatten into relational tables" in file_tab),
+            # FileLoadTab builds a loadOpts bag (fresh-load shares the same
+            # object); drop modal still uses an inline payload literal.
             ("file modal: sends flatten:false + the toggle",
-             "flatten: false," in file_tab
-             and "shred: shredOn," in file_tab
-             and "root_id: rootId" in file_tab),
+             ("loadOpts.flatten = false" in file_tab
+              and "loadOpts.shred = shredOn" in file_tab
+              and "loadOpts.root_id = rootId" in file_tab)
+             or ("flatten: false," in file_tab
+                 and "shred: shredOn," in file_tab
+                 and "root_id: rootId" in file_tab)),
             ("file modal: old skip-fields UI yields to the toggle",
              "isJson && !shredEligible ? (" in file_tab),
             ("drop modal: same gating + payload",
@@ -5291,8 +6155,12 @@ def backend_tests(datadir, csv_path, json_path):
              % eff_bad)
         need(not map_bad,
              "every ref map has a cleanup site: %r" % map_bad)
+        # Visual toggles: Sphere nodes (default on), Node Snap (default off),
+        # Hover-open tables drawer (default off).
         eq(keys, {"samql.editorIvory", "samql.reduceMotion",
                   "samql.eyeCare", "samql.nodeFlowDense",
+                  "samql.nodeSphere", "samql.nodeSnap",
+                  "samql.tablesDrawerHoverOpen",
                   "samql.nbMinimapMini", "samql.nb2.paletteHidden",
                   "samql.canvasIvory", "samql.theme"},
            "the direct storage-key inventory is frozen and namespaced")
@@ -8202,12 +9070,14 @@ def backend_tests(datadir, csv_path, json_path):
         for frag, why in (
             ('r"^/api/load/sniff$"', "sniff route registered"),
             ('_ridf = fields.get("root_id")', "multipart parses root_id"),
-            ('"root_id": root_id, "cancel": False}', "jobs carry root_id"),
             ('root_id NOT unique', "note says NOT unique"),
             ('root_id unique (', "note says unique"),
             ('sniff_root_sample(raw', "sample mode repairs a prefix"),
         ):
             need(frag in srv, why)
+        # Jobs may insert "fresh" between root_id and cancel; require the
+        # key on both load job dicts, not the old adjacent cancel form.
+        need(srv.count('"root_id": root_id') >= 2, "jobs carry root_id")
         need(srv.count('root_id=job.get("root_id")') >= 2,
              "both load workers pass root_id")
         ldr = open(os.path.join(BACKEND, "samql_core", "loaders.py"),
@@ -8227,7 +9097,9 @@ def backend_tests(datadir, csv_path, json_path):
         lm = _fe("src", "components", "LoadDataModal.tsx")
         fl = _fe("src", "components", "load", "FileLoadTab.tsx")
         need("export { RootIdPicker }" in lm
-             and "root_id: rootId" in fl, "modal picker + opts wired")
+             and ("root_id: rootId" in fl
+                  or "loadOpts.root_id = rootId" in fl),
+             "modal picker + opts wired")
         ap = _fe("src", "App.tsx")
         need("dropRootId" in ap and "<RootIdPicker" in ap
              and "root_id: dropRootId" in ap, "drop prompt picker wired")
@@ -8911,9 +9783,13 @@ def backend_tests(datadir, csv_path, json_path):
         )[1][:700]
         need("cancelRequested.current = false" in start,
              "startRun clears stale cancellation for a fresh run depth")
+        # Tab switch still clears cancel via resetExecutionScope; the second
+        # arg (clearLastRunCache) is keep-mounted / last-run-cache control and
+        # must not drop the cancel clear. Match the call prefix, not a brittle
+        # one-arg form.
         need("cancelRequested.current = false" in scope_reset
              and "scopeVersionRef.current += 1" in scope_reset
-             and "resetExecutionScope(true)" in scope_effect,
+             and "resetExecutionScope(true" in scope_effect,
              "tab-scope invalidation clears stale cancellation state")
         need(nb.count("cancelRequested.current = false") == 4,
              "cancelRequested resets only in scope invalidation, startRun, "
@@ -11101,6 +11977,7 @@ def backend_tests(datadir, csv_path, json_path):
         class _CR:
             cols = ["id", "name"]
             total = 2
+            data_epoch = 0
 
             class store:
                 pass
@@ -11110,6 +11987,7 @@ def backend_tests(datadir, csv_path, json_path):
 
         ses = Session.__new__(Session)
         ses._results = {"r1": _CR()}
+        ses._data_epoch = 0
         out = ses.export("r1", "tsv")
         need(out.get("ok"), "result tsv export: %r" % out)
         body = open(out["path"], encoding="utf-8").read()
@@ -11691,7 +12569,9 @@ def backend_tests(datadir, csv_path, json_path):
                 ("write_log", "_bundled_asset", "set_app_user_model_id",
                  "apply_app_icon", "set_relaunch_icon",
                  "wait_for_app_window", "port_open", "_is_samql",
-                 "stop_server", "find_browser", "make_splash")}
+                 "stop_server", "find_browser", "make_splash",
+                 "find_samql_window", "focus_window",
+                 "_acquire_single_instance")}
         logs = []
         browser_asks = []
         ico = _tfB.mktemp(suffix=".ico")
@@ -11703,6 +12583,11 @@ def backend_tests(datadir, csv_path, json_path):
             _LA.apply_app_icon = lambda h, p: None
             _LA.set_relaunch_icon = lambda h, p: None
             _LA.wait_for_app_window = lambda *a, **k: None
+            # Isolate from a live SamQL window / mutex on the box (.519b
+            # env flake: find_samql_window short-circuits before create_window).
+            _LA.find_samql_window = lambda: None
+            _LA.focus_window = lambda h: False
+            _LA._acquire_single_instance = lambda: (True, False)
             _LA.port_open = lambda p, **k: True
             _LA._is_samql = lambda p: True
             _LA.stop_server = lambda p: browser_asks.append("STOP?!")
@@ -14335,7 +15220,8 @@ def backend_tests(datadir, csv_path, json_path):
         need("body.editor-ivory .code,\nbody.editor-ivory .code pre.hl"
              in css.replace("\r", ""),
              "ivory mode darkens code text (docs blocks + hl base)")
-        gidx = css.index(".nb-group {")
+        # Prefer the production rule (not html.theme-light .nb-group).
+        gidx = css.index("Groups never shrink now")
         blk = css[gidx:gidx + 700]
         need("flex: 0 0 auto;" in blk and "flex: 0 1 auto" not in blk,
              "journal groups never shrink below their widest cell")
@@ -16646,10 +17532,14 @@ def backend_tests(datadir, csv_path, json_path):
         checks = [
             ("all refreshers are latest-wins",
              catalog.count("Seq.current") >= 8
-             and "sequence === tablesSeq.current" in catalog
-             and "sequence === historySeq.current" in catalog
-             and "sequence === savedSeq.current" in catalog
-             and "sequence !== workflowsSeq.current" in catalog),
+             and ("sequence === tablesSeq.current" in catalog
+                  or "sequence !== tablesSeq.current" in catalog)
+             and ("sequence === historySeq.current" in catalog
+                  or "sequence !== historySeq.current" in catalog)
+             and ("sequence === savedSeq.current" in catalog
+                  or "sequence !== savedSeq.current" in catalog)
+             and ("sequence === workflowsSeq.current" in catalog
+                  or "sequence !== workflowsSeq.current" in catalog)),
             ("the retry path routes through the guard too",
              ".then(apply)" in catalog
              and "api.tables().then(apply)" in catalog),
@@ -16833,11 +17723,12 @@ def backend_tests(datadir, csv_path, json_path):
             # old shrink squeezed groups below max-content and cells
             # bled across neighbours.
             ("group hugs the widest cell",
-             "width: max-content;" in css.split(".nb-group {")[1][:980]
-             and "max-width: none;"
-             in css.split(".nb-group {")[1][:980]
-             and "flex: 0 0 auto;"
-             in css.split(".nb-group {")[1][:980]),
+             (lambda blk: (
+                 "width: max-content;" in blk
+                 and "max-width: none;" in blk
+                 and "flex: 0 0 auto;" in blk
+             ))(css[css.index("Groups never shrink now"):
+                    css.index("Groups never shrink now") + 980])),
             ("the groups row scrolls instead of clipping",
              "overflow-x: auto;" in css.split(".nb-groups {")[1][:260]),
             ("the chip has its own chrome",
@@ -16891,12 +17782,14 @@ def backend_tests(datadir, csv_path, json_path):
             ("node selection transitions its shadow",
              ".nb2-node { transition: box-shadow" in css),
         ]
-        # the audit itself, kept honest: exactly ONE component owns a
-        # modal backdrop (the shared Modal with the .435 exit).
+        # the audit itself, kept honest: exactly ONE production component
+        # owns a modal backdrop (the shared Modal with the .435 exit).
+        # Component tests may mention the class without owning one.
         import glob as _g
         owners = [f for f in _g.glob(os.path.join(
             ROOT, "frontend", "src", "components", "*.tsx"))
-            if "modal-backdrop" in open(f, encoding="utf-8").read()]
+            if ".test." not in os.path.basename(f)
+            and "modal-backdrop" in open(f, encoding="utf-8").read()]
         checks += [("one backdrop owner (the shared Modal)",
                     len(owners) == 1
                     and owners[0].endswith("Modal.tsx"))]
@@ -16939,7 +17832,8 @@ def backend_tests(datadir, csv_path, json_path):
         # Wave 2 made Modal accessible and timer-safe. Validate the behavior,
         # not the obsolete one-line formatting used before focus trapping.
         close_timer = re.search(
-            r"window\.setTimeout\(\(\) => \{.*?onClose\(\);.*?\},\s*160\)",
+            r"closeTimer\.current = window\.setTimeout\(\(\) => \{.*?"
+            r"onClose\(\);.*?\},\s*closeMs\)",
             md, re.S)
         escape_branch = re.search(
             r'if \(e\.key === "Escape"\) \{.*?beginClose\(\);.*?\}',
@@ -19421,10 +20315,21 @@ def backend_tests(datadir, csv_path, json_path):
             engine = "duckdb"
             capped = True
             cap = 5
+            data_epoch = 0
 
             def view(self, sort_col, descending):
                 return [(1,)]
-        sess2 = _t.SimpleNamespace(_results={"rid2": _CR2()})
+        sess2 = _t.SimpleNamespace(
+            _results={"rid2": _CR2()}, _data_epoch=0,
+            _running_lock=_th.Lock(), _running={})
+        sess2._live_cached_result = \
+            S.Session._live_cached_result.__get__(sess2, S.Session)
+        sess2._clear_stale_engine_cancel = \
+            S.Session._clear_stale_engine_cancel.__get__(sess2, S.Session)
+        sess2._register_run = lambda *a, **k: None
+        sess2._unregister_run = lambda *a, **k: None
+        sess2._end_run_keep_cancel = lambda *a, **k: None
+        sess2._run_is_cancelled = lambda q: False
         pg = S.Session.page.__get__(sess2, S.Session)("rid2")
         need(pg.get("result_capped") is True and pg.get("result_cap") == 5,
              "page() surfaces result_capped/result_cap on the wire: "
@@ -21989,6 +22894,33 @@ def backend_tests(datadir, csv_path, json_path):
                 s.config.data.pop("flatten_json", None)
                 s.config.save()
 
+    def t_fresh_load_setting():
+        # Fresh load (skip filecache) defaults OFF, toggles via
+        # set_fresh_load / fresh_load_enabled, and persists. Restores the
+        # user's config key exactly afterward.
+        s = _fresh_session()
+        had = "fresh_load" in s.config.data
+        orig_val = s.config.data.get("fresh_load")
+        orig_attr = getattr(s, "fresh_load", False)
+        try:
+            s.config.data.pop("fresh_load", None)
+            s.fresh_load = bool(s.config.get("fresh_load", False))
+            need(s.fresh_load_enabled() is False,
+                 "fresh_load defaults off")
+            need(s.set_fresh_load(True) is True, "set returns new state")
+            need(s.fresh_load_enabled() is True, "reads back on")
+            need(s.config.get("fresh_load") is True, "persisted to config")
+            need(s.set_fresh_load(False) is False
+                 and not s.fresh_load_enabled(),
+                 "toggled back off")
+        finally:
+            s.fresh_load = orig_attr
+            if had:
+                s.config.set("fresh_load", orig_val)
+            else:
+                s.config.data.pop("fresh_load", None)
+                s.config.save()
+
     def t_json_load_shred_only_when_toggled():
         # Relational shred runs only when shred=True / flatten-on-load is on.
         # Default flatten is off so a plain DuckDB JSON load stays one nested
@@ -23642,7 +24574,8 @@ def backend_tests(datadir, csv_path, json_path):
         # tab. That requires the Notebook to stay MOUNTED (hidden with display)
         # rather than being conditionally rendered -- a conditional render
         # unmounts it, destroying the in-flight query's state and its result, so
-        # it looks cancelled when you come back.
+        # it looks cancelled when you come back. IDE / NodeFlow / Dashboard use
+        # the same keep-mounted pattern so their in-flight work survives too.
         def rd(*p):
             return open(os.path.join(ROOT, *p), encoding="utf-8").read()
         app = rd("frontend", "src", "App.tsx")
@@ -23654,9 +24587,9 @@ def backend_tests(datadir, csv_path, json_path):
              not _re.search(r'view === "notebook"\s*\?\s*\(', app)
              and not _re.search(
                  r'view === "notebook"\s*&&\s*\(?\s*<Notebook', app)),
-            ("the IDE branch is gated so it doesn't render behind the Journal",
-             _re.search(r'view === "ide"\s*\?\s*\(', app)
-             is not None),
+            ("IDE is keep-mounted via display (not unmounted on tab switch)",
+             'display: view === "ide" ? "contents" : "none"' in app
+             and 'data-testid="ide-surface"' in app),
         ]
         missing = [n for n, ok in checks if not ok]
         need(not missing,
@@ -24810,8 +25743,9 @@ def backend_tests(datadir, csv_path, json_path):
             skip("duckdb not installed")
         s = _fresh_session()
         try:
+            from samql_core.session import DUCKDB_TARGET
             r = s.run_query(
-                "SELECT i AS n FROM range(30) t(i)", target="duckdb")
+                "SELECT i AS n FROM range(30) t(i)", target=DUCKDB_TARGET)
             need(r.get("result_id"), "query produced a pageable result: %r" % r)
             s.duckdb.interrupt()
             need(s.duckdb._cancel.is_set(), "interrupt left sticky cancel set")
@@ -26571,11 +27505,15 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_flow_cache_incremental():
-        # End-to-end: re-running an unchanged flow hits; editing a node reuses
-        # its unchanged upstream; results are identical with the cache off.
+        # Latest-data intent: reuse only when the graph + inputs are unchanged.
+        # After a content write / epoch bump the volatile cache must clear —
+        # do not require mid-graph upstream reuse after a node edit.
+        from samql_core.session import LOCAL_TARGET
         s = _loaded_session()  # table "data"
         try:
             need(s.flow_cache, "the flow cache is on by default")
+            s.fresh_run = False
+            s._flow_cache_clear()
             g = {"nodes": [
                 {"id": "n1", "type": "input", "config": {"table": "data"}},
                 {"id": "n2", "type": "pivot", "config": {
@@ -26586,30 +27524,44 @@ def backend_tests(datadir, csv_path, json_path):
             r1 = s.run_nodeflow(g, "n2", "out")
             need(not r1.get("error"), "first run ok: %s" % r1.get("error"))
             i1 = s.flow_cache_info()
-            need(i1["misses"] >= 1 and i1["size"] >= 1, "first run populates the cache")
+            need(i1["misses"] >= 1 and i1["size"] >= 1,
+                 "first run populates the cache")
             rows = r1["total_rows"]
             r2 = s.run_nodeflow(g, "n2", "out")
             i2 = s.flow_cache_info()
-            need(i2["hits"] > i1["hits"], "re-running an unchanged flow hits the cache")
+            need(i2["hits"] > i1["hits"],
+                 "re-running an unchanged flow hits the cache")
             eq(i2["misses"], i1["misses"], "the re-run recomputes nothing")
             eq(r2["total_rows"], rows, "the cached result matches the first run")
-            # edit the pivot: its upstream input is unchanged and must be reused
+            # Edit the pivot: answers must stay correct; mid-graph reuse is
+            # not the contract (latest-data caches input + last run).
             import copy as _copy
             g2 = _copy.deepcopy(g)
-            g2["nodes"][1]["config"]["values"] = [{"field": "score", "agg": "avg"}]
-            hbefore = s.flow_cache_info()["hits"]
+            g2["nodes"][1]["config"]["values"] = [
+                {"field": "score", "agg": "avg"}]
             r3 = s.run_nodeflow(g2, "n2", "out")
             need(not r3.get("error"), "edited pivot runs")
-            need(s.flow_cache_info()["hits"] > hbefore,
-                 "editing the pivot reuses its cached upstream input")
-            eq(r3["total_rows"], rows, "row count unchanged by the agg edit (3 categories)")
+            eq(r3["total_rows"], rows,
+               "row count unchanged by the agg edit (3 categories)")
+            # Content mutation clears volatile cache (epoch bump).
+            ep = s._data_epoch
+            s.run_query(
+                "INSERT INTO data (id, name, score, category, dt) VALUES "
+                "(999, 'z', 1, 'Z', '2020-01-01')",
+                target=LOCAL_TARGET)
+            need(s._data_epoch > ep, "write bumps data_epoch")
+            eq(s.flow_cache_info()["size"], 0,
+               "write clears flow cache (no stale reuse)")
             # parity: identical result with the cache disabled
             s2 = _loaded_session()
             try:
                 s2.flow_cache = False
+                s2.fresh_run = False
                 roff = s2.run_nodeflow(g, "n2", "out")
-                eq(roff["total_rows"], rows, "result is identical with the cache OFF")
-                eq(s2.flow_cache_info()["size"], 0, "nothing is cached when disabled")
+                eq(roff["total_rows"], rows,
+                   "result is identical with the cache OFF")
+                eq(s2.flow_cache_info()["size"], 0,
+                   "nothing is cached when disabled")
             finally:
                 s2.shutdown()
         finally:
@@ -26653,6 +27605,7 @@ def backend_tests(datadir, csv_path, json_path):
         s = _fresh_session()
         try:
             s.flow_cache = True
+            s.fresh_run = False
             s._flow_cache_clear()
             s.run_query(
                 "CREATE TABLE rnd_src AS SELECT 1 AS id UNION ALL SELECT 2 "
@@ -26699,6 +27652,8 @@ def backend_tests(datadir, csv_path, json_path):
         from samql_core.session import LOCAL_TARGET
         s = _fresh_session()
         try:
+            s.flow_cache = True
+            s.fresh_run = False
             s.run_query("CREATE TABLE src AS SELECT 1 AS g, 10 AS v "
                         "UNION ALL SELECT 1, 20", target=LOCAL_TARGET)
             g = {"nodes": [
@@ -26725,6 +27680,8 @@ def backend_tests(datadir, csv_path, json_path):
         # and every result is still correct.
         s = _loaded_session()
         try:
+            s.flow_cache = True
+            s.fresh_run = False
             s.flow_cache_max = 2
             s._flow_cache_clear()
             s._flow_cache_stats["evictions"] = 0
@@ -26753,11 +27710,15 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_flow_cache_checkpoint():
-        # A blocking join feeding a single consumer is materialised + cached, so
-        # editing a node downstream of it reuses the join instead of rerunning.
+        # Latest-data: join→filter materialises; an unchanged re-run may reuse.
+        # Editing the filter must recompute the new answer. Do not require
+        # mid-graph join-checkpoint hits after the edit (input + last run).
         from samql_core.session import LOCAL_TARGET
         s = _fresh_session()
         try:
+            s.flow_cache = True
+            s.fresh_run = False
+            s._flow_cache_clear()
             s.run_query("CREATE TABLE jl AS SELECT 1 AS g, 'x' AS a "
                         "UNION ALL SELECT 2, 'y'", target=LOCAL_TARGET)
             s.run_query("CREATE TABLE jr AS SELECT 1 AS g, 100 AS b "
@@ -26776,18 +27737,21 @@ def backend_tests(datadir, csv_path, json_path):
                     {"from": {"node": "J", "port": "inner"},
                      "to": {"node": "F", "port": "in"}}]}
             r1 = s.run_nodeflow(g, "F", "true")
-            need(not r1.get("error"), "join -> filter flow runs: %s" % r1.get("error"))
+            need(not r1.get("error"),
+                 "join -> filter flow runs: %s" % r1.get("error"))
             eq(r1["total_rows"], 2, "filter b>50 keeps both joined rows")
             need(s.flow_cache_info()["misses"] >= 1,
-                 "the join is materialised + cached as a checkpoint")
+                 "first run materialises into the volatile cache")
             hits0 = s.flow_cache_info()["hits"]
+            r_same = s.run_nodeflow(g, "F", "true")
+            need(not r_same.get("error"), "unchanged re-run ok")
+            need(s.flow_cache_info()["hits"] > hits0,
+                 "unchanged graph reuses last-run cache")
             import copy as _copy
             g2 = _copy.deepcopy(g)
             g2["nodes"][3]["config"]["condition"] = "b > 150"
             r2 = s.run_nodeflow(g2, "F", "true")
             need(not r2.get("error"), "edited flow runs")
-            need(s.flow_cache_info()["hits"] > hits0,
-                 "editing the filter downstream reuses the cached join")
             eq(r2["total_rows"], 1,
                "the edited filter recomputes (one row) -- not stale")
         finally:
@@ -27947,7 +28911,9 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_nodeflow_write_to_table():
         # The write node materialises its upstream into a real loaded table.
+        # Default destination is DuckDB even when the Input table is SQLite.
         from samql_core import nodeflow
+        from samql_core.session import DUCKDB_TARGET
         s = _loaded_session()
         try:
             g = {"nodes": [
@@ -27964,16 +28930,31 @@ def backend_tests(datadir, csv_path, json_path):
             need(r.get("ok"), "write returns ok: %s" % r.get("error"))
             eq(r["table"], "kept_rows",
                "the table name is sanitised to a safe identifier")
-            need(any(t["name"] == "kept_rows" for t in s.tables_tree()),
-                 "the written table shows in the tables list")
-            res = s.run_query('SELECT COUNT(*) FROM "kept_rows"')
+            eq(r.get("engine"), "duckdb",
+               "Write defaults to DuckDB (not the SQLite input engine)")
+            need(any(t["name"] == "kept_rows" and t.get("engine") == "duckdb"
+                     for t in s.tables_tree()),
+                 "the written table shows under DuckDB in the tables list")
+            res = s.run_query('SELECT COUNT(*) FROM "kept_rows"',
+                              target=DUCKDB_TARGET)
             eq(res["rows"][0][0], r["rows"], "the written row count matches")
             # re-running overwrites (no duplicate / no error)
             r2 = s.run_nodeflow_to_table(g, "w", "kept rows!")
             need(r2.get("ok"), "re-running the write overwrites cleanly")
+            eq(r2.get("engine"), "duckdb", "re-write stays on DuckDB")
             need(not [n for n in s.db.table_columns
                       if n.startswith("__nbflow")],
-                 "no flow temp tables are left behind")
+                 "no flow temp tables are left behind on SQLite")
+            # SQLite remains available as an explicit opt-in.
+            g_sql = {"nodes": [
+                {"id": "i", "type": "input", "config": {"table": "data"}},
+                {"id": "w", "type": "write",
+                 "config": {"name": "kept_sqlite", "dest": "sqlite"}}],
+                "edges": [{"from": {"node": "i", "port": "out"},
+                           "to": {"node": "w", "port": "in"}}]}
+            r3 = s.run_nodeflow_to_table(g_sql, "w", "kept_sqlite")
+            need(r3.get("ok"), "sqlite opt-in write: %s" % r3.get("error"))
+            eq(r3.get("engine"), "sqlite", "dest=sqlite stores in SQLite")
             eq(nodeflow.NODE_PORTS["write"], {"in": ["in"], "out": ["out"]},
                "write node has an input (sink)")
         finally:
@@ -28866,6 +29847,21 @@ def backend_tests(datadir, csv_path, json_path):
             eq(len(res["rows"]), 3, "the folder node feeds downstream")
             eq(s.load_folder_files(d).get("table"), tbl,
                "an unchanged folder is cached")
+            # same size + preserved mtime rewrite of one folder file must miss
+            jan = os.path.join(d, "jan.csv")
+            st = os.stat(jan)
+            open(jan, "w", newline="").write(
+                "id,region,amt\n9,North,1\n8,South,2\n")
+            os.utime(jan, (st.st_atime, st.st_mtime))
+            r2 = s.load_folder_files(d)
+            need(r2.get("ok"), "folder rewrite reload ok: %s" % r2.get("error"))
+            eng = s.duckdb if r2.get("engine") == "duckdb" else s.db
+            need(eng is not None, "engine available after folder reload")
+            _c, got = eng.execute(
+                'SELECT COUNT(*) FROM "%s" WHERE id = 9' % r2["table"])
+            need(got and int(got[0][0]) == 1,
+                 "folder cache served rewritten content, not stale: %r"
+                 % (got,))
             need(s.load_folder_files("/no/such/folder/zz").get("error"),
                  "a missing folder errors")
         finally:
@@ -30033,12 +31029,16 @@ def backend_tests(datadir, csv_path, json_path):
     def t_flow_write_append():
         # the write node's overwrite (default) / append modes, and an idempotent
         # append (delete-by-key then insert) so re-running doesn't duplicate.
+        # Unpinned SQL source materialises on the write destination (DuckDB).
+        from samql_core.session import DUCKDB_TARGET
         vals = "(VALUES (1, 'a'), (2, 'a'), (3, 'b'), (4, 'b'), (5, 'c'))"
 
-        def graph(cat, mode, keys=None):
+        def graph(cat, mode, keys=None, dest=None):
             cfg = {"name": "acc_t", "mode": mode}
             if keys is not None:
                 cfg["replace_keys"] = keys
+            if dest is not None:
+                cfg["dest"] = dest
             sql = ("WITH t(id, cat) AS %s "
                    "SELECT id, cat FROM t WHERE cat = '%s'" % (vals, cat))
             return {"nodes": [
@@ -30051,8 +31051,12 @@ def backend_tests(datadir, csv_path, json_path):
         try:
             r = s.run_nodeflow_to_table(graph("a", "overwrite"), "w", "acc_t")
             need(r.get("ok"), "overwrite ok: %s" % r.get("error"))
+            eq(r.get("engine"), "duckdb", "unpinned write defaults to DuckDB")
             eq(r.get("rows"), 2, "overwrite wrote the two 'a' rows")
             eq(r.get("mode"), "overwrite", "mode echoed back")
+            eq(s.run_query("SELECT COUNT(*) FROM acc_t",
+                           target=DUCKDB_TARGET)["rows"][0][0], 2,
+               "rows land in DuckDB")
             r = s.run_nodeflow_to_table(graph("b", "append"), "w", "acc_t")
             need(r.get("ok"), "append ok: %s" % r.get("error"))
             eq(r.get("rows"), 4, "append added the two 'b' rows -> 4")
@@ -30072,6 +31076,143 @@ def backend_tests(datadir, csv_path, json_path):
             # overwrite resets the table
             r = s.run_nodeflow_to_table(graph("a", "overwrite"), "w", "acc_t")
             eq(r.get("rows"), 2, "overwrite reset the table to the two 'a' rows")
+        finally:
+            s.shutdown()
+
+    def t_flow_write_overwrite_input_change():
+        # Write overwrite must replace destination contents when the Input
+        # table (or upstream shape) changes — not keep the first-run rows,
+        # and not leave a file-origin watch that can restore the old CSV.
+        from samql_core.session import DUCKDB_TARGET
+        import tempfile, os, csv, time
+
+        def graph(table, dest="dest_w", mode="overwrite"):
+            return {"nodes": [
+                {"id": "i", "type": "input", "config": {"table": table}},
+                {"id": "w", "type": "write",
+                 "config": {"name": dest, "mode": mode}}],
+                "edges": [{"from": {"node": "i", "port": "out"},
+                           "to": {"node": "w", "port": "in"}}]}
+
+        s = Session()
+        try:
+            s.set_fresh_run(False)
+            s.flow_cache = True
+            s.run_query(
+                "CREATE OR REPLACE TABLE src_a AS "
+                "SELECT 1 AS id, 'a' AS v", target=DUCKDB_TARGET)
+            s.run_query(
+                "CREATE OR REPLACE TABLE src_b AS "
+                "SELECT 2 AS id, 'b' AS v UNION ALL SELECT 3, 'c'",
+                target=DUCKDB_TARGET)
+            r1 = s.run_nodeflow_to_table(graph("src_a"), "w", "dest_w")
+            need(r1.get("ok"), "first overwrite: %s" % r1.get("error"))
+            eq(r1.get("engine"), "duckdb",
+               "DuckDB-input write stores on DuckDB")
+            eq(r1.get("rows"), 1, "first write one row")
+            rows1 = s.run_query(
+                "SELECT * FROM dest_w ORDER BY id", target=DUCKDB_TARGET)
+            eq(rows1.get("rows"), [[1, "a"]], "dest starts as src_a")
+
+            r2 = s.run_nodeflow_to_table(graph("src_b"), "w", "dest_w")
+            need(r2.get("ok"), "overwrite after input change: %s"
+                 % r2.get("error"))
+            eq(r2.get("mode"), "overwrite", "mode still overwrite")
+            eq(r2.get("engine"), "duckdb", "overwrite stays on DuckDB")
+            eq(r2.get("rows"), 2, "dest row count follows new upstream")
+            rows2 = s.run_query(
+                "SELECT * FROM dest_w ORDER BY id", target=DUCKDB_TARGET)
+            eq(rows2.get("rows"), [[2, "b"], [3, "c"]],
+               "overwrite replaced dest with src_b rows "
+               "(_clear_write_destination on DuckDB)")
+
+            # Schema change on overwrite (not append-aligned NULLs).
+            s.run_query(
+                "CREATE OR REPLACE TABLE src_c AS "
+                "SELECT 9 AS id, 'z' AS v, 1.5 AS amt",
+                target=DUCKDB_TARGET)
+            r3 = s.run_nodeflow_to_table(graph("src_c"), "w", "dest_w")
+            need(r3.get("ok"), "overwrite schema change: %s" % r3.get("error"))
+            cols = s.run_query(
+                "SELECT * FROM dest_w", target=DUCKDB_TARGET).get("columns")
+            need(cols and "amt" in cols,
+                 "overwrite replaced schema with new upstream columns")
+
+            # File-backed destination: overwrite must detach origin watch so
+            # a later file edit cannot restore the pre-write CSV.
+            td = tempfile.mkdtemp()
+            p = os.path.join(td, "sales.csv")
+            with open(p, "w", newline="") as fh:
+                w = csv.writer(fh)
+                w.writerow(["id", "v"])
+                w.writerow([1, "from_file"])
+            sales = s.load_file(
+                p, destination="duckdb", base_name="sales")[0]["name"]
+            r4 = s.run_nodeflow_to_table(
+                graph("src_b", dest=sales), "w", sales)
+            need(r4.get("ok"), "overwrite file-backed: %s" % r4.get("error"))
+            eq(s.duckdb.table_sources.get(sales), "nodeflow",
+               "write marks destination as nodeflow")
+            ow = getattr(s, "_origin_watch", None)
+            need(ow is not None, "origin watch present")
+            need(ow.path_for("duckdb", sales) is None,
+                 "overwrite unregisters file-origin watch")
+            with open(p, "w", newline="") as fh:
+                fh.write("id,v\n1,REVERTED\n2,X\n")
+            time.sleep(0.05)
+            os.utime(p, None)
+            s.tables_tree()
+            got = s.run_query(
+                'SELECT * FROM "%s" ORDER BY id' % sales,
+                target=DUCKDB_TARGET).get("rows")
+            eq(got, [[2, "b"], [3, "c"]],
+               "watcher must not restore CSV over nodeflow overwrite")
+
+            # Append still grows / fills missing columns (not a full replace).
+            # dest_w currently has the single src_c row (id,v,amt); append
+            # adds src_d (id,v) with amt=NULL → 2 rows, schema kept.
+            s.run_query(
+                "CREATE OR REPLACE TABLE src_d AS "
+                "SELECT 4 AS id, 'd' AS v", target=DUCKDB_TARGET)
+            r5 = s.run_nodeflow_to_table(
+                graph("src_d", dest="dest_w", mode="append"), "w", "dest_w")
+            need(r5.get("ok"), "append preserved: %s" % r5.get("error"))
+            eq(r5.get("rows"), 2,
+               "append added a row without wiping the prior overwrite")
+            rows5 = s.run_query(
+                "SELECT id, v FROM dest_w ORDER BY id",
+                target=DUCKDB_TARGET).get("rows")
+            eq(rows5, [[4, "d"], [9, "z"]],
+               "append kept prior overwrite row and added the new one")
+
+            # Temp-name shadow + VIEW destination: overwrite must still land.
+            s.duckdb.execute(
+                "CREATE OR REPLACE TABLE shadow_t AS "
+                "SELECT 1 AS id, 'old' AS v")
+            s.duckdb.execute(
+                "CREATE TEMP TABLE shadow_t AS "
+                "SELECT 99 AS id, 'temp' AS v")
+            r6 = s.run_nodeflow_to_table(
+                graph("src_a", dest="shadow_t"), "w", "shadow_t")
+            need(r6.get("ok"), "overwrite through temp shadow: %s"
+                 % r6.get("error"))
+            eq(s.run_query(
+                "SELECT * FROM shadow_t", target=DUCKDB_TARGET).get("rows"),
+               [[1, "a"]], "overwrite replaced main table despite temp shadow")
+
+            s.duckdb.execute("DROP TABLE IF EXISTS view_dest")
+            s.duckdb.execute(
+                "CREATE OR REPLACE VIEW view_dest AS "
+                "SELECT 1 AS id, 'view' AS v")
+            r7 = s.run_nodeflow_to_table(
+                graph("src_b", dest="view_dest"), "w", "view_dest")
+            need(r7.get("ok"), "overwrite view destination: %s"
+                 % r7.get("error"))
+            eq(s.run_query(
+                "SELECT * FROM view_dest ORDER BY id",
+                target=DUCKDB_TARGET).get("rows"),
+               [[2, "b"], [3, "c"]],
+               "overwrite replaced a VIEW with a real table from upstream")
         finally:
             s.shutdown()
 
@@ -31154,7 +32295,12 @@ def backend_tests(datadir, csv_path, json_path):
             need(r.get("ok"), "container iterator runs: %s" % r.get("error"))
             eq(r.get("passes"), 2, "one pass per variables row")
             eq(r.get("rows"), 4, "both regions' matching rows accumulated")
-            _c, rows = s.db.execute(
+            # Write / Input / iterator accumulate follow DuckDB-default store
+            # (same as run_nodeflow_to_table); query the engine the run used.
+            eq(r.get("engine"), "duckdb",
+               "container iterator accumulates on DuckDB with unpinned writes")
+            eng = s.duckdb if r.get("engine") == "duckdb" else s.db
+            _c, rows = eng.execute(
                 'SELECT region,amt,src FROM "c_per_region" ORDER BY region,amt')
             eq([tuple(x) for x in rows],
                [("EU", 5, "EU"), ("EU", 7, "EU"),
@@ -31173,9 +32319,11 @@ def backend_tests(datadir, csv_path, json_path):
                 seen.append(url)
                 tn = "__apimock_%d" % len(seen)
                 ue = url.replace("'", "''")
-                s.db.execute('DROP TABLE IF EXISTS "%s"' % tn)
-                s.db.execute("CREATE TABLE \"%s\" AS SELECT '%s' AS url"
-                             % (tn, ue))
+                # Mock table must land on the flow engine (DuckDB default).
+                mock_eng = s.duckdb if s.duckdb is not None else s.db
+                mock_eng.execute('DROP TABLE IF EXISTS "%s"' % tn)
+                mock_eng.execute(
+                    "CREATE TABLE \"%s\" AS SELECT '%s' AS url" % (tn, ue))
                 return {"ok": True, "table": tn, "err_table": None,
                         "columns": ["url"], "rows": [[url]]}
             s.fetch_api_node = fake_fetch
@@ -33491,6 +34639,21 @@ def backend_tests(datadir, csv_path, json_path):
             # re-reading the same unchanged file reuses the hidden table
             eq(s.load_directory_file(p).get("table"), tbl,
                "an unchanged file is cached, not reloaded")
+            # same size + preserved mtime but rewritten content must miss
+            # (bounded content samples in the directory cache token)
+            st = os.stat(p)
+            open(p, "w", newline="").write(
+                "id,region,amt\n9,North,999\n8,South,888\n7,North,777\n")
+            os.utime(p, (st.st_atime, st.st_mtime))
+            r2 = s.load_directory_file(p)
+            need(r2.get("ok"), "rewrite reload ok: %s" % r2.get("error"))
+            eng = s.duckdb if r2.get("engine") == "duckdb" else s.db
+            need(eng is not None, "engine available after directory reload")
+            _c, got = eng.execute(
+                'SELECT region FROM "%s" WHERE id = 9' % r2["table"])
+            need(got and got[0][0] == "North",
+                 "directory cache served rewritten content, not stale: %r"
+                 % (got,))
             # a missing file errors gracefully
             need(s.load_directory_file(os.path.join(d, "nope.csv")).get("error"),
                  "a missing file returns an error")
@@ -37977,7 +39140,8 @@ def backend_tests(datadir, csv_path, json_path):
             ("fe_chart_stale_guard", "FE chart/pivot stale guard"),
             ("fe_profile_recon_stale", "FE profile/recon stale guard"),
             ("fe_export_blocks_stale", "FE export blocks stale"),
-            ("fe_field_explorer_soft_clear", "FE Field Explorer soft clear"),
+            ("fe_field_explorer_rediscovery",
+             "FE Field Explorer rediscovery on dataEpoch"),
             ("fe_apply_data_epoch", "FE applies mutation data_epoch"),
             ("be_reclaim_stale_results", "backend reclaims stale results"),
             ("fe_nodeflow_epoch_clears", "FE NodeFlow epoch clears"),
@@ -38365,6 +39529,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_sqlserver_node_fetch_and_autofetch),
         ("directory node (read a file from a folder)", t_directory_node),
         ("append-from-folder node (stack files)", t_appendfolder_node),
+        # content-signature coverage lives inside the two node tests above
+
         ("group node (linear child pipeline)", t_group_node),
         ("multi-join node (inner join 3+ inputs)", t_multijoin_node),
         ("json-extract node (paths -> columns)", t_jsonextract_node),
@@ -38380,6 +39546,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("flow: group multi-input (bound join inside)", t_flow_group_multi_input),
         ("flow: variable node ${name} substitution", t_flow_variable_node),
         ("flow: write node append / overwrite / idempotent", t_flow_write_append),
+        ("flow: write overwrite replaces after input change",
+         t_flow_write_overwrite_input_change),
         ("flow: dynamic file browser (DuckDB glob reader)", t_flow_filebrowser),
         ("flow: API node fetch + load + read (injected fetcher)", t_flow_apinode),
         ("flow: API node password from the secret store", t_apinode_secret),
@@ -39151,8 +40319,40 @@ def backend_tests(datadir, csv_path, json_path):
          t_filecache_sweep),
         ("filecache: load wiring (hit skips COPY, change misses, fallback)",
          t_filecache_load_wiring),
+        ("latest-data: uniquify-on-load + manual reload new name",
+         t_uniquify_origin_watch_fresh_reload),
+        ("latest-data: watcher clears IDE/Journal/NodeFlow last-run",
+         t_watcher_clears_last_run_ide_journal_nodeflow),
+        ("latest-data: Input recheck in-place + Fresh run skips cache",
+         t_input_signature_recheck_and_fresh_run),
+        ("latest-data: origin reload error surfaced (not silent)",
+         t_origin_reload_error_surfaced),
+        ("latest-data: IDE/Journal recheck-before-run sees newest",
+         t_ide_journal_recheck_before_run),
+        ("latest-data: busy/half-updated no silent stale success",
+         t_busy_half_updated_no_stale_success),
+        ("latest-data: poll/sync single-flight + recheck budget",
+         t_origin_poll_single_flight_and_budget),
+        ("latest-data: NodeFlow same-name Input smoke after recheck",
+         t_nodeflow_same_name_input_smoke_after_recheck),
+        ("latest-data: size-scaled recheck budget + caps",
+         t_origin_size_scaled_budget),
+        ("latest-data: cheap-stat short-circuit (no digest)",
+         t_origin_cheap_stat_short_circuit),
+        ("latest-data: single-flight reload reuse on run",
+         t_origin_single_flight_reuse_on_run),
+        ("latest-data: in-use-only scoped recheck-before-run",
+         t_origin_in_use_scoped_recheck),
+        ("latest-data: many tiny origins no hang + fail-closed",
+         t_origin_many_tiny_no_hang),
         ("filecache: lifecycle (survives stray sweep; startup sweeps it)",
          t_filecache_lifecycle),
+        ("startup: wipe flatten/shred staging caches",
+         t_sweep_op_caches_startup),
+        ("API JSON: Cache-Control no-store on _send_json",
+         t_send_json_no_store),
+        ("results: reclaim pinned epoch-expired after pin age/release",
+         t_reclaim_pinned_epoch_expired),
         ("journal chain reuse: TEMP VIEWs over fresh upstream results",
          t_chain_reuse_views),
         ("load UI: flatten field checkboxes aren't stretched by .form-row",
@@ -39269,6 +40469,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_json_reader_stdlib_override_and_diag),
         ("settings: flatten-JSON toggle defaults off, persists",
          t_flatten_json_setting),
+        ("settings: Fresh load toggle defaults off, persists",
+         t_fresh_load_setting),
         ("JSON load shreds only when flatten/shred toggle is on",
          t_json_load_shred_only_when_toggled),
         ("load routing: flatten-on -> normalized; off -> nested; SQLite always",

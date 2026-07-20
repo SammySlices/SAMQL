@@ -3217,6 +3217,16 @@ class DuckDBManager:
                     self.table_columns[final] = cols
                     self._types_cache_drop(final)
                     self.table_sources[final] = path
+                    # Keep persistent filecache entries alive while a view
+                    # is attached so budget sweep cannot unlink them.
+                    try:
+                        from . import filecache as _fc
+                        if path and _fc.enabled() and os.path.dirname(
+                                os.path.realpath(path)) == os.path.realpath(
+                                    _fc._DIR):
+                            _fc.hold(path)
+                    except Exception:
+                        pass
                     return final
                 except Exception as e:
                     if _is_interrupt(e):
@@ -3286,7 +3296,8 @@ class DuckDBManager:
             self.write_lock.release()
 
     def load_file_to_parquet_view(self, name, path, kind, delimiter=None,
-                                  cancel=None, json_depth=None):
+                                  cancel=None, json_depth=None,
+                                  skip_cache=False):
         """Stream a (large) file straight into a Parquet cache and expose it as
         a read_parquet view. The rows are never materialised in the engine, so
         memory stays bounded for the whole lifecycle -- ingest AND queries --
@@ -3303,6 +3314,10 @@ class DuckDBManager:
 
         ``json_depth`` (JSON only) is included in the file-cache key so a
         shallow flatten-off conversion never collides with a full nested one.
+
+        ``skip_cache`` (Fresh load) bypasses persistent filecache lookup and
+        commit so the conversion always re-reads the source. Does not change
+        Parquet size thresholds.
         """
         from .loaders import LoadCancelled
         from . import tmputil
@@ -3330,12 +3345,14 @@ class DuckDBManager:
         # attach the existing Parquet and skip the whole parse. The key
         # changes whenever the source changes, so a stale entry can't be
         # served; SAMQL_FILECACHE=0 restores the old per-instance behavior.
+        # Fresh load (skip_cache) always re-converts from the source file.
         extra = delimiter or ""
         if kind == "json" and json_depth is not None:
             extra = "%s|depth=%s" % (extra, json_depth)
+        use_cache = filecache.enabled() and not skip_cache
         fc_key = filecache.cache_key(path, kind, extra=extra) \
-            if filecache.enabled() else None
-        hit = filecache.lookup(fc_key)
+            if use_cache else None
+        hit = filecache.lookup(fc_key) if fc_key else None
         if hit:
             if _cancelled():
                 raise LoadCancelled()
@@ -3344,16 +3361,22 @@ class DuckDBManager:
             return final
         # Single-flight per cache key (acquire before write_lock). A waiter
         # re-looks up after the leader commits instead of duplicating COPY.
-        with filecache.conversion_lock(fc_key):
+        # Fresh load still uses a conversion lock keyed by path identity when
+        # possible so two Fresh loads of the same file don't race COPY.
+        lock_key = fc_key or (
+            filecache.cache_key(path, kind, extra=extra)
+            if filecache.enabled() else None)
+        with filecache.conversion_lock(lock_key):
             if _cancelled():
                 raise LoadCancelled()
-            hit = filecache.lookup(fc_key)
-            if hit:
-                if _cancelled():
-                    raise LoadCancelled()
-                final = self.create_view_from_file(name, hit, "parquet")
-                DuckDBManager._remember_origin(self, final, path)
-                return final
+            if fc_key:
+                hit = filecache.lookup(fc_key)
+                if hit:
+                    if _cancelled():
+                        raise LoadCancelled()
+                    final = self.create_view_from_file(name, hit, "parquet")
+                    DuckDBManager._remember_origin(self, final, path)
+                    return final
             if fc_key:
                 cache = filecache.begin(fc_key)
             else:
@@ -3520,6 +3543,7 @@ class DuckDBManager:
     def drop_table(self, name):
         self._types_cache_drop(name)
         backing = None
+        src = None
         with self.write_lock:
             kind = None
             try:
@@ -3542,9 +3566,17 @@ class DuckDBManager:
                 except Exception:
                     continue
             self.table_columns.pop(name, None)
-            self.table_sources.pop(name, None)
+            src = self.table_sources.pop(name, None)
             self.table_origins.pop(name, None)
             backing = getattr(self, "view_backing", {}).pop(name, None)
+        if src:
+            try:
+                from . import filecache as _fc
+                if _fc.enabled() and os.path.dirname(
+                        os.path.realpath(src)) == os.path.realpath(_fc._DIR):
+                    _fc.release(src)
+            except Exception:
+                pass
         if backing:
             try:
                 os.unlink(backing)

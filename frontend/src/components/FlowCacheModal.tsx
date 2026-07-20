@@ -29,6 +29,7 @@ export const FlowCachePanel: React.FC<{
   const [persistentEnabled, setPersistentEnabled] = useState(true);
   const [persistentMaxMb, setPersistentMaxMb] = useState("4096");
   const [persistentDays, setPersistentDays] = useState("14");
+  const [freshRun, setFreshRun] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -41,6 +42,7 @@ export const FlowCachePanel: React.FC<{
     setParallel(!!next.parallel_nodeflows);
     setParallelWorkers(String(next.parallel_workers_configured ?? 1));
     setPersistentEnabled(!!next.persistent_enabled);
+    setFreshRun(!!next.fresh_run);
     setPersistentMaxMb(
       String(
         Math.round(
@@ -133,6 +135,7 @@ export const FlowCachePanel: React.FC<{
       persistent_enabled: persistentEnabled,
       persistent_max_mb: persistMb,
       persistent_days: days,
+      fresh_run: freshRun,
     });
     if (next)
       onToast(
@@ -218,6 +221,18 @@ export const FlowCachePanel: React.FC<{
             onChange={(e) => setEnabled(e.target.checked)}
           />
           Reuse unchanged intermediate node results
+        </label>
+        <label
+          className="check-row"
+          title="Optional: never reuse last-run NodeFlow intermediates between runs. File-change watcher already clears last-run caches for IDE, Journal, and NodeFlow when a source file changes."
+        >
+          <input
+            type="checkbox"
+            data-testid="fresh-run-toggle"
+            checked={freshRun}
+            onChange={(e) => setFreshRun(e.target.checked)}
+          />
+          Always recompute NodeFlow intermediates (optional; file changes already clear last-run)
         </label>
         <label>
           Maximum entries

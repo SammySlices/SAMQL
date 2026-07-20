@@ -721,8 +721,20 @@ def frontend_tests(do_build):
         grid = _read_fe("src", "components", "DataGrid.tsx")
         watchdog = _read_fe("src", "components", "ServerWatchdog.tsx")
         need('role="dialog"' in modal and 'aria-modal="true"' in modal
-             and "previousFocus" in modal and "FOCUSABLE" in modal,
-             "Modal source lacks focus containment/restoration")
+             and "previousFocus" in modal and "FOCUSABLE" in modal
+             and "createPortal" in modal
+             and "document.body" in modal,
+             "Modal source lacks focus containment/restoration/portal")
+        css = _read_fe("src", "styles.css")
+        # .modal.fast must NOT use layout/paint contain (clips nested Browse).
+        import re as _re_modal
+        mfast = _re_modal.search(
+            r"\.modal\.fast\s*\{([^}]*)\}", css)
+        need(mfast and "contain:" not in mfast.group(1),
+             ".modal.fast must not set CSS contain (portal + no contain)")
+        need("portals to document.body" in combined
+             or "portals to document.body so nested browse" in combined,
+             "Modal portal behavior is covered by a component test")
         need("viewerRequestSeq" in grid
              and "request !== viewerRequestSeq.current" in grid,
              "DataGrid full-value fetch lacks latest-wins protection")
@@ -1013,22 +1025,29 @@ console.log("OK");
              and "cancelQuery" in fx
              and "openRef" in fx
              and "next_after" in fx
-             and "[srcKey, open]" in fx),
+             and "[srcKey, open, dataEpoch]" in fx),
+            ("dataEpoch advances clear fields and re-run nested discovery",
+             "dataEpoch" in fx
+             and "[srcKey, open, dataEpoch]" in fx
+             and "setFields(null)" in fx
+             and "reloadFields" in fx),
             ("right pane assembles first / all-rows / recursive queries",
              ("Peek one value" in fx or "First record" in fx)
              and "All rows" in fx
              and "recursive" in fx
              and ("formatFieldSql" in fx or "acc.unnests" in fx)
-             and "buildUnnestPipelineSql" in fx),
+             and ("buildUnnestPipelineSql" in fx
+                  or "buildUnnestPipelineSql" in
+                  _read_fe("src", "lib", "fieldExplorerSql.ts"))),
             ("copy buttons use the shared copyText helper",
              "copyText" in fx),
             ("App renders it OUTSIDE the view switch so it persists",
              "<FieldExplorer" in app
              and "fieldExplorerOpen" in app),
-            ("Tools & Tables hosts JSON Field Explorer entry (not Settings)",
-             "onOpenJsonFieldExplorer" in app
-             and "JSON Field Explorer" in tools
-             and "tools-tables-tab-fields" in tools
+            ("Settings → Tools hosts JSON Field Explorer entry",
+             "settings-json-field-explorer" in app
+             and "JSON Field Explorer" in app
+             and "setFieldExplorerOpen(true)" in app
              and "Field explorer…" not in app),
             ("command palette opens JSON Field Explorer (not view-gated)",
              "Open JSON Field Explorer" in app),
@@ -1073,7 +1092,8 @@ console.log("OK");
              and "dataDrift" in nb),
             ("staleness key stays the canonical composition",
              "ranCompiledSql: composed" in nb
-             and "ranDataEpoch: dataEpoch" in nb),
+             and ("ranDataEpoch: dataEpoch" in nb
+                  or "ranDataEpoch: stampResultEpoch" in nb)),
             ("one retry on reuse_stale with full inlining",
              "reuse_stale" in nb),
             ("api.query carries the reuse map",
@@ -2764,10 +2784,13 @@ console.log("OK");
              'moved.type === "group"' in nbk
              and 'moved.type === "iterator"' in nbk
              and 'node.type !== "group" && node.type !== "iterator"' in nbk),
+            # Sphere under-panel + minimize pill (and classic isContainer body)
+            # own the children list; the old inline ternary is gone.
             ("iterator renders the container body",
-             ('n.type === "group" || n.type === "iterator" ? (' in nbk
-              or 'node.type === "group" || node.type === "iterator" ? ('
-                 in nbk)),
+             "isContainer" in nbk
+             and "ContainerChildrenBody" in nbk
+             and "nodeflow-sphere-under" in nbk
+             and "nodeflow-container-minimize" in nbk),
             ("palette / right-click drop onto an iterator adds a child",
              'type !== "group"' in nbk
              and 'type !== "iterator"' in nbk
@@ -3104,8 +3127,9 @@ console.log("OK");
         # Build .184 — fixes for the type errors the full `tsc` surfaced once
         # the frontend node_modules was installed (tsc is skipped in this
         # sandbox, so the fixes are guarded structurally here):
-        #   - showTables / showNodeSearch are typed useState<boolean> so their
-        #     setter callbacks stop being implicit-any (App.tsx TS7006)
+        #   - showNodeSearch stays a typed useState<boolean> so its setter is
+        #     not implicit-any (showTables always-on is guarded in
+        #     t_ui_feature_wiring — not a type-safety pin)
         #   - leftInputsOf indexes PORTS via a string-keyed cast and types its
         #     filter param (NodeFlow.tsx TS7053 + TS7006)
         #   - the unreachable `n.type === "sql"` arm in the node-label chain is
@@ -3119,8 +3143,6 @@ console.log("OK");
         nbk = _read_nodebook_source()
         nbc = _notebook_cell_source()
         checks = [
-            ("showTables state typed boolean",
-             "[showTables, setShowTables] = useState<boolean>(" in app),
             ("showNodeSearch state typed boolean",
              "[showNodeSearch, setShowNodeSearch] = useState<boolean>(" in app),
             ("leftInputsOf indexes PORTS through a string cast",
@@ -3232,6 +3254,10 @@ console.log("OK");
              and "<Icon.Square size={13} /> Stop" in nb),
             ("Journal Stop halts the sweep and cancels in-flight cells",
              "cancelAllRef" in nb and "cancelCell(id)" in nb),
+            # Keep-mounted surfaces: Journal Stop must NOT bare-cancelAllRuns()
+            # (that would kill concurrent IDE / NodeFlow / Dashboard runs).
+            ("Journal Stop is scoped to Journal cells (no bare cancelAllRuns)",
+             "cancelAllRuns()" not in nb and "Scoped to Journal" in nb),
             ("IDE exports profile + reconcile tabs, not just query results",
              "canExport" in app and "reconReportCsv" in app
              and "profileCsv" in app
@@ -3417,9 +3443,11 @@ console.log("OK");
              '"echarts"' in pkg and '"recharts"' not in pkg),
             ("pivot nests row dimensions into sub-rows",
              "pv-group-start" in pv and "pv-subdim" in pv),
-            ("tables panel hide/show toggle wired",
-             "showTables" in app and "Hide tables panel" in app
-             and "tables-reopen" in app),
+            ("tables panel always available (slide-out drawer, no hide toggle)",
+             "const showTables = true;" in app
+             and "setTablesPanelOpen" in app
+             and "Hide tables panel" not in app
+             and "setShowTables" not in app),
             ("notebook cell inline-rename wired",
              "renameCell" in nb and "onRename" in nb
              and "sanitizeCellName" in nb and "renameInSql" in nb
@@ -3564,8 +3592,9 @@ console.log("OK");
              and "openCat" in _read_nodebook_source()
              and "nb2-canvas-scaler" in _read_nodebook_source()
              and "zoomBy" in _read_nodebook_source()
-             # zoom is buttons-only now (wheel/trackpad no longer zooms)
-             and 'addEventListener("wheel"' not in _read_nodebook_source()
+             # Ctrl+wheel / trackpad pinch zooms; plain wheel pans/scrolls
+             and 'addEventListener("wheel"' in _read_nodebook_source()
+             and "ctrlKey" in _read_nodebook_source()
              and "is-empty" in _read_nodebook_source()
              # the per-node delete X is gone (delete via panel or right-click)
              and "nb2-node-x" not in _read_nodebook_source()
@@ -3735,13 +3764,13 @@ console.log("OK");
                  css.find("}", css.find(".wf-actions-row {"))]
              )(rd("src", "styles.css"))),
             ("node canvas: hide-toolbar toggle + right-click Nodes cascade (category -> node)",
-             (lambda nbk, css: (
-                 "paletteHidden" in nbk and "onTogglePalette" in nbk
-                 and "nb2-hidden" in nbk
+             (lambda nbk, css, app_src: (
+                 "paletteHidden" in nbk and "nb2-hidden" in nbk
+                 and "setNodeToolbarHidden" in app_src
                  and "nodesOpen" in nbk and "categoryOpen" in nbk
                  and "nb2-cm-sub" in nbk and "NODE_GROUPS" in nbk
                  and "nb2-cm-sub" in css and "nb2-hidden" in css
-             ))(_read_nodebook_source(), rd("src", "styles.css"))),
+             ))(_read_nodebook_source(), rd("src", "styles.css"), app)),
             ("node cascade: nested flyout not clipped (scroll lives on the leaf)",
              (lambda nbk, css: (
                  # the leaf (node list) flyout is the one marked scrollable
@@ -3769,6 +3798,16 @@ console.log("OK");
                  and "#e5484d" in css[
                      css.find(".nb2-port.out .nb2-dot {"):
                      css.find("}", css.find(".nb2-port.out .nb2-dot {"))]
+             ))(rd("src", "styles.css"))),
+            # Wiring pulse must target the arrow glyph, not .nb2-port.in —
+            # sphere ports use transform for rim placement; animating
+            # transform on the port overrides translate and jumps the handle.
+            ("node ports: wiring pulse animates .nb2-dot, not the port box",
+             (lambda css: (
+                 ".nb2-canvas-wrap.wiring .nb2-port.in > .nb2-dot" in css
+                 and "nb-port-hot" in css
+                 and ".nb2-canvas-wrap.wiring .nb2-port.in {\n"
+                     "  animation: nb-port-hot" not in css
              ))(rd("src", "styles.css"))),
             ("node/journal load requests are cleared after consuming (no replay on view re-mount)",
              # children signal consumption...
@@ -3800,8 +3839,7 @@ console.log("OK");
             ("view: node-toolbar toggle shared between Settings and the canvas",
              "Show node toolbar" in app and "Hide node toolbar" in app
              and "paletteHidden={nodeToolbarHidden}" in app
-             and "onTogglePalette={() => setNodeToolbarHidden" in app
-             and "onClick={onTogglePalette}" in _read_nodebook_source()
+             and "setNodeToolbarHidden((v) => !v)" in app
              # the old internal palette state is gone (App owns it now)
              and "setPaletteHidden" not in _read_nodebook_source()),
             ("drag-and-drop file load: overlay + how-to-load prompt -> background job + Cancel",
@@ -3942,7 +3980,7 @@ console.log("OK");
                  "function portTopOffset" in nbk
                  and "nodeHeight(n) / 2" in nbk
                  and "top: portTopOffset(" in nbk
-                 and 'style={{ top: portTopOffset(node, "out", index) }}' in nbk
+                 and 'portTopOffset(node, "out"' in nbk
                  # bigger arrow
                  and "border-left: 14px solid var(--accent)" in css
                  # hover brightens in the port's own colour, not the green accent
@@ -4149,14 +4187,11 @@ console.log("OK");
                      encoding="utf-8").read())),
             ("inspector columns don't blank on keystroke (flicker fix)",
              (lambda nbk: (
-                 # input columns are cleared only when the selected node changes
-                 # (deps may include scopeKey; probing lines can sit between)
-                 (("setInspCols({});" in nbk and "}, [selId]);" in nbk)
-                  or ("setInputColumns({});" in nbk
-                      and "}, [scopeKey, selId]);" in nbk))
-                 and "blanked every column-derived list" in nbk
-                 # ...never at the top of the fetch effect, which re-ran on every
-                 # keystroke and blanked the column-derived lists (the flicker)
+                 # Ownership gating + no clear-on-select before paint (was the
+                 # flicker). Cache hits publish in useLayoutEffect.
+                 "inspColsOwnedBy" in nbk
+                 and "do not clear-on-select" in nbk
+                 and "useLayoutEffect" in nbk
                  and "setInspCols({});\n    if (!sel) return;" not in nbk
                  and "setInputColumns({});\n    if (!sel) return;" not in nbk
              ))(_read_nodebook_source())),
@@ -4472,8 +4507,10 @@ console.log("OK");
             ("select field list stacks vertically (one per row)",
              "flex-direction: column" in fields),
             ("select renders one row element per field",
-             "(sel.config.fields || []).map(" in nb
-             and 'className="nb2-field"' in nb),
+             ("(sel.config.fields || []).map(" in nb
+              or "(sel.config.fields || []) as SelField[]" in nb)
+             and ('className="nb2-field"' in nb
+                  or '"nb2-field"' in nb)),
             ("long field names clip to their row, not overflow",
              "text-overflow: ellipsis" in fname
              and "white-space: nowrap" in fname
@@ -4503,8 +4540,9 @@ console.log("OK");
             ("multi-select supports copy / paste / delete",
              "copySelection" in nb and "pasteClipboard" in nb
              and "deleteMany" in nb and "selIds" in nb),
-            ("zoom is buttons-only (no wheel/trackpad zoom)",
-             'addEventListener("wheel"' not in nb),
+            ("ctrl+wheel zooms; plain wheel does not",
+             'addEventListener("wheel"' in nb
+             and "ctrlKey" in nb),
             ("config panel floats over the canvas (doesn't push it)",
              "position: absolute" in block(".nb2-inspector")),
             ("dragging a node onto a group drops it inside",
@@ -4613,16 +4651,28 @@ console.log("OK");
              and "nb2-wf-name-edit" not in nb
              and "nb2-wfbar" not in nb
              and "nb2-tabbar-actions" in nb),
-            # --- .93: output-arrow preview is cached ---
-            ("preview results are cached (LRU, signature+epoch-keyed)",
+            # --- .93 / latest-data: output preview is last-run, epoch-keyed ---
+            # Keys use activeTabId + dataEpoch (not graphSig — post-run prune
+            # flips signature and would orphan seeds). Epoch bumps / Run-all /
+            # workflow-tab switch clear the cache so stale reuse cannot survive.
+            ("preview results are last-run / epoch-keyed (clear on change)",
              "previewCache" in nb
-             and 'graphSig + "::" + dataEpoch + "::" + node.id + "::" + port'
-                 in nb
-             and "(cached)" in nb),
+             and "previewCacheKey" in nb
+             and "activeTabIdRef.current" in nb
+             and "dataEpochRef.current" in nb
+             and "rememberTableLastRun" in nb
+             and "refreshOpenPreviewFromLastRun" in nb
+             and "(cached)" in nb
+             and "setPreview(null)" in nb),
             ("preview cache is bounded + cleared on tab switch / data epoch",
-             "previewCache.current.size > 12" in nb
+             "PREVIEW_CACHE_MAX" in nb
+             and "previewCache.current.size > PREVIEW_CACHE_MAX" in nb
              and "previewCache.current.clear()" in nb
              and "previewEpochRef" in nb),
+            ("Run all seeds last-run cache for every ancestor node",
+             "seedLastRunCaches" in nb
+             and "lastRunSeedRequests" in nb
+             and "LAST_RUN_SEED_PREVIEW_LIMIT" in nb),
             # --- .93: resizable chart/dashboard nodes ---
             ("chart/dashboard nodes are resizable",
              "startNodeResize" in nb and "nb2-node-resize" in nb
@@ -4937,9 +4987,15 @@ console.log("OK");
         css = rd("src", "styles.css")
 
         def css_block(sel):
-            i = css.find(sel + " {")
+            # Prefer the production rule, not html.theme-light / nested hosts.
+            anchor = "\n" + sel + " {"
+            i = css.find(anchor)
             if i < 0:
-                return ""
+                i = css.find(sel + " {")
+                if i < 0:
+                    return ""
+            else:
+                i += 1  # skip leading newline
             j = css.find("}", i)
             return css[i : (j if j > 0 else len(css))]
 
@@ -5398,6 +5454,94 @@ console.log("OK");
         need(not missing,
              "Dense NodeFlow incomplete: " + "; ".join(missing))
 
+    def t_nodeflow_sphere():
+        # Settings → Visual → Sphere nodes: icon spheres, rim ports, floating
+        # under-panels for chart/group/iterator. Notes stay boxes.
+        css = _read_fe("src", "styles.css")
+        app = _read_fe("src", "App.tsx")
+        model = _read_fe("src", "lib", "nodeFlowModel.ts")
+        card = _read_fe(
+            "src", "components", "nodeflow", "NodeFlowCanvasCard.tsx")
+        scene = _read_fe("src", "components", "nodeflow", "NodeFlowScene.tsx")
+        nf = _read_fe("src", "components", "NodeFlow.tsx")
+        vitest = os.path.join(
+            FRONTEND, "src", "lib", "nodeFlowSphere.component.test.ts")
+        missing = []
+        if "nodeflow-sphere-toggle" not in app or "Sphere nodes" not in app:
+            missing.append("Settings Sphere nodes toggle")
+        if "samql.nodeSphere" not in app:
+            missing.append("samql.nodeSphere persistence")
+        if "Default ON" not in app or 'saved === "0"' not in app:
+            missing.append("samql.nodeSphere defaults on (missing/corrupt); honors explicit 0")
+        if "sphereMode = true" not in nf:
+            missing.append("NodeFlow sphereMode prop defaults on")
+        if "setNodeFlowSphereMode" not in app or "setNodeFlowSphereMode" not in model:
+            missing.append("sphere mode layout flag")
+        if "nodeUsesSphereChrome" not in model:
+            missing.append("nodeUsesSphereChrome helper")
+        if 'n.type === "text"' not in model:
+            missing.append("text nodes stay boxes in sphere mode")
+        if "SPHERE_RING" not in model or "spherePortOffset" not in model:
+            missing.append("SPHERE_RING / spherePortOffset wire anchors")
+        if "SPHERE_UNDER_GAP_CONTAINER" not in model or "sphereUnderGap" not in model:
+            missing.append("container under-panel gap clears bottom ports")
+        if "nodeUnderBodySize" not in model or "nodeWorldBounds" not in model:
+            missing.append("under-panel sizing / world bounds")
+        if "sphereMode" not in model or "a.sphereMode === b.sphereMode" not in model:
+            missing.append("sphereMode canvas memo key")
+        if "sphereMode" not in scene:
+            missing.append("NodeFlowScene sphereMode prop")
+        if "setNodeFlowSphereMode(sphereMode)" not in nf:
+            missing.append("NodeFlow syncs sphereMode before paint")
+        if "nb2-sphere-under" not in card or "sphereUnderGap" not in card:
+            missing.append("floating under-panel on canvas cards")
+        if "nb2-sphere-icon" not in card or "nb2-sphere-face" not in card:
+            missing.append("sphere face + icon chrome")
+        # Classic group body top:38 must not leak into the under-panel.
+        # (Shared margin rule also matches the selector — pin the reset block.)
+        reset_idx = css.find(
+            "Classic .nb2-group-body is absolute under the 30px head")
+        reset_blk = css[reset_idx:reset_idx + 450] if reset_idx >= 0 else ""
+        if "top: auto" not in reset_blk and "top:auto" not in reset_blk:
+            missing.append("sphere under-panel clears classic top:38 group body")
+        icon_blk = _block_css(css, ".nb2-sphere-icon")
+        # Theme ink via currentColor / --text (light + dark); hard #111 was
+        # the pre-dark-mode sphere polish and is obsolete.
+        if ("var(--text)" not in icon_blk
+                and "#111111" not in icon_blk
+                and "color: #111" not in icon_blk):
+            missing.append("sphere icons use theme ink (var(--text))")
+        if "filter: none" not in icon_blk and "filter:none" not in icon_blk:
+            missing.append("sphere icons have no glow filter")
+        # Selected/dragged cards stack above under-panel hosts.
+        if ".nb2-node.sphere:has(> .nb2-sphere-under)" not in css:
+            missing.append("under-panel host z-index stacking")
+        if "z-index: 5" not in _block_css(css, ".nb2-node.sel"):
+            missing.append("selected node z-index above under-panel hosts")
+        # Wiring pulse scales the glyph, not the port (keeps rim translate).
+        if ".nb2-canvas-wrap.wiring .nb2-port.in > .nb2-dot" not in css:
+            missing.append("wiring pulse targets .nb2-dot")
+        if ".nb2-canvas-wrap.wiring .nb2-port.in {\n  animation: nb-port-hot" in css:
+            missing.append("wiring pulse must not animate .nb2-port.in")
+        if "nodeSpawnOrigin" not in model:
+            missing.append("nodeSpawnOrigin centers new sphere drops")
+        if not os.path.isfile(vitest):
+            missing.append("Vitest nodeFlowSphere.component.test.ts")
+        else:
+            sphere_test = open(vitest, encoding="utf-8").read()
+            for tok in (
+                "fans Join three outputs",
+                "SPHERE_UNDER_GAP_CONTAINER",
+                "usernode",
+                "SPHERE_RING",
+                "nodeSpawnOrigin",
+                "honors sphereMode prop",
+            ):
+                if tok not in sphere_test:
+                    missing.append("Vitest sphere coverage: " + tok)
+        need(not missing,
+             "Sphere NodeFlow incomplete: " + "; ".join(missing))
+
     def t_more_animations():
         # Second animation batch: node placement scale-in + drag lift, the
         # toast auto-dismiss countdown bar, the editor tab bar's sliding
@@ -5749,6 +5893,10 @@ console.log("OK");
         need('from "../lib/runController"' in journal
              and "cancelOne(" in journal,
              "Journal must use the shared cancelOne")
+        # Keep-mounted: Journal Stop cancels only its cells via cancelOne —
+        # bare cancelAllRuns() would kill concurrent IDE/NodeFlow/Dashboard.
+        need("cancelAllRuns()" not in journal,
+             "Journal Stop must not bare-cancelAllRuns (keep-mounted scope)")
         need(('from "../lib/runController"' in node
               or 'from "../../lib/runController"' in node)
              and ("cancelAllRuns(" in node or "cancelOne(" in node),
@@ -6180,14 +6328,22 @@ console.log("OK");
              and "useNodeFlowDocumentController({" in component
              and "const startRun =" not in component
              and "const loadTabIntoState =" not in component),
-            ("execution lifecycle has one scope-aware owner",
+            ("execution lifecycle has one scope-aware Run / last-run owner",
              all(token in execution for token in (
                  "scopeVersionRef", "runScopesRef", "isRunCurrent",
                  "cancelAllRuns(ids)", "runDepth.current",
                  "previousTabRef.current === activeTabId",
                  "previewCache.current.clear()",
                  "previewEpochRef",
-                 'graphSig + "::" + dataEpoch + "::" + node.id + "::" + port',
+                 "previewCacheKey",
+                 "rememberTableLastRun",
+                 "refreshOpenPreviewFromLastRun",
+                 "seedLastRunCaches",
+                 "lastRunSeedRequests",
+                 "activeTabIdRef.current",
+                 "dataEpochRef.current",
+                 "isBootstrap",
+                 "lastRunPreviewCache",
              ))),
             ("document lifecycle owns tabs, history, autosave, and files",
              all(token in documents for token in (
@@ -6201,6 +6357,11 @@ console.log("OK");
                  "drops a stale execution result after switching tabs",
                  "keeps concurrent run state active until the final request finishes",
                  "keeps only the latest asynchronous workflow file open",
+                 "reuses Run-all last-run rows on output click without recomputing",
+                 "replaces open preview with post–Run-all last-run rows",
+                 "seeds last-run cache for A→B→C so each node previews without re-run",
+                 "keeps last-run cache across remount (IDE / Journal / Dashboard tab switch)",
+                 "keeps last-run cache when graphSig changes after Run all (post-run prune)",
              ))),
         ]
         missing = [name for name, ok in checks if not ok]
@@ -6570,7 +6731,7 @@ console.log("OK");
             ("catalog refresh preserves table identity when unchanged",
              "export function tablesCatalogEqual" in rd(
                  "src", "controllers", "useCatalogController.ts")
-             and "tablesCatalogEqual(prev, value)" in rd(
+             and "tablesCatalogEqual(prev, next)" in rd(
                  "src", "controllers", "useCatalogController.ts")
              and "returns true for identical snapshots" in rd(
                  "src", "controllers",
@@ -6818,6 +6979,8 @@ console.log("OK");
          t_eye_care_scaling),
         ("Dense NodeFlow shrinks canvas geometry (pairs with Eye Care)",
          t_nodeflow_dense),
+        ("Sphere NodeFlow: icon spheres, rim fans, under-panels",
+         t_nodeflow_sphere),
         ("second animation batch (nodes/toast-bar/tab-slide/run-flash)",
          t_more_animations),
         ("pivot result grid: sortable + resizable columns + red remove-x",
@@ -6847,4 +7010,10 @@ console.log("OK");
         ("TypeScript type-check (tsc)", t_typecheck),
         ("production build (vite)", t_build),
     ]:
+        _only = os.environ.get("SAMQL_ONLY")
+        _skip = os.environ.get("SAMQL_SKIP")
+        if _only and _only not in name:
+            continue
+        if _skip and _skip in name:
+            continue
         run("frontend", name, fn)

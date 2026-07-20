@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
 import { api } from "../../lib/api";
 import { paletteColors } from "../../lib/chartOption";
@@ -23,6 +23,7 @@ import {
   ReorderList,
 } from "./InspectorControls";
 import { InspectorShell } from "./InspectorShell";
+import { findChildNode } from "./nodeFlowGraphCommands";
 import {
   filterSelectFields,
   isSelectFieldMissingUpstream,
@@ -253,6 +254,50 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
   const [selectFieldSortDir, setSelectFieldSortDir] = useState<"asc" | "desc">(
     "asc",
   );
+  // Rename is drafted locally and committed on blur/Enter (and when leaving
+  // the Select) only. Patching on every keystroke used to push intermediate
+  // names into the graph signature → downstream Select reconcile tombstoned
+  // fragments like "Hi" / "My" / "Name" while typing "Hi My Name".
+  //
+  // Canvas selection is pointerdown-first, so blur may never run (or may run
+  // after `sel` already points at another node). Drafts therefore carry the
+  // editing Select's nodeId and commit via `patch` against that id — never
+  // via selection-scoped `updateField`.
+  const [selectRenameDraft, setSelectRenameDraft] = useState<{
+    nodeId: string;
+    name: string;
+    value: string;
+  } | null>(null);
+  const selectRenameDraftRef = useRef(selectRenameDraft);
+  selectRenameDraftRef.current = selectRenameDraft;
+  const selectRenameDiscardRef = useRef(false);
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+  const patchRef = useRef(patch);
+  patchRef.current = patch;
+  const commitSelectRenameDraft = () => {
+    if (selectRenameDiscardRef.current) {
+      selectRenameDiscardRef.current = false;
+      selectRenameDraftRef.current = null;
+      setSelectRenameDraft(null);
+      return;
+    }
+    const draft = selectRenameDraftRef.current;
+    if (!draft) return;
+    selectRenameDraftRef.current = null;
+    setSelectRenameDraft(null);
+    const node =
+      nodesRef.current.find((n) => n.id === draft.nodeId) ||
+      findChildNode(nodesRef.current, draft.nodeId)?.child ||
+      null;
+    if (!node || node.type !== "select") return;
+    const fields = [...((node.config?.fields || []) as SelField[])];
+    const idx = fields.findIndex((f) => f.name === draft.name);
+    if (idx < 0) return;
+    if (draft.value === (fields[idx].rename || "")) return;
+    fields[idx] = { ...fields[idx], rename: draft.value };
+    patchRef.current(draft.nodeId, { fields });
+  };
   const [apiConnProfiles, setApiConnProfiles] = useState<
     { key: string; name: string; fields: Record<string, unknown> }[]
   >([]);
@@ -267,6 +312,11 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
   useEffect(() => {
     setSelectFieldSearch("");
     setSelectFieldSortDir("asc");
+    // Flush any in-flight rename for the Select we are leaving. Selection
+    // changes on pointerdown, often before the rename input's blur.
+    return () => {
+      commitSelectRenameDraft();
+    };
   }, [sel?.id]);
   useEffect(() => {
     const kind = sel ? getNodeInspectorType(sel.type) : null;
@@ -957,12 +1007,49 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             </select>
                             <input
                               className="nb2-field-rename"
+                              data-testid={`select-field-rename-${f.name}`}
                               placeholder="rename…"
-                              value={f.rename || ""}
-                              onChange={(e) =>
-                                updateField(i, { rename: e.target.value })
+                              value={
+                                selectRenameDraft?.nodeId === sel.id &&
+                                selectRenameDraft?.name === f.name
+                                  ? selectRenameDraft.value
+                                  : f.rename || ""
                               }
-                              title="Rename this field (header) — moves with the field when reordered"
+                              onFocus={() => {
+                                selectRenameDiscardRef.current = false;
+                                const next = {
+                                  nodeId: sel.id,
+                                  name: f.name,
+                                  value: f.rename || "",
+                                };
+                                selectRenameDraftRef.current = next;
+                                setSelectRenameDraft(next);
+                              }}
+                              onChange={(e) => {
+                                const next = {
+                                  nodeId: sel.id,
+                                  name: f.name,
+                                  value: e.target.value,
+                                };
+                                // Sync ref immediately so blur / selection
+                                // change in the same tick still sees the value.
+                                selectRenameDraftRef.current = next;
+                                setSelectRenameDraft(next);
+                              }}
+                              onBlur={() => {
+                                commitSelectRenameDraft();
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  (e.target as HTMLInputElement).blur();
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  selectRenameDiscardRef.current = true;
+                                  (e.target as HTMLInputElement).blur();
+                                }
+                              }}
+                              title="Rename this field (header) — applied on Enter or when you leave the field; moves with the field when reordered"
                             />
                             {missing && (
                               <span
@@ -6654,6 +6741,16 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     placeholder="flow_result"
                     onChange={(e) => patch(sel.id, { name: e.target.value })}
                   />
+                  <label className="nb2-lbl">Store in</label>
+                  <select
+                    className="nb2-in"
+                    data-testid="write-destination"
+                    value={sel.config.dest || "duckdb"}
+                    onChange={(e) => patch(sel.id, { dest: e.target.value })}
+                  >
+                    <option value="duckdb">DuckDB</option>
+                    <option value="sqlite">SQLite</option>
+                  </select>
                   <label className="nb2-lbl">When the table exists</label>
                   <select
                     className="nb2-in"
@@ -6700,8 +6797,11 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     </>
                   )}
                   <div className="nb2-hint-sm">
-                    Writes the incoming rows to a loaded table you can query and
-                    join.
+                    Writes the incoming rows to a loaded{" "}
+                    {(sel.config.dest || "duckdb") === "sqlite"
+                      ? "SQLite"
+                      : "DuckDB"}{" "}
+                    table you can query and join.
                     {(sel.config.mode || "overwrite") === "append"
                       ? " Append adds to the table (creating it on the first write)."
                       : " Overwrite replaces a table of the same name."}

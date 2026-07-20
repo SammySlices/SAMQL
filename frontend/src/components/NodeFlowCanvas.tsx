@@ -8,8 +8,10 @@ import {
   type CanvasNodeMemoState,
   isNodeFlowPointerDragging,
   nodeHeight,
+  nodeUsesSphereChrome,
   nodeWidth,
   sameCanvasNodeMemoState,
+  sphereSize,
 } from "../lib/nodeFlowModel";
 
 export type Wire = NodeFlowWire;
@@ -151,11 +153,22 @@ function CanvasNodeFrameImpl({
   dying,
   born,
   lineageFlash,
+  denseMode,
+  sphereMode,
   onPointerDown,
   onContextMenu,
   children,
 }: CanvasNodeFrameProps) {
+  void denseMode;
   useRenderCount(`NodeFlowNode:${node.id}`);
+  // Prefer the React prop so brand-new cards (palette drop / duplicate /
+  // Created Node) sphere on first paint without waiting on html.nb-sphere.
+  const sphere = nodeUsesSphereChrome(node, sphereMode);
+  const hoverName = String(
+    node.config.label || node.config.name || node.type,
+  );
+  const w = sphere ? sphereSize() : nodeWidth(node);
+  const h = sphere ? sphereSize() : nodeHeight(node);
   return (
     <div
       data-testid="nodeflow-node"
@@ -173,14 +186,21 @@ function CanvasNodeFrameImpl({
         (snapped ? " snap" : "") +
         (dying ? " dying" : "") +
         (born ? " born" : "") +
-        (lineageFlash ? " lineage-flash" : "")
+        (lineageFlash ? " lineage-flash" : "") +
+        (sphere ? " sphere" : "")
       }
-      title={error ? "Error: " + error : warning || undefined}
+      title={
+        error
+          ? "Error: " + error
+          : sphere
+            ? hoverName
+            : warning || undefined
+      }
       style={{
         left: node.x,
         top: node.y,
-        width: nodeWidth(node),
-        height: nodeHeight(node),
+        width: w,
+        height: h,
         ...(ripple
           ? { animationDelay: Math.min(index * 35, 420) + "ms" }
           : {}),

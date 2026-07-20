@@ -182,6 +182,55 @@ describe("reconcileSelectFields case-insensitive matching", () => {
     expect(isSelectFieldMissingUpstream(next[1], ["a"])).toBe(true);
   });
 
+  it("commit-on-blur upstream rename leaves only final name downstream (no Hi/My/Name fragments)", () => {
+    // Select→Select: typing A→"Hi"→"Hi My"→"Hi My Name" with pauses used to
+    // publish each draft as upstream output, so reconcile tombstoned Hi /
+    // Hi My. With rename commit-on-blur, only the final name reaches here.
+    let down: SelField[] = [
+      { name: "A", keep: true },
+      { name: "amount", keep: true },
+    ];
+    down = reconcileSelectFields(["Hi My Name", "amount"], down);
+    expect(down.map((f) => f.name)).toEqual(["A", "amount", "Hi My Name"]);
+    const missing = down
+      .filter((f) =>
+        isSelectFieldMissingUpstream(f, ["Hi My Name", "amount"]),
+      )
+      .map((f) => f.name);
+    expect(missing).toEqual(["A"]);
+    expect(missing).not.toContain("Hi");
+    expect(missing).not.toContain("Hi My");
+    expect(missing).not.toContain("My");
+    expect(missing).not.toContain("Name");
+
+    // Contrast: the buggy per-pause publish path accumulates fragments.
+    let buggy: SelField[] = [
+      { name: "A", keep: true },
+      { name: "amount", keep: true },
+    ];
+    for (const cols of [
+      ["Hi", "amount"],
+      ["Hi My", "amount"],
+      ["Hi My Name", "amount"],
+    ] as string[][]) {
+      buggy = reconcileSelectFields(cols, buggy);
+    }
+    expect(
+      buggy
+        .filter((f) =>
+          isSelectFieldMissingUpstream(f, ["Hi My Name", "amount"]),
+        )
+        .map((f) => f.name)
+        .sort(),
+    ).toEqual(["A", "Hi", "Hi My"]);
+
+    // True upstream removal still tombstones; Clear missing still drops it.
+    expect(clearMissingSelectFields(down, ["Hi My Name", "amount"])).toEqual([
+      { name: "amount", keep: true },
+      { name: "Hi My Name", keep: true },
+    ]);
+  });
+
   it("treats unknown upstream (null/undefined) as not missing", () => {
     const f: SelField = { name: "a", keep: true };
     expect(isSelectFieldMissingUpstream(f, null)).toBe(false);

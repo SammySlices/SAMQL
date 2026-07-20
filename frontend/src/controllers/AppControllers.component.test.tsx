@@ -114,8 +114,8 @@ describe("Phase 5 App controllers", () => {
   });
 
   it("catalog controller keeps the newest table refresh response", async () => {
-    const first = deferred<any[]>();
-    const second = deferred<any[]>();
+    const first = deferred<{ tables: any[]; data_epoch: number }>();
+    const second = deferred<{ tables: any[]; data_epoch: number }>();
     apiMock.tables
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
@@ -126,11 +126,17 @@ describe("Phase 5 App controllers", () => {
       result.current.refreshTables();
     });
     await act(async () => {
-      second.resolve([{ name: "new", engine: "duckdb", columns: [] }]);
+      second.resolve({
+        tables: [{ name: "new", engine: "duckdb", columns: [] }],
+        data_epoch: 2,
+      });
       await second.promise;
     });
     await act(async () => {
-      first.resolve([{ name: "old", engine: "duckdb", columns: [] }]);
+      first.resolve({
+        tables: [{ name: "old", engine: "duckdb", columns: [] }],
+        data_epoch: 1,
+      });
       await first.promise;
     });
     expect(result.current.tables.map((table) => table.name)).toEqual(["new"]);

@@ -1,8 +1,7 @@
 import {
   PORTS,
   isTopInput,
-  nodeHeight,
-  nodeWidth,
+  nodeWorldBounds,
   portsOf,
   portXY,
   type NbEdge,
@@ -92,8 +91,11 @@ export function buildNodeFlowRenderModel(
   edges: readonly NbEdge[],
   /** React cache key — densify() reads the shared layout flag. */
   denseMode = false,
+  /** React cache key — sphere helpers read the shared layout flag. */
+  sphereMode = false,
 ): NodeFlowRenderModel {
   void denseMode;
+  void sphereMode;
   const nodeById = new Map<string, NbNode>();
   const nodeIndexById = new Map<string, number>();
   const incomingMutable: Record<string, NbEdge[]> = {};
@@ -399,24 +401,21 @@ export function selectVisibleCanvasNodes(
   overscanPx = LARGE_GRAPH_OVERSCAN_PX,
   /** React cache key — densify() reads the shared layout flag. */
   denseMode = false,
+  /** React cache key — sphere helpers read the shared layout flag. */
+  sphereMode = false,
 ): NbNode[] {
   void denseMode;
+  void sphereMode;
   // Under the large-graph threshold, return the same array identity so
   // Scene/WireLayer memo can skip when nothing else changed.
   if (nodes.length <= threshold) return nodes as NbNode[];
   const bounds = nodeFlowViewBounds(viewport, zoom, overscanPx);
   if (!bounds) return nodes as NbNode[];
-  return nodes.filter(
-    (node) =>
-      forcedIds.has(node.id) ||
-      intersects(
-        node.x,
-        node.y,
-        node.x + nodeWidth(node),
-        node.y + nodeHeight(node),
-        bounds,
-      ),
-  );
+  return nodes.filter((node) => {
+    if (forcedIds.has(node.id)) return true;
+    const b = nodeWorldBounds(node);
+    return intersects(b.x0, b.y0, b.x1, b.y1, bounds);
+  });
 }
 
 export function selectVisibleCanvasWires(

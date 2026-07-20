@@ -425,6 +425,8 @@ export const Dashboard: React.FC<{
   onWorkflowsChanged?: () => void;
   inspectorHost?: HTMLElement | null;
   onSelectionChange?: (hasSelection: boolean) => void;
+  /** When false, Dashboard is hidden but kept mounted — pause global shortcuts. */
+  active?: boolean;
 }> = ({
   onToast,
   command,
@@ -434,6 +436,7 @@ export const Dashboard: React.FC<{
   onWorkflowsChanged,
   inspectorHost: _inspectorHost,
   onSelectionChange,
+  active = true,
 }) => {
   void _inspectorHost;
   const [workspace, setWorkspace] = useState<DashboardWorkspace>(() =>
@@ -585,6 +588,7 @@ export const Dashboard: React.FC<{
   }, [expandedId, doc.widgets]);
 
   useEffect(() => {
+    if (!active) return;
     if (configKind == null && expandedId == null) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -596,7 +600,7 @@ export const Dashboard: React.FC<{
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [configKind, configMinimized, closeConfig, expandedId, closeExpand]);
+  }, [active, configKind, configMinimized, closeConfig, expandedId, closeExpand]);
 
   const openTitleConfig = useCallback(() => {
     setSelectedId(null);
@@ -659,9 +663,11 @@ export const Dashboard: React.FC<{
     setActiveDoc((d) => ({ ...d, widgetsLocked: !d.widgetsLocked }));
   }, [setActiveDoc]);
 
-  // Scoped to Dashboard mount (view is exclusive); skip editable fields so
-  // native text undo and SQL editor (other views) are unaffected.
+  // Scoped to the active Dashboard view; skip when keep-mounted but hidden
+  // so IDE/Journal undo shortcuts are not stolen. Skip editable fields so
+  // native text undo is unaffected.
   useEffect(() => {
+    if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
       const el = e.target as HTMLElement | null;
@@ -685,7 +691,7 @@ export const Dashboard: React.FC<{
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undoDash, redoDash]);
+  }, [active, undoDash, redoDash]);
 
   const updateWidget = useCallback(
     (id: string, patch: Partial<DashboardWidget>) => {
@@ -877,12 +883,9 @@ export const Dashboard: React.FC<{
   const cancelRun = useCallback(async () => {
     const cur = runRef.current;
     if (!cur) return;
+    // Scoped cancel only — do not api.cancelAll() (that would kill IDE /
+    // Journal / NodeFlow runs that should keep going across tab switches).
     cancelOne(cur.queryId, cur.ctrl);
-    try {
-      await api.cancelAll();
-    } catch {
-      /* best-effort backend interrupt */
-    }
     onToast("warn", "Cancelled", "Dashboard run stopped.");
   }, [onToast]);
 

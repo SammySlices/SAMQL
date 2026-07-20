@@ -303,8 +303,8 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   },
   write: {
     title: "Write to table",
-    what: "Writes the input into a named table so other flows and cells can read it.",
-    use: "Name the table and choose overwrite or append.",
+    what: "Writes the input into a named DuckDB table (SQLite optional) so other flows and cells can read it.",
+    use: "Name the table, keep Store in as DuckDB unless you need SQLite, then choose overwrite or append.",
   },
   output: {
     title: "Output",

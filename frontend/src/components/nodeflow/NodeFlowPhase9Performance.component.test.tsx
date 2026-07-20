@@ -88,6 +88,7 @@ function makeSceneProps(
     setHoveredInput: vi.fn(),
     setNodeMenu: vi.fn(),
     denseMode: false,
+    sphereMode: false,
   };
 }
 

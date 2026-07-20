@@ -9,7 +9,7 @@ const apiMock = vi.hoisted(() => ({
     build: "test",
     features: { duckdb: true },
   })),
-  tables: vi.fn(async () => []),
+  tables: vi.fn(async () => ({ tables: [], data_epoch: 0 })),
   history: vi.fn(async () => ({ history: [] })),
   saved: vi.fn(async () => ({ saved: [] })),
   workflowsList: vi.fn(async () => ({ workflows: [] })),
@@ -71,20 +71,25 @@ vi.mock("../components/ActivityShared", () => ({
 }));
 
 import App from "../App";
-import { setNodeFlowDenseMode } from "./nodeFlowModel";
+import { setNodeFlowDenseMode, setNodeFlowSphereMode } from "./nodeFlowModel";
 
 describe("Settings View consolidations", () => {
   beforeEach(() => {
     localStorage.clear();
     setNodeFlowDenseMode(false);
+    setNodeFlowSphereMode(false);
     document.documentElement.classList.remove(
       "eye-care",
       "nb-dense",
+      "nb-sphere",
       "theme-light",
       "has-user-canvas-bg",
       "has-user-canvas-bg-ide",
       "has-user-canvas-bg-journal",
       "has-user-canvas-bg-node",
+      "has-user-canvas-text-ide",
+      "has-user-canvas-text-journal",
+      "has-user-canvas-text-node",
       "has-user-canvas-dot-node",
       "canvas-node-luma-dark",
       "canvas-node-luma-light",
@@ -93,6 +98,9 @@ describe("Settings View consolidations", () => {
     document.documentElement.style.removeProperty("--user-canvas-bg-ide");
     document.documentElement.style.removeProperty("--user-canvas-bg-journal");
     document.documentElement.style.removeProperty("--user-canvas-bg-node");
+    document.documentElement.style.removeProperty("--user-canvas-text-ide");
+    document.documentElement.style.removeProperty("--user-canvas-text-journal");
+    document.documentElement.style.removeProperty("--user-canvas-text-node");
     document.documentElement.style.removeProperty("--user-canvas-dot-color-node");
     document.documentElement.style.removeProperty(
       "--user-canvas-dot-opacity-node",
@@ -100,6 +108,7 @@ describe("Settings View consolidations", () => {
     document.documentElement.removeAttribute("data-canvas-node-luma");
     document.documentElement.removeAttribute("data-eye-care");
     document.documentElement.removeAttribute("data-nb-dense");
+    document.documentElement.removeAttribute("data-nb-sphere");
     document.documentElement.setAttribute("data-theme", "dark");
     document.body.classList.remove("motion-reduced", "canvas-ivory", "editor-ivory");
     apiMock.health.mockClear();
@@ -192,7 +201,7 @@ describe("Settings View consolidations", () => {
     ).toBeTruthy();
   });
 
-  it("nests theme, Eye Care, Reduce motion, Condensed NodeFlow, and Node Snap under Visual Toggles", async () => {
+  it("nests theme, Eye Care, Reduce motion, Condensed NodeFlow, Node Snap, Sphere nodes, and Hover-open tables under Visual Toggles", async () => {
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -207,6 +216,8 @@ describe("Settings View consolidations", () => {
     expect(screen.queryByTestId("eye-care-toggle")).toBeNull();
     expect(screen.queryByTestId("nodeflow-dense-toggle")).toBeNull();
     expect(screen.queryByTestId("node-snap-toggle")).toBeNull();
+    expect(screen.queryByTestId("nodeflow-sphere-toggle")).toBeNull();
+    expect(screen.queryByTestId("tables-drawer-hover-open-toggle")).toBeNull();
     expect(screen.queryByTestId("settings-reduce-motion-toggle")).toBeNull();
     expect(screen.queryByTestId("settings-canvas-color")).toBeNull();
 
@@ -216,6 +227,8 @@ describe("Settings View consolidations", () => {
     const motion = screen.getByTestId("settings-reduce-motion-toggle");
     const dense = screen.getByTestId("nodeflow-dense-toggle");
     const snap = screen.getByTestId("node-snap-toggle");
+    const sphere = screen.getByTestId("nodeflow-sphere-toggle");
+    const hoverTables = screen.getByTestId("tables-drawer-hover-open-toggle");
     const canvasColor = screen.getByTestId("settings-canvas-color");
     expect(theme).toHaveTextContent("Toggle Light Mode");
     expect(eye).toHaveTextContent("Eye Care");
@@ -223,8 +236,15 @@ describe("Settings View consolidations", () => {
     expect(dense).toHaveTextContent("Condensed NodeFlow");
     expect(snap).toHaveTextContent("Node Snap");
     expect(snap).toHaveAttribute("aria-pressed", "false");
+    expect(sphere).toHaveTextContent("Sphere nodes: on");
+    expect(sphere).toHaveAttribute("aria-pressed", "true");
+    expect(hoverTables).toHaveTextContent("Hover-open tables");
+    expect(hoverTables).toHaveAttribute("aria-pressed", "false");
     expect(canvasColor).toHaveTextContent("Change Canvas Color");
     expect(localStorage.getItem("samql.nodeSnap")).toBe("0");
+    expect(localStorage.getItem("samql.nodeSphere")).toBe("1");
+    expect(localStorage.getItem("samql.tablesDrawerHoverOpen")).toBe("0");
+    expect(document.documentElement.classList.contains("nb-sphere")).toBe(true);
 
     fireEvent.click(theme);
     await waitFor(() => {
@@ -263,6 +283,101 @@ describe("Settings View consolidations", () => {
       expect(snap).toHaveTextContent("Node Snap: on");
       expect(localStorage.getItem("samql.nodeSnap")).toBe("1");
     });
+
+    fireEvent.click(sphere);
+    await waitFor(() => {
+      expect(sphere).toHaveAttribute("aria-pressed", "false");
+      expect(sphere).toHaveTextContent("Sphere nodes");
+      expect(localStorage.getItem("samql.nodeSphere")).toBe("0");
+      expect(document.documentElement.classList.contains("nb-sphere")).toBe(
+        false,
+      );
+    });
+
+    fireEvent.click(sphere);
+    await waitFor(() => {
+      expect(sphere).toHaveAttribute("aria-pressed", "true");
+      expect(sphere).toHaveTextContent("Sphere nodes: on");
+      expect(localStorage.getItem("samql.nodeSphere")).toBe("1");
+      expect(document.documentElement.classList.contains("nb-sphere")).toBe(
+        true,
+      );
+    });
+
+    fireEvent.click(hoverTables);
+    await waitFor(() => {
+      expect(hoverTables).toHaveAttribute("aria-pressed", "true");
+      expect(hoverTables).toHaveTextContent("Hover-open tables: on");
+      expect(localStorage.getItem("samql.tablesDrawerHoverOpen")).toBe("1");
+      expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+        "data-hover-open-full",
+        "1",
+      );
+    });
+
+    fireEvent.click(hoverTables);
+    await waitFor(() => {
+      expect(hoverTables).toHaveAttribute("aria-pressed", "false");
+      expect(hoverTables).toHaveTextContent("Hover-open tables");
+      expect(localStorage.getItem("samql.tablesDrawerHoverOpen")).toBe("0");
+      expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+        "data-hover-open-full",
+        "0",
+      );
+    });
+  });
+
+  it("restores Hover-open tables on from localStorage 1", async () => {
+    localStorage.setItem("samql.tablesDrawerHoverOpen", "1");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    const hoverTables = screen.getByTestId("tables-drawer-hover-open-toggle");
+    expect(hoverTables).toHaveAttribute("aria-pressed", "true");
+    expect(hoverTables).toHaveTextContent("Hover-open tables: on");
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-hover-open-full",
+      "1",
+    );
+  });
+
+  it("restores Sphere nodes off from explicit localStorage 0", async () => {
+    localStorage.setItem("samql.nodeSphere", "0");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    const sphere = screen.getByTestId("nodeflow-sphere-toggle");
+    expect(sphere).toHaveAttribute("aria-pressed", "false");
+    expect(sphere).toHaveTextContent("Sphere nodes");
+    expect(localStorage.getItem("samql.nodeSphere")).toBe("0");
+  });
+
+  it("defaults Sphere nodes on for missing or corrupt localStorage", async () => {
+    localStorage.setItem("samql.nodeSphere", "maybe");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    const sphere = screen.getByTestId("nodeflow-sphere-toggle");
+    expect(sphere).toHaveAttribute("aria-pressed", "true");
+    expect(localStorage.getItem("samql.nodeSphere")).toBe("1");
   });
 
   it("Change Canvas Color opens floating modal with surface tabs", async () => {
@@ -289,6 +404,7 @@ describe("Settings View consolidations", () => {
     expect(screen.getByTestId("settings-canvas-tab-journal")).toBeTruthy();
     expect(screen.getByTestId("settings-canvas-tab-node")).toBeTruthy();
     expect(screen.getByTestId("settings-canvas-color-input")).toBeTruthy();
+    expect(screen.getByTestId("settings-canvas-text-input")).toBeTruthy();
 
     const swatch = screen.getByTestId("settings-canvas-swatch-e4ebe4");
     fireEvent.click(swatch);
@@ -300,6 +416,19 @@ describe("Settings View consolidations", () => {
       expect(
         document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
       ).toBe("#e4ebe4");
+    });
+
+    fireEvent.click(screen.getByTestId("settings-canvas-text-swatch-ffffff"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasTextColor.ide")).toBe("#ffffff");
+      expect(
+        document.documentElement.classList.contains("has-user-canvas-text-ide"),
+      ).toBe(true);
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-text-ide",
+        ),
+      ).toBe("#ffffff");
     });
 
     fireEvent.click(screen.getByTestId("settings-canvas-tab-journal"));
@@ -319,6 +448,18 @@ describe("Settings View consolidations", () => {
       expect(localStorage.getItem("samql.canvasColor.ide")).toBe("#e4ebe4");
     });
 
+    fireEvent.click(screen.getByTestId("settings-canvas-text-swatch-111111"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasTextColor.journal")).toBe(
+        "#111111",
+      );
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-text-journal",
+        ),
+      ).toBe("#111111");
+    });
+
     fireEvent.click(screen.getByTestId("settings-canvas-tab-node"));
     const wheel = screen.getByTestId(
       "settings-canvas-color-input",
@@ -329,6 +470,20 @@ describe("Settings View consolidations", () => {
       expect(
         document.documentElement.style.getPropertyValue("--user-canvas-bg-node"),
       ).toBe("#ececec");
+    });
+    const textWheel = screen.getByTestId(
+      "settings-canvas-text-input",
+    ) as HTMLInputElement;
+    fireEvent.input(textWheel, { target: { value: "#54b949" } });
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasTextColor.node")).toBe(
+        "#54b949",
+      );
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-text-node",
+        ),
+      ).toBe("#54b949");
     });
     expect(screen.getByTestId("settings-canvas-dots")).toBeTruthy();
     expect(screen.getByTestId("settings-canvas-dot-color")).toBeTruthy();
@@ -465,6 +620,7 @@ describe("Settings View consolidations", () => {
 
   it("resets a surface canvas color to default", async () => {
     localStorage.setItem("samql.canvasColor.ide", "#ffffff");
+    localStorage.setItem("samql.canvasTextColor.ide", "#111111");
     render(<App />);
     await waitFor(() =>
       expect(screen.getByTestId("samql-app")).toHaveAttribute(
@@ -481,12 +637,92 @@ describe("Settings View consolidations", () => {
     fireEvent.click(screen.getByTestId("settings-canvas-color-reset"));
     await waitFor(() => {
       expect(localStorage.getItem("samql.canvasColor.ide")).toBeNull();
+      expect(localStorage.getItem("samql.canvasTextColor.ide")).toBeNull();
       expect(
         document.documentElement.classList.contains("has-user-canvas-bg-ide"),
       ).toBe(false);
       expect(
+        document.documentElement.classList.contains("has-user-canvas-text-ide"),
+      ).toBe(false);
+      expect(
         document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
       ).toBe("");
+      expect(
+        document.documentElement.style.getPropertyValue(
+          "--user-canvas-text-ide",
+        ),
+      ).toBe("");
+    });
+  });
+
+  it("clears custom canvas bg/text on light↔dark theme switch", async () => {
+    localStorage.setItem("samql.canvasColor.ide", "#ffffff");
+    localStorage.setItem("samql.canvasColor.journal", "#ececec");
+    localStorage.setItem("samql.canvasColor.node", "#e4ebe4");
+    localStorage.setItem("samql.canvasTextColor.ide", "#111111");
+    localStorage.setItem("samql.canvasTextColor.journal", "#222222");
+    localStorage.setItem("samql.canvasTextColor.node", "#54b949");
+    localStorage.setItem("samql.canvasDotColor.node", "#aabbcc");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    expect(
+      document.documentElement.classList.contains("has-user-canvas-bg-ide"),
+    ).toBe(true);
+    expect(
+      document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
+    ).toBe("#ffffff");
+
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    const theme = screen.getByTestId("settings-theme-toggle");
+    fireEvent.click(theme);
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.theme")).toBe("light");
+      expect(localStorage.getItem("samql.canvasColor.ide")).toBeNull();
+      expect(localStorage.getItem("samql.canvasColor.journal")).toBeNull();
+      expect(localStorage.getItem("samql.canvasColor.node")).toBeNull();
+      expect(localStorage.getItem("samql.canvasTextColor.ide")).toBeNull();
+      expect(localStorage.getItem("samql.canvasTextColor.journal")).toBeNull();
+      expect(localStorage.getItem("samql.canvasTextColor.node")).toBeNull();
+      expect(
+        document.documentElement.classList.contains("has-user-canvas-bg-ide"),
+      ).toBe(false);
+      expect(
+        document.documentElement.classList.contains(
+          "has-user-canvas-text-node",
+        ),
+      ).toBe(false);
+      expect(
+        document.documentElement.style.getPropertyValue("--user-canvas-bg-ide"),
+      ).toBe("");
+      // Snap-grid dots are not theme canvas colors; leave them alone.
+      expect(localStorage.getItem("samql.canvasDotColor.node")).toBe("#aabbcc");
+    });
+
+    // Re-apply a custom color in light mode, then switch back to dark.
+    fireEvent.click(screen.getByTestId("settings-canvas-color"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-canvas-color-panel")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByTestId("settings-canvas-swatch-ffffff"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.canvasColor.ide")).toBe("#ffffff");
+    });
+    fireEvent.click(screen.getByTestId("settings-button"));
+    fireEvent.click(screen.getByTestId("settings-visual-toggles"));
+    fireEvent.click(screen.getByTestId("settings-theme-toggle"));
+    await waitFor(() => {
+      expect(localStorage.getItem("samql.theme")).toBe("dark");
+      expect(localStorage.getItem("samql.canvasColor.ide")).toBeNull();
+      expect(localStorage.getItem("samql.canvasTextColor.ide")).toBeNull();
+      expect(
+        document.documentElement.classList.contains("has-user-canvas-bg-ide"),
+      ).toBe(false);
     });
   });
 

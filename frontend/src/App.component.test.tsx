@@ -33,7 +33,21 @@ vi.mock("./lib/api", () => ({
 vi.mock("./components/ServerWatchdog", () => ({ ServerWatchdog: () => null }));
 vi.mock("./components/FieldExplorer", () => ({ FieldExplorer: () => null }));
 vi.mock("./components/NodeFlow", () => ({
-  NodeFlow: () => <div data-testid="nodeflow-view">NodeFlow</div>,
+  NodeFlow: (props: { active?: boolean }) => (
+    <div data-testid="nodeflow-view" data-active={props.active === false ? "0" : "1"}>
+      NodeFlow
+    </div>
+  ),
+}));
+vi.mock("./components/Dashboard", () => ({
+  Dashboard: (props: { active?: boolean }) => (
+    <div
+      data-testid="dashboard-view"
+      data-active={props.active === false ? "0" : "1"}
+    >
+      Dashboard
+    </div>
+  ),
 }));
 vi.mock("./components/Notebook", () => ({
   Notebook: (props: {
@@ -105,7 +119,7 @@ describe("App runtime behavior", () => {
   beforeEach(() => {
     vi.resetModules();
     apiMock.health.mockReset().mockResolvedValue(health);
-    apiMock.tables.mockReset().mockResolvedValue([]);
+    apiMock.tables.mockReset().mockResolvedValue({ tables: [], data_epoch: 0 });
     apiMock.history.mockReset().mockResolvedValue([]);
     apiMock.saved.mockReset().mockResolvedValue([]);
     apiMock.workflowsList.mockReset().mockResolvedValue({ workflows: [] });
@@ -135,7 +149,76 @@ describe("App runtime behavior", () => {
 
     fireEvent.click(screen.getByTestId("view-journal"));
     expect(journal).toBeVisible();
-    expect(screen.queryByTestId("ide-sql-editor")).not.toBeInTheDocument();
+    // IDE stays mounted (hidden) so in-flight queries are not aborted on unmount.
+    expect(screen.getByTestId("ide-sql-editor")).toBeInTheDocument();
+    expect(screen.getByTestId("ide-sql-editor")).not.toBeVisible();
+  });
+
+  it("keeps IDE mounted across Journal / NodeFlow / Dashboard switches", async () => {
+    await renderFreshApp();
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute("data-ready", "true"),
+    );
+
+    const ide = screen.getByTestId("ide-sql-editor");
+    expect(ide).toBeVisible();
+
+    fireEvent.click(screen.getByTestId("view-journal"));
+    expect(screen.getByTestId("ide-surface")).not.toBeVisible();
+    expect(screen.getByTestId("ide-sql-editor")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("view-nodeflow"));
+    await waitFor(() =>
+      expect(screen.getByTestId("nodeflow-view")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("nodeflow-view")).toBeVisible();
+    expect(screen.getByTestId("nodeflow-view")).toHaveAttribute(
+      "data-active",
+      "1",
+    );
+    expect(screen.getByTestId("ide-sql-editor")).toBeInTheDocument();
+    expect(screen.getByTestId("ide-sql-editor")).not.toBeVisible();
+
+    fireEvent.click(screen.getByTestId("view-dashboard"));
+    await waitFor(() =>
+      expect(screen.getByTestId("dashboard-view")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("dashboard-view")).toBeVisible();
+    expect(screen.getByTestId("dashboard-view")).toHaveAttribute(
+      "data-active",
+      "1",
+    );
+    // Previously visited NodeFlow stays mounted but inactive.
+    expect(screen.getByTestId("nodeflow-view")).toBeInTheDocument();
+    expect(screen.getByTestId("nodeflow-view")).not.toBeVisible();
+    expect(screen.getByTestId("nodeflow-view")).toHaveAttribute(
+      "data-active",
+      "0",
+    );
+    expect(screen.getByTestId("ide-sql-editor")).toBeInTheDocument();
+    expect(screen.getByTestId("ide-sql-editor")).not.toBeVisible();
+
+    fireEvent.click(screen.getByTestId("view-ide"));
+    expect(screen.getByTestId("ide-sql-editor")).toBeVisible();
+    expect(screen.getByTestId("dashboard-view")).not.toBeVisible();
+    expect(screen.getByTestId("dashboard-view")).toHaveAttribute(
+      "data-active",
+      "0",
+    );
+
+    // Round-trip IDE → Journal → NodeFlow must keep the same NodeFlow mount
+    // (display:none), so last-run preview cache state is not torn down.
+    const nodeFlowEl = screen.getByTestId("nodeflow-view");
+    fireEvent.click(screen.getByTestId("view-journal"));
+    expect(screen.getByTestId("nodeflow-view")).toBe(nodeFlowEl);
+    expect(screen.getByTestId("nodeflow-view")).not.toBeVisible();
+    fireEvent.click(screen.getByTestId("view-nodeflow"));
+    expect(screen.getByTestId("nodeflow-view")).toBe(nodeFlowEl);
+    expect(screen.getByTestId("nodeflow-view")).toBeVisible();
+    expect(screen.getByTestId("nodeflow-view")).toHaveAttribute(
+      "data-active",
+      "1",
+    );
   });
 
   it("opens SQL assistant from Journal in copy-only mode", async () => {
@@ -305,8 +388,8 @@ describe("App runtime behavior", () => {
   });
 
   it("keeps the newest table refresh when responses complete out of order", async () => {
-    const older = deferred<any[]>();
-    const newer = deferred<any[]>();
+    const older = deferred<{ tables: any[]; data_epoch: number }>();
+    const newer = deferred<{ tables: any[]; data_epoch: number }>();
     apiMock.tables
       .mockReturnValueOnce(older.promise)
       .mockReturnValueOnce(newer.promise);
@@ -314,10 +397,16 @@ describe("App runtime behavior", () => {
     await renderFreshApp();
     fireEvent.focus(window);
 
-    newer.resolve([{ name: "new_catalog", columns: [], engine: "sqlite" }]);
+    newer.resolve({
+      tables: [{ name: "new_catalog", columns: [], engine: "sqlite" }],
+      data_epoch: 2,
+    });
     await waitFor(() => expect(screen.getByTestId("sidebar-tables")).toHaveTextContent("new_catalog"));
 
-    older.resolve([{ name: "stale_catalog", columns: [], engine: "sqlite" }]);
+    older.resolve({
+      tables: [{ name: "stale_catalog", columns: [], engine: "sqlite" }],
+      data_epoch: 1,
+    });
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByTestId("sidebar-tables")).toHaveTextContent("new_catalog");
     expect(screen.getByTestId("sidebar-tables")).not.toHaveTextContent("stale_catalog");

@@ -194,6 +194,7 @@ def run_suite(*, self_test: bool) -> dict[str, Any]:
     s = Session()
     try:
         s.flow_cache = True
+        s.fresh_run = False  # isolate from persisted Fresh-run setting
         s.run_query("CREATE TABLE flow_src AS SELECT 1 AS g",
                     target=LOCAL_TARGET)
         s.run_query("CREATE TABLE other_tbl AS SELECT 1 AS x",

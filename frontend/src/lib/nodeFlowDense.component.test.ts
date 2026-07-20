@@ -49,11 +49,15 @@ describe("Dense NodeFlow", () => {
       born: false,
       lineageFlash: false,
       denseMode: false,
+      sphereMode: false,
       renderVersion: "g1",
       chartVersion: null,
       childSelection: null,
     };
     expect(sameCanvasNodeMemoState(base, { ...base, denseMode: true })).toBe(
+      false,
+    );
+    expect(sameCanvasNodeMemoState(base, { ...base, sphereMode: true })).toBe(
       false,
     );
     expect(sameCanvasNodeMemoState(base, { ...base })).toBe(true);

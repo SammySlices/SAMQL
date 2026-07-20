@@ -347,6 +347,8 @@ export interface FlowCacheInfo {
     pressure: string;
   };
   persistent_enabled: boolean;
+  /** When true, NodeFlow runs skip volatile/persistent reuse after Input checks. */
+  fresh_run?: boolean;
   persistent: {
     path: string;
     size: number;
@@ -494,6 +496,41 @@ export const api = {
     jsonFetch<{ ok: boolean; order?: string[] }>("/api/tables/reorder", {
       method: "POST",
       body: JSON.stringify({ order }),
+    }),
+  /** Reload a file-backed table; default uniquifies into a new name. */
+  reloadTable: (
+    engine: string,
+    table: string,
+    opts?: { replace?: boolean; fresh?: boolean },
+  ) =>
+    jsonFetch<{
+      ok: boolean;
+      name: string;
+      previous?: string;
+      replaced?: boolean;
+      path?: string;
+      tables?: unknown[];
+      all?: TableInfo[];
+      data_epoch?: number;
+      error?: string;
+    }>("/api/table/reload", {
+      method: "POST",
+      body: JSON.stringify({
+        engine,
+        table,
+        replace: !!opts?.replace,
+        ...(opts?.fresh !== undefined ? { fresh: opts.fresh } : {}),
+      }),
+    }),
+  setFreshLoad: (on: boolean) =>
+    jsonFetch<{ fresh_load: boolean }>("/api/settings/fresh-load", {
+      method: "POST",
+      body: JSON.stringify({ on }),
+    }),
+  getFreshLoad: () =>
+    jsonFetch<{ fresh_load: boolean }>("/api/settings/fresh-load", {
+      method: "POST",
+      body: "{}",
     }),
   columnFields: (
     engine: string,
@@ -653,7 +690,12 @@ export const api = {
     headerRow?: number,
     mode = "materialize",
     exclude?: string,
-    opts?: { flatten?: boolean; shred?: boolean; root_id?: RootIdChoice },
+    opts?: {
+      flatten?: boolean;
+      shred?: boolean;
+      root_id?: RootIdChoice;
+      fresh?: boolean;
+    },
   ): Promise<{ job_id: string; bytes_total: number; name: string; files: number }> => {
     const form = buildLoadForm(files, {
       destination,
@@ -665,6 +707,7 @@ export const api = {
       flatten: opts?.flatten,
       shred: opts?.shred,
       rootId: opts?.root_id,
+      fresh: opts?.fresh,
     });
     return formFetch<{
       job_id: string;
@@ -750,7 +793,12 @@ export const api = {
     sheet?: string,
     headerRow?: number,
     exclude?: string,
-    opts?: { flatten?: boolean; shred?: boolean; root_id?: RootIdChoice },
+    opts?: {
+      flatten?: boolean;
+      shred?: boolean;
+      root_id?: RootIdChoice;
+      fresh?: boolean;
+    },
   ) =>
     jsonFetch<{ job_id: string; bytes_total: number; name: string }>(
       "/api/load/start",
@@ -763,6 +811,7 @@ export const api = {
             ? { flatten: opts.flatten } : {}),
           ...(opts && opts.shred ? { shred: true } : {}),
           ...(opts && opts.root_id ? { root_id: opts.root_id } : {}),
+          ...(opts && opts.fresh !== undefined ? { fresh: opts.fresh } : {}),
         }),
       },
     ),
@@ -1237,6 +1286,7 @@ export const api = {
     clear?: boolean;
     reset_stats?: boolean;
     clear_persistent?: boolean;
+    fresh_run?: boolean;
   }) =>
     jsonFetch<FlowCacheInfo>("/api/settings/flow-cache", {
       method: "POST",

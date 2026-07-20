@@ -18,6 +18,66 @@ import { cancelAllRuns, cancelOne, isCancelledError, registerRun, unregisterRun 
 import type { ChartData } from "../../lib/types";
 import type { NodeFlowSnapshot } from "./useNodeFlowDocumentController";
 
+/** FE last-run preview rows — enough for a typical Run-all ancestor closure. */
+const PREVIEW_CACHE_MAX = 64;
+/** Match rememberTableLastRun row cap; keeps seed SELECTs cheap. */
+const LAST_RUN_SEED_PREVIEW_LIMIT = 200;
+
+/** Node types whose output is not a table last-run preview. */
+const LAST_RUN_SEED_SKIP = new Set([
+  "browse",
+  "chart",
+  "dashboard",
+  "text",
+  "output",
+  "write",
+  "iterator",
+  "while",
+  "variable",
+  "samqldash",
+  "dyn_output",
+  "profile",
+  "reconcile",
+]);
+
+/**
+ * (node, port) pairs to seed after a successful Run all / leaf run.
+ * Wired outgoing ports for intermediates; all declared outs for leaves.
+ */
+export function lastRunSeedRequests(
+  nodes: NbNode[],
+  edges: NbEdge[],
+  terminalIds: Iterable<string>,
+): { node: string; port: string }[] {
+  const byId = new Map((nodes || []).map((n) => [n.id, n]));
+  const closure = ancestorNodeIds(edges, terminalIds);
+  const reqs: { node: string; port: string }[] = [];
+  const seen = new Set<string>();
+  for (const id of closure) {
+    const n = byId.get(id);
+    if (!n || LAST_RUN_SEED_SKIP.has(n.type)) continue;
+    const outs = PORTS[n.type]?.outputs || [];
+    if (!outs.length) continue;
+    const used = [
+      ...new Set(
+        (edges || [])
+          .filter(
+            (e) => e.from.node === id && outs.includes(e.from.port),
+          )
+          .map((e) => e.from.port),
+      ),
+    ];
+    const ports = used.length ? used : outs;
+    for (const port of ports) {
+      const key = `${id}::${port}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      reqs.push({ node: id, port });
+    }
+  }
+  return reqs;
+}
+
 export type NodeFlowPreview =
   | {
       kind: "table";
@@ -52,11 +112,30 @@ export type NodeFlowPreview =
       }[];
     };
 
+type LastRunTablePreview = Extract<NodeFlowPreview, { kind: "table" }>;
+
+/**
+ * Module-scoped last-run preview cache. App also keeps NodeFlow mounted
+ * via display:none across IDE / Journal / Dashboard switches (same as
+ * Journal), but this Map still survives a true remount (StrictMode,
+ * dashReload-style remount, or a future layout change). A component
+ * useRef alone would wipe Run-all seeds on that remount. Persist here
+ * until Run all start, dataEpoch bump, workflow-tab reset, or explicit
+ * clear — not App view switches.
+ */
+const lastRunPreviewCache = new Map<string, LastRunTablePreview>();
+
+/** Test helper: drop module cache between cases so seeds do not leak. */
+export function clearLastRunPreviewCacheForTests(): void {
+  lastRunPreviewCache.clear();
+}
+
 interface UseNodeFlowExecutionControllerOptions {
   activeTabId: string;
   nodes: NbNode[];
   edges: NbEdge[];
   liveRef: React.MutableRefObject<NodeFlowSnapshot>;
+  /** Retained for call-site stability; last-run keys no longer salt on it. */
   graphSig: string;
   /** Backend Session._data_epoch — included in preview cache keys. */
   dataEpoch?: number;
@@ -92,7 +171,7 @@ export function useNodeFlowExecutionController({
   nodes,
   edges,
   liveRef,
-  graphSig,
+  graphSig: _graphSig,
   dataEpoch = 0,
   graphForApi,
   graphForRun,
@@ -139,8 +218,125 @@ export function useNodeFlowExecutionController({
   const doPreviewRef = useRef<
     ((node: NbNode, port: string, title: string) => void) | null
   >(null);
-  const previewCache = useRef<Map<string, Extract<NodeFlowPreview, { kind: "table" }>>>(new Map());
+  // Shared module Map — survives App IDE/Journal remount of NodeFlow.
+  const previewCache = useRef(lastRunPreviewCache);
   const previewEpochRef = useRef(dataEpoch);
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+  const dataEpochRef = useRef(dataEpoch);
+  dataEpochRef.current = dataEpoch;
+  /** Open drawer snapshot — used to refresh after Run all seeds last-run cache. */
+  const previewRef = useRef<NodeFlowPreview | null>(null);
+  previewRef.current = preview;
+
+  // Last-run keys intentionally omit graphSig. Post-run missing-ref prune (and
+  // other config patches) change executionGraphSignature while the rows are
+  // still the latest run — salting by graphSig orphaned seeds so the next
+  // output click said "no cached results" (often noticed after an IDE tab
+  // round-trip). Invalidate by clearing on Run all / dataEpoch / workflow tab.
+  const previewCacheKey = (nodeId: string, port: string) =>
+    `${activeTabIdRef.current}::${dataEpochRef.current}::${nodeId}::${port}`;
+
+  /** Store last-run table rows for a node/port so later output clicks reuse them. */
+  const rememberTableLastRun = (
+    cacheNodeId: string,
+    cachePort: string,
+    title: string,
+    result: {
+      columns?: string[];
+      rows?: unknown[][];
+      total_rows?: number;
+      preview_limited?: boolean;
+    },
+    /** Terminal lineage id (may differ for group-child previews). */
+    sourceNodeId?: string,
+    sourcePort?: string,
+  ) => {
+    const pv: Extract<NodeFlowPreview, { kind: "table" }> = {
+      kind: "table",
+      title,
+      columns: result.columns || [],
+      rows: (result.rows || []).slice(0, 200),
+      total: result.total_rows || 0,
+      limited: !!result.preview_limited,
+      sourceNodeId: sourceNodeId || cacheNodeId,
+      sourcePort: sourcePort || cachePort,
+    };
+    const cacheKey = previewCacheKey(cacheNodeId, cachePort);
+    previewCache.current.set(cacheKey, pv);
+    if (previewCache.current.size > PREVIEW_CACHE_MAX) {
+      const oldest = previewCache.current.keys().next().value;
+      if (oldest !== undefined) previewCache.current.delete(oldest);
+    }
+    return pv;
+  };
+
+  /**
+   * After terminals succeed, fetch preview rows for every data node in the
+   * ancestor closure and store them under that node's id/port. Backend run
+   * APIs only return terminal envelopes; intermediates were never remembered.
+   * Preview-limited so this does not rematerialize full tables for tracing.
+   */
+  const seedLastRunCaches = async (terminalIds: string[]) => {
+    if (!terminalIds.length || cancelRequested.current) return;
+    const snapNodes = liveRef.current.nodes;
+    const snapEdges = liveRef.current.edges;
+    const requests = lastRunSeedRequests(snapNodes, snapEdges, terminalIds);
+    if (!requests.length) return;
+    // Backend run_nodeflows caps at 64 targets.
+    const capped = requests.slice(0, 64);
+    const id = uid("nblr");
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
+    try {
+      const r = await api.nodeflowRunBatch(
+        graphForRun(),
+        capped,
+        id,
+        ctrl.signal,
+        true,
+        LAST_RUN_SEED_PREVIEW_LIMIT,
+      );
+      if (
+        cancelRequested.current ||
+        !mountedRef.current ||
+        r.cancelled ||
+        !r.ok ||
+        !r.results
+      ) {
+        return;
+      }
+      const byId = new Map(snapNodes.map((n) => [n.id, n]));
+      for (const x of r.results) {
+        if (!x || x.error || x.cancelled) continue;
+        const n = byId.get(x.node);
+        const port = x.port || "out";
+        rememberTableLastRun(
+          x.node,
+          port,
+          `${n?.config?.label || x.node} · ${port}`,
+          x,
+        );
+      }
+    } catch {
+      /* best-effort; terminals may already be remembered */
+    } finally {
+      unregisterRun(id, ctrl);
+    }
+  };
+
+  /** After Run all, open drawer must show the new last-run rows (not pre-run). */
+  const refreshOpenPreviewFromLastRun = () => {
+    const open = previewRef.current;
+    if (!open || open.kind !== "table" || !open.sourceNodeId) return;
+    const key = previewCacheKey(
+      open.sourceNodeId,
+      open.sourcePort || "out",
+    );
+    const hit = previewCache.current.get(key);
+    if (hit) setPreview(hit);
+    else setPreview(null);
+  };
 
   const isRunCurrent = (id: string) =>
     mountedRef.current && runScopesRef.current.get(id) === scopeVersionRef.current;
@@ -195,7 +391,7 @@ export function useNodeFlowExecutionController({
     chartPromisesRef.current.clear();
   };
 
-  // Data mutations bump the session epoch without changing graphSig. Drop any
+  // Data mutations bump the session epoch (file change / load). Drop any
   // FE preview hits AND the open drawer so prior rows cannot look current.
   // Abort in-flight preview/chart/validate so completions cannot repaint stale.
   useEffect(() => {
@@ -262,7 +458,16 @@ export function useNodeFlowExecutionController({
     auxGenerationRef.current.get(owner.key) === owner.generation &&
     auxRequestsRef.current.get(owner.key) === owner;
 
-  const resetExecutionScope = (updateUi: boolean) => {
+  /**
+   * Cancel in-flight work for this mount / workflow tab.
+   * clearLastRunCache: true for workflow-tab switches (stale graph);
+   * false on App view unmount so IDE / Journal / Dashboard round-trips
+   * keep Run-all seeds in the module Map.
+   */
+  const resetExecutionScope = (
+    updateUi: boolean,
+    clearLastRunCache = true,
+  ) => {
     scopeVersionRef.current += 1;
     const ids = [...activeRunIds.current];
     if (ids.length) cancelAllRuns(ids);
@@ -273,7 +478,7 @@ export function useNodeFlowExecutionController({
     runDepth.current = 0;
     runIdRef.current = null;
     cancelRequested.current = false;
-    previewCache.current.clear();
+    if (clearLastRunCache) previewCache.current.clear();
     if (cancelRecoveryTimerRef.current != null) {
       window.clearTimeout(cancelRecoveryTimerRef.current);
       cancelRecoveryTimerRef.current = null;
@@ -291,8 +496,13 @@ export function useNodeFlowExecutionController({
 
   useLayoutEffect(() => {
     if (previousTabRef.current === activeTabId) return;
+    const prev = previousTabRef.current;
     previousTabRef.current = activeTabId;
-    resetExecutionScope(true);
+    // Document controller boots activeTabId as "" then the real tab id.
+    // That bootstrap (and any empty id) is not a workflow switch — a remount
+    // after IDE/Journal/Dashboard must keep module last-run seeds.
+    const isBootstrap = !prev || !activeTabId;
+    resetExecutionScope(true, !isBootstrap);
     // resetExecutionScope intentionally reads only current refs and stable state
     // setters; re-running for function identity would cancel active work on
     // every render.
@@ -303,7 +513,8 @@ export function useNodeFlowExecutionController({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      resetExecutionScope(false);
+      // Cancel runs/aux only — keep module last-run cache for remount.
+      resetExecutionScope(false, false);
     };
     // One mount lifetime owns one cancellation scope.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -437,96 +648,41 @@ export function useNodeFlowExecutionController({
     !!r?.cancelled || cancelRequested.current || (id ? !isRunCurrent(id) : false);
 
   const doPreview = async (node: NbNode, port: string, title: string) => {
-    // reuse the last result for this (node, port) as long as the graph's
-    // structure AND the session data epoch are unchanged -- so clicking an
-    // output arrow again (or after just moving nodes around) doesn't re-run,
-    // but a table reload/UPDATE cannot serve a prior preview as current.
-    // Cheap: a preview holds <=200 display rows, and the cache is capped +
-    // keyed by structural signature + dataEpoch. Cleared on tab switch / epoch bump.
-    const cacheKey =
-      graphSig + "::" + dataEpoch + "::" + node.id + "::" + port;
+    // Output / preview clicks are cache-only. Fresh compute happens on Run all
+    // (or an explicit leaf run), which seeds last-run rows. Never start a
+    // graph/node execution from opening the results drawer.
+    // Cleared on workflow-tab switch / dataEpoch bump / Run-all start
+    // (then re-seeded). Survives App IDE / Journal / Dashboard switches.
+    const cacheKey = previewCacheKey(node.id, port);
     const hit = previewCache.current.get(cacheKey);
     if (hit) {
-      setPreview(hit);
+      setPreview({ ...hit, title: title || hit.title });
       previewCache.current.delete(cacheKey); // refresh LRU position
-      previewCache.current.set(cacheKey, hit);
+      previewCache.current.set(cacheKey, {
+        ...hit,
+        title: title || hit.title,
+      });
       setStatus({
         kind: "done",
         text: `${(hit.total || 0).toLocaleString()} rows (cached)`,
       });
       return;
     }
-    const id = startRun(`Running ${node.config.label}…`, [node.id]);
-    // if this is a child inside a group, preview the pipeline up to and
-    // including it by running the group's output on a truncated graph.
-    const cctx = childCtx(node.id);
-    const graph = cctx
-      ? partialGroupGraph(cctx.groupId, cctx.index + 1)
-      : graphForRun();
-    const runNode = cctx ? cctx.groupId : node.id;
-    const runPort = cctx ? "out" : port;
-    try {
-      const ctrl = new AbortController();
-      registerRun(id, ctrl); // .520: modal Cancel aborts this fetch too
-      let r;
-      try {
-        r = await api.nodeflowRun(
-          graph,
-          runNode,
-          runPort,
-          id,
-          ctrl.signal,
-          true,
-          5000,
-        );
-      } finally {
-        unregisterRun(id, ctrl);
-      }
-      if (wasCancelled(r, id)) return finishRun(id, { cancelled: true }, "");
-      if (r.error) {
-        // the backend names the node that actually failed (r.node); fall back
-        // to the run target if it didn't attribute one. Surface the failure on
-        // the node's red badge + the status bar only (matching the Run path):
-        // previewing a node with no output (e.g. a disconnected input) is a
-        // normal in-progress state, so it no longer also pops an error toast.
-        const culprit = (r as { node?: string }).node || node.id;
-        setNodeErrors((p) => ({ ...p, [culprit]: r.error as string }));
-        return finishRun(id, r, "");
-      }
-      setNodeErrors((p) => {
-        if (!(node.id in p)) return p;
-        const { [node.id]: _drop, ...rest } = p;
-        return rest;
-      });
-      const pv = {
-        kind: "table" as const,
-        title,
-        columns: r.columns || [],
-        rows: (r.rows || []).slice(0, 200),
-        total: r.total_rows || 0,
-        limited: !!r.preview_limited,
-        sourceNodeId: runNode,
-        sourcePort: runPort,
-      };
-      setPreview(pv);
-      previewCache.current.set(cacheKey, pv);
-      if (previewCache.current.size > 12) {
-        const oldest = previewCache.current.keys().next().value;
-        if (oldest !== undefined) previewCache.current.delete(oldest);
-      }
-      finishRun(id, 
-        r,
-        `${(r.total_rows || 0).toLocaleString()}${r.preview_limited ? "+" : ""} rows preview`,
-      );
-    } catch (e: any) {
-      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
-        finishRun(id, { cancelled: true }, "");
-        return;
-      }
-      setNodeErrors((p) => ({ ...p, [node.id]: e.message || String(e) }));
-      onToast("error", "Flow error", e.message || String(e));
-      finishRun(id, { error: e.message || String(e) }, "");
-    }
+    // Empty / stale: open the drawer with no rows so the click is visible,
+    // but do not call nodeflowRun / startRun.
+    setPreview({
+      kind: "table",
+      title: title || `${node.config.label || node.id} · ${port}`,
+      columns: [],
+      rows: [],
+      total: 0,
+      sourceNodeId: node.id,
+      sourcePort: port,
+    });
+    setStatus({
+      kind: "idle",
+      text: "No cached results — use Run all",
+    });
   };
 
   // After a successful run/rerun, drop obsolete missing column refs from
@@ -594,6 +750,13 @@ export function useNodeFlowExecutionController({
         const { [node.id]: _drop, ...rest } = p;
         return rest;
       });
+      // Seed last-run cache so a later output click reuses this run's rows.
+      rememberTableLastRun(
+        runNode,
+        "out",
+        `${node.config.label || node.id} · out`,
+        r,
+      );
       finishRun(id, r, `${(r.total_rows || 0).toLocaleString()} rows`);
       await pruneMissingRefsAfterSuccessfulRun([node.id]);
       return { ok: true };
@@ -657,10 +820,17 @@ export function useNodeFlowExecutionController({
           const { [n.id]: _drop, ...rest } = prev;
           return rest;
         });
+        rememberTableLastRun(
+          n.id,
+          "out",
+          `${n.config.label || n.id} · out`,
+          x,
+        );
         return { ok: true };
       });
       // Do not auto-open the preview drawer on run success; the user opens
-      // results by clicking a node's output port (doPreview).
+      // results by clicking a node's output port (doPreview). Last-run rows
+      // are already seeded above for those clicks.
       finishRun(id, 
         r,
         `${outcomes.filter((x) => x.ok).length} of ${leaves.length} branches ran`,
@@ -1636,6 +1806,9 @@ export function useNodeFlowExecutionController({
     // A new batch owns fresh cancellation state. Clear it before computing
     // terminals or starting any child run so no prior Stop can poison Run all.
     cancelRequested.current = false;
+    // Drop pre–Run-all FE preview hits so individual node views cannot stick
+    // on stale last-run rows. Successful terminals + ancestors re-seed below.
+    previewCache.current.clear();
     // Snapshot the synchronously maintained refs at click time.  This avoids
     // sending a render-old graph when Run is clicked immediately after an
     // inspector edit (React may not have committed the next render yet).
@@ -1846,6 +2019,16 @@ export function useNodeFlowExecutionController({
     if (successfulTerminalIds.length) {
       await pruneMissingRefsAfterSuccessfulRun(successfulTerminalIds);
     }
+    // Seed last-run rows for every data node in the successful terminals'
+    // ancestor closure (Select/Join/Filter/…), not only the sink leaf/Output.
+    // doPreview stays cache-only and looks up by that node's id + port.
+    if (successfulTerminalIds.length && !cancelRequested.current) {
+      await seedLastRunCaches(successfulTerminalIds);
+    }
+    if (batchScope !== scopeVersionRef.current) return;
+    // Open drawer: swap to new last-run rows (or clear if this node wasn't
+    // part of the batch) so the UI never stays on pre–Run-all data.
+    refreshOpenPreviewFromLastRun();
     const bits = [`${ok} ran`];
     if (bad) bits.push(`${bad} failed`);
     if (isolated.length)

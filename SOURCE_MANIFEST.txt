@@ -45,6 +45,7 @@ backend/samql_core/load_thresholds.py
 backend/samql_core/loaders.py
 backend/samql_core/mssql.py
 backend/samql_core/nodeflow.py
+backend/samql_core/originwatch.py
 backend/samql_core/profiler.py
 backend/samql_core/progress.py
 backend/samql_core/python_node.py
@@ -170,6 +171,7 @@ frontend/src/components/load/SqlServerLoadTab.tsx
 frontend/src/components/nodeflow/InspectorControls.component.test.tsx
 frontend/src/components/nodeflow/InspectorControls.tsx
 frontend/src/components/nodeflow/InspectorShell.tsx
+frontend/src/components/nodeflow/NodeFlowCanvasCard.containerMinimize.component.test.tsx
 frontend/src/components/nodeflow/NodeFlowCanvasCard.tsx
 frontend/src/components/nodeflow/NodeFlowCanvasShell.tsx
 frontend/src/components/nodeflow/NodeFlowChrome.component.test.tsx
@@ -276,6 +278,7 @@ frontend/src/lib/nodeFlowFavorites.component.test.ts
 frontend/src/lib/nodeFlowModel.ts
 frontend/src/lib/nodeFlowPersistence.component.test.ts
 frontend/src/lib/nodeFlowPersistence.ts
+frontend/src/lib/nodeFlowSphere.component.test.ts
 frontend/src/lib/nodeHelp.ts
 frontend/src/lib/nodeSnap.component.test.tsx
 frontend/src/lib/nodeflowColumnsCache.component.test.ts

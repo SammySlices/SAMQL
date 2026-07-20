@@ -81,17 +81,23 @@ import { ProgressBar } from "./components/ProgressBar";
 import { useRunProgress } from "./lib/useRunProgress";
 import { cancelOne, isCancelledError, registerRun, unregisterRun, wasCancelled } from "./lib/runController";
 import { uid } from "./lib/ids";
-import { setNodeFlowDenseMode } from "./lib/nodeFlowModel";
+import { setNodeFlowDenseMode, setNodeFlowSphereMode } from "./lib/nodeFlowModel";
 import {
   applyAllCanvasColors,
+  applyAllCanvasTextColors,
   applyCanvasColor,
+  applyCanvasTextColor,
   applyNodeDotStyle,
+  clearAllUserCanvasColors,
   persistCanvasColor,
+  persistCanvasTextColor,
   persistNodeDotStyle,
   readPersistedCanvasColors,
+  readPersistedCanvasTextColors,
   readPersistedNodeDotStyle,
   type CanvasColors,
   type CanvasSurface,
+  type CanvasTextColors,
   type NodeDotStyle,
 } from "./lib/canvasColor";
 import { ReconcileModal, ReconSpec } from "./components/ReconcileModal";
@@ -723,6 +729,47 @@ export default function App() {
       /* ignore */
     }
   }, [nodeSnap]);
+  // Tables drawer: edge hover opens the full panel (legacy). Default OFF —
+  // hover shows hamburger only; click opens. Settings → Visual Toggles.
+  const [tablesDrawerHoverOpen, setTablesDrawerHoverOpen] = useState(() => {
+    try {
+      return window.localStorage?.getItem("samql.tablesDrawerHoverOpen") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage?.setItem(
+        "samql.tablesDrawerHoverOpen",
+        tablesDrawerHoverOpen ? "1" : "0",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [tablesDrawerHoverOpen]);
+  // Icon-sphere NodeFlow chrome (vs classic box cards). Default ON; Settings → Visual.
+  // Missing/corrupt preference → on; only explicit "0" stays off.
+  const [nodeSphere, setNodeSphere] = useState(() => {
+    let on = true;
+    try {
+      const saved = window.localStorage?.getItem("samql.nodeSphere");
+      if (saved === "0") on = false;
+      else if (saved === "1") on = true;
+    } catch {
+      on = true;
+    }
+    setNodeFlowSphereMode(on);
+    return on;
+  });
+  useLayoutEffect(() => {
+    setNodeFlowSphereMode(nodeSphere);
+    try {
+      window.localStorage?.setItem("samql.nodeSphere", nodeSphere ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [nodeSphere]);
   // optional ivory background for the SQL editor (paired with canvas under
   // Visual Toggles → light mode)
   const [ivoryEditor, setIvoryEditor] = useState(() => {
@@ -760,18 +807,35 @@ export default function App() {
     }
   }, [lightTheme]);
   // Per-surface canvas colors (IDE / Journal / NodeFlow). When set,
-  // --user-canvas-bg-* wins over ivory / light hard-coded whites.
+  // --user-canvas-bg-* / --user-canvas-text-* win over ivory / theme defaults.
   const [canvasColors, setCanvasColors] = useState<CanvasColors>(() => {
     const saved = readPersistedCanvasColors();
     applyAllCanvasColors(saved);
     return saved;
   });
+  const [canvasTextColors, setCanvasTextColors] = useState<CanvasTextColors>(
+    () => {
+      const saved = readPersistedCanvasTextColors();
+      applyAllCanvasTextColors(saved);
+      return saved;
+    },
+  );
   // NodeFlow snap-grid dots (color + opacity) — Settings → Canvas Color → Node.
   const [nodeDots, setNodeDots] = useState<NodeDotStyle>(() => {
     const saved = readPersistedNodeDotStyle();
     applyNodeDotStyle(saved);
     return saved;
   });
+  // Global canvas color keys are not per-theme; clear on light↔dark so CSS
+  // theme defaults apply instead of carrying a custom color across themes.
+  const prevLightThemeRef = useRef(lightTheme);
+  useEffect(() => {
+    if (prevLightThemeRef.current === lightTheme) return;
+    prevLightThemeRef.current = lightTheme;
+    const cleared = clearAllUserCanvasColors();
+    setCanvasColors(cleared.colors);
+    setCanvasTextColors(cleared.textColors);
+  }, [lightTheme]);
   const [canvasColorPanelOpen, setCanvasColorPanelOpen] = useState(false);
   const pickCanvasColor = useCallback(
     (surface: CanvasSurface, raw: string) => {
@@ -783,10 +847,23 @@ export default function App() {
     },
     [],
   );
+  const pickCanvasTextColor = useCallback(
+    (surface: CanvasSurface, raw: string) => {
+      const next = raw.trim().toLowerCase();
+      if (!/^#[0-9a-f]{6}$/.test(next)) return;
+      setCanvasTextColors((prev) => ({ ...prev, [surface]: next }));
+      applyCanvasTextColor(surface, next);
+      persistCanvasTextColor(surface, next);
+    },
+    [],
+  );
   const resetCanvasColor = useCallback((surface: CanvasSurface) => {
     setCanvasColors((prev) => ({ ...prev, [surface]: null }));
+    setCanvasTextColors((prev) => ({ ...prev, [surface]: null }));
     applyCanvasColor(surface, null);
+    applyCanvasTextColor(surface, null);
     persistCanvasColor(surface, null);
+    persistCanvasTextColor(surface, null);
   }, []);
   const pickNodeDotColor = useCallback((raw: string) => {
     const next = raw.trim().toLowerCase();
@@ -822,8 +899,8 @@ export default function App() {
   const [sidebarW, setSidebarW] = useState(() =>
     typeof SAVED?.sidebarW === "number" ? SAVED.sidebarW : 290,
   );
-  // Tables / History / Workflows always use the slide-out drawer (folder-handle
-  // hamburger). There is no Settings path to hide the rail entirely.
+  // Tables / History / Workflows always use the left-edge slide-out drawer
+  // (hover edge → hamburger; click to open). No Settings path to hide it.
   const showTables = true;
   const [tablesPanelOpen, setTablesPanelOpen] = useState(false);
   const [tablesSideTab, setTablesSideTab] =
@@ -1057,6 +1134,19 @@ export default function App() {
     activeIdRef,
     loadSqlIntoEditor,
   });
+
+  // Lazy NodeFlow / Dashboard mount on first visit, then stay mounted
+  // (display:none) so tab switches do not abort in-flight runs via unmount.
+  const [keepNodeFlow, setKeepNodeFlow] = useState(
+    () => view === "nodeflow",
+  );
+  const [keepDashboard, setKeepDashboard] = useState(
+    () => view === "dashboard",
+  );
+  useEffect(() => {
+    if (view === "nodeflow") setKeepNodeFlow(true);
+    if (view === "dashboard") setKeepDashboard(true);
+  }, [view]);
 
   const dashboardUi = useDashboardSettings(toast, () => {
     setDashReloadKey((k) => k + 1);
@@ -1970,7 +2060,6 @@ export default function App() {
     nodeToolbarHidden,
     openToolsTables,
     refreshTables,
-    showTables,
     switchView,
     view,
   ]);
@@ -2887,7 +2976,7 @@ export default function App() {
                   data-testid="settings-visual-toggles"
                   aria-expanded={settingsFlyout?.kind === "visual"}
                   aria-haspopup="menu"
-                  title="Light/Dark mode, Eye Care, reduce motion, Condensed NodeFlow, Node Snap, and canvas color"
+                  title="Light/Dark mode, Eye Care, reduce motion, Condensed NodeFlow, Node Snap, Sphere nodes, Hover-open tables, and canvas color"
                   onMouseEnter={(e) =>
                     showSettingsFlyout("visual", e.currentTarget)
                   }
@@ -3191,6 +3280,34 @@ export default function App() {
                     {nodeSnap ? "Node Snap: on" : "Node Snap"}
                   </button>
                   <button
+                    role="menuitemcheckbox"
+                    data-testid="nodeflow-sphere-toggle"
+                    aria-checked={nodeSphere}
+                    aria-pressed={nodeSphere}
+                    title="Show NodeFlow nodes as icon spheres with ports around the rim (notes stay boxes; group/iterator/chart bodies float under the sphere)"
+                    onClick={() =>
+                      setNodeSphere((v) => {
+                        const next = !v;
+                        setNodeFlowSphereMode(next);
+                        return next;
+                      })
+                    }
+                  >
+                    {nodeSphere ? "Sphere nodes: on" : "Sphere nodes"}
+                  </button>
+                  <button
+                    role="menuitemcheckbox"
+                    data-testid="tables-drawer-hover-open-toggle"
+                    aria-checked={tablesDrawerHoverOpen}
+                    aria-pressed={tablesDrawerHoverOpen}
+                    title="Hover the left edge to open the full Tables / History / Workflows panel (off = show hamburger only, then click)"
+                    onClick={() => setTablesDrawerHoverOpen((v) => !v)}
+                  >
+                    {tablesDrawerHoverOpen
+                      ? "Hover-open tables: on"
+                      : "Hover-open tables"}
+                  </button>
+                  <button
                     role="menuitem"
                     data-testid="settings-canvas-color"
                     aria-expanded={canvasColorPanelOpen}
@@ -3256,6 +3373,7 @@ export default function App() {
           inspectorMode={
             (view === "nodeflow" && nbSel) || (view === "dashboard" && dashSel)
           }
+          hoverOpenFull={tablesDrawerHoverOpen}
         >
           {((view === "nodeflow" && showTables && nbSel) ||
             (view === "dashboard" && showTables && dashSel)) ? (
@@ -3267,6 +3385,46 @@ export default function App() {
           ) : (
             <Sidebar
               onTableProps={(engine, name) => setTableProps({ engine, name })}
+              onReloadTable={(engine, name, opts) => {
+                const doReload = () => {
+                  api
+                    .reloadTable(engine, name, {
+                      replace: !!opts?.replace,
+                      fresh: true,
+                    })
+                    .then((r) => {
+                      refreshTables();
+                      if (r?.name && r.name !== name) {
+                        toast(
+                          "ok",
+                          "Reloaded as new table",
+                          `"${name}" → "${r.name}"`,
+                        );
+                      } else {
+                        toast("ok", "Table reloaded", name);
+                      }
+                    })
+                    .catch((e: unknown) =>
+                      toast(
+                        "error",
+                        "Reload failed",
+                        e instanceof Error ? e.message : String(e),
+                      ),
+                    );
+                };
+                if (opts?.replace) {
+                  // Same ConfirmPop as Drop / Clear all — not window.confirm
+                  // (native dialog is flaky in the pywebview host).
+                  askConfirm(
+                    { left: 268, top: 150, side: "right" as const },
+                    `Replace "${name}" with a fresh load from its source file?`,
+                    doReload,
+                    "Replace",
+                  );
+                  return;
+                }
+                doReload();
+              }}
               tables={tables}
               history={history}
               saved={saved}
@@ -3304,9 +3462,11 @@ export default function App() {
         </TablesSidebarDrawer>
 
         <div className="main">
-          {/* Journal stays MOUNTED across view switches (display:none, not an
-              unmount) so a running query — and its result — survives switching
-              to another tab and is still there when you come back. */}
+          {/* Journal / IDE / NodeFlow / Dashboard stay MOUNTED across view
+              switches (display:none, not an unmount) so in-flight runs and
+              their results survive switching tabs. Explicit Stop still
+              cancels. Lazy NodeFlow/Dashboard mount on first visit, then
+              persist (keeps NodeFlow last-run preview cache warm too). */}
           <div style={{ display: view === "notebook" ? "contents" : "none" }}>
             <Notebook
               appVersion={health?.version}
@@ -3345,34 +3505,10 @@ export default function App() {
             onClose={() => setCommandPaletteOpen(false)}
             commands={commandPaletteCommands}
           />
-          {view === "nodeflow" ? (
-            <Suspense
-              fallback={
-                <div className="view-loading">Loading NodeFlow…</div>
-              }
-            >
-              <NodeFlow tables={tables} dataEpoch={dataEpoch} onToast={toast} features={feats || null} onTablesChanged={refreshTables} showTables={showTables} inspectorHost={nbHostEl} onSelectionChange={setNbSel} showNodeSearch={showNodeSearch} loadRequest={nodeLoad} onLoadConsumed={() => setNodeLoad(null)} onWorkflowsChanged={refreshWorkflows} command={nodeCmd} paletteHidden={nodeToolbarHidden} toolsTablesOpen={toolsTablesOpen} onToolsTablesOpenChange={setToolsTablesOpen} onOpenLoad={() => setLoadOpen(true)} denseMode={nodeFlowDense} snap={nodeSnap} />
-            </Suspense>
-          ) : view === "dashboard" ? (
-            <Suspense
-              fallback={
-                <div className="view-loading">Loading Dashboard…</div>
-              }
-            >
-              <Dashboard
-                key={dashReloadKey}
-                onToast={toast}
-                command={dashboardCmd}
-                onCommandConsumed={() => setDashboardCmd(null)}
-                loadRequest={dashboardLoad}
-                onLoadConsumed={() => setDashboardLoad(null)}
-                onWorkflowsChanged={refreshWorkflows}
-                inspectorHost={dashHostEl}
-                onSelectionChange={setDashSel}
-              />
-            </Suspense>
-          ) : view === "ide" ? (
-            <>
+          <div
+            style={{ display: view === "ide" ? "contents" : "none" }}
+            data-testid="ide-surface"
+          >
               {/* editor tabs */}
               <div className="tabs ed-tabs" ref={tabsRef}>
             {edTabs.map((t) => (
@@ -4481,8 +4617,68 @@ export default function App() {
                 );
               })()}
           </div>
-            </>
-          ) : null}
+          </div>
+          {(keepNodeFlow || view === "nodeflow") && (
+            <div
+              style={{ display: view === "nodeflow" ? "contents" : "none" }}
+              data-testid="nodeflow-surface"
+            >
+              <Suspense
+                fallback={
+                  <div className="view-loading">Loading NodeFlow…</div>
+                }
+              >
+                <NodeFlow
+                  tables={tables}
+                  dataEpoch={dataEpoch}
+                  onToast={toast}
+                  features={feats || null}
+                  onTablesChanged={refreshTables}
+                  showTables={showTables}
+                  inspectorHost={nbHostEl}
+                  onSelectionChange={setNbSel}
+                  showNodeSearch={showNodeSearch}
+                  loadRequest={nodeLoad}
+                  onLoadConsumed={() => setNodeLoad(null)}
+                  onWorkflowsChanged={refreshWorkflows}
+                  command={nodeCmd}
+                  paletteHidden={nodeToolbarHidden}
+                  toolsTablesOpen={toolsTablesOpen}
+                  onToolsTablesOpenChange={setToolsTablesOpen}
+                  onOpenLoad={() => setLoadOpen(true)}
+                  denseMode={nodeFlowDense}
+                  sphereMode={nodeSphere}
+                  snap={nodeSnap}
+                  active={view === "nodeflow"}
+                />
+              </Suspense>
+            </div>
+          )}
+          {(keepDashboard || view === "dashboard") && (
+            <div
+              style={{ display: view === "dashboard" ? "contents" : "none" }}
+              data-testid="dashboard-surface"
+            >
+              <Suspense
+                fallback={
+                  <div className="view-loading">Loading Dashboard…</div>
+                }
+              >
+                <Dashboard
+                  key={dashReloadKey}
+                  onToast={toast}
+                  command={dashboardCmd}
+                  onCommandConsumed={() => setDashboardCmd(null)}
+                  loadRequest={dashboardLoad}
+                  onLoadConsumed={() => setDashboardLoad(null)}
+                  onWorkflowsChanged={refreshWorkflows}
+                  inspectorHost={dashHostEl}
+                  onSelectionChange={setDashSel}
+                  active={view === "dashboard"}
+                />
+              </Suspense>
+            </div>
+          )}
         </div>
       </div>
 
@@ -4514,8 +4710,10 @@ export default function App() {
       <CanvasColorModal
         open={canvasColorPanelOpen}
         colors={canvasColors}
+        textColors={canvasTextColors}
         nodeDots={nodeDots}
         onPick={pickCanvasColor}
+        onPickText={pickCanvasTextColor}
         onReset={resetCanvasColor}
         onPickNodeDotColor={pickNodeDotColor}
         onPickNodeDotOpacity={pickNodeDotOpacity}

@@ -640,7 +640,8 @@ def _progress_should_cancel(progress):
 
 
 def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
-                      json_depth=None, force_ondisk=False, progress=None):
+                      json_depth=None, force_ondisk=False, progress=None,
+                      skip_cache=False):
     """Load a file into DuckDB, choosing storage by size.
 
     A file at/above the on-disk threshold (SAMQL_ONDISK_MB) — or the hard
@@ -747,7 +748,8 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
                 return _parquet_result(name, "parquet-view", json_depth)
             name = duck.load_file_to_parquet_view(
                 base_name, path, kind, delimiter=delimiter,
-                json_depth=json_depth, cancel=cancel)
+                json_depth=json_depth, cancel=cancel,
+                skip_cache=skip_cache)
             return _parquet_result(name, "parquet-cache", json_depth)
         except LoadCancelled:
             raise
@@ -766,7 +768,8 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
                         % (json_depth, e))
                     name = duck.load_file_to_parquet_view(
                         base_name, path, kind, delimiter=delimiter,
-                        json_depth=0, cancel=cancel)
+                        json_depth=0, cancel=cancel,
+                        skip_cache=skip_cache)
                     return _parquet_result(name, "parquet-cache", 0)
                 except LoadCancelled:
                     raise
@@ -861,7 +864,7 @@ def _shred_nested_json_load(session, res, root_id=None):
 
 def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
                       spill=None, exclude=None, root_id=None,
-                      full_nested=False):
+                      full_nested=False, skip_cache=False):
     """DuckDB JSON load for array / NDJSON / concat / single-object shapes.
 
     Every JSON format is converted before query use:
@@ -908,7 +911,8 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
             session, path, base_name, "json",
             json_depth=json_depth,
             force_ondisk=force_ondisk,
-            progress=progress)
+            progress=progress,
+            skip_cache=skip_cache)
 
     def _ondisk_for_size():
         thresh = _json_ondisk_min_bytes()
@@ -1022,7 +1026,7 @@ def _load_json_duckdb(session, path, base_name, flatten=True, progress=None,
 def load_file(session, path, destination="sqlite", base_name=None,
               progress=None, delimiter=None, mode="materialize",
               sheet=None, header_row=1, exclude=None, flatten=None,
-              root_id=None, full_nested=False):
+              root_id=None, full_nested=False, skip_cache=False):
     """Dispatch a single file to the right loader based on extension and
     the requested destination engine. ``session`` provides .db and
     .get_duckdb(). ``progress`` (optional) is called as
@@ -1035,6 +1039,7 @@ def load_file(session, path, destination="sqlite", base_name=None,
     (Excel, or DuckDB unavailable) safely falls back to a materialized load.
     ``full_nested`` (JSON + DuckDB, flatten off) loads uncapped STRUCT/LIST
     types for a subsequent shred pass without running shred in the loader.
+    ``skip_cache`` (Fresh load) bypasses persistent file→Parquet filecache.
     Returns a list of loaded-table descriptors."""
     # "auto"/"default" means "the best engine for this machine" -- DuckDB when
     # installed (far better at large files), else SQLite. The Session.load_file
@@ -1104,7 +1109,8 @@ def load_file(session, path, destination="sqlite", base_name=None,
         # a large one is viewed in place (columnar pushdown, bounded memory).
         # See _load_into_duckdb for the size split.
         return _load_into_duckdb(session, path, base_name, "parquet",
-                                 progress=progress)
+                                 progress=progress,
+                                 skip_cache=bool(skip_cache))
     if ext in ("json", "ndjson", "jsonl"):
         # per-load override wins (the Load modal decides now); None keeps the
         # legacy session default for callers that don't say (folder appends,
@@ -1118,7 +1124,8 @@ def load_file(session, path, destination="sqlite", base_name=None,
             return _load_json_duckdb(
                 session, path, base_name, flatten=flatten,
                 progress=progress, spill=spill, exclude=exclude,
-                root_id=root_id, full_nested=bool(full_nested))
+                root_id=root_id, full_nested=bool(full_nested),
+                skip_cache=bool(skip_cache))
         # SQLite (or any non-DuckDB engine) always flattens -- it has no nested
         # column types -- so the toggle only affects the DuckDB path above.
         return load_json(session.db, path, base_name, progress=progress,
@@ -1127,7 +1134,8 @@ def load_file(session, path, destination="sqlite", base_name=None,
     ndelim = _norm_delim(delimiter)
     if destination == "duckdb":
         return _load_into_duckdb(session, path, base_name, "csv",
-                                 delimiter=ndelim, progress=progress)
+                                 delimiter=ndelim, progress=progress,
+                                 skip_cache=bool(skip_cache))
     # Large CSV into SQLite thrash-queries and can OOM on analytics. When
     # DuckDB is available, auto-upgrade to the on-disk Parquet path so
     # multi-GB / multi-million-row CSVs still load. Only fail loud when
@@ -1149,7 +1157,8 @@ def load_file(session, path, destination="sqlite", base_name=None,
                 "instead of SQLite\n" % (sz / (1024 * 1024.0)))
             return _load_into_duckdb(session, path, base_name, "csv",
                                      delimiter=ndelim, force_ondisk=True,
-                                     progress=progress)
+                                     progress=progress,
+                                     skip_cache=bool(skip_cache))
         raise RuntimeError(
             "This CSV is %.0f MiB — too large for SQLite, and DuckDB is "
             "not installed. Install duckdb (pip install duckdb) so SamQL "

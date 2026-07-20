@@ -1,16 +1,18 @@
 import React, { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { TablesSidebarDrawer } from "./TablesSidebarDrawer";
 
 function Harness({
   enabled = true,
   initialOpen = false,
   inspectorMode = false,
+  hoverOpenFull = false,
 }: {
   enabled?: boolean;
   initialOpen?: boolean;
   inspectorMode?: boolean;
+  hoverOpenFull?: boolean;
 }) {
   const [open, setOpen] = useState(initialOpen);
   const [tab, setTab] = useState("tables");
@@ -27,6 +29,7 @@ function Harness({
         width={280}
         onResizePointerDown={() => setWidths((w) => [...w, 1])}
         inspectorMode={inspectorMode}
+        hoverOpenFull={hoverOpenFull}
       >
         <div data-testid="drawer-body">
           <span data-testid="active-tab-label">{tab}</span>
@@ -69,48 +72,126 @@ function Harness({
 }
 
 describe("TablesSidebarDrawer", () => {
-  it("starts closed with a folder-handle hamburger when enabled", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("starts closed with a left-edge hit strip (panel hidden)", () => {
     render(<Harness />);
     expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
       "data-open",
       "0",
     );
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-hover-open-full",
+      "0",
+    );
     expect(screen.getByTestId("tables-sidebar-drawer").className).toContain(
       "is-closed",
     );
+    const edge = screen.getByTestId("tables-sidebar-edge");
+    expect(edge).toBeInTheDocument();
+    expect(edge).toHaveAttribute("aria-label", "Show tables panel handle");
+    expect(edge).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByTestId("tables-sidebar-peek")).toBeInTheDocument();
-    const menu = screen.getByTestId("tables-sidebar-peek-menu");
-    expect(menu).toBeInTheDocument();
-    expect(menu).toHaveAttribute("aria-label", "Open tables panel");
-    expect(menu).toHaveAttribute("aria-expanded", "false");
-    expect(
-      screen.queryByTestId("tables-sidebar-peek-tab-tables"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("tables-sidebar-peek-handle"),
-    ).not.toBeInTheDocument();
     expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
   });
 
-  it("opens from the hamburger and keeps the handle mounted on the panel", () => {
+  it("edge hover peeks hamburger only (default; does not open panel)", () => {
     render(<Harness />);
-    fireEvent.click(screen.getByTestId("tables-sidebar-peek-menu"));
+    fireEvent.pointerEnter(screen.getByTestId("tables-sidebar-drawer"));
     const drawer = screen.getByTestId("tables-sidebar-drawer");
+    expect(drawer).toHaveAttribute("data-open", "0");
+    expect(drawer).toHaveAttribute("data-peek", "1");
+    expect(drawer.className).toContain("is-peek");
+    expect(drawer.className).toContain("is-closed");
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
+    const menu = screen.getByTestId("tables-sidebar-peek-menu");
+    expect(menu).toHaveAttribute("aria-label", "Open tables panel");
+    expect(menu).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("opens from a click on the peeked hamburger", () => {
+    render(<Harness />);
+    fireEvent.pointerEnter(screen.getByTestId("tables-sidebar-drawer"));
+    fireEvent.click(screen.getByTestId("tables-sidebar-peek-menu"));
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-open",
+      "1",
+    );
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("open");
+  });
+
+  it("edge click peeks hamburger only (does not open panel)", () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("tables-sidebar-edge"));
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-open",
+      "0",
+    );
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-peek",
+      "1",
+    );
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
+  });
+
+  it("hides peek after leave delay when the pointer leaves (panel stays closed)", () => {
+    render(<Harness />);
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    fireEvent.pointerEnter(drawer);
+    expect(drawer).toHaveAttribute("data-peek", "1");
+    fireEvent.pointerLeave(drawer);
+    expect(drawer).toHaveAttribute("data-peek", "1");
+    act(() => {
+      vi.advanceTimersByTime(279);
+    });
+    expect(drawer).toHaveAttribute("data-peek", "1");
+    act(() => {
+      vi.advanceTimersByTime(2);
+    });
+    expect(drawer).toHaveAttribute("data-peek", "0");
+    expect(drawer).toHaveAttribute("data-open", "0");
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
+  });
+
+  it("does not auto-hide an open panel on pointer leave (default)", () => {
+    render(<Harness initialOpen />);
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    fireEvent.pointerLeave(drawer);
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
     expect(drawer).toHaveAttribute("data-open", "1");
-    expect(drawer.className).toContain("is-open");
-    // Folder handle remains nested on the panel's right edge.
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("open");
+  });
+
+  it("cancels peek-hide when the pointer re-enters before the delay", () => {
+    render(<Harness />);
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    fireEvent.pointerEnter(drawer);
+    fireEvent.pointerLeave(drawer);
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    fireEvent.pointerEnter(drawer);
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(drawer).toHaveAttribute("data-peek", "1");
+    expect(drawer).toHaveAttribute("data-open", "0");
+  });
+
+  it("keeps the handle mounted on the panel while open", () => {
+    render(<Harness initialOpen />);
     const peek = screen.getByTestId("tables-sidebar-peek");
     expect(peek).toBeInTheDocument();
     expect(screen.getByTestId("tables-sidebar-panel").contains(peek)).toBe(
       true,
     );
-    const menu = screen.getByTestId("tables-sidebar-peek-menu");
-    expect(menu).toHaveAttribute(
-      "aria-label",
-      "Drag to resize, click to close tables panel",
-    );
-    expect(menu).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByTestId("open-flag")).toHaveTextContent("open");
   });
 
   it("closes from a quick click on the hamburger while open (no drag)", () => {
@@ -150,9 +231,9 @@ describe("TablesSidebarDrawer", () => {
     expect(screen.getByTestId("open-flag")).toHaveTextContent("open");
   });
 
-  it("does not start resize from the closed folder handle", () => {
+  it("does not start resize from the closed edge strip", () => {
     render(<Harness />);
-    fireEvent.pointerDown(screen.getByTestId("tables-sidebar-peek-menu"), {
+    fireEvent.pointerDown(screen.getByTestId("tables-sidebar-edge"), {
       clientX: 10,
       clientY: 200,
     });
@@ -173,21 +254,81 @@ describe("TablesSidebarDrawer", () => {
     expect(screen.getByTestId("tables-sidebar-peek")).toBeInTheDocument();
   });
 
-  it("closes on outside pointerdown and keeps the handle", () => {
+  it("closes on outside pointerdown and keeps the edge strip", () => {
     render(<Harness initialOpen />);
     fireEvent.pointerDown(screen.getByTestId("outside"));
     expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
       "data-open",
       "0",
     );
+    expect(screen.getByTestId("tables-sidebar-edge")).toBeInTheDocument();
     expect(screen.getByTestId("tables-sidebar-peek")).toBeInTheDocument();
-    expect(screen.getByTestId("tables-sidebar-peek-menu")).toBeInTheDocument();
   });
 
   it("closes on Escape", () => {
     render(<Harness initialOpen />);
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
+  });
+
+  it("hoverOpenFull: edge hover opens the full panel", () => {
+    render(<Harness hoverOpenFull />);
+    fireEvent.pointerEnter(screen.getByTestId("tables-sidebar-drawer"));
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    expect(drawer).toHaveAttribute("data-open", "1");
+    expect(drawer).toHaveAttribute("data-hover-open-full", "1");
+    expect(drawer).toHaveAttribute("data-peek", "0");
+    expect(drawer.className).toContain("is-open");
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("open");
+    const menu = screen.getByTestId("tables-sidebar-peek-menu");
+    expect(menu).toHaveAttribute(
+      "aria-label",
+      "Drag to resize, click to close tables panel",
+    );
+    expect(menu).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("hoverOpenFull: edge click opens the full panel", () => {
+    render(<Harness hoverOpenFull />);
+    fireEvent.click(screen.getByTestId("tables-sidebar-edge"));
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-open",
+      "1",
+    );
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("open");
+  });
+
+  it("hoverOpenFull: hides again after leave delay when the pointer leaves", () => {
+    render(<Harness hoverOpenFull />);
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    fireEvent.pointerEnter(drawer);
+    expect(drawer).toHaveAttribute("data-open", "1");
+    fireEvent.pointerLeave(drawer);
+    expect(drawer).toHaveAttribute("data-open", "1");
+    act(() => {
+      vi.advanceTimersByTime(279);
+    });
+    expect(drawer).toHaveAttribute("data-open", "1");
+    act(() => {
+      vi.advanceTimersByTime(2);
+    });
+    expect(drawer).toHaveAttribute("data-open", "0");
+    expect(screen.getByTestId("open-flag")).toHaveTextContent("closed");
+  });
+
+  it("hoverOpenFull: cancels leave-hide when the pointer re-enters before the delay", () => {
+    render(<Harness hoverOpenFull />);
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    fireEvent.pointerEnter(drawer);
+    fireEvent.pointerLeave(drawer);
+    act(() => {
+      vi.advanceTimersByTime(100);
+    });
+    fireEvent.pointerEnter(drawer);
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(drawer).toHaveAttribute("data-open", "1");
   });
 
   it("stays visually open in inspector mode even if open=false", () => {
@@ -199,7 +340,6 @@ describe("TablesSidebarDrawer", () => {
     expect(screen.getByTestId("tables-sidebar-drawer").className).toContain(
       "is-inspector",
     );
-    // Same folder handle as normal open — nested on the panel's right edge.
     const peek = screen.getByTestId("tables-sidebar-peek");
     expect(peek).toBeInTheDocument();
     expect(screen.getByTestId("tables-sidebar-panel").contains(peek)).toBe(
@@ -211,6 +351,16 @@ describe("TablesSidebarDrawer", () => {
       "Drag to resize, click to close tables panel",
     );
     expect(menu).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("does not auto-hide on pointer leave while in inspector mode", () => {
+    render(<Harness inspectorMode />);
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    fireEvent.pointerLeave(drawer);
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(drawer).toHaveAttribute("data-open", "1");
   });
 
   it("requests close from a quick handle click while in inspector mode", () => {
@@ -309,4 +459,29 @@ describe("TablesSidebarDrawer", () => {
     delete document.documentElement.dataset.samqlNfDrag;
   });
 
+  it("does not peek or open on pointer enter while samqlNfDrag is set", () => {
+    document.documentElement.dataset.samqlNfDrag = "1";
+    render(<Harness />);
+    fireEvent.pointerEnter(screen.getByTestId("tables-sidebar-drawer"));
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-open",
+      "0",
+    );
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-peek",
+      "0",
+    );
+    delete document.documentElement.dataset.samqlNfDrag;
+  });
+
+  it("does not open on pointer enter while samqlNfDrag is set (hoverOpenFull)", () => {
+    document.documentElement.dataset.samqlNfDrag = "1";
+    render(<Harness hoverOpenFull />);
+    fireEvent.pointerEnter(screen.getByTestId("tables-sidebar-drawer"));
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-open",
+      "0",
+    );
+    delete document.documentElement.dataset.samqlNfDrag;
+  });
 });

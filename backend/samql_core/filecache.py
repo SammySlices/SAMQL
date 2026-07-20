@@ -43,12 +43,56 @@ _LAST_SWEEP = [0.0]  # monotonic time of last opportunistic sweep
 _SWEEP_MIN_INTERVAL_SEC = 120.0
 _CONV_LOCKS = {}
 _CONV_LOCKS_MU = __import__("threading").Lock()
+# Paths currently backing a live table/view (refcount). Budget/age eviction
+# must never unlink these; concurrent same-file waiters stay safe.
+_HELD = {}  # realpath -> refcount
+_HELD_LOCK = __import__("threading").Lock()
+# Soft recent floor: protect convert→attach races even when unheld.
+_RECENT_FLOOR_SEC = 30.0
+# Soft recent window when under budget (legacy 600s posture, attach-aware).
+_RECENT_SOFT_SEC = 600.0
 
 
 def _next_seq():
     with _SEQ_LOCK:
         _SEQ[0] += 1
         return _SEQ[0]
+
+
+def _real(path):
+    try:
+        return os.path.realpath(path)
+    except Exception:
+        return path
+
+
+def hold(path):
+    """Mark a cache entry as attached to a live table/view (refcount)."""
+    if not path:
+        return
+    key = _real(path)
+    with _HELD_LOCK:
+        _HELD[key] = _HELD.get(key, 0) + 1
+
+
+def release(path):
+    """Drop one attach reference; entry becomes eligible for eviction."""
+    if not path:
+        return
+    key = _real(path)
+    with _HELD_LOCK:
+        n = _HELD.get(key, 0) - 1
+        if n <= 0:
+            _HELD.pop(key, None)
+        else:
+            _HELD[key] = n
+
+
+def is_held(path):
+    if not path:
+        return False
+    with _HELD_LOCK:
+        return _HELD.get(_real(path), 0) > 0
 
 
 def conversion_lock(key):
@@ -102,7 +146,7 @@ def _ensure_dir():
         pass
 
 
-def _source_content_digest(path, size):
+def content_digest(path, size=None):
     """Bounded content samples (same posture as Session._stable_path_signature).
 
     Size/mtime alone can collide after an in-place rewrite that preserves
@@ -110,6 +154,8 @@ def _source_content_digest(path, size):
     accidental stale reuse materially less likely.
     """
     h = hashlib.sha256()
+    if size is None:
+        size = int(os.path.getsize(path))
     size = int(size)
     offsets = sorted(set([
         0,
@@ -124,6 +170,10 @@ def _source_content_digest(path, size):
             h.update(str(offset).encode("ascii"))
             h.update(fh.read(64 * 1024))
     return h.hexdigest()[:32]
+
+
+# Back-compat alias for callers that used the private name.
+_source_content_digest = content_digest
 
 
 def cache_key(path, kind, extra=""):
@@ -230,14 +280,22 @@ def _max_age_sec():
 def sweep():
     """Reclaim the cache: drop abandoned .tmp files (>1h), entries unused
     longer than the age limit, then least-recently-used entries until the
-    total is under budget. Returns how many files were removed."""
+    total is under budget. Returns how many files were removed.
+
+    Live attaches (``hold``) are never age- or budget-evicted. A short recent
+    floor protects convert→attach races and concurrent same-file waiters.
+    The legacy 600s soft window still skips budget eviction when under
+    budget; under pressure it shrinks so only held + floor-recent survive.
+    """
     removed = 0
     try:
         names = os.listdir(_DIR)
     except Exception:
         return 0
     now = time.time()
-    entries = []  # (mtime, size, path)
+    total = 0
+    candidates = []  # (mtime, size, path) — always budget-eligible
+    soft_recent = []  # (mtime, size, path) — eligible only under pressure
     for n in names:
         p = os.path.join(_DIR, n)
         try:
@@ -249,22 +307,31 @@ def sweep():
                     os.unlink(p)
                     removed += 1
                 continue
-            if now - m > _max_age_sec():
+            sz = os.path.getsize(p)
+            held = is_held(p)
+            age = now - m
+            if age > _max_age_sec() and not held:
                 os.unlink(p)
                 removed += 1
                 continue
-            # very recent entries (attached views from a live session) are
-            # exempt from BUDGET eviction -- only age can take them
-            if now - m < 600:
+            total += sz
+            if held:
                 continue
-            entries.append((m, os.path.getsize(p), p))
+            if age < _RECENT_FLOOR_SEC:
+                # convert→attach / waiter race: never budget-evict
+                continue
+            if age < _RECENT_SOFT_SEC:
+                soft_recent.append((m, sz, p))
+                continue
+            candidates.append((m, sz, p))
         except Exception:
             continue
-    total = sum(sz for _m, sz, _p in entries)
     budget = _budget_bytes()
     if total > budget:
-        entries.sort()  # oldest (least recently used) first
-        for _m, sz, p in entries:
+        # Prefer older unheld; under pressure also reclaim soft-recent.
+        pool = list(candidates)
+        pool.sort()
+        for _m, sz, p in pool:
             if total <= budget:
                 break
             try:
@@ -273,4 +340,17 @@ def sweep():
                 removed += 1
             except Exception:
                 continue
+        if total > budget:
+            soft_recent.sort()
+            for _m, sz, p in soft_recent:
+                if total <= budget:
+                    break
+                if is_held(p):
+                    continue
+                try:
+                    os.unlink(p)
+                    total -= sz
+                    removed += 1
+                except Exception:
+                    continue
     return removed

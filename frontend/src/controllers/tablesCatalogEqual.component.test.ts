@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { tablesCatalogEqual } from "./useCatalogController";
+import {
+  CATALOG_ORIGIN_POLL_MS,
+  detectFileRefreshedToasts,
+  tablesCatalogEqual,
+} from "./useCatalogController";
 import type { TableInfo } from "../lib/types";
 
 function table(
@@ -63,5 +67,49 @@ describe("tablesCatalogEqual", () => {
     a[0].source = undefined as unknown as string;
     const b = [table({ engine: "duckdb", name: "t1", source: "" })];
     expect(tablesCatalogEqual(a, b)).toBe(true);
+  });
+
+  it("detects source_changed badge flips", () => {
+    const a = [table({ engine: "duckdb", name: "t1" })];
+    const b = [table({ engine: "duckdb", name: "t1", source_changed: true })];
+    expect(tablesCatalogEqual(a, b)).toBe(false);
+  });
+
+  it("detects source_reload_error flips", () => {
+    const a = [table({ engine: "duckdb", name: "t1", source_changed: true })];
+    const b = [
+      table({
+        engine: "duckdb",
+        name: "t1",
+        source_changed: true,
+        source_reload_error: "No reloadable source file",
+      }),
+    ];
+    expect(tablesCatalogEqual(a, b)).toBe(false);
+  });
+
+  it("detects File refreshed transitions for toasts", () => {
+    const prev = [
+      table({ engine: "duckdb", name: "t1", source_changed: true }),
+    ];
+    const next = [table({ engine: "duckdb", name: "t1" })];
+    expect(detectFileRefreshedToasts(prev, next)).toEqual([
+      { engine: "duckdb", name: "t1" },
+    ]);
+    expect(
+      detectFileRefreshedToasts(prev, [
+        table({
+          engine: "duckdb",
+          name: "t1",
+          source_changed: true,
+          source_reload_error: "boom",
+        }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("documents focused catalog origin poll interval (2–5s)", () => {
+    expect(CATALOG_ORIGIN_POLL_MS).toBeGreaterThanOrEqual(2000);
+    expect(CATALOG_ORIGIN_POLL_MS).toBeLessThanOrEqual(5000);
   });
 });

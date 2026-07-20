@@ -772,8 +772,8 @@ describe("FieldExplorer modal close cancels nested discovery", () => {
   });
 
   it("aborts fetch and cancelQuery when the panel closes mid-discovery", async () => {
-    let resolveFields: ((v: unknown) => void) | null = null;
-    const pending = new Promise((resolve) => {
+    let resolveFields: ((v: unknown) => void) | undefined;
+    const pending = new Promise<unknown>((resolve) => {
       resolveFields = resolve;
     });
     vi.mocked(api.tableFields).mockImplementation(
@@ -820,7 +820,7 @@ describe("FieldExplorer modal close cancels nested discovery", () => {
       ),
     );
     // Unblock the hanging promise so the test does not leak.
-    resolveFields?.({ fields: [] });
+    resolveFields!({ fields: [] });
   });
 
   it("resumes with after when a chunk returns partial + next_after", async () => {
@@ -880,6 +880,71 @@ describe("FieldExplorer modal close cancels nested discovery", () => {
       expect.any(AbortSignal),
       expect.objectContaining({ after: "a", query_id: expect.any(String) }),
     );
+  });
+});
+
+describe("FieldExplorer dataEpoch rediscovery", () => {
+  beforeEach(() => {
+    localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
+    vi.mocked(api.tableFields).mockResolvedValue(arrayFieldTree as any);
+    vi.mocked(api.columnAccessPreview).mockResolvedValue({ ok: false } as any);
+  });
+
+  it("clears fields and re-runs nested discovery when dataEpoch advances", async () => {
+    const { rerender } = render(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+        dataEpoch={1}
+      />,
+    );
+    await screen.findByText("json");
+    expect(api.tableFields).toHaveBeenCalledTimes(1);
+
+    const nextTree = {
+      fields: [
+        {
+          depth: 1,
+          name: "json",
+          type: "JSON",
+          kind: "struct",
+          column: "json",
+          path: "json",
+          access: { first: '"json"', sel: '"json"', unnests: [] },
+        },
+        {
+          depth: 1,
+          name: "new_after_reload",
+          type: "VARCHAR",
+          kind: "scalar",
+          column: "new_after_reload",
+          path: "new_after_reload",
+          access: {
+            first: '"new_after_reload"',
+            sel: '"new_after_reload"',
+            unnests: [],
+          },
+        },
+      ],
+    };
+    vi.mocked(api.tableFields).mockResolvedValue(nextTree as any);
+
+    rerender(
+      <FieldExplorer
+        open
+        onClose={vi.fn()}
+        tables={nestedTable()}
+        onToast={vi.fn()}
+        dataEpoch={2}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(api.tableFields).toHaveBeenCalledTimes(2);
+    });
+    expect(await screen.findByText("new_after_reload")).toBeTruthy();
   });
 });
 

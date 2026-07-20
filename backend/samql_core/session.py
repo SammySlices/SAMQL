@@ -831,6 +831,30 @@ class Session:
         # every load entry point that does not pass an explicit flatten/shred
         # flag (folder appends, some path loads).
         self.flatten_on_load = bool(self.config.get("flatten_json", False))
+        # Fresh load: skip persistent file→Parquet filecache for the next
+        # load(s). Default off (cache stays for perf). Per-load ``fresh``
+        # overrides this when passed explicitly.
+        self.fresh_load = bool(self.config.get("fresh_load", False))
+        # Fresh run: skip NodeFlow volatile / persistent reuse so each run
+        # executes against the current catalog after Input signature checks.
+        # Default off for perf; latest-data wins when on.
+        self.fresh_run = bool(self.config.get("fresh_run", False))
+        # File-origin watcher for ordinary loaded tables (sidebar badge +
+        # NodeFlow Input recheck). Directory/appendfolder keep their own
+        # signature caches.
+        from .originwatch import OriginWatch
+        self._origin_watch = OriginWatch()
+        # Single-flight for watcher / pre-run origin reloads (no N parallel
+        # reloads of the same table from overlapping tables_tree polls).
+        self._origin_sync_lock = threading.Lock()
+        self._origin_syncing = False
+        # Per-table in-flight reload: Run joins the watcher's job (no duplicate
+        # convert). key -> (Event, result_box) where result_box is [ok|None].
+        self._origin_reload_inflight = {}
+        self._origin_reload_gate = threading.Lock()
+        # Table names recently used by IDE SQL / Journal / NodeFlow — idle
+        # poll/sync prioritizes these; others stay cheaper / lazier.
+        self._origin_in_use_names = set()
         # Load-file size thresholds (Parquet / JSON stream / upload / cache).
         # Persisted overrides win over env vars; applied process-wide so
         # engines.py / filecache / server upload cap all see them.
@@ -912,6 +936,8 @@ class Session:
         # (rid -> refcount); pinned results are never evicted / freed, and an
         # explicit discard is DEFERRED until the run's views are dropped
         self._reuse_pins = {}
+        # First-pin wall time per result id (leaked-pin age bound).
+        self._reuse_pin_since = {}
         self._discard_deferred = set()
         self._lock = threading.RLock()
         # DuckDB on disk (bounded memory; cold data spilled to a temp DB
@@ -1000,6 +1026,30 @@ class Session:
         a single nested DuckDB table (False)."""
         return bool(getattr(self, "flatten_on_load", False))
 
+    def set_fresh_load(self, on):
+        """Toggle Fresh load (skip filecache) and persist it."""
+        self.fresh_load = bool(on)
+        try:
+            self.config.set("fresh_load", self.fresh_load)
+        except Exception:
+            pass
+        return self.fresh_load
+
+    def fresh_load_enabled(self):
+        return bool(getattr(self, "fresh_load", False))
+
+    def set_fresh_run(self, on):
+        """Toggle Fresh run (skip NodeFlow cache reuse) and persist it."""
+        self.fresh_run = bool(on)
+        try:
+            self.config.set("fresh_run", self.fresh_run)
+        except Exception:
+            pass
+        return self.fresh_run
+
+    def fresh_run_enabled(self):
+        return bool(getattr(self, "fresh_run", False))
+
     def set_concurrent_reads(self, on):
         # .426: async reads are ALWAYS ON. The whole product leans on
         # them now (grid pages, catalog peeks, counts); the old opt-out
@@ -1072,6 +1122,8 @@ class Session:
             "restoring": bool(getattr(self, "restoring", False)),
             "concurrent_reads": self.concurrent_reads_enabled(),
             "flatten_json": self.flatten_json_enabled(),
+            "fresh_load": self.fresh_load_enabled(),
+            "fresh_run": self.fresh_run_enabled(),
             "last_stall": stall,
             "stall_log": stall_log,
         }
@@ -1321,6 +1373,31 @@ class Session:
                 except Exception:
                     pass
             self._catalog_dirty = False
+        # Debounced origin poll: ordinary CSV/JSON edits → reload input in
+        # place (when idle) + clear last-run for IDE / Journal / NodeFlow.
+        # In-use tables (open SQL / Journal / NodeFlow) are checked/synced
+        # first; others stay cheaper (badge-pending until next tick or Run).
+        try:
+            ow = getattr(self, "_origin_watch", None)
+            if ow is not None:
+                in_use = list(getattr(self, "_origin_in_use_names", None) or [])
+                newly = ow.poll(priority_names=in_use) or []
+                if newly:
+                    self._sync_changed_file_origins(newly, clear_caches=True)
+                elif not self._runs_active():
+                    # Deferred reload after a busy poll (already cleared once).
+                    pending = list(ow.pending_keys() or [])
+                    if pending:
+                        self._sync_changed_file_origins(
+                            pending, clear_caches=False)
+                flags = ow.snapshot_flags()
+                reload_errs = ow.snapshot_errors()
+            else:
+                flags = {}
+                reload_errs = {}
+        except Exception:
+            flags = {}
+            reload_errs = {}
         # SQLite
         for name in sorted(self.db.table_columns):
             if name.startswith("__"):
@@ -1329,13 +1406,19 @@ class Session:
             # .464: busy-skip -- a running statement must never park the
             # sidebar; a miss shows no types now and fills in next pass.
             types = self.db.types_cached(name)
-            out.append({
+            row = {
                 "engine": "sqlite",
                 "name": name,
                 "source": self.db.table_sources.get(name, ""),
                 "row_count": self._cached_count(self.db, "sqlite", name),
                 "columns": _cols_with_hints(cols, types),
-            })
+            }
+            if flags.get(("sqlite", name)):
+                row["source_changed"] = True
+            err = reload_errs.get(("sqlite", name))
+            if err:
+                row["source_reload_error"] = err
+            out.append(row)
         # DuckDB
         if self.duckdb is not None:
             for name in sorted(self.duckdb.table_columns):
@@ -1343,7 +1426,7 @@ class Session:
                     continue  # internal staging (reconcile __nb_*)
                 cols = self.duckdb.table_columns.get(name, [])
                 types = self.duckdb.types_cached(name)
-                out.append({
+                row = {
                     "engine": "duckdb",
                     "name": name,
                     "source": self.duckdb.table_sources.get(name, ""),
@@ -1353,7 +1436,13 @@ class Session:
                     # .501: explicit flatten parentage for the sidebar family
                     # tree (path-only child names carry no parent in the name)
                     "parent": self._table_family.get(name),
-                })
+                }
+                if flags.get(("duckdb", name)):
+                    row["source_changed"] = True
+                err = reload_errs.get(("duckdb", name))
+                if err:
+                    row["source_reload_error"] = err
+                out.append(row)
         # remote catalog tables: names only -- columns are fetched lazily (via
         # /api/catalog/columns when a table is expanded) so a catalog of
         # thousands of tables stays a light payload. Carry the database /
@@ -2165,13 +2254,19 @@ class Session:
             if rows is not None:
                 self._prime_count(eng, nm, rows)
 
-    def _invalidate_counts(self, keys=None):
+    def _invalidate_counts(self, keys=None, keep_results=None):
         """Drop sidebar COUNT(*) cache entries after a mutation.
 
         ``keys`` — optional iterable of ``(engine_label, table_name)``. When
         given, only those entries are removed so unrelated large tables keep
         their cached counts. When omitted, the whole cache is cleared
         (unknown / free-form write SQL, engine resets).
+
+        ``keep_results`` — optional iterable of result ids that must remain
+        live across this epoch bump (keep-result-on-save: the snapshot just
+        materialised/exported stays pageable/exportable). Their
+        ``data_epoch`` is refreshed to the new session epoch; other stale
+        results still reclaim under latest-data-wins.
 
         Latest-data wins: any content-touching invalidate advances
         ``_data_epoch`` so IDE/Journal/NodeFlow clients refuse retained
@@ -2199,22 +2294,54 @@ class Session:
             self._data_epoch += 1
             if hasattr(self, "_flow_cache"):
                 self._flow_cache_clear()
-            self._reclaim_stale_results()
+            keep = set()
+            for rid in (keep_results or ()):
+                if rid:
+                    keep.add(rid)
+            if keep:
+                cur = int(getattr(self, "_data_epoch", 0) or 0)
+                with self._lock:
+                    for rid in keep:
+                        cr = self._results.get(rid)
+                        if cr is not None:
+                            try:
+                                cr.data_epoch = cur
+                            except Exception:
+                                pass
+            self._reclaim_stale_results(keep=keep or None)
 
-    def _reclaim_stale_results(self):
-        """Close unpinned result snapshots whose data_epoch no longer matches.
+    def _reclaim_stale_results(self, keep=None):
+        """Close result snapshots whose data_epoch no longer matches.
 
         Live checks already refuse them; reclaiming frees parquet/slots so
         frequent mutations do not pile dead stores until ordinary eviction.
-        Pinned Journal-reuse results are left alone until pins release.
+        Pinned Journal-reuse results are kept while the pin is live and
+        younger than ``SAMQL_PINNED_STALE_MAX_SEC`` (default 1h). Once pins
+        release — or a pin ages out — epoch-expired stores are reclaimed so
+        wrong data is never served from a leaked pin.
+
+        ``keep`` — optional result ids that must not be reclaimed (e.g. the
+        result just saved via materialize_result).
         """
         try:
             cur = int(getattr(self, "_data_epoch", 0) or 0)
         except Exception:
             cur = 0
+        keep_ids = set(keep or ())
+        try:
+            max_pin = float(os.environ.get("SAMQL_PINNED_STALE_MAX_SEC")
+                            or 3600)
+        except Exception:
+            max_pin = 3600.0
+        if max_pin < 0:
+            max_pin = 3600.0
+        now = time.time()
+        pin_since = getattr(self, "_reuse_pin_since", None)
+        if pin_since is None:
+            self._reuse_pin_since = pin_since = {}
         with self._lock:
             for rid in list(self._results_order):
-                if self._reuse_pins.get(rid):
+                if rid in keep_ids:
                     continue
                 cr = self._results.get(rid)
                 if cr is None:
@@ -2227,6 +2354,17 @@ class Session:
                     got = -1
                 if got == cur:
                     continue
+                if self._reuse_pins.get(rid):
+                    since = pin_since.get(rid)
+                    if since is None:
+                        since = float(getattr(cr, "created", now) or now)
+                        pin_since[rid] = since
+                    if (now - since) < max_pin:
+                        continue
+                    # Aged pin on an expired epoch: drop the pin and reclaim.
+                    self._reuse_pins.pop(rid, None)
+                    pin_since.pop(rid, None)
+                    self._discard_deferred.discard(rid)
                 self._results.pop(rid, None)
                 if rid in self._results_order:
                     self._results_order.remove(rid)
@@ -2444,6 +2582,447 @@ class Session:
         deps = getattr(self, "_flow_source_tables", None)
         if deps is not None:
             deps.clear()
+
+    def _clear_last_run_caches(self):
+        """Drop last-run surfaces shared by IDE, Journal, and NodeFlow.
+
+        Advances ``data_epoch`` so clients refuse retained result_ids /
+        preview drawers / Journal cell pages; clears volatile + persistent
+        NodeFlow reuse; reclaims expired snapshots. Does not drop loaded
+        catalog tables (inputs stay; contents may be refreshed separately).
+        """
+        try:
+            self._data_epoch = int(getattr(self, "_data_epoch", 0) or 0) + 1
+        except Exception:
+            self._data_epoch = 1
+        try:
+            self._flow_cache_clear()
+        except Exception:
+            pass
+        try:
+            preg = getattr(self, "_persistent_flow_cache_registry", None)
+            if preg is not None:
+                preg.clear(reset_stats=False)
+        except Exception:
+            pass
+        try:
+            self._reclaim_stale_results()
+        except Exception:
+            pass
+
+    def _runs_active(self):
+        try:
+            with self._running_lock:
+                return bool(self._running)
+        except Exception:
+            return False
+
+    def _note_origin_reload_error(self, eng_name, table, message):
+        """Surface a watcher/recheck reload failure on the origin registry."""
+        ow = getattr(self, "_origin_watch", None)
+        if ow is None:
+            return
+        try:
+            ow.set_error(eng_name, table, message)
+        except Exception:
+            pass
+        try:
+            # Keep a short trail for diagnostics / Activity-style status.
+            trail = getattr(self, "_origin_reload_log", None)
+            if trail is None:
+                trail = []
+                self._origin_reload_log = trail
+            trail.append({
+                "engine": eng_name,
+                "table": table,
+                "error": str(message or "Reload failed"),
+                "ts": time.time(),
+            })
+            if len(trail) > 32:
+                del trail[:-32]
+        except Exception:
+            pass
+
+    def _touch_origin_in_use(self, names):
+        """Remember tables used by the latest IDE/Journal/NodeFlow surface."""
+        if not names:
+            return
+        cur = getattr(self, "_origin_in_use_names", None)
+        if cur is None:
+            self._origin_in_use_names = cur = set()
+        for n in names:
+            text = str(n or "").strip()
+            if text and not text.startswith("__"):
+                cur.add(text)
+        # Bound growth — keep a modest working set for poll priority.
+        if len(cur) > 64:
+            # Drop arbitrary extras; next runs re-add what matters.
+            self._origin_in_use_names = set(list(cur)[-64:])
+
+    def _filter_origin_keys(self, keys, only_names=None):
+        """Filter ``(engine, name)`` keys to ``only_names`` when provided."""
+        if not keys:
+            return []
+        if only_names is None:
+            return list(keys)
+        wanted = {str(n) for n in only_names if n}
+        if not wanted:
+            return []
+        return [k for k in keys if k[1] in wanted]
+
+    def _prioritize_origin_keys(self, keys):
+        """In-use table names first (idle sync / digest walk order)."""
+        if not keys:
+            return []
+        in_use = getattr(self, "_origin_in_use_names", None) or set()
+        if not in_use:
+            return list(keys)
+        head, tail = [], []
+        for k in keys:
+            (head if k[1] in in_use else tail).append(k)
+        return head + tail
+
+    def _reload_origin_inplace(self, eng_name, table, *, deadline=None):
+        """In-place fresh reload; records errors instead of swallowing them.
+
+        Single-flight per ``(engine, table)``: if the watcher (or another
+        Run) is already converting this table, wait on that same job instead
+        of starting a duplicate. Returns True on success, False on failure
+        (badge/error left set). When ``deadline`` (monotonic) expires while
+        waiting, returns False without starting a new convert.
+        """
+        key = (str(eng_name), str(table))
+        gate = getattr(self, "_origin_reload_gate", None)
+        inflight = getattr(self, "_origin_reload_inflight", None)
+        if gate is None or inflight is None:
+            return self._reload_origin_inplace_body(eng_name, table)
+        with gate:
+            slot = inflight.get(key)
+            if slot is not None:
+                ev, box = slot
+                waiter = True
+            else:
+                ev = threading.Event()
+                box = [None]
+                inflight[key] = (ev, box)
+                waiter = False
+        if waiter:
+            remain = None
+            if deadline is not None:
+                remain = max(0.0, float(deadline) - time.monotonic())
+            if remain is not None:
+                ev.wait(timeout=remain)
+            else:
+                ev.wait()
+            if not ev.is_set():
+                return False
+            ok = box[0]
+            return bool(ok) if ok is not None else False
+        try:
+            ok = self._reload_origin_inplace_body(eng_name, table)
+            box[0] = bool(ok)
+            return bool(ok)
+        finally:
+            with gate:
+                cur = inflight.get(key)
+                if cur is not None and cur[0] is ev:
+                    inflight.pop(key, None)
+            ev.set()
+
+    def _reload_origin_inplace_body(self, eng_name, table):
+        """Actual in-place reload (caller holds the per-table single-flight)."""
+        try:
+            res = self.reload_table_from_source(
+                eng_name, table, replace=True, fresh=True,
+                include_tree=False)
+        except Exception as e:
+            self._note_origin_reload_error(eng_name, table, err_str(e))
+            return False
+        if not isinstance(res, dict) or not res.get("ok"):
+            msg = (res or {}).get("error") if isinstance(res, dict) else None
+            self._note_origin_reload_error(
+                eng_name, table, msg or "Reload failed")
+            return False
+        try:
+            ow = getattr(self, "_origin_watch", None)
+            if ow is not None:
+                ow.clear_error(eng_name, table)
+        except Exception:
+            pass
+        return True
+
+    def _sync_changed_file_origins(self, keys, *, clear_caches=True):
+        """Watcher reaction: refresh inputs + clear last-run (all surfaces).
+
+        For each ``(engine, name)`` whose source file changed:
+        - Optionally clear IDE/Journal/NodeFlow last-run caches (epoch bump).
+        - When no query/flow is mid-flight, reload that table in place
+          (same name) so Inputs / SQL tabs keep their table identity
+          (NodeFlow missing-field UX) while seeing newest rows.
+        - When busy, leave ``source_changed`` / Updating… badge; retry on a
+          later idle poll (without re-bumping epoch) or pre-run recheck.
+        - Reload failures are recorded on the origin entry (not silent).
+        Single-flight: overlapping syncs no-op (deferred poll retries).
+        In-use tables reload first; per-tick reload count is capped so many
+        watched files cannot stall the sidebar.
+        """
+        from . import originwatch as OW
+        if not keys:
+            return
+        lock = getattr(self, "_origin_sync_lock", None)
+        if lock is not None:
+            if not lock.acquire(blocking=False):
+                return
+        else:
+            lock = None
+        try:
+            if getattr(self, "_origin_syncing", False):
+                return
+            self._origin_syncing = True
+            ordered = self._prioritize_origin_keys(keys)
+            in_use = getattr(self, "_origin_in_use_names", None) or set()
+            if in_use:
+                preferred = [k for k in ordered if k[1] in in_use]
+                # Prefer in-use; if none of the dirty set is in-use, still
+                # make forward progress on a capped batch (lazy others).
+                work = preferred or ordered
+            else:
+                work = ordered
+            try:
+                cap = int(OW.MAX_RELOADS_PER_SYNC)
+            except Exception:
+                cap = 4
+            if cap > 0:
+                work = work[:cap]
+            if clear_caches and work:
+                # Clear first so retained grids/previews cannot look current.
+                self._clear_last_run_caches()
+            if self._runs_active():
+                return
+            for eng_name, table in work:
+                self._reload_origin_inplace(eng_name, table)
+        finally:
+            self._origin_syncing = False
+            if lock is not None:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+    def _ensure_origins_fresh_for_run(self, *, budget_sec=None, sql=None,
+                                      table_names=None, graph=None):
+        """IDE/Journal/NodeFlow pre-run: cheap origin recheck + reload-then-run.
+
+        Force-polls watched origins (cheap-stat first). Reloads only origins
+        needed for this run when ``sql`` / ``table_names`` / ``graph`` is
+        given — not every watched sidebar table. Budget scales with pending
+        file sizes (hard-capped). Joins in-flight watcher reloads (no
+        duplicate convert). Never returns success while needed sources are
+        known-stale without attempting refresh — deadline / busy → clear
+        retry error (not silent stale).
+
+        Returns None when fresh (or nothing needed); else ``{"error": ...}``.
+        """
+        from . import originwatch as OW
+        ow = getattr(self, "_origin_watch", None)
+        if ow is None:
+            return None
+        only = None
+        if table_names is not None:
+            only = {str(n) for n in table_names if n}
+        elif sql is not None:
+            only = set(self._table_names_in(sql) or [])
+            self._touch_origin_in_use(only)
+        elif graph is not None:
+            only = set(self._input_table_names_from_graph(graph) or [])
+            self._touch_origin_in_use(only)
+        try:
+            newly = ow.poll(
+                force=True,
+                priority_names=list(only) if only is not None else list(
+                    getattr(self, "_origin_in_use_names", None) or []),
+            ) or []
+        except Exception:
+            newly = []
+        try:
+            pending = list(ow.pending_keys() or [])
+        except Exception:
+            pending = []
+        # Preserve order, unique; scope to this run when known.
+        seen = set()
+        keys = []
+        for k in list(newly) + pending:
+            if k in seen:
+                continue
+            seen.add(k)
+            keys.append(k)
+        keys = self._filter_origin_keys(keys, only)
+        if not keys:
+            return None
+        # Size-scaled budget (caller override wins when explicit).
+        if budget_sec is None:
+            try:
+                sizes = ow.sizes_for_keys(keys)
+            except Exception:
+                sizes = []
+            budget = OW.recheck_budget_sec(sizes)
+        else:
+            try:
+                budget = float(budget_sec)
+            except Exception:
+                budget = OW.RECHECK_BUDGET_SEC
+            if budget <= 0:
+                budget = OW.RECHECK_BUDGET_MIN_SEC
+        t0 = time.monotonic()
+        deadline = t0 + budget
+        # Retained grids must not look current while we refresh.
+        try:
+            self._clear_last_run_caches()
+        except Exception:
+            pass
+        # Join any in-flight per-table reloads first (watcher already working).
+        still = []
+        for eng_name, table in keys:
+            if time.monotonic() >= deadline:
+                return {"error":
+                        "Source file updating — retry in a moment."}
+            gate = getattr(self, "_origin_reload_gate", None)
+            inflight = getattr(self, "_origin_reload_inflight", None)
+            slot = None
+            if gate is not None and inflight is not None:
+                with gate:
+                    slot = inflight.get((str(eng_name), str(table)))
+            if slot is not None:
+                ok = self._reload_origin_inplace(
+                    eng_name, table, deadline=deadline)
+                if not ok:
+                    # Still pending / timed out / failed — fail closed.
+                    try:
+                        if ow.is_changed(eng_name, table):
+                            return {"error":
+                                    "Source file updating — retry in a moment."}
+                    except Exception:
+                        return {"error":
+                                "Source file updating — retry in a moment."}
+                continue
+            still.append((eng_name, table))
+        keys = still
+        if not keys:
+            # Re-check: in-flight jobs may have cleared flags.
+            try:
+                keys = self._filter_origin_keys(
+                    list(ow.pending_keys() or []), only)
+            except Exception:
+                keys = []
+            if not keys:
+                return None
+        # Wait briefly if another query/flow holds the engines — prefer
+        # reload-then-run over indefinite wait or silent stale success.
+        busy_deadline = min(deadline, t0 + OW.BUSY_WAIT_SEC)
+        while self._runs_active() and time.monotonic() < busy_deadline:
+            time.sleep(0.05)
+        if self._runs_active():
+            return {"error":
+                    "Source file updating — retry in a moment."}
+        # Single-flight with remaining budget (block for in-flight sync).
+        lock = getattr(self, "_origin_sync_lock", None)
+        got_lock = True
+        if lock is not None:
+            remain = max(0.0, deadline - time.monotonic())
+            got_lock = lock.acquire(timeout=remain)
+            if not got_lock:
+                # Another sync may have finished — re-check needed flags.
+                try:
+                    left = self._filter_origin_keys(
+                        list(ow.pending_keys() or []), only)
+                    if not left:
+                        return None
+                except Exception:
+                    pass
+                return {"error":
+                        "Source file updating — retry in a moment."}
+        try:
+            self._origin_syncing = True
+            # Re-read pending after waiting (idle watcher may have cleared).
+            try:
+                keys = self._filter_origin_keys(
+                    list(ow.pending_keys() or []) or keys, only)
+            except Exception:
+                pass
+            for eng_name, table in keys:
+                if time.monotonic() >= deadline:
+                    return {"error":
+                            "Source file updating — retry in a moment."}
+                ok = self._reload_origin_inplace(
+                    eng_name, table, deadline=deadline)
+                if not ok:
+                    err = None
+                    try:
+                        err = (ow.snapshot_errors() or {}).get(
+                            (eng_name, table))
+                    except Exception:
+                        err = None
+                    # Timeout joining / reloading → retry, not silent stale.
+                    if not err:
+                        try:
+                            if ow.is_changed(eng_name, table):
+                                return {"error":
+                                        "Source file updating — "
+                                        "retry in a moment."}
+                        except Exception:
+                            pass
+                    return {"error":
+                            "Could not refresh %s: %s"
+                            % (table, err or "reload failed")}
+        finally:
+            self._origin_syncing = False
+            if lock is not None and got_lock:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+        return None
+
+    def _input_table_names_from_graph(self, graph):
+        """Table names referenced by Input / Inputs nodes (incl. nested)."""
+        names = set()
+        if not graph or not isinstance(graph, dict):
+            return names
+        walk = list(graph.get("nodes") or [])
+        i = 0
+        while i < len(walk):
+            node = walk[i]
+            i += 1
+            if not isinstance(node, dict):
+                continue
+            typ = node.get("type")
+            cfg = node.get("config")
+            if not isinstance(cfg, dict):
+                cfg = {}
+            if typ in ("group", "iterator"):
+                for ch in (cfg.get("children") or []):
+                    walk.append(ch)
+                continue
+            if typ == "usernode":
+                inner = cfg.get("graph") or {}
+                if isinstance(inner, dict):
+                    for ch in (inner.get("nodes") or []):
+                        walk.append(ch)
+                continue
+            if typ == "input":
+                t = (cfg.get("table") or "").strip()
+                if t:
+                    names.add(t)
+            elif typ == "inputs":
+                for item in (cfg.get("tables") or []):
+                    if isinstance(item, dict):
+                        nm = (item.get("name") or item.get("table")
+                              or "").strip()
+                    else:
+                        nm = str(item or "").strip()
+                    if nm:
+                        names.add(nm)
+        return names
 
     @staticmethod
     def _sql_path(path):
@@ -2735,6 +3314,7 @@ class Session:
                 "parallel_workers_effective": budget["parallel_workers"],
                 "resource_budget": budget,
                 "persistent_enabled": bool(self.persistent_flow_cache),
+                "fresh_run": self.fresh_run_enabled(),
                 "persistent": self._persistent_flow_cache_registry.info(),
                 **self._flow_cache_registry.info()}
 
@@ -3226,11 +3806,14 @@ class Session:
                              adaptive_resources=None,
                              parallel_nodeflows=None, parallel_workers=None,
                              persistent_enabled=None, persistent_max_mb=None,
-                             persistent_days=None, clear_persistent=False):
+                             persistent_days=None, clear_persistent=False,
+                             fresh_run=None):
         """Apply and persist NodeFlow cache/resource settings."""
         if enabled is not None:
             self.flow_cache = bool(enabled)
             self.config.set("flow_cache", self.flow_cache)
+        if fresh_run is not None:
+            self.set_fresh_run(bool(fresh_run))
         if max_entries is not None:
             self.flow_cache_max = max(0, min(int(max_entries), 10000))
             self.config.set("flow_cache_max", self.flow_cache_max)
@@ -3349,10 +3932,19 @@ class Session:
     def load_file(self, path, destination="auto", base_name=None,
                   progress=None, delimiter=None, mode="materialize",
                   sheet=None, header_row=1, op_kind="load", exclude=None,
-                  flatten=None, shred=False, root_id=None):
+                  flatten=None, shred=False, root_id=None, fresh=None):
         if destination in (None, "", "auto", "default"):
             destination = self.default_destination()
         _label = base_name or os.path.basename(path or "") or "file"
+        # Fresh load: per-call flag wins; else session setting. Never
+        # silently changes Parquet size / flatten / shred thresholds.
+        if fresh is None:
+            try:
+                skip_cache = bool(self.fresh_load_enabled())
+            except Exception:
+                skip_cache = bool(getattr(self, "fresh_load", False))
+        else:
+            skip_cache = bool(fresh)
         _oid = None
         try:
             _oid = opreg.begin(op_kind, target=_label)
@@ -3363,6 +3955,8 @@ class Session:
             # STRUCT/LIST types (not depth-capped JSON) so relational shred
             # sees real arrays/structs — and stays the fast Parquet path for
             # large files — instead of mis-shredding JSON scalar columns.
+            # Table names uniquify on collision (foo → foo_2); engines never
+            # overwrite an existing catalog table on the default load path.
             loaded = loaders.load_file(
                 self, path, destination=destination,
                 base_name=base_name, progress=progress,
@@ -3370,7 +3964,8 @@ class Session:
                 sheet=sheet, header_row=header_row,
                 exclude=exclude, flatten=flatten,
                 root_id=root_id,
-                full_nested=bool(shred) and flatten is False)
+                full_nested=bool(shred) and flatten is False,
+                skip_cache=skip_cache)
             if shred:
                 loaded = self._shred_after_load(loaded, root_id=root_id)
         finally:
@@ -3386,7 +3981,31 @@ class Session:
                 item for item in items if isinstance(item, dict))
         except Exception:
             self._invalidate_counts()
+        # Register file-origin watches so sidebar + NodeFlow Input recheck
+        # notice later CSV/JSON edits (directory/appendfolder keep own caches).
+        try:
+            self._register_loaded_origins(path, loaded)
+        except Exception:
+            pass
         return loaded
+
+    def _register_loaded_origins(self, path, loaded):
+        from . import originwatch as OW
+        ow = getattr(self, "_origin_watch", None)
+        if ow is None or not path:
+            return
+        items = loaded if isinstance(loaded, list) else [loaded]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            eng_name = item.get("engine") or "sqlite"
+            if not name or str(name).startswith("__"):
+                continue
+            eng = self.duckdb if eng_name == "duckdb" else self.db
+            watch_path = OW.watchable_path(eng, name, prefer_path=path)
+            if watch_path:
+                ow.register(eng_name, name, watch_path)
 
     # extensions load_file knows how to read
     _FOLDER_EXTS = {"csv", "tsv", "txt", "json", "ndjson", "jsonl",
@@ -4052,9 +4671,9 @@ class Session:
             return "sqlite"
         return None
 
-    def _flow_engine_target(self, graph):
-        """The single engine a flow runs on, derived from its input tables and
-        any loaded tables referenced by SQL nodes."""
+    def _flow_pinned_engine(self, graph):
+        """Return ``\"duckdb\"``, ``\"sqlite\"``, or ``None`` if no input pins
+        an engine. Shared by flow targeting and Write-node destination."""
         from . import nodeflow
         eng = None
 
@@ -4104,7 +4723,35 @@ class Session:
                     _scan(cfg.get("children"))
 
         _scan(graph.get("nodes"))
+        return eng
+
+    def _flow_engine_target(self, graph):
+        """The single engine a flow runs on, derived from its input tables and
+        any loaded tables referenced by SQL nodes."""
+        eng = self._flow_pinned_engine(graph)
         return DUCKDB_TARGET if eng == "duckdb" else LOCAL_TARGET
+
+    def _resolve_write_destination(self, wcfg):
+        """Write-node store target: DuckDB by default; SQLite opt-in.
+
+        Accepts ``dest`` / ``destination`` as duckdb / sqlite / auto /
+        ``__duckdb__`` / ``__local__``. Empty/auto follows
+        ``default_destination()`` (DuckDB when installed).
+        """
+        raw = ((wcfg or {}).get("dest")
+               or (wcfg or {}).get("destination")
+               or "").strip().lower()
+        if raw in ("", "auto", "default"):
+            return (DUCKDB_TARGET if self.default_destination() == "duckdb"
+                    else LOCAL_TARGET)
+        if raw in ("duckdb", "__duckdb__"):
+            if not HAS_DUCKDB:
+                return LOCAL_TARGET
+            return DUCKDB_TARGET
+        if raw in ("sqlite", "local", "__local__"):
+            return LOCAL_TARGET
+        return (DUCKDB_TARGET if self.default_destination() == "duckdb"
+                else LOCAL_TARGET)
 
     def _independent_flow_target_groups(self, graph, targets):
         """Partition targets whose upstream node sets do not overlap."""
@@ -4260,6 +4907,24 @@ class Session:
         # resolve ${name} workflow-variable tokens once, up front: everything
         # below compiles a graph whose tokens are already filled in
         graph = applyvars.resolve_graph(graph)
+        from . import nodeflow
+        # Input file-origin recheck (mtime/size/ctime/inode + content digest).
+        # Directory/appendfolder keep their own signature recheck on fetch.
+        # Explicit refresh failures must surface (not silent stale success).
+        try:
+            graph = self._refresh_file_backed_inputs(graph)
+        except nodeflow.NodeflowError:
+            raise
+        except RuntimeError as e:
+            msg = str(e)
+            low = msg.lower()
+            # Fail closed on known-stale / budget / reload errors (not silent).
+            if (msg.startswith("Could not refresh")
+                    or ("updating" in low and "retry" in low)):
+                raise nodeflow.NodeflowError(msg)
+            # Unexpected probe errors: keep prior posture (do not abort run).
+        except Exception:
+            pass
         # SQL Server / SharePoint / Web scrape: reconnect + import before
         # compile so Dashboard / Run all work with a saved profile + password
         # without a prior interactive Fetch.
@@ -4267,7 +4932,6 @@ class Session:
             graph, [nid for nid, _port in targets], query_id=None)
         # SHRED nodes create their relational tables before anything composes
         self._shred_flow_prepass(graph, targets)
-        from . import nodeflow
         import re as _re
         import secrets as _secrets
         eng, _kind = self._engine_obj(engine_target)
@@ -4307,8 +4971,13 @@ class Session:
         # subtree + projection + data epoch + engine. A boundary node whose
         # fingerprint is already cached is reused instead of recomputed. Empty
         # (no caching) when the cache is off or fingerprinting fails.
+        # Fresh run: skip volatile + persistent reuse so the run always
+        # executes against the current catalog after Input signature checks.
+        fresh_run = bool(getattr(self, "fresh_run", False))
         use_volatile_cache = bool(
-            getattr(self, "flow_cache", False) and _engine_override is None)
+            getattr(self, "flow_cache", False)
+            and _engine_override is None
+            and not fresh_run)
         # Filebrowser / remote / directory sources can change without a
         # data-epoch bump (config text stays stable). Non-deterministic
         # SQL/sample/python would likewise freeze the first materialisation
@@ -4337,7 +5006,8 @@ class Session:
             except Exception:
                 fps = {}
         persistent_fps = {}
-        persistent_salt = self._persistent_flow_salt(graph, engine_target)
+        persistent_salt = None if fresh_run else self._persistent_flow_salt(
+            graph, engine_target)
         if persistent_salt:
             try:
                 persistent_fps = nodeflow.flow_fingerprints(
@@ -5470,6 +6140,56 @@ class Session:
         self._flow_cleanup(query_id, et, created)
         return {"ok": True, "results": results}
 
+    def _clear_write_destination(self, eng, name):
+        """Free ``name`` for a NodeFlow overwrite (main + temp shadows).
+
+        DuckDB resolves unqualified names temp-first, so a leftover TEMP
+        TABLE/VIEW with the destination name makes ``DROP TABLE IF EXISTS``
+        remove only the temp object — then ``CREATE TABLE`` fails (or a
+        CREATE OR REPLACE updates main while SELECT still reads the stale
+        temp). Views also reject ``DROP TABLE``. Clear temp shadows, then
+        view/table in the main catalog, engine registries, and any file
+        origin watch so a later watcher sync cannot restore the prior file
+        over the written table.
+        """
+        if not name:
+            return
+        q = str(name).replace('"', '""')
+        drops = (
+            # DuckDB temp catalog (no-op / error on SQLite — ignored).
+            'DROP VIEW IF EXISTS "temp"."main"."%s"' % q,
+            'DROP TABLE IF EXISTS "temp"."main"."%s"' % q,
+            # SQLite temp schema.
+            'DROP VIEW IF EXISTS temp."%s"' % q,
+            'DROP TABLE IF EXISTS temp."%s"' % q,
+            # Main catalog: view then table (order matters for both engines).
+            'DROP VIEW IF EXISTS "%s"' % q,
+            'DROP TABLE IF EXISTS "%s"' % q,
+        )
+        for sql in drops:
+            try:
+                eng.execute(sql)
+            except Exception:
+                pass
+        for reg_name in ("table_columns", "table_sources", "table_origins",
+                         "view_backing"):
+            reg = getattr(eng, reg_name, None)
+            if isinstance(reg, dict):
+                reg.pop(name, None)
+        drop_types = getattr(eng, "_types_cache_drop", None)
+        if callable(drop_types):
+            try:
+                drop_types(name)
+            except Exception:
+                pass
+        ow = getattr(self, "_origin_watch", None)
+        if ow is not None:
+            for eng_label in ("duckdb", "sqlite"):
+                try:
+                    ow.unregister(eng_label, name)
+                except Exception:
+                    pass
+
     def _write_into_table(self, eng, name, src, mode, replace_keys):
         """Write rows from table ``src`` into ``name``. mode 'overwrite' (or a
         target that doesn't exist yet) drops + recreates; 'append' inserts,
@@ -5481,6 +6201,11 @@ class Session:
         from . import nodeflow
 
         def _exists(t):
+            # Prefer the main-catalog registry so a temp shadow of the same
+            # name cannot steer append into a disposable temp relation.
+            cols = getattr(eng, "table_columns", None) or {}
+            if t in cols:
+                return True
             try:
                 eng.execute('SELECT * FROM "%s" LIMIT 0' % t)
                 return True
@@ -5488,7 +6213,7 @@ class Session:
                 return False
 
         if mode == "overwrite" or not _exists(name):
-            eng.execute('DROP TABLE IF EXISTS "%s"' % name)
+            self._clear_write_destination(eng, name)
             eng.execute('CREATE TABLE "%s" AS SELECT * FROM "%s"' % (name, src))
             return
         tcols = self._col_names(eng, table=name)
@@ -5507,6 +6232,136 @@ class Session:
             ('"%s"' % c) if c in sset else "NULL" for c in tcols)
         eng.execute('INSERT INTO "%s" (%s) SELECT %s FROM "%s"'
                     % (name, collist, sellist, src))
+
+    def _drain_flow_table_rows(self, eng, table, batch=50000):
+        """Read all rows of a flow temp/table into memory (or a spill list).
+
+        DuckDB TEMP tables are only visible on the main connection, so the
+        drain holds ``write_lock`` and uses ``same_conn=True``.
+        """
+        sql = 'SELECT * FROM "%s"' % table
+        same = getattr(eng, "ENGINE_KIND", None) == "duckdb"
+        lock = getattr(eng, "write_lock", None) if same else None
+        if lock is not None:
+            lock.acquire()
+        try:
+            cols, first, cursor = (
+                eng.execute_cursor(sql, batch=batch, same_conn=True) if same
+                else eng.execute_cursor(sql, batch=batch))
+            cols = list(cols or [])
+            rows = [tuple(r) for r in (first or [])]
+            if cursor is not None:
+                try:
+                    while True:
+                        chunk = cursor.fetchmany(batch)
+                        if not chunk:
+                            break
+                        rows.extend(tuple(r) for r in chunk)
+                finally:
+                    if not same:
+                        try:
+                            cursor.close()
+                        except Exception:
+                            pass
+            return cols, rows
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _stream_copy_table(self, src_eng, src, dest_eng, name):
+        """Create ``name`` on ``dest_eng`` as a full copy of ``src`` on
+        ``src_eng``. Caller must have cleared ``name`` on the destination
+        when overwriting. Uses ``add_table_streaming`` so the exact name is
+        kept when the catalog slot is free."""
+        same_src = getattr(src_eng, "ENGINE_KIND", None) == "duckdb"
+        batch = 50000
+        if same_src:
+            # Drain under the DuckDB lock first so we never hold it across
+            # a destination-engine write (would deadlock on same engine, and
+            # block the pool on cross-engine).
+            cols, rows = self._drain_flow_table_rows(src_eng, src, batch=batch)
+            tname, _n = dest_eng.add_table_streaming(
+                name, cols, iter(rows), source="nodeflow")
+        else:
+            cols, first, cursor = src_eng.execute_cursor(
+                'SELECT * FROM "%s"' % src, batch=batch)
+            cols = list(cols or [])
+
+            def _rows():
+                for r in (first or []):
+                    yield tuple(r)
+                if cursor is not None:
+                    try:
+                        while True:
+                            chunk = cursor.fetchmany(batch)
+                            if not chunk:
+                                break
+                            for r in chunk:
+                                yield tuple(r)
+                    finally:
+                        try:
+                            cursor.close()
+                        except Exception:
+                            pass
+
+            tname, _n = dest_eng.add_table_streaming(
+                name, cols, _rows(), source="nodeflow")
+        if tname != name:
+            # Catalog raced a uniquify — move onto the requested name.
+            try:
+                dest_eng.execute('DROP TABLE IF EXISTS "%s"' % name)
+            except Exception:
+                pass
+            dest_eng.execute(
+                'ALTER TABLE "%s" RENAME TO "%s"' % (tname, name))
+            cols_reg = getattr(dest_eng, "table_columns", None)
+            if isinstance(cols_reg, dict) and tname in cols_reg:
+                cols_reg[name] = cols_reg.pop(tname)
+            src_reg = getattr(dest_eng, "table_sources", None)
+            if isinstance(src_reg, dict) and tname in src_reg:
+                src_reg[name] = src_reg.pop(tname)
+
+    def _write_into_table_cross(self, src_eng, src, dest_eng, name,
+                                mode, replace_keys):
+        """Write ``src`` (on ``src_eng``) into ``name`` on ``dest_eng``.
+
+        Same-engine delegates to ``_write_into_table`` (overwrite uses
+        ``_clear_write_destination``). Cross-engine copies into a staging
+        table on the destination, then reuses the same overwrite/append
+        logic so DuckDB temp/view/origin clearing stays in one place.
+        """
+        if src_eng is dest_eng:
+            self._write_into_table(dest_eng, name, src, mode, replace_keys)
+            return
+
+        def _exists(t):
+            cols = getattr(dest_eng, "table_columns", None) or {}
+            if t in cols:
+                return True
+            try:
+                dest_eng.execute('SELECT * FROM "%s" LIMIT 0' % t)
+                return True
+            except Exception:
+                return False
+
+        if mode == "overwrite" or not _exists(name):
+            self._clear_write_destination(dest_eng, name)
+            self._stream_copy_table(src_eng, src, dest_eng, name)
+            return
+        stage = name + "__nf_xstage"
+        self._clear_write_destination(dest_eng, stage)
+        try:
+            self._stream_copy_table(src_eng, src, dest_eng, stage)
+            self._write_into_table(
+                dest_eng, name, stage, mode, replace_keys)
+        finally:
+            try:
+                dest_eng.execute('DROP TABLE IF EXISTS "%s"' % stage)
+            except Exception:
+                pass
+            reg = getattr(dest_eng, "table_columns", None)
+            if isinstance(reg, dict):
+                reg.pop(stage, None)
 
     def _reduce_accumulator(self, eng, name, keys, aggs):
         """Collapse the accumulator to one row per key, folding each measure
@@ -5555,8 +6410,9 @@ class Session:
 
     def run_nodeflow_to_table(self, graph, node_id, name, query_id=None):
         """Run a write node's upstream flow and store the result as a loaded
-        table (in the flow's own engine) so it shows in the tables list and can
-        be queried / joined. Overwrites a same-named table. Cancellable.
+        table. Destination defaults to DuckDB (``dest`` / ``destination`` on
+        the write node; SQLite remains opt-in). Overwrite uses
+        ``_clear_write_destination`` on the destination engine. Cancellable.
         Returns {ok, table, engine, rows, all} or {error}."""
         from . import nodeflow, applyvars
         import re as _re
@@ -5584,12 +6440,22 @@ class Session:
         replace_keys = [str(k).strip()
                         for k in (wcfg.get("replace_keys") or [])
                         if str(k).strip()]
+        write_et = self._resolve_write_destination(wcfg)
         nm = sanitize_ident(name, "flow_result")
         created = []
         et = LOCAL_TARGET
         try:
-            et = self._flow_engine_target(graph)
+            pinned = self._flow_pinned_engine(graph)
+            if pinned == "duckdb":
+                et = DUCKDB_TARGET
+            elif pinned == "sqlite":
+                et = LOCAL_TARGET
+            else:
+                # Unpinned flow (pure SQL / createtable): materialise on the
+                # write destination so DuckDB writes stay same-engine.
+                et = write_et
             eng, _kind = self._engine_obj(et)
+            dest_eng, dest_kind = self._engine_obj(write_et)
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
@@ -5598,13 +6464,29 @@ class Session:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
         try:
-            self._write_into_table(eng, nm, tmp, write_mode, replace_keys)
-            eng.sync_catalog()
+            self._write_into_table_cross(
+                eng, tmp, dest_eng, nm, write_mode, replace_keys)
+            dest_eng.sync_catalog()
             try:
-                eng.table_sources[nm] = "nodeflow"
+                dest_eng.table_sources[nm] = "nodeflow"
             except Exception:
                 pass
-            _c, _r = eng.execute('SELECT COUNT(*) FROM "%s"' % nm)
+            # Overwrite must not keep a stale file-origin watch: idle
+            # tables_tree sync would reload the old CSV/JSON over the write.
+            if write_mode == "overwrite":
+                try:
+                    (getattr(dest_eng, "table_origins", None) or {}).pop(
+                        nm, None)
+                except Exception:
+                    pass
+                ow = getattr(self, "_origin_watch", None)
+                if ow is not None:
+                    for eng_label in ("duckdb", "sqlite"):
+                        try:
+                            ow.unregister(eng_label, nm)
+                        except Exception:
+                            pass
+            _c, _r = dest_eng.execute('SELECT COUNT(*) FROM "%s"' % nm)
             n = int(_r[0][0]) if _r else 0
         except nodeflow.NodeflowError as e:
             self._flow_cleanup(query_id, et, created)
@@ -5617,7 +6499,8 @@ class Session:
                     % (type(e).__name__, e)}
         self._flow_cleanup(query_id, et, created)
         self._invalidate_profiles()
-        _kind = "duckdb" if et == DUCKDB_TARGET else "sqlite"
+        _kind = dest_kind if dest_kind in ("duckdb", "sqlite") else (
+            "duckdb" if write_et == DUCKDB_TARGET else "sqlite")
         self._invalidate_counts(keys=self._count_keys_for_tables(_kind, nm))
         self._prime_count(_kind, nm, n)
         return {"ok": True, "table": nm, "mode": write_mode,
@@ -6834,9 +7717,14 @@ class Session:
         pinned = []
         pins = getattr(self, "_reuse_pins", None)
         lock = getattr(self, "_lock", None)
+        pin_since = getattr(self, "_reuse_pin_since", None)
+        if pin_since is None and pins is not None:
+            self._reuse_pin_since = pin_since = {}
         if pins is not None and lock is not None:
             with lock:
                 for _n, rid in (reuse or {}).items():
+                    if pins.get(rid, 0) <= 0 and pin_since is not None:
+                        pin_since[rid] = time.time()
                     pins[rid] = pins.get(rid, 0) + 1
                     pinned.append(rid)
 
@@ -6859,11 +7747,15 @@ class Session:
                 time.sleep(0.05)
             if pins is not None and lock is not None:
                 flush = []
+                released = False
                 with lock:
                     for rid in pinned:
                         n = pins.get(rid, 0) - 1
                         if n <= 0:
                             pins.pop(rid, None)
+                            if pin_since is not None:
+                                pin_since.pop(rid, None)
+                            released = True
                             if rid in self._discard_deferred:
                                 self._discard_deferred.discard(rid)
                                 flush.append(rid)
@@ -6872,6 +7764,13 @@ class Session:
                 for rid in flush:
                     try:
                         self.discard_result(rid)
+                    except Exception:
+                        pass
+                # Pins released: reclaim epoch-expired stores that were
+                # held only by the pin (do not serve wrong data).
+                if released:
+                    try:
+                        self._reclaim_stale_results()
                     except Exception:
                         pass
         try:
@@ -6892,6 +7791,14 @@ class Session:
         registers itself so the stat modal lists it live, grouped and
         labelled; flow-internal calls pass no surface and register at the
         flow level instead (no double-begin on the same id)."""
+        # IDE / Journal: origin recheck before register (reload-then-run).
+        # Must run before _register_run so watcher busy-skip does not block
+        # this run's own refresh. Scope to tables referenced by this SQL.
+        # Flow-internal calls omit surface.
+        if surface in ("ide", "journal"):
+            fresh_err = self._ensure_origins_fresh_for_run(sql=sql)
+            if fresh_err:
+                return fresh_err
         if surface and query_id:
             self._clear_stale_engine_cancel(except_qid=query_id)
             self._register_run(query_id, None, surface=surface, label=label)
@@ -6926,6 +7833,13 @@ class Session:
         change their semantics -- and the ledger says so."""
         spans = split_sql_statements_spans(sql or "")
         stmts = [sp[2].strip() for sp in spans if sp[2].strip()]
+        # Multi-statement path calls run_query without surface per stmt;
+        # recheck once up front so Journal Run-all still sees newest files.
+        # Scope to tables referenced across the script.
+        if surface in ("ide", "journal") and len(stmts) > 1:
+            fresh_err = self._ensure_origins_fresh_for_run(sql=sql)
+            if fresh_err:
+                return fresh_err
         if len(stmts) <= 1:
             r = self.run_query(sql, target=target, read_only=read_only,
                                query_id=query_id, dialect=dialect,
@@ -10291,6 +11205,12 @@ class Session:
         origins = getattr(eng, "table_origins", None)
         if isinstance(origins, dict) and old in origins:
             origins[new] = origins.pop(old)
+        try:
+            ow = getattr(self, "_origin_watch", None)
+            if ow is not None:
+                ow.rename(engine, old, new)
+        except Exception:
+            pass
         self._rename_table_ui_order(engine, old, new)
         self._invalidate_profiles()
         self._invalidate_counts(
@@ -10312,6 +11232,12 @@ class Session:
             self.sync_restore_manifest()
         except Exception:
             pass
+        try:
+            ow = getattr(self, "_origin_watch", None)
+            if ow is not None:
+                ow.unregister(engine, name)
+        except Exception:
+            pass
         self._drop_table_ui_order(engine, name)
         self._invalidate_profiles()
         self._invalidate_counts(
@@ -10319,6 +11245,195 @@ class Session:
         self._schedule_cleanup(full=True)
         return {"ok": True,
                 "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
+
+    def reload_table_from_source(self, engine, name, replace=False,
+                                 fresh=None, include_tree=True):
+        """Reload a file-backed table from its origin path.
+
+        Default (``replace=False``): load into a new uniquified name and leave
+        the prior table in place — matches uniquify-on-load (sidebar Reload
+        as new). ``replace=True`` drops then reloads under the same name
+        (watcher / NodeFlow Input contract — preserves Select missing-field
+        identity). ``include_tree=False`` skips nested ``tables_tree`` (used
+        by the origin-sync path to avoid re-entrancy).
+        """
+        from . import originwatch as OW
+        from . import loaders as _loaders
+        eng = self.duckdb if engine == "duckdb" else self.db
+        if eng is None or name not in getattr(eng, "table_columns", {}):
+            return {"error": "Table not found."}
+        path = OW.watchable_path(eng, name)
+        ow = getattr(self, "_origin_watch", None)
+        if not path and ow is not None:
+            path = ow.path_for(engine, name)
+        if not path or not os.path.isfile(path):
+            return {"error": "No reloadable source file for this table."}
+        base = _loaders.base_name_for(os.path.splitext(
+            os.path.basename(path))[0] or name)
+        if replace:
+            try:
+                self.drop_table(engine, name)
+            except Exception as e:
+                return {"error": "Could not replace table: %s" % e}
+            # Exact prior name — free after drop so uniquify returns it.
+            load_base = name
+        else:
+            load_base = base
+        try:
+            loaded = self.load_file(
+                path, destination=engine or "auto",
+                base_name=load_base, fresh=True if fresh is None else fresh)
+        except Exception as e:
+            return {"error": err_str(e)}
+        items = loaded if isinstance(loaded, list) else [loaded]
+        new_name = None
+        for item in items:
+            if isinstance(item, dict) and item.get("name"):
+                new_name = item["name"]
+                break
+        if not new_name:
+            return {"error": "Reload produced no table."}
+        try:
+            if ow is not None:
+                ow.mark_current(engine, new_name, path)
+        except Exception:
+            pass
+        out = {
+            "ok": True,
+            "name": new_name,
+            "previous": name,
+            "replaced": bool(replace),
+            "path": path,
+            "tables": items,
+            "data_epoch": int(getattr(self, "_data_epoch", 0) or 0),
+        }
+        if include_tree:
+            out["all"] = self.tables_tree()
+        return out
+
+    def _refresh_file_backed_inputs(self, graph):
+        """Before a NodeFlow run: recheck Input file origins (same as watcher).
+
+        Directory/appendfolder already recheck via their own caches — left
+        alone. On signature miss: reload in place (same table name) so Select
+        missing-field / Clear-missing UX stays attached, and clear last-run
+        caches so the run cannot reuse stale intermediates. Joins in-flight
+        watcher reloads; size-scaled deadline fails closed with a retry error.
+        Does not force-poll the whole watch registry (avoids starving the
+        idle ``tables_tree`` debounce).
+        """
+        from . import originwatch as OW
+        if not graph:
+            return graph
+        needed = self._input_table_names_from_graph(graph)
+        self._touch_origin_in_use(needed)
+        changed_any = False
+        ow = getattr(self, "_origin_watch", None)
+        sizes = []
+        for tname in needed:
+            eng_name = self._engine_of_table(tname)
+            if not eng_name:
+                continue
+            eng = self.duckdb if eng_name == "duckdb" else self.db
+            path = OW.watchable_path(eng, tname)
+            if not path and ow is not None:
+                path = ow.path_for(eng_name, tname)
+            try:
+                sizes.append(int(os.path.getsize(path)) if path else 0)
+            except Exception:
+                sizes.append(0)
+        deadline = time.monotonic() + OW.recheck_budget_sec(sizes)
+        walk = list((graph.get("nodes") or []))
+        i = 0
+        while i < len(walk):
+            node = walk[i]
+            i += 1
+            if not isinstance(node, dict):
+                continue
+            typ = node.get("type")
+            cfg = node.get("config")
+            if not isinstance(cfg, dict):
+                cfg = {}
+                node["config"] = cfg
+            if typ in ("group", "iterator"):
+                for ch in (cfg.get("children") or []):
+                    walk.append(ch)
+                continue
+            if typ not in ("input", "inputs"):
+                continue
+            tables = []
+            if typ == "input":
+                t = (cfg.get("table") or "").strip()
+                if t:
+                    tables.append(t)
+            else:
+                for item in (cfg.get("tables") or []):
+                    if isinstance(item, dict):
+                        nm = (item.get("name") or item.get("table")
+                              or "").strip()
+                    else:
+                        nm = str(item or "").strip()
+                    if nm:
+                        tables.append(nm)
+            for table in tables:
+                if not table or table.startswith("__"):
+                    continue
+                eng_name = self._engine_of_table(table)
+                if not eng_name:
+                    continue
+                eng = self.duckdb if eng_name == "duckdb" else self.db
+                path = OW.watchable_path(eng, table)
+                if not path and ow is not None:
+                    path = ow.path_for(eng_name, table)
+                if not path:
+                    continue
+                baseline = ow.token_for(eng_name, table) if ow else None
+                # Cheap-stat short-circuit: reuse prior digest when stats match.
+                cur = OW.file_token(path, prior=baseline)
+                if cur is None:
+                    continue
+                if baseline is None:
+                    if ow is not None:
+                        ow.register(eng_name, table, path, token=cur)
+                    continue
+                if cur == baseline:
+                    continue
+                # Same name replace — Select tombstones stay on this Input.
+                # Surface failures via origin error (not silent swallow).
+                # Join watcher in-flight reload when present (no duplicate).
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "Source file updating — retry in a moment.")
+                if self._reload_origin_inplace(
+                        eng_name, table, deadline=deadline):
+                    changed_any = True
+                else:
+                    # Fail the materialize path with a clear retry signal
+                    # rather than running on known-stale input bytes.
+                    err = None
+                    try:
+                        err = (ow.snapshot_errors() or {}).get(
+                            (eng_name, table)) if ow else None
+                    except Exception:
+                        err = None
+                    if not err:
+                        try:
+                            if ow and ow.is_changed(eng_name, table):
+                                raise RuntimeError(
+                                    "Source file updating — retry in a moment.")
+                        except RuntimeError:
+                            raise
+                        except Exception:
+                            pass
+                    raise RuntimeError(
+                        "Could not refresh Input %s: %s"
+                        % (table, err or "reload failed"))
+        if changed_any:
+            try:
+                self._clear_last_run_caches()
+            except Exception:
+                pass
+        return graph
 
     def _cleanup_temp_source(self, src):
         """Delete a dropped table/view's backing file *iff* SamQL had streamed
@@ -10454,6 +11569,16 @@ class Session:
                     eng.conn.commit()
                 except Exception:
                     pass
+            # DROP+CREATE can keep the same name with a new shape. Invalidate
+            # the column-types cache so incremental sync re-PRAGMAs / DESCRIBEs
+            # instead of reusing the prior warm entry.
+            drop = getattr(eng, "_types_cache_drop", None)
+            if callable(drop):
+                drop(name)
+            else:
+                cache = getattr(eng, "_types_cache", None)
+                if isinstance(cache, dict):
+                    cache.pop(name, None)
             # register the new table in the in-memory catalog so the reconcile
             # engine (and /api/tables) can see it
             eng.sync_catalog()
@@ -10463,9 +11588,11 @@ class Session:
                            else "sqlite")
             # Staging tables are content mutations — bump data_epoch so
             # IDE/Journal refuse retained snapshots that predate this write.
+            # Keep the from_result snapshot live when staging from it.
             self._invalidate_profiles()
             self._invalidate_counts(
-            keys=self._count_keys_for_tables(engine_kind, name))
+                keys=self._count_keys_for_tables(engine_kind, name),
+                keep_results=[from_result] if from_result else None)
             return {"name": name, "columns": cols, "engine": engine_kind,
                     "data_epoch": int(getattr(self, "_data_epoch", 0) or 0)}
         except Exception as e:
@@ -10536,8 +11663,12 @@ class Session:
             return {"error": err_str(e)}
         finally:
             self._unregister_run(query_id)
+        # Keep-result-on-save: the snapshot just written must stay live so a
+        # second uniquify / export of the same result_id still works. Other
+        # stale results still reclaim under latest-data-wins.
         self._invalidate_counts(
-            keys=self._count_keys_for_tables(kind, tname))
+            keys=self._count_keys_for_tables(kind, tname),
+            keep_results=[result_id])
         self._invalidate_profiles()
         self._prime_count(kind, tname, n)
         return {"ok": True, "table": tname, "rows": n, "engine": kind,
@@ -13544,12 +14675,19 @@ class Session:
             return {"error": "That file no longer exists."}
         try:
             st = os.stat(path)
-            # size/ctime/ino catch in-place rewrites that preserve mtime.
+            # size/ctime/ino + bounded content samples (filecache posture):
+            # same-mtime in-place rewrites must miss the directory cache.
+            from . import filecache as _fc
+            try:
+                digest = _fc.content_digest(path, int(st.st_size))
+            except Exception:
+                digest = ""
             file_token = (
                 int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
                 int(st.st_size),
                 int(getattr(st, "st_ctime_ns", 0) or 0),
                 int(getattr(st, "st_ino", 0) or 0),
+                digest,
             )
         except OSError as e:
             return {"error": err_str(e)}
@@ -14264,16 +15402,25 @@ class Session:
                     "(CSV, TSV, JSON, Parquet, Excel)."}
         paths = [os.path.join(folder, n) for n in names]
         try:
-            # Include size/ctime/ino so same-mtime rewrites miss the cache.
-            sig = tuple(
-                (n,
-                 int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
-                 int(st.st_size),
-                 int(getattr(st, "st_ctime_ns", 0) or 0),
-                 int(getattr(st, "st_ino", 0) or 0))
-                for n, p in zip(names, paths)
-                for st in (os.stat(p),)
-            )
+            # size/ctime/ino + bounded content samples (filecache posture)
+            # so same-mtime in-place rewrites miss the folder cache.
+            from . import filecache as _fc
+            sig_rows = []
+            for n, p in zip(names, paths):
+                st = os.stat(p)
+                try:
+                    digest = _fc.content_digest(p, int(st.st_size))
+                except Exception:
+                    digest = ""
+                sig_rows.append((
+                    n,
+                    int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
+                    int(st.st_size),
+                    int(getattr(st, "st_ctime_ns", 0) or 0),
+                    int(getattr(st, "st_ino", 0) or 0),
+                    digest,
+                ))
+            sig = tuple(sig_rows)
         except OSError as e:
             return {"error": err_str(e)}
 

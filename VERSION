@@ -2,12 +2,39 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-18.669
+Current build:   2026-07-20.672
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-20.672  (v2.16.4)
+
+MASTER APPWINDOW: ORIGIN WATCH + FRESH LOAD/RUN + UI HARDENING.
+File-origin watcher with in-place reload, source_changed / reload-error
+badges, table reload API, Fresh load and Fresh run settings; canvas color
+and tables sidebar/drawer polish; NodeFlow execution-controller and sphere
+UX; suite/harness pins. Refresh samql_txt full-source bundle.
+
+----------------------------------------------------------------------
+build 2026-07-18.671  (v2.16.4)
+
+BETA APPWINDOW: SPHERE POLISH + LATEST-DATA-WINS HARDENING.
+Sphere chrome for groups/iterators/SQL/variables with floating under-panels,
+rim port fan, and container minimize; Field Explorer and modal open polish;
+pinned stale-result age bound; filecache/session reclaim fixes. Refresh
+samql_txt full-source bundle.
+
+----------------------------------------------------------------------
+build 2026-07-18.670  (v2.16.4)
+
+FEATURE: NodeFlow Sphere nodes visual toggle — Settings → Visual → Sphere
+nodes renders leaf cards as transparent icon spheres with rim ports and
+hover titles (groups/notes/SQL/expanded charts stay boxes). Default off.
+Catalog refresh tolerates missing tables arrays in FE mocks. Refresh
+samql_txt.
 
 ----------------------------------------------------------------------
 build 2026-07-18.669  (v2.16.4)

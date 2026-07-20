@@ -5,8 +5,10 @@ import {
   DEFAULT_CANVAS_COLOR,
   DEFAULT_NODE_DOT_COLOR,
   DEFAULT_NODE_DOT_OPACITY,
+  defaultCanvasTextColor,
   type CanvasColors,
   type CanvasSurface,
+  type CanvasTextColors,
   type NodeDotStyle,
 } from "../lib/canvasColor";
 import { Icon } from "./Icon";
@@ -21,8 +23,10 @@ const TABS: { id: CanvasSurface; label: string }[] = [
 type Props = {
   open: boolean;
   colors: CanvasColors;
+  textColors: CanvasTextColors;
   nodeDots: NodeDotStyle;
   onPick: (surface: CanvasSurface, color: string) => void;
+  onPickText: (surface: CanvasSurface, color: string) => void;
   onReset: (surface: CanvasSurface) => void;
   onPickNodeDotColor: (color: string) => void;
   onPickNodeDotOpacity: (opacity: number) => void;
@@ -33,8 +37,10 @@ type Props = {
 export const CanvasColorModal: React.FC<Props> = ({
   open,
   colors,
+  textColors,
   nodeDots,
   onPick,
+  onPickText,
   onReset,
   onPickNodeDotColor,
   onPickNodeDotOpacity,
@@ -43,18 +49,21 @@ export const CanvasColorModal: React.FC<Props> = ({
 }) => {
   const { pos, startDrag, dragging, settled, winRef } = useWinDrag({
     x: Math.max(24, Math.round((window.innerWidth - 320) / 2)),
-    y: Math.max(64, Math.round((window.innerHeight - 280) / 2)),
+    y: Math.max(64, Math.round((window.innerHeight - 320) / 2)),
   });
   const [tab, setTab] = useState<CanvasSurface>("ide");
 
   if (!open) return null;
 
   const current = colors[tab];
+  const currentText = textColors[tab];
   const wheelValue = current ?? DEFAULT_CANVAS_COLOR;
+  const textWheelValue = currentText ?? defaultCanvasTextColor();
   const dotColor = nodeDots.color ?? DEFAULT_NODE_DOT_COLOR;
   const dotOpacity = nodeDots.opacity ?? DEFAULT_NODE_DOT_OPACITY;
   const dotsCustom =
     nodeDots.color != null || nodeDots.opacity != null;
+  const tabLabel = TABS.find((t) => t.id === tab)?.label ?? tab;
 
   return createPortal(
     <div
@@ -105,12 +114,12 @@ export const CanvasColorModal: React.FC<Props> = ({
       </div>
       <div className="canvas-color-body" role="tabpanel">
         <label className="settings-canvas-color-wheel">
-          <span className="settings-canvas-color-label">Color</span>
+          <span className="settings-canvas-color-label">Background</span>
           <input
             type="color"
             data-testid="settings-canvas-color-input"
             value={wheelValue}
-            aria-label={`${TABS.find((t) => t.id === tab)?.label ?? tab} canvas color`}
+            aria-label={`${tabLabel} canvas background`}
             onInput={(e) =>
               onPick(tab, (e.target as HTMLInputElement).value)
             }
@@ -122,7 +131,7 @@ export const CanvasColorModal: React.FC<Props> = ({
         <div
           className="settings-canvas-swatches"
           role="listbox"
-          aria-label="Basic colors"
+          aria-label="Background colors"
         >
           {CANVAS_COLOR_PRESETS.map((p) => (
             <button
@@ -139,6 +148,51 @@ export const CanvasColorModal: React.FC<Props> = ({
               aria-selected={(current ?? "").toLowerCase() === p.value}
               style={{ background: p.value }}
               onClick={() => onPick(tab, p.value)}
+            />
+          ))}
+        </div>
+        <label className="settings-canvas-color-wheel">
+          <span className="settings-canvas-color-label">Text</span>
+          <input
+            type="color"
+            data-testid="settings-canvas-text-input"
+            value={textWheelValue}
+            aria-label={`${tabLabel} canvas text color`}
+            onInput={(e) =>
+              onPickText(tab, (e.target as HTMLInputElement).value)
+            }
+            onChange={(e) =>
+              onPickText(tab, (e.target as HTMLInputElement).value)
+            }
+          />
+        </label>
+        <div
+          className="settings-canvas-swatches"
+          role="listbox"
+          aria-label="Text colors"
+        >
+          {[
+            { label: "White", value: "#ffffff" },
+            { label: "Light ink", value: "#e8eaef" },
+            { label: "Dim", value: "#9aa3b2" },
+            { label: "Black", value: "#111111" },
+            { label: "Charcoal", value: "#2a2a2a" },
+            { label: "Accent green", value: "#54b949" },
+          ].map((p) => (
+            <button
+              key={p.value}
+              type="button"
+              role="option"
+              data-testid={`settings-canvas-text-swatch-${p.value.slice(1)}`}
+              className={
+                "settings-canvas-swatch" +
+                ((currentText ?? "").toLowerCase() === p.value ? " on" : "")
+              }
+              title={p.label}
+              aria-label={`Text ${p.label}`}
+              aria-selected={(currentText ?? "").toLowerCase() === p.value}
+              style={{ background: p.value }}
+              onClick={() => onPickText(tab, p.value)}
             />
           ))}
         </div>
@@ -218,7 +272,7 @@ export const CanvasColorModal: React.FC<Props> = ({
           type="button"
           className="btn sm ghost canvas-color-reset"
           data-testid="settings-canvas-color-reset"
-          title="Restore the default background for this surface"
+          title="Restore the default background and text for this surface"
           onClick={() => onReset(tab)}
         >
           Reset to default

@@ -247,6 +247,9 @@ export const FieldExplorer: React.FC<Props> = ({
   const reloadFields = (engine: string, table: string, key: string) => {
     const gen = ++fieldsFetchGen.current;
     setBusy(true);
+    // Clear the tree immediately so a replace/reload cannot show stale
+    // nested keys while rediscovery is in flight (latest-data wins).
+    setFields(null);
     setSelIdx(null);
     setSelIdxs([]);
     setOpenFields(new Set());
@@ -331,6 +334,9 @@ export const FieldExplorer: React.FC<Props> = ({
     if (!srcKey && sources.length === 1) setSrcKey(sources[0].key);
   }, [sources, srcKey]);
 
+  // Latest-data wins: when dataEpoch advances while FE is open on the same
+  // table/srcKey, clear fields and re-run nested discovery (discovery-only;
+  // no shred/flatten). Preview soft-clear alone left stale nested keys.
   useEffect(() => {
     if (!open || !src) {
       setFields(null);
@@ -339,21 +345,7 @@ export const FieldExplorer: React.FC<Props> = ({
     }
     return reloadFields(src.engine, src.table, src.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [srcKey, open]);
-
-  // Latest-data wins: soft-clear preview samples when tables mutate without
-  // forcing a full rediscovery (discovery stays discovery-only).
-  const feEpochRef = useRef(dataEpoch);
-  useEffect(() => {
-    if (feEpochRef.current === dataEpoch) return;
-    feEpochRef.current = dataEpoch;
-    if (!open) return;
-    setPreviewSample(null);
-    setPreviewErr(null);
-    setValidatedAccess(null);
-    setValidatedFirstSql(null);
-    setValidatedAllSql(null);
-  }, [dataEpoch, open]);
+  }, [srcKey, open, dataEpoch]);
 
   // Closing the Field Explorer modal cancels in-flight nested discovery
   // (AbortController + backend query_id), matching Stop semantics.

@@ -80,6 +80,12 @@ interface Props {
   workflows: WorkflowSummary[];
   onInsertTable: (name: string) => void;
   onTableProps?: (engine: string, name: string) => void;
+  /** Reload file-backed table from disk (default: new uniquified name). */
+  onReloadTable?: (
+    engine: EngineKind,
+    name: string,
+    opts?: { replace?: boolean },
+  ) => void;
   onInsertColumn: (col: string) => void;
   onLoadSql: (sql: string) => void;
   onProfile: (table: string, engine: EngineKind) => void;
@@ -182,6 +188,7 @@ const TablesTree: React.FC<
   setQ,
   onInsertTable,
   onTableProps,
+  onReloadTable,
   onLoadSql,
   onInsertColumn,
   onProfile,
@@ -665,6 +672,30 @@ const TablesTree: React.FC<
           >
             {t.name}
           </span>
+          {t.source_reload_error && !t.remote && (
+            <span
+              className="source-changed-badge source-reload-error-badge"
+              data-testid="source-reload-error-badge"
+              title={
+                `Auto-reload failed: ${t.source_reload_error}. ` +
+                "Use Reload as new table or Reload and replace from the menu."
+              }
+            >
+              Reload failed
+            </span>
+          )}
+          {t.source_changed && !t.source_reload_error && !t.remote && (
+            <span
+              className="source-changed-badge"
+              data-testid="source-changed-badge"
+              title={
+                "Source file changed — Updating this table in place. " +
+                "Use Reload as new table or Reload and replace from the menu for a manual reload."
+              }
+            >
+              Updating…
+            </span>
+          )}
           {famParent && onLoadSql && (
             <span
               className="join-btn"
@@ -1198,6 +1229,33 @@ const TablesTree: React.FC<
             >
               Properties
             </button>
+            {!menu.t.remote && onReloadTable && (
+              <>
+                <button
+                  data-testid="reload-table-new"
+                  onClick={() => {
+                    onReloadTable(menu.t.engine, menu.t.name);
+                    setMenu(null);
+                  }}
+                  title="Load the current file into a new uniquified table name"
+                >
+                  Reload as new table
+                </button>
+                <button
+                  data-testid="reload-table-replace"
+                  onClick={() => {
+                    // Confirm lives in App (ConfirmPop), same as Drop / Clear all.
+                    onReloadTable(menu.t.engine, menu.t.name, {
+                      replace: true,
+                    });
+                    setMenu(null);
+                  }}
+                  title="Drop this table and reload from the source file under the same name"
+                >
+                  Reload and replace…
+                </button>
+              </>
+            )}
             {onLoadSql && parentOf.has(menu.t.engine + ":" + menu.t.name) && (
               <button
                 onClick={() => {

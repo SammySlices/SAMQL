@@ -71,6 +71,7 @@ export function useBackgroundOperations({
         flatten?: boolean;
         shred?: boolean;
         root_id?: RootIdChoice;
+        fresh?: boolean;
       },
     ) => {
       setLoadOpen(false);

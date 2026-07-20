@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  HEAD_H,
-  NODE_W,
+  nodeSpawnOrigin,
   type NbEdge,
   type NbNode,
   nodeFlowDenseActive,
+  nodeFlowSphereActive,
   setNodeFlowDenseMode,
+  setNodeFlowSphereMode,
 } from "../lib/nodeFlowModel";
 import type { TableInfo } from "../lib/types";
 import { useStableEvent } from "../lib/useStableEvent";
@@ -73,8 +74,12 @@ export const NodeFlow: React.FC<{
   onOpenLoad?: () => void;
   /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
   denseMode?: boolean;
+  /** Icon-sphere chrome (owned by App Settings → Visual). Default ON. */
+  sphereMode?: boolean;
   /** Canvas grid snap while dragging (owned by App Settings → Visual). Default OFF. */
   snap?: boolean;
+  /** When false, NodeFlow is hidden but kept mounted — pause global shortcuts. */
+  active?: boolean;
 }> = ({
   tables,
   dataEpoch = 0,
@@ -93,12 +98,17 @@ export const NodeFlow: React.FC<{
   onToolsTablesOpenChange,
   onOpenLoad,
   denseMode = false,
+  sphereMode = true,
   snap = false,
+  active = true,
 }) => {
-  // Keep densify() aligned with App Settings before Scene paints (also syncs
-  // a lazy-chunk module copy if Rollup ever duplicates nodeFlowModel).
+  // Keep densify() / sphere helpers aligned with App Settings before Scene paints
+  // (also syncs a lazy-chunk module copy if Rollup ever duplicates nodeFlowModel).
   if (nodeFlowDenseActive() !== denseMode) {
     setNodeFlowDenseMode(denseMode);
+  }
+  if (nodeFlowSphereActive() !== sphereMode) {
+    setNodeFlowSphereMode(sphereMode);
   }
   // Latest-data wins: inspector column probes must miss after catalog mutations.
   useEffect(() => {
@@ -474,6 +484,7 @@ export const NodeFlow: React.FC<{
   });
 
   useNodeFlowKeyboardShortcuts({
+    enabled: active,
     selectedId: selId,
     selectedEdgeRef: selEdgeRef,
     selectedIdsRef: selIdsRef,
@@ -627,6 +638,7 @@ export const NodeFlow: React.FC<{
           setHoveredInput={setHoveredInput}
           setNodeMenu={setNodeMenu}
           denseMode={denseMode}
+          sphereMode={sphereMode}
         />
 
         {/* inspector — floats over the canvas, or (when the tables panel is
@@ -757,7 +769,8 @@ export const NodeFlow: React.FC<{
           ) {
             groupAddChild(group.id, type);
           } else {
-            addNodeAt(type, point.x - NODE_W / 2, point.y - HEAD_H);
+            const origin = nodeSpawnOrigin(type, point.x, point.y, sphereMode);
+            addNodeAt(type, origin.x, origin.y);
           }
         }}
       />

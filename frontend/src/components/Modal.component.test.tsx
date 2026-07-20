@@ -77,6 +77,23 @@ describe("Modal accessibility and lifecycle", () => {
     }
   });
 
+  it("portals to document.body so nested browse is not clipped by a parent modal", () => {
+    const host = document.createElement("div");
+    host.className = "modal fast";
+    document.body.appendChild(host);
+
+    render(
+      <Modal title="Select a file" onClose={vi.fn()} fast testId="browse-modal">
+        browse body
+      </Modal>,
+      { container: host },
+    );
+
+    const dialog = screen.getByTestId("browse-modal");
+    expect(dialog.closest(".modal-backdrop")?.parentElement).toBe(document.body);
+    expect(host.contains(dialog)).toBe(false);
+  });
+
   it("closes immediately for reduced motion", () => {
     document.body.classList.add("motion-reduced");
     const onClose = vi.fn();

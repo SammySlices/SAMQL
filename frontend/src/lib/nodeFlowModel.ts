@@ -540,6 +540,43 @@ export const CANVAS_PAD = 240;
 export const HEAD_H = 30;
 export const PORT_TOP = 46;
 export const PORT_GAP = 24;
+/** Icon-sphere node diameter (Settings → Visual → Sphere nodes). */
+export const SPHERE_SIZE = 56;
+/** Sphere ring stroke (px); must match `.nb2-node.sphere { border-width }`. */
+export const SPHERE_RING = 3;
+/** Port-center distance past the sphere rim so triangles clear the ring. */
+export const SPHERE_PORT_OUTSET = 14;
+/** Gap between sphere rim and floating under-node chart/dashboard panel. */
+export const SPHERE_UNDER_GAP = 8;
+/**
+ * Extra gap for group/iterator under-panels: bottom-fanned left-rim inputs
+ * (iterator vars/in, multi-in group) sit past the sphere bottom; the shared
+ * chart gap is too tight and the panel (z-index above ports) covers them.
+ *
+ * Sized to clear the always-visible expand/minimize pill hung below the
+ * sphere (see `.nb2-sphere-container-toggle` `bottom`), which itself clears
+ * outset 14 + 14×16 triangle half + ring + margin (~44px past the rim).
+ */
+export const SPHERE_UNDER_GAP_CONTAINER = 48;
+/** CSS `bottom` magnitude for the group/iterator sphere toggle pill (px). */
+export const SPHERE_CONTAINER_PILL_BOTTOM = 44;
+
+/** Vertical gap under the sphere rim before the floating under-panel. */
+export function sphereUnderGap(n?: NbNode): number {
+  const base =
+    n && (n.type === "group" || n.type === "iterator")
+      ? SPHERE_UNDER_GAP_CONTAINER
+      : SPHERE_UNDER_GAP;
+  return densify(base);
+}
+/**
+ * Total angular span (radians) for multi-port fan on one side of the sphere.
+ * Kept well under π so N outputs stay on the *right* rim (and inputs on the
+ * *left*) with clear pixel separation — a full semicircle put extremes at
+ * top/bottom dead-center where `contain: layout` + circular clipping hid them
+ * (Join looked like a single out; Filter's true/false both left the right rim).
+ */
+export const SPHERE_PORT_SPREAD = Math.PI * 0.55;
 
 /** Dense NodeFlow scale (Settings > View). Eye Care zooms chrome; dense
  *  shrinks canvas geometry so more nodes fit. Composes with Eye Care. */
@@ -549,6 +586,7 @@ export const NB_DENSE_SCALE = 0.85;
 // during the same render that toggles Settings (classList alone would lag
 // one frame behind useEffect).
 let _denseMode = false;
+let _sphereMode = false;
 
 export function setNodeFlowDenseMode(on: boolean): void {
   _denseMode = !!on;
@@ -570,6 +608,75 @@ export function nodeFlowDenseActive(): boolean {
   return _denseMode;
 }
 
+export function setNodeFlowSphereMode(on: boolean): void {
+  _sphereMode = !!on;
+  if (typeof document !== "undefined") {
+    document.documentElement.classList.toggle("nb-sphere", _sphereMode);
+    document.documentElement.setAttribute(
+      "data-nb-sphere",
+      _sphereMode ? "on" : "off",
+    );
+  }
+}
+
+export function nodeFlowSphereActive(): boolean {
+  if (typeof document !== "undefined") {
+    return document.documentElement.classList.contains("nb-sphere");
+  }
+  return _sphereMode;
+}
+
+/**
+ * Transparent icon-sphere chrome (vs classic box cards).
+ *
+ * Kept as boxes (strong product reason):
+ * - text — sticky-note body is the canvas content
+ *
+ * Group and iterator use sphere chrome; their child lists float under the
+ * sphere via `.nb2-sphere-under` (classic box mode unchanged). Chart /
+ * dashboard keep sphere chrome when expanded; their viz floats the same way.
+ *
+ * SQL, Variable, Python, and Created Nodes (`usernode`) use spheres like
+ * other leaves; edit in the inspector (classic mode still shows canvas
+ * body previews where applicable).
+ *
+ * Pass `sphereMode` from React props when available so newly mounted cards
+ * match Settings immediately even if the shared html/module flag lags a
+ * frame (lazy chunks / first paint after create).
+ */
+export function nodeUsesSphereChrome(
+  n: NbNode,
+  sphereMode?: boolean,
+): boolean {
+  const on =
+    sphereMode !== undefined ? !!sphereMode : nodeFlowSphereActive();
+  if (!on) return false;
+  if (n.type === "text") return false;
+  return true;
+}
+
+/**
+ * World top-left for a node dropped/created at a content-space point so the
+ * cursor lands on the visual center (sphere) or classic header band.
+ */
+export function nodeSpawnOrigin(
+  type: NodeType,
+  contentX: number,
+  contentY: number,
+  sphereMode?: boolean,
+): { x: number; y: number } {
+  const probe: NbNode = { id: "", type, x: 0, y: 0, config: {} };
+  const sphere = nodeUsesSphereChrome(probe, sphereMode);
+  if (sphere) {
+    const s = sphereSize();
+    return { x: contentX - s / 2, y: contentY - s / 2 };
+  }
+  return {
+    x: contentX - densify(NODE_W) / 2,
+    y: contentY - densify(HEAD_H),
+  };
+}
+
 function denseScale(): number {
   return nodeFlowDenseActive() ? NB_DENSE_SCALE : 1;
 }
@@ -577,6 +684,10 @@ function denseScale(): number {
 function densify(n: number): number {
   const s = denseScale();
   return s === 1 ? n : Math.max(1, Math.round(n * s));
+}
+
+export function sphereSize(): number {
+  return densify(SPHERE_SIZE);
 }
 
 export const STORE_KEY = "samql.nodeflow.v1";
@@ -596,20 +707,91 @@ export const NB_CREATED_NODE_MIME = "application/x-nb-created-node";
 
 // charts render under the node when expanded; dashboards are wider so their
 // 2x2 board has room. Charts are hidden unless explicitly shown; dashboards
-// show unless explicitly collapsed.
+// / groups / iterators show unless explicitly collapsed (`config.collapsed`).
 export function nodeShowsBody(n: NbNode) {
   if (n.type === "chart") return n.config.collapsed === false;
-  if (n.type === "dashboard") return n.config.collapsed !== true;
+  if (
+    n.type === "dashboard" ||
+    n.type === "group" ||
+    n.type === "iterator"
+  ) {
+    return n.config.collapsed !== true;
+  }
   return false;
 }
+
+/**
+ * Floating under-node panel size (chart/dashboard viz, group/iterator
+ * children), or null when hidden. Callers only attach this panel under
+ * sphere chrome.
+ */
+export function nodeUnderBodySize(n: NbNode): { w: number; h: number } | null {
+  if (n.type === "group" || n.type === "iterator") {
+    if (!nodeShowsBody(n)) return null;
+    // Under-panel: 30px label bar + child rows (~30px) + gaps/padding.
+    // Shared by group/iterator (no classic 30px head). Expand/minimize is
+    // the always-visible sphere pill above this panel, not the bar.
+    const bar = 30;
+    const k = ((n.config && n.config.children) || []).length;
+    const rows = Math.max(1, k);
+    const h = Math.max(
+      bar + 72,
+      Math.min(360, bar + 8 + rows * 30 + Math.max(0, rows - 1) * 4),
+    );
+    return { w: densify(GROUP_W), h: densify(h) };
+  }
+  if ((n.type !== "chart" && n.type !== "dashboard") || !nodeShowsBody(n)) {
+    return null;
+  }
+  const defW = densify(n.type === "dashboard" ? DASH_W : NODE_W);
+  const defH = densify(n.type === "dashboard" ? DASH_BODY_H : CHART_BODY_H);
+  const w =
+    typeof n.config.bodyW === "number"
+      ? Math.max(densify(NODE_W), Math.min(1100, densify(n.config.bodyW)))
+      : defW;
+  const h =
+    typeof n.config.bodyH === "number"
+      ? Math.max(110, Math.min(820, densify(n.config.bodyH)))
+      : defH;
+  return { w, h };
+}
+
+/**
+ * Axis-aligned world bounds including a sphere's floating under-node panel
+ * (centered horizontally under the sphere, gap below the rim).
+ */
+export function nodeWorldBounds(n: NbNode): {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+} {
+  const x = Number(n.x) || 0;
+  const y = Number(n.y) || 0;
+  const w = nodeWidth(n);
+  const h = nodeHeight(n);
+  let x0 = x;
+  let y0 = y;
+  let x1 = x + w;
+  let y1 = y + h;
+  if (nodeUsesSphereChrome(n)) {
+    const body = nodeUnderBodySize(n);
+    if (body) {
+      const gap = sphereUnderGap(n);
+      const cx = x + w / 2;
+      x0 = Math.min(x0, cx - body.w / 2);
+      x1 = Math.max(x1, cx + body.w / 2);
+      y1 = Math.max(y1, y + h + gap + body.h);
+    }
+  }
+  return { x0, y0, x1, y1 };
+}
+
 export function nodeWidth(n: NbNode) {
+  if (nodeUsesSphereChrome(n)) return sphereSize();
   if (n.type === "group" || n.type === "iterator") return densify(GROUP_W);
   if ((n.type === "chart" || n.type === "dashboard") && nodeShowsBody(n)) {
-    const def = densify(n.type === "dashboard" ? DASH_W : NODE_W);
-    const w = n.config.bodyW;
-    return typeof w === "number"
-      ? Math.max(densify(NODE_W), Math.min(1100, densify(w)))
-      : def;
+    return nodeUnderBodySize(n)?.w ?? densify(NODE_W);
   }
   if (n.type === "sql") {
     const w = n.config.bodyW;
@@ -638,6 +820,7 @@ export function portsOf(n: NbNode): { inputs: string[]; outputs: string[] } {
 }
 
 export function nodeHeight(n: NbNode) {
+  if (nodeUsesSphereChrome(n)) return sphereSize();
   const head = densify(HEAD_H);
   const portTop = densify(PORT_TOP);
   const portGap = densify(PORT_GAP);
@@ -685,6 +868,8 @@ export function nodeHeight(n: NbNode) {
     return base + auto;
   }
   if (n.type === "group" || n.type === "iterator") {
+    // Classic collapse: header + ports only (sphere uses under-panel hide).
+    if (!nodeShowsBody(n)) return Math.max(base, head + densify(8));
     const k = ((n.config && n.config.children) || []).length;
     return Math.max(
       base,
@@ -699,10 +884,9 @@ export function canvasWorldSize(nodes: NbNode[]): { w: number; h: number } {
   let maxX = CANVAS_MIN_W;
   let maxY = CANVAS_MIN_H;
   for (const n of nodes) {
-    const x = Number(n.x) || 0;
-    const y = Number(n.y) || 0;
-    maxX = Math.max(maxX, x + nodeWidth(n) + CANVAS_PAD);
-    maxY = Math.max(maxY, y + nodeHeight(n) + CANVAS_PAD);
+    const b = nodeWorldBounds(n);
+    maxX = Math.max(maxX, b.x1 + CANVAS_PAD);
+    maxY = Math.max(maxY, b.y1 + CANVAS_PAD);
   }
   return { w: Math.ceil(maxX), h: Math.ceil(maxY) };
 }
@@ -761,12 +945,70 @@ export function visibleOutputCount(n: NbNode): number {
 // near the header instead, where the in/out conceptually belong. `total` lets a
 // caller override the port count (groups pass their visible-input count so the
 // shown arrows centre correctly); it defaults to the static port list.
+/**
+ * Port center in the node's padding-box coordinates (CSS `left`/`top` for
+ * absolutely positioned `.nb2-port.sphere-port`).
+ *
+ * Nodes use `box-sizing: border-box`, so the padding edge is inset by
+ * {@link SPHERE_RING}. Wire world coords must add that ring back (see
+ * {@link portXY}) — otherwise endpoints sit on the padding origin and miss
+ * the visual center of the 14×16 triangles after `translate(-50%, -50%)`.
+ */
+export function spherePortOffset(
+  n: NbNode,
+  side: "in" | "out",
+  idx: number,
+  total?: number,
+): { left: number; top: number } {
+  const S = sphereSize();
+  // CSS border is not densified; keep ring in sync with styles.css.
+  const ring = SPHERE_RING;
+  // Padding-box center of the circle (border-box center minus ring).
+  const cx = S / 2 - ring;
+  const cy = S / 2 - ring;
+  // Distance from padding center to outer rim is S/2; sit past it so the
+  // 14×16 triangle clears the stroke.
+  const r = S / 2 + densify(SPHERE_PORT_OUTSET);
+  // Default to the node's real port count (not 1) so Join's three outs,
+  // Filter's true/false, multi-in joins, iterator vars+in, etc. fan around
+  // the rim instead of stacking on a single angle. Classic "top" inputs
+  // (iterator vars) join the left-rim fan in sphere mode.
+  const ports = portsOf(n);
+  const t = Math.max(
+    1,
+    total ?? (side === "in" ? ports.inputs.length : ports.outputs.length),
+  );
+  // Fan around the horizontal axis on each side (not a full semicircle).
+  // Outputs cluster on the right rim; inputs on the left — top→bottom order.
+  const spread = SPHERE_PORT_SPREAD;
+  let angle: number;
+  if (t === 1) {
+    angle = side === "in" ? Math.PI : 0;
+  } else {
+    const u = idx / Math.max(1, t - 1); // 0…1
+    if (side === "in") {
+      // π + spread/2 (upper-left) → π - spread/2 (lower-left)
+      angle = Math.PI + spread / 2 - u * spread;
+    } else {
+      // -spread/2 (upper-right) → +spread/2 (lower-right)
+      angle = -spread / 2 + u * spread;
+    }
+  }
+  return {
+    left: cx + r * Math.cos(angle),
+    top: cy + r * Math.sin(angle),
+  };
+}
+
 export function portTopOffset(
   n: NbNode,
   side: "in" | "out",
   idx: number,
   total?: number,
 ) {
+  if (nodeUsesSphereChrome(n)) {
+    return spherePortOffset(n, side, idx, total).top;
+  }
   const portTop = densify(PORT_TOP);
   const portGap = densify(PORT_GAP);
   if (
@@ -791,6 +1033,22 @@ export function portXY(
 ) {
   const arr = side === "in" ? portsOf(n).inputs : portsOf(n).outputs;
   const port = arr[idx];
+  if (nodeUsesSphereChrome(n)) {
+    // Padding-box → border-box/world (see spherePortOffset).
+    // All inputs (including classic top-edge ports like iterator "vars")
+    // fan on the left rim — no separate top-of-sphere anchor.
+    const ring = SPHERE_RING;
+    const off = spherePortOffset(
+      n,
+      side,
+      idx,
+      total ?? arr.length,
+    );
+    // Sphere ports use translate(-50%,-50%) so left/top is the triangle
+    // bounding-box center; both in/out glyphs point right, so that center
+    // is the visual attachment point for the wire.
+    return { x: n.x + ring + off.left, y: n.y + ring + off.top };
+  }
   // top inputs (the iterator's "vars" driver) anchor on the top edge, centered
   if (side === "in" && isTopInput(n.type, port)) {
     return { x: n.x + nodeWidth(n) / 2, y: n.y };
@@ -831,6 +1089,8 @@ export interface CanvasNodeMemoState {
   lineageFlash: boolean;
   /** Dense NodeFlow layout flag — module densify() is not visible to React.memo. */
   denseMode: boolean;
+  /** Icon-sphere chrome flag — module sphere helpers are not visible to React.memo. */
+  sphereMode: boolean;
   renderVersion: string;
   chartVersion: unknown;
   childSelection: string | null;
@@ -853,6 +1113,7 @@ export function sameCanvasNodeMemoState(
     a.born === b.born &&
     a.lineageFlash === b.lineageFlash &&
     a.denseMode === b.denseMode &&
+    a.sphereMode === b.sphereMode &&
     a.renderVersion === b.renderVersion &&
     a.chartVersion === b.chartVersion &&
     a.childSelection === b.childSelection

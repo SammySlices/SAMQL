@@ -9,12 +9,17 @@ const mocks = vi.hoisted(() => ({
     available: true,
     drivers: ["ODBC Driver 18 for SQL Server"],
   }),
+  // FileLoadTab seeds Fresh load from the session setting on mount.
+  getFreshLoad: vi.fn().mockResolvedValue({ fresh_load: false }),
+  setFreshLoad: vi.fn().mockResolvedValue({ fresh_load: false }),
 }));
 
 vi.mock("../lib/api", () => ({
   abortInflight: mocks.abortInflight,
   api: {
     mssqlDrivers: mocks.mssqlDrivers,
+    getFreshLoad: mocks.getFreshLoad,
+    setFreshLoad: mocks.setFreshLoad,
   },
 }));
 

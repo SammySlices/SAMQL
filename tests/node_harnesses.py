@@ -148,7 +148,7 @@ assert(o.series[0].smooth === false, "smooth=false honoured");
 // 8. Palette + theme.
 o = buildChartOption(cat({ style: { palette: "vivid", theme: "light" } }));
 assert(o.color[0] === paletteColors("vivid")[0], "vivid palette applied");
-assert(o.backgroundColor === "#ffffff", "light theme bg white");
+assert(o.backgroundColor === "#d8d8d8", "light theme bg cool gray");
 
 // 9. Legend + grid toggles.
 o = buildChartOption(cat({ style: { showLegend: true } }));
@@ -406,13 +406,14 @@ eq(reconcileSelectFields(["a", "b"], []),
    [{ name: "a", keep: true }, { name: "b", keep: true }],
    "seed from upstream");
 
-// 2. Upstream rename (foo -> bar) propagates: foo dropped, bar added kept,
-//    baz preserved. THIS is the reported bug. (bar appends at the end now that
-//    surviving columns keep their order.)
+// 2. Upstream rename (foo -> bar): schema refresh keeps foo as a missing
+//    tombstone (Clear missing / post-run prune drops it) and appends bar.
+//    Surviving columns keep user order.
 eq(reconcileSelectFields(["bar", "baz"],
      [{ name: "foo", keep: true }, { name: "baz", keep: true }]),
-   [{ name: "baz", keep: true }, { name: "bar", keep: true }],
-   "renamed upstream column propagates downstream");
+   [{ name: "foo", keep: true }, { name: "baz", keep: true },
+    { name: "bar", keep: true }],
+   "renamed upstream column keeps tombstone + appends new name");
 
 // 3. Per-field settings (keep / rename / type) survive for columns that remain.
 eq(reconcileSelectFields(["a", "b"],
@@ -426,11 +427,12 @@ eq(reconcileSelectFields(["a", "b", "x"],
    [{ name: "a", keep: true }, { name: "b", keep: false }, { name: "x", keep: true }],
    "new formula column appears downstream");
 
-// 5. A column that no longer exists upstream is dropped.
+// 5. A column that no longer exists upstream is retained as a tombstone
+//    until Clear missing / a successful run prune.
 eq(reconcileSelectFields(["a"],
      [{ name: "a", keep: true }, { name: "gone", keep: true }]),
-   [{ name: "a", keep: true }],
-   "removed upstream column drops out");
+   [{ name: "a", keep: true }, { name: "gone", keep: true }],
+   "removed upstream column kept as tombstone on schema refresh");
 
 // 6. Order follows the user's field list, NOT upstream -- so a drag-reorder
 //    survives a column refresh.
@@ -495,7 +497,7 @@ const refreshed = applySelectColumnsReconcile(stale, {
   sel: ["customer_id", "name"],
 });
 eq(refreshed[0].config.fields,
-   [{ name: "amount", keep: false },
+   [{ name: "order_id", keep: true }, { name: "amount", keep: false },
     { name: "customer_id", keep: true }, { name: "name", keep: true }],
    "Input table change retains unchecked tombstones while refreshing Select fields");
 assert(applySelectColumnsReconcile(refreshed, {
@@ -529,10 +531,12 @@ const nestedAfter = applySelectColumnsReconcile(nestedBefore, {
   nested: ["a", "b"],
 });
 eq(nestedAfter[0].config.children[0].config.fields,
-   [{ name: "a", keep: true }, { name: "b", keep: true }],
+   [{ name: "old", keep: true },
+    { name: "a", keep: true }, { name: "b", keep: true }],
    "nested Select fields reconcile inside group.children");
 eq(collectSelectFieldPatches(nestedBefore, nestedAfter),
    [{ id: "nested", fields: [
+      { name: "old", keep: true },
       { name: "a", keep: true }, { name: "b", keep: true }] }],
    "collectSelectFieldPatches surfaces nested Select ids for patch()");
 
