@@ -8,6 +8,7 @@ import {
   type NbEdge,
   type NbNode,
 } from "../../lib/nodeFlowModel";
+import { NODEFLOW_COSMETIC_CONFIG_KEYS } from "../../lib/nodegraph";
 import {
   ancestorNodeIds,
   applyMissingRefPruneToNodes,
@@ -41,6 +42,22 @@ const LAST_RUN_SEED_SKIP = new Set([
 ]);
 
 /**
+ * Zero-input load/source nodes. Runnable as Run-all leaves with no inbound
+ * wire, and allowed to preview-execute on cache miss (table peek). Connectors
+ * (apinode / sqlserver / sharepoint / webscrape) stay off this list — they
+ * materialize via Fetch, not bare nodeflowRun.
+ */
+export const NODEFLOW_SOURCE_TYPES = new Set([
+  "input",
+  "shred",
+  "directory",
+  "appendfolder",
+  "filebrowser",
+  "createtable",
+  "sql",
+]);
+
+/**
  * Output port to request when a node is a Run-all leaf (no Output/Write).
  * Most nodes expose ``out``; Filter only has ``true``/``false``. Hardcoding
  * ``out`` for Filter yields backend ``Unknown filter output: out`` and empty
@@ -59,6 +76,10 @@ export function leafRunPort(type: string): string {
 /**
  * (node, port) pairs to seed after a successful Run all / leaf run.
  * Wired outgoing ports for intermediates; all declared outs for leaves.
+ * Join always seeds all three side outputs (only L / inner / only R) even when
+ * only ``inner`` is wired — otherwise left/right Preview stays empty after Run all.
+ * Filter always seeds True and False for the same reason (Preview False after a
+ * True-only wire must not wait for a cache-miss peek).
  */
 export function lastRunSeedRequests(
   nodes: NbNode[],
@@ -83,7 +104,12 @@ export function lastRunSeedRequests(
           .map((e) => e.from.port),
       ),
     ];
-    const ports = used.length ? used : outs;
+    const ports =
+      n.type === "join" || n.type === "filter"
+        ? outs
+        : used.length
+          ? used
+          : outs;
     for (const port of ports) {
       const key = `${id}::${port}`;
       if (seen.has(key)) continue;
@@ -92,6 +118,71 @@ export function lastRunSeedRequests(
     }
   }
   return reqs;
+}
+
+/** Join output ports that may preview-execute on cache miss (plus legacy ``out``). */
+export function isJoinSidePreviewPort(port: string): boolean {
+  return (
+    port === "out" ||
+    port === "inner" ||
+    port === "left_only" ||
+    port === "right_only"
+  );
+}
+
+/** Filter True/False ports may preview-execute on cache miss (like Join sides). */
+export function isFilterPreviewPort(port: string): boolean {
+  return port === "true" || port === "false";
+}
+
+/** Downstream closure of root node ids (includes the roots). */
+export function descendantNodeIds(
+  edges: NbEdge[],
+  rootIds: Iterable<string>,
+): Set<string> {
+  const outgoing = new Map<string, string[]>();
+  for (const e of edges || []) {
+    const list = outgoing.get(e.from.node) || [];
+    list.push(e.to.node);
+    outgoing.set(e.from.node, list);
+  }
+  const out = new Set<string>();
+  const stack = [...rootIds];
+  while (stack.length) {
+    const id = stack.pop()!;
+    if (out.has(id)) continue;
+    out.add(id);
+    for (const child of outgoing.get(id) || []) stack.push(child);
+  }
+  return out;
+}
+
+const COSMETIC_CONFIG_KEYS = new Set<string>(NODEFLOW_COSMETIC_CONFIG_KEYS);
+
+/**
+ * True when a config patch changes anything execution-relevant. Cosmetic keys
+ * (label / style / body size / collapsed) never invalidate last-run previews.
+ */
+export function isSemanticConfigPatch(
+  currentConfig: Record<string, unknown> | null | undefined,
+  patchConfig: Record<string, unknown> | null | undefined,
+): boolean {
+  const before = currentConfig || {};
+  for (const key of Object.keys(patchConfig || {})) {
+    if (COSMETIC_CONFIG_KEYS.has(key)) continue;
+    const prev = before[key];
+    const next = (patchConfig as Record<string, unknown>)[key];
+    if (prev === next) continue;
+    try {
+      if (JSON.stringify(prev ?? null) === JSON.stringify(next ?? null)) {
+        continue;
+      }
+    } catch {
+      /* non-serialisable values: treat as changed */
+    }
+    return true;
+  }
+  return false;
 }
 
 export type NodeFlowPreview =
@@ -249,9 +340,87 @@ export function useNodeFlowExecutionController({
   // other config patches) change executionGraphSignature while the rows are
   // still the latest run — salting by graphSig orphaned seeds so the next
   // output click said "no cached results" (often noticed after an IDE tab
-  // round-trip). Invalidate by clearing on Run all / dataEpoch / workflow tab.
+  // round-trip). Invalidate by clearing on Run all / dataEpoch / workflow tab,
+  // plus targeted downstream invalidation on user config edits / rewiring
+  // (patchNode + the edge-diff effect below).
   const previewCacheKey = (nodeId: string, port: string) =>
     `${activeTabIdRef.current}::${dataEpochRef.current}::${nodeId}::${port}`;
+
+  /**
+   * Drop last-run previews for the given nodes AND everything downstream of
+   * them; a stale pre-edit table must never be served as "(cached)" after an
+   * upstream config or wiring change. If the open drawer shows one of those
+   * nodes, clear it too — the rows on screen are no longer the latest intent.
+   */
+  const invalidateLastRunDownstream = (rootIds: Iterable<string>) => {
+    const closure = descendantNodeIds(liveRef.current.edges, rootIds);
+    if (!closure.size) return;
+    for (const key of [...previewCache.current.keys()]) {
+      // Key layout: tab::epoch::nodeId::port (node/port never contain "::").
+      const parts = key.split("::");
+      const nodeId = parts[parts.length - 2];
+      if (nodeId && closure.has(nodeId)) previewCache.current.delete(key);
+    }
+    const open = previewRef.current;
+    if (
+      open &&
+      open.kind === "table" &&
+      open.sourceNodeId &&
+      closure.has(open.sourceNodeId)
+    ) {
+      setPreview(null);
+      setStatus({
+        kind: "idle",
+        text: "Flow edited — run or preview again for fresh results",
+      });
+    }
+  };
+
+  /**
+   * Config patch that also invalidates stale last-run previews downstream of
+   * the edited node (group children invalidate from their container). The
+   * automatic post-run missing-ref prune bypasses this on purpose — those
+   * patches describe the run that just happened, not a user edit.
+   */
+  const patchNode = (id: string, config: Record<string, any>) => {
+    const top = liveRef.current.nodes.find((n) => n.id === id);
+    const cctx = top ? null : childCtx(id);
+    const target = top || cctx?.child || null;
+    if (target && isSemanticConfigPatch(target.config, config)) {
+      invalidateLastRunDownstream([cctx ? cctx.groupId : id]);
+    }
+    patch(id, config);
+  };
+
+  // Rewiring changes what flows into the edge's target: invalidate the
+  // target-side downstream closure for added AND removed wires. Tab switches
+  // already clear the whole cache (resetExecutionScope) — skip their diff.
+  const edgeSigRef = useRef<string[] | null>(null);
+  const edgeSigTabRef = useRef(activeTabId);
+  useEffect(() => {
+    const sig = (edges || []).map(
+      (e) => `${e.from.node}>${e.from.port}>${e.to.node}>${e.to.port}`,
+    );
+    const prev = edgeSigRef.current;
+    edgeSigRef.current = sig;
+    if (edgeSigTabRef.current !== activeTabId) {
+      edgeSigTabRef.current = activeTabId;
+      return;
+    }
+    if (prev === null) return;
+    const prevSet = new Set(prev);
+    const curSet = new Set(sig);
+    const affected = new Set<string>();
+    for (const k of curSet) {
+      if (!prevSet.has(k)) affected.add(k.split(">")[2]);
+    }
+    for (const k of prevSet) {
+      if (!curSet.has(k)) affected.add(k.split(">")[2]);
+    }
+    if (affected.size) invalidateLastRunDownstream(affected);
+    // invalidateLastRunDownstream reads only refs; edges/tab drive the diff.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edges, activeTabId]);
 
   /** Store last-run table rows for a node/port so later output clicks reuse them. */
   const rememberTableLastRun = (
@@ -664,11 +833,22 @@ export function useNodeFlowExecutionController({
     !!r?.cancelled || cancelRequested.current || (id ? !isRunCurrent(id) : false);
 
   const doPreview = async (node: NbNode, port: string, title: string) => {
-    // Output / preview clicks are cache-only. Fresh compute happens on Run all
-    // (or an explicit leaf run), which seeds last-run rows. Never start a
-    // graph/node execution from opening the results drawer.
-    // Cleared on workflow-tab switch / dataEpoch bump / Run-all start
-    // (then re-seeded). Survives App IDE / Journal / Dashboard switches.
+    // Prefer last-run cache (seeded by Run all / leaf run). Cleared on
+    // workflow-tab switch / dataEpoch bump / Run-all start. Survives App
+    // IDE / Journal / Dashboard switches.
+    //
+    // Policy:
+    // - Load/source (incl. SQL): preview-limited nodeflowRun on miss (table peek).
+    // - Join side outputs (only L / inner / only R / legacy out): same peek —
+    //   otherwise left/right Preview stays empty until a seed that often only
+    //   covers the wired ``inner`` port.
+    // - Filter True/False: same peek — users expect Preview True to show
+    //   matching rows (e.g. order_id = 101) without a prior Run all seed.
+    // - Join input ports (left / right): resolve the wired parent and preview
+    //   that upstream output (source parents may peek; other transforms stay
+    //   cache-only).
+    // - Other transforms (Select/…): cache-only on miss so a port click
+    //   never starts a full pipeline.
     const cacheKey = previewCacheKey(node.id, port);
     const hit = previewCache.current.get(cacheKey);
     if (hit) {
@@ -684,21 +864,171 @@ export function useNodeFlowExecutionController({
       });
       return;
     }
-    // Empty / stale: open the drawer with no rows so the click is visible,
-    // but do not call nodeflowRun / startRun.
-    setPreview({
-      kind: "table",
-      title: title || `${node.config.label || node.id} · ${port}`,
-      columns: [],
-      rows: [],
-      total: 0,
-      sourceNodeId: node.id,
-      sourcePort: port,
-    });
-    setStatus({
-      kind: "idle",
-      text: "No cached results — use Run all",
-    });
+
+    // Join left/right inputs → peek the connected upstream node/port.
+    if (node.type === "join" && (port === "left" || port === "right")) {
+      const snap = liveRef.current;
+      const edge = (snap.edges || []).find(
+        (e) => e.to.node === node.id && e.to.port === port,
+      );
+      const previewTitle =
+        title || `${node.config.label || node.id} · ${port}`;
+      if (!edge) {
+        setPreview({
+          kind: "table",
+          title: previewTitle,
+          columns: [],
+          rows: [],
+          total: 0,
+          sourceNodeId: node.id,
+          sourcePort: port,
+        });
+        setStatus({
+          kind: "idle",
+          text: `Connect the ${port} input`,
+        });
+        return;
+      }
+      const parent = (snap.nodes || []).find((n) => n.id === edge.from.node);
+      if (!parent) {
+        setPreview({
+          kind: "table",
+          title: previewTitle,
+          columns: [],
+          rows: [],
+          total: 0,
+          sourceNodeId: node.id,
+          sourcePort: port,
+        });
+        setStatus({
+          kind: "idle",
+          text: `Connect the ${port} input`,
+        });
+        return;
+      }
+      await doPreview(parent, edge.from.port, previewTitle);
+      return;
+    }
+
+    const mayPeek =
+      NODEFLOW_SOURCE_TYPES.has(node.type) ||
+      (node.type === "join" && isJoinSidePreviewPort(port)) ||
+      (node.type === "filter" && isFilterPreviewPort(port));
+
+    if (!mayPeek) {
+      // Empty / stale transform: open the drawer with no rows so the click
+      // is visible, but do not call nodeflowRun / startRun.
+      setPreview({
+        kind: "table",
+        title: title || `${node.config.label || node.id} · ${port}`,
+        columns: [],
+        rows: [],
+        total: 0,
+        sourceNodeId: node.id,
+        sourcePort: port,
+      });
+      setStatus({
+        kind: "idle",
+        text: "No cached results — use Run all",
+      });
+      return;
+    }
+
+    // Source / Join-side / Filter peek: preview-limited nodeflowRun.
+    const previewTitle =
+      title || `${node.config.label || node.id} · ${port}`;
+    const id = startRun(`Previewing ${node.config.label || node.id}…`, [
+      node.id,
+    ]);
+    const cctx = childCtx(node.id);
+    const graph = cctx
+      ? partialGroupGraph(cctx.groupId, cctx.index + 1)
+      : graphForRun();
+    const runNode = cctx ? cctx.groupId : node.id;
+    const runPort = cctx ? "out" : port;
+    try {
+      const ctrl = new AbortController();
+      registerRun(id, ctrl);
+      let r;
+      try {
+        r = await api.nodeflowRun(
+          graph,
+          runNode,
+          runPort,
+          id,
+          ctrl.signal,
+          true,
+          LAST_RUN_SEED_PREVIEW_LIMIT,
+        );
+      } finally {
+        unregisterRun(id, ctrl);
+      }
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      if (r.error) {
+        const culprit = (r as { node?: string }).node || node.id;
+        setNodeErrors((p) => ({ ...p, [culprit]: r.error as string }));
+        finishRun(id, r, "");
+        setPreview({
+          kind: "table",
+          title: previewTitle,
+          columns: [],
+          rows: [],
+          total: 0,
+          sourceNodeId: node.id,
+          sourcePort: port,
+        });
+        return;
+      }
+      setNodeErrors((p) => {
+        if (!(node.id in p)) return p;
+        const { [node.id]: _drop, ...rest } = p;
+        return rest;
+      });
+      // Cache under the clicked node/port so inspector Preview and the
+      // output-port click share the same last-run key.
+      const pv = rememberTableLastRun(
+        node.id,
+        port,
+        previewTitle,
+        r,
+        node.id,
+        port,
+      );
+      setPreview(pv);
+      finishRun(
+        id,
+        r,
+        `${(r.total_rows || 0).toLocaleString()}${
+          r.preview_limited ? "+" : ""
+        } rows preview`,
+      );
+    } catch (e: any) {
+      if (
+        !isRunCurrent(id) ||
+        cancelRequested.current ||
+        isCancelledError(e, id)
+      ) {
+        finishRun(id, { cancelled: true }, "");
+        return;
+      }
+      setNodeErrors((p) => ({
+        ...p,
+        [node.id]: e.message || String(e),
+      }));
+      finishRun(id, { error: e.message || String(e) }, "");
+      setPreview({
+        kind: "table",
+        title: previewTitle,
+        columns: [],
+        rows: [],
+        total: 0,
+        sourceNodeId: node.id,
+        sourcePort: port,
+      });
+    }
   };
 
   // After a successful run/rerun, drop obsolete missing column refs from
@@ -963,7 +1293,7 @@ export function useNodeFlowExecutionController({
     const st = { ...(node.config.style || {}) };
     if (v === undefined || v === "") delete st[k];
     else st[k] = v;
-    patch(node.id, { style: st });
+    patchNode(node.id, { style: st });
   };
   // set / clear a single per-element colour override
   const patchSeriesColor = (node: NbNode, name: string, color: string | null) => {
@@ -1038,7 +1368,7 @@ export function useNodeFlowExecutionController({
   const setDashPane = (dash: NbNode, idx: number, port: string) => {
     const panes = [...(dash.config.panes || ["in1", "in2", "in3", "in4"])];
     panes[idx] = port;
-    patch(dash.id, { panes });
+    patchNode(dash.id, { panes });
     const cn = upstreamChartNode(dash, port);
     if (cn) void ensureChartFor(cn);
   };
@@ -1502,10 +1832,10 @@ export function useNodeFlowExecutionController({
       if (r.error || !r.ok) {
         onToast("error", "Couldn't read file", r.error || "Failed.");
         finishRun(id, { error: r.error || "Failed." }, "");
-        patch(node.id, { file, path, table: "", columns: [] });
+        patchNode(node.id, { file, path, table: "", columns: [] });
         return;
       }
-      patch(node.id, {
+      patchNode(node.id, {
         file,
         path,
         table: r.table,
@@ -1543,10 +1873,10 @@ export function useNodeFlowExecutionController({
       if (r.error || !r.ok) {
         onToast("error", "Couldn't read folder", r.error || "Failed.");
         finishRun(id, { error: r.error || "Failed." }, "");
-        patch(node.id, { folder, table: "", columns: [], files: 0 });
+        patchNode(node.id, { folder, table: "", columns: [], files: 0 });
         return;
       }
-      patch(node.id, {
+      patchNode(node.id, {
         folder,
         table: r.table,
         columns: r.columns || [],
@@ -1655,12 +1985,12 @@ export function useNodeFlowExecutionController({
       if (r.error || !r.ok) {
         onToast("error", "Fetch failed", r.error || "Failed.");
         finishRun(id, { error: r.error || "Failed." }, "");
-        patch(node.id, { table: "", columns: [] });
+        patchNode(node.id, { table: "", columns: [] });
         return { ok: false };
       }
       if (r.fetched === false) {
         // continue-on-error: the failure was captured on the errors output
-        patch(node.id, {
+        patchNode(node.id, {
           table: "",
           columns: [],
           rows: 0,
@@ -1676,7 +2006,7 @@ export function useNodeFlowExecutionController({
         finishRun(id, r, "Fetch error captured");
         return { ok: true };
       }
-      patch(node.id, {
+      patchNode(node.id, {
         table: r.table,
         columns: r.columns || [],
         rows: r.rows,
@@ -1733,7 +2063,7 @@ export function useNodeFlowExecutionController({
         return { ok: false };
       }
       const errs = r.errors || [];
-      patch(node.id, {
+      patchNode(node.id, {
         it_passes: r.passes,
         it_attempted: r.attempted,
         it_rows: r.rows,
@@ -1791,7 +2121,7 @@ export function useNodeFlowExecutionController({
         finishRun(id, { error: r.error }, "");
         return { ok: false };
       }
-      patch(node.id, {
+      patchNode(node.id, {
         wh_iters: r.iterations,
         wh_converged: r.converged,
         wh_rows: r.rows,
@@ -1843,17 +2173,7 @@ export function useNodeFlowExecutionController({
     const hasIn = (n: NbNode) => runEdges.some((e) => e.to.node === n.id);
     const hasOut = (n: NbNode) => runEdges.some((e) => e.from.node === n.id);
     // Zero-input sources may be Run-all leaves with no inbound wire.
-    // Connectors (apinode / sqlserver / sharepoint / webscrape) stay off this
-    // list — they materialize via Fetch, not bare nodeflowRun.
-    const SOURCES = new Set([
-      "input",
-      "shred",
-      "directory",
-      "appendfolder",
-      "filebrowser",
-      "createtable",
-      "sql",
-    ]);
+    const SOURCES = NODEFLOW_SOURCE_TYPES;
     const SKIP_LEAF = new Set([
       "browse",
       "chart",
@@ -2044,7 +2364,7 @@ export function useNodeFlowExecutionController({
     }
     // Seed last-run rows for every data node in the successful terminals'
     // ancestor closure (Select/Join/Filter/…), not only the sink leaf/Output.
-    // doPreview stays cache-only and looks up by that node's id + port.
+    // Most transforms stay cache-only; sources, Join sides, and Filter may peek.
     if (successfulTerminalIds.length && !cancelRequested.current) {
       await seedLastRunCaches(successfulTerminalIds);
     }
@@ -2163,6 +2483,7 @@ export function useNodeFlowExecutionController({
     doRunWhile,
     doCreateTable,
     doPreview,
+    patchNode,
     outputKind,
     IMAGE_FORMATS_CHART,
     IMAGE_FORMATS_DASH,

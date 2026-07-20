@@ -7,7 +7,8 @@ import React, {
   useState,
 } from "react";
 import { startPointerDrag } from "../lib/pointerDrag";
-import { api } from "../lib/api";
+import { api, saveToDownloads } from "../lib/api";
+import { pivotCsv, pivotCsvFilename } from "../lib/pivotExport";
 import {
   cancelOne,
   isCancelledError,
@@ -627,6 +628,28 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
     });
   }, [data, sort]);
 
+  // Export the pivot as it is sorted on screen. Collapsed groups are not folded
+  // out: the file carries the whole pivot, since collapsing is a reading aid
+  // rather than a filter.
+  const [exporting, setExporting] = useState(false);
+  const exportCsv = async () => {
+    if (!data || !data.rows.length || exporting) return;
+    setExporting(true);
+    try {
+      const name = pivotCsvFilename(
+        source === RESULT_SRC ? "result" : source,
+      );
+      const saved = await saveToDownloads(name, {
+        text: pivotCsv(data.columns, viewRows),
+      });
+      onToast("ok", "Exported", saved.path);
+    } catch (e: any) {
+      onToast("error", "Export failed", e?.message || String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Collapse/expand for nested row groups: a chevron on each non-leaf row-
   // dimension cell folds that group's children into one representative row, so
   // one parent can stay expanded while another is collapsed. When subtotals are
@@ -823,6 +846,19 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
             ■ Stop
           </button>
         )}
+        <button
+          className="btn ghost sm"
+          data-testid="pivot-export-csv"
+          disabled={!data || !data.rows.length || exporting}
+          title={
+            data && data.rows.length
+              ? "Export this pivot to a CSV file in Downloads"
+              : "Run a pivot first"
+          }
+          onClick={exportCsv}
+        >
+          <Icon.Download size={14} /> {exporting ? "Exporting…" : "Export CSV"}
+        </button>
         {onPopOut && (
           <button
             className="btn ghost sm pv-popout"

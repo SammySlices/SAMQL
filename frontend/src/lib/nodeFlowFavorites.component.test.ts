@@ -9,10 +9,12 @@ import {
 } from "./createdNodes";
 import {
   FAVORITES_KEY,
+  PORTS,
   createdFavoriteKey,
   createdIdFromFavorite,
   inputPortMark,
   isCreatedFavoriteKey,
+  portArrowMark,
   sidePortLabel,
   type NbEdge,
   type NbNode,
@@ -62,9 +64,38 @@ describe("side port labels", () => {
     expect(inputPortMark("in")).toBeNull();
   });
 
+  it("marks join outs L/R and Filter outs T/F inside the arrow", () => {
+    expect(portArrowMark("left_only")).toBe("L");
+    expect(portArrowMark("right_only")).toBe("R");
+    expect(portArrowMark("true")).toBe("T");
+    expect(portArrowMark("false")).toBe("F");
+    expect(portArrowMark("inner")).toBeNull();
+    expect(portArrowMark("out")).toBeNull();
+    expect(sidePortLabel("true")).toBeNull();
+    expect(sidePortLabel("false")).toBeNull();
+  });
+
+  it("PORTS catalog: only Filter false is the red branch; every other out is green-tone", () => {
+    const redPorts: string[] = [];
+    for (const [type, ports] of Object.entries(PORTS)) {
+      for (const out of ports.outputs) {
+        if (out === "false") redPorts.push(`${type}.${out}`);
+      }
+    }
+    expect(redPorts).toEqual(["filter.false"]);
+    // Cross Join / anti-join / reconcile / API err stay green (not false).
+    expect(PORTS.crossjoin.outputs).toEqual(["out"]);
+    expect(PORTS.antijoin.outputs).toEqual(["out"]);
+    expect(PORTS.reconcile.outputs).toEqual(["out"]);
+    expect(PORTS.apinode.outputs).toContain("err");
+    expect(PORTS.join.outputs).toEqual([
+      "left_only",
+      "inner",
+      "right_only",
+    ]);
+  });
+
   it("keeps semantic captions", () => {
-    expect(sidePortLabel("true")).toBe("True");
-    expect(sidePortLabel("false")).toBe("False");
     expect(sidePortLabel("left_only")).toBe("only L");
     expect(sidePortLabel("inner")).toBe("inner");
     expect(sidePortLabel("right_only")).toBe("only R");

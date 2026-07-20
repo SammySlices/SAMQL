@@ -7,6 +7,9 @@ import React, {
 } from "react";
 import { useConfirmPop } from "./ConfirmPop";
 import { NotebookCell, type RunCell } from "./NotebookCell";
+import { FindReplaceDialog } from "./FindReplaceDialog";
+import { useFindReplace } from "../lib/useFindReplace";
+import { revealJournalMatch } from "../lib/journalFindReveal";
 import { ProgressBar } from "./ProgressBar";
 import { Icon } from "./Icon";
 import { api, exportResultToFile, saveToDownloads, stampResultEpoch } from "../lib/api";
@@ -1047,6 +1050,13 @@ export const Notebook: React.FC<Props> = ({
     } finally {
       setRunningAll(false);
       setJournalProg(null);
+      // Clear the sweep's abort flag once the sweep ends. It lives only for the
+      // duration of a Run all; leaving it set (after Stop) would make every
+      // later runCell bail at its cancelAllRef gate, silently killing manual
+      // cell runs, run upstream/downstream/branch, and expired-result reruns
+      // until the next Run all reset it. The finally runs only after the last
+      // wave's cells have settled, so this cannot race an in-flight cancel.
+      cancelAllRef.current = false;
     }
   };
 
@@ -1924,6 +1934,46 @@ export const Notebook: React.FC<Props> = ({
       );
   };
 
+  // Ctrl+F / Ctrl+R across every cell. SQL cells are searched on their code,
+  // note cells on their prose, in document order.
+  //
+  // A match is revealed straight through the DOM rather than by threading a
+  // prop down to one of N editors: every cell carries `data-cellid`, and
+  // SqlEditor is a plain textarea, so the right one can be focused directly.
+  const journalFind = useFindReplace({
+    enabled: active,
+    getScopes: () =>
+      cellsRef.current
+        .filter((c) => c.type === "sql" || c.type === "note")
+        .map((c) =>
+          c.type === "sql"
+            ? { id: c.id, field: "code", text: c.code || "" }
+            : { id: c.id, field: "text", text: c.text || "" },
+        ),
+    applyEdits: (edits) => {
+      const byId = new Map(edits.map((e) => [e.id, e]));
+      // One batched update so undo treats a replace-all as a single step.
+      setCells((cs) =>
+        cs.map((c) => {
+          const hit = byId.get(c.id);
+          if (!hit) return c;
+          return hit.field === "text"
+            ? { ...c, text: hit.text }
+            : { ...c, code: hit.text };
+        }),
+      );
+    },
+    revealMatch: (m) => {
+      // A collapsed cell would hide its own match, so open it first and let
+      // that render land before reaching for the textarea.
+      const cell = cellsRef.current.find((c) => c.id === m.scopeId);
+      if (cell?.collapsed) patch(m.scopeId, { collapsed: false });
+      window.setTimeout(() => {
+        revealJournalMatch(m.scopeId, m.start, m.end);
+      }, 0);
+    },
+  });
+
   // Bucket cells by group for the columnar layout, preserving array order (and
   // thus each group's top-to-bottom run order) and each cell's GLOBAL index i
   // (used for cross-group source lists, which may reach any earlier cell).
@@ -1941,6 +1991,11 @@ export const Notebook: React.FC<Props> = ({
   return (
     <div className="nb" data-testid="journal-view" onKeyDown={onJournalKeyDown}>
       {confirmPop.ui}
+      <FindReplaceDialog
+        {...journalFind.dialogProps}
+        scopeLabel={`${cells.length} cell${cells.length === 1 ? "" : "s"}`}
+        testId="journal-find"
+      />
       {fileModal && (
         <FileBrowser
           saveMode={fileModal.mode === "save"}

@@ -18,14 +18,30 @@ const node = (
 ): NbNode => ({ id, type, x: 0, y: 0, config });
 
 describe("node definition registry", () => {
-  it("covers every frontend node type exactly once", () => {
+  it("covers every frontend node type; SQL may appear in two palette groups", () => {
     expect(Object.keys(NODE_DEFINITIONS).sort()).toEqual(Object.keys(PORTS).sort());
     expect(new Set(NODE_PALETTE_ORDER).size).toBe(NODE_PALETTE_ORDER.length);
 
     const grouped = NODE_GROUPS.flatMap((group) => group.types);
     expect(grouped).toEqual(expect.arrayContaining(NODE_PALETTE_ORDER));
-    expect(new Set(grouped).size).toBe(grouped.length);
+    // Most types appear once; SQL is intentionally listed in Combine and Create.
+    const MULTI_GROUP = new Set<string>(["sql"]);
+    const counts = new Map<string, number>();
+    for (const t of grouped) counts.set(t, (counts.get(t) || 0) + 1);
+    for (const [t, n] of counts) {
+      if (MULTI_GROUP.has(t)) expect(n).toBeGreaterThanOrEqual(2);
+      else expect(n).toBe(1);
+    }
     expect(new Set(grouped)).toEqual(new Set(NODE_PALETTE_ORDER));
+
+    const combine = NODE_GROUPS.find((g) => g.id === "combine")!;
+    const create = NODE_GROUPS.find((g) => g.id === "create")!;
+    expect(combine.types).toContain("sql");
+    expect(create.types).toContain("sql");
+    expect(PORTS.sql.inputs).toHaveLength(10);
+    expect(PORTS.sql.outputs).toEqual(["out"]);
+    expect(getNodeDefinition("sql").label).toBe("SQL");
+    expect(nodeInspectorIsResizable("sql")).toBe(true);
   });
 
   it("returns fresh default configuration objects", () => {
@@ -86,6 +102,40 @@ describe("node definition registry", () => {
     expect(getNodeCardSummary(node("input", { table: "" }), [])).toBe(
       "(pick a table)",
     );
+    expect(
+      getNodeCardSummary(node("filter", { condition: "score > 50" }), []),
+    ).toBe("score > 50");
+    expect(getNodeCardSummary(node("filter", { condition: "" }), [])).toBe(
+      "(set a condition)",
+    );
+    expect(getNodeCardSummary(node("filter", { condition: "   " }), [])).toBe(
+      "(set a condition)",
+    );
+    expect(
+      getNodeCardSummary(
+        node("formula", {
+          formulas: [{ name: "total", expr: "[price] * [qty]", mode: "new" }],
+        }),
+        [],
+      ),
+    ).toBe("total = [price] * [qty]");
+    expect(
+      getNodeCardSummary(
+        node("formula", {
+          formulas: [
+            { name: "a", expr: "1", mode: "new" },
+            { name: "b", expr: "2", mode: "new" },
+          ],
+        }),
+        [],
+      ),
+    ).toBe("a = 1; b = 2");
+    expect(
+      getNodeCardSummary(
+        node("formula", { formulas: [{ name: "", expr: "", mode: "new" }] }),
+        [],
+      ),
+    ).toBe("(set expression)");
     expect(
       getNodeCardSummary(
         node("join", { keys: [{ left: "id", right: "order_id" }] }),

@@ -204,11 +204,11 @@ export function useNodeFlowCanvasInteractions(
     [],
   );
 
-  const resolveUnionPort = useCallback((nodeId: string, edges: NbEdge[]) => {
+  const resolveStackPort = useCallback((nodeId: string, edges: NbEdge[], type: "union" | "sql") => {
     const taken = new Set(
       edges.filter((edge) => edge.to.node === nodeId).map((edge) => edge.to.port),
     );
-    for (const port of PORTS.union.inputs) {
+    for (const port of PORTS[type].inputs) {
       if (!taken.has(port)) return port;
     }
     return null;
@@ -382,7 +382,7 @@ export function useNodeFlowCanvasInteractions(
           );
           let toPort = target.port;
           let stackFull = false;
-          if (targetNode?.type === "union") {
+          if (targetNode?.type === "union" || targetNode?.type === "sql") {
             const existing = (current.edgesRef.current || []).some(
               (edge) =>
                 edge.to.node === target?.node &&
@@ -390,19 +390,21 @@ export function useNodeFlowCanvasInteractions(
                 edge.from.port === drag.fromPort,
             );
             if (!existing) {
-              const free = resolveUnionPort(
+              const free = resolveStackPort(
                 target.node,
                 current.edgesRef.current || [],
+                targetNode.type,
               );
               if (!free) stackFull = true;
               else toPort = free;
             }
           }
           if (stackFull) {
+            const kind = targetNode?.type === "sql" ? "SQL" : "Union";
             current.onToast(
               "warn",
-              "Union is full",
-              "A union node stacks up to 10 inputs.",
+              `${kind} is full`,
+              `A ${kind === "SQL" ? "SQL" : "union"} node stacks up to 10 inputs.`,
             );
           } else {
             const finalPort = toPort;
@@ -418,19 +420,40 @@ export function useNodeFlowCanvasInteractions(
                 to: { node: target.node, port: finalPort },
               },
             ]);
-          }
-          if (target.port === "in") {
-            current.setNodes((nodes) =>
-              nodes.map((node) => {
-                if (node.id !== target?.node || node.type !== "sql") return node;
-                const sql = String(node.config.sql || "").trim();
-                if (sql && !/from\s+your_table/i.test(sql)) return node;
-                return {
-                  ...node,
-                  config: { ...node.config, sql: "SELECT *\nFROM input" },
-                };
-              }),
-            );
+            // First wire onto an empty SQL stub: seed FROM <table> when possible.
+            if (
+              targetNode?.type === "sql" &&
+              /^in\d+$/.test(String(finalPort))
+            ) {
+              current.setNodes((nodes) =>
+                nodes.map((node) => {
+                  if (node.id !== target?.node || node.type !== "sql") return node;
+                  const sql = String(node.config.sql || "").trim();
+                  if (
+                    sql &&
+                    !/^SELECT \*\s*\nFROM\s*$/i.test(sql) &&
+                    sql !== "SELECT *\nFROM "
+                  ) {
+                    return node;
+                  }
+                  const fromNode = (current.nodesRef.current || []).find(
+                    (n) => n.id === drag.fromNode,
+                  );
+                  const table =
+                    (fromNode?.config?.table &&
+                      String(fromNode.config.table).trim()) ||
+                    "";
+                  if (!table) return node;
+                  return {
+                    ...node,
+                    config: {
+                      ...node.config,
+                      sql: `SELECT *\nFROM ${table}`,
+                    },
+                  };
+                }),
+              );
+            }
           }
         } else {
           const dx = Math.abs(event.clientX - (drag.startX ?? event.clientX));
@@ -522,7 +545,7 @@ export function useNodeFlowCanvasInteractions(
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
     };
-  }, [clampToViewport, fireSnap, groupAtContentPoint, nearestInputPort, resolveUnionPort, toContent]);
+  }, [clampToViewport, fireSnap, groupAtContentPoint, nearestInputPort, resolveStackPort, toContent]);
 
   const startNodeDrag = useCallback(
     (event: React.PointerEvent, node: NbNode) => {

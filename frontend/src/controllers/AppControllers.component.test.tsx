@@ -559,4 +559,5 @@ describe("Phase 5 App controllers", () => {
       expect.stringContaining("12 rows"),
     );
   });
+
 });

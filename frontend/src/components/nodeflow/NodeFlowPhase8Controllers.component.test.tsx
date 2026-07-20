@@ -6,6 +6,10 @@ import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import { useNodeFlowDocumentController } from "./useNodeFlowDocumentController";
 import {
   clearLastRunPreviewCacheForTests,
+  descendantNodeIds,
+  isFilterPreviewPort,
+  isJoinSidePreviewPort,
+  isSemanticConfigPatch,
   lastRunSeedRequests,
   leafRunPort,
   useNodeFlowExecutionController,
@@ -250,17 +254,28 @@ describe("Phase 8 NodeFlow controllers", () => {
     expect(result.current.preview).toBeNull();
   });
 
-  it("opens an empty preview drawer on output click without executing", async () => {
+  it("opens an empty preview drawer on Select output click without executing", async () => {
+    // Select (and most transforms) stay cache-only on miss. Load/source,
+    // Join sides, and Filter True/False may peek — covered separately.
     const run = vi.spyOn(api, "nodeflowRun");
     const batch = vi.spyOn(api, "nodeflowRunBatch");
-    const source = node("source-a");
+    const sel: NbNode = {
+      id: "sel-a",
+      type: "select",
+      x: 10,
+      y: 10,
+      config: {
+        label: "Select",
+        fields: [{ name: "x", keep: true }],
+      },
+    };
     const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
-      current: { nodes: [source], edges: [] },
+      current: { nodes: [sel], edges: [] },
     };
     const { result } = renderHook(() =>
       useNodeFlowExecutionController({
         activeTabId: "tab-a",
-        nodes: [source],
+        nodes: [sel],
         edges: [],
         liveRef,
         graphSig: "graph-a",
@@ -278,7 +293,7 @@ describe("Phase 8 NodeFlow controllers", () => {
     );
 
     await act(async () => {
-      await result.current.doPreview(source, "out", "Source · out");
+      await result.current.doPreview(sel, "out", "Select · output");
     });
 
     expect(run).not.toHaveBeenCalled();
@@ -287,15 +302,817 @@ describe("Phase 8 NodeFlow controllers", () => {
     expect(result.current.preview).toEqual(
       expect.objectContaining({
         kind: "table",
-        title: "Source · out",
+        title: "Select · output",
         columns: [],
         rows: [],
         total: 0,
-        sourceNodeId: "source-a",
+        sourceNodeId: "sel-a",
         sourcePort: "out",
       }),
     );
     expect(result.current.status.text).toMatch(/no cached results/i);
+  });
+
+  it("Filter True/False Preview peeks on cache miss", async () => {
+    // Preview UX gap: cache-only Filter left Preview True empty until Run all
+    // seeded last-run rows. Users filtering demo_orders (order_id = 101)
+    // expect matching rows from Preview True alone — same peek bound as Join.
+    expect(isFilterPreviewPort("true")).toBe(true);
+    expect(isFilterPreviewPort("false")).toBe(true);
+    expect(isFilterPreviewPort("out")).toBe(false);
+
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["order_id", "region"],
+      rows: [[101, "East"]],
+      total_rows: 1,
+      preview_limited: true,
+    } as any);
+    const batch = vi.spyOn(api, "nodeflowRunBatch");
+    const src = node("src-ord");
+    const flt: NbNode = {
+      id: "flt-ord",
+      type: "filter",
+      x: 160,
+      y: 10,
+      config: {
+        label: "Filter",
+        filterMode: "simple",
+        field: "order_id",
+        op: "=",
+        value: "101",
+        condition: "[order_id] = 101",
+      },
+    };
+    const edges: NbEdge[] = [
+      {
+        id: "e1",
+        from: { node: "src-ord", port: "out" },
+        to: { node: "flt-ord", port: "in" },
+      },
+    ];
+    const graph = { nodes: [src, flt], edges };
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: graph,
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-filter-peek",
+        nodes: [src, flt],
+        edges,
+        liveRef,
+        graphSig: "graph-filter-peek",
+        graphForApi: () => graph,
+        graphForRun: () => graph,
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.doPreview(flt, "true", "Filter · True");
+    });
+
+    expect(batch).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalled();
+    const call = run.mock.calls[0];
+    expect(call?.[1]).toBe("flt-ord");
+    expect(call?.[2]).toBe("true");
+    expect(call?.[5]).toBe(true); // preview flag
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        title: "Filter · True",
+        columns: ["order_id", "region"],
+        rows: [[101, "East"]],
+        total: 1,
+        sourceNodeId: "flt-ord",
+        sourcePort: "true",
+      }),
+    );
+  });
+
+  it("Join left_only / right_only Preview peeks on cache miss", async () => {
+    // Code was wrong for Join side UX: cache-only doPreview left only L / only R
+    // empty whenever Run-all seeded solely the wired ``inner`` port (or never
+    // ran). Prefer a preview-limited join-side peek — same bound as sources.
+    expect(isJoinSidePreviewPort("left_only")).toBe(true);
+    expect(isJoinSidePreviewPort("right_only")).toBe(true);
+    expect(isJoinSidePreviewPort("inner")).toBe(true);
+    expect(isJoinSidePreviewPort("left")).toBe(false);
+
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["id"],
+      rows: [[1]],
+      total_rows: 1,
+      preview_limited: true,
+    } as any);
+    const batch = vi.spyOn(api, "nodeflowRunBatch");
+    const leftSrc = node("src-l");
+    const rightSrc: NbNode = {
+      ...node("src-r"),
+      config: { label: "src-r", table: "right" },
+    };
+    const join: NbNode = {
+      id: "join-1",
+      type: "join",
+      x: 200,
+      y: 10,
+      config: {
+        label: "Join",
+        keys: [{ left: "id", right: "id" }],
+      },
+    };
+    const edges: NbEdge[] = [
+      {
+        id: "e-l",
+        from: { node: "src-l", port: "out" },
+        to: { node: "join-1", port: "left" },
+      },
+      {
+        id: "e-r",
+        from: { node: "src-r", port: "out" },
+        to: { node: "join-1", port: "right" },
+      },
+    ];
+    const graph = { nodes: [leftSrc, rightSrc, join], edges };
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: graph,
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-join",
+        nodes: [leftSrc, rightSrc, join],
+        edges,
+        liveRef,
+        graphSig: "graph-join",
+        dataEpoch: 1,
+        graphForApi: () => graph,
+        graphForRun: () => graph,
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.doPreview(join, "left_only", "Join · only L");
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[1]).toBe("join-1");
+    expect(run.mock.calls[0]?.[2]).toBe("left_only");
+    expect(run.mock.calls[0]?.[5]).toBe(true); // preview
+    expect(run.mock.calls[0]?.[6]).toBe(200); // limit
+    expect(batch).not.toHaveBeenCalled();
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        title: "Join · only L",
+        columns: ["id"],
+        rows: [[1]],
+        total: 1,
+        sourceNodeId: "join-1",
+        sourcePort: "left_only",
+      }),
+    );
+
+    run.mockClear();
+    run.mockResolvedValue({
+      columns: ["id"],
+      rows: [[9]],
+      total_rows: 1,
+      preview_limited: true,
+    } as any);
+    await act(async () => {
+      await result.current.doPreview(join, "right_only", "Join · only R");
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[2]).toBe("right_only");
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        sourcePort: "right_only",
+        rows: [[9]],
+      }),
+    );
+  });
+
+  it("Join Preview left/right resolves upstream source without join execute", async () => {
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["id", "name"],
+      rows: [[1, "a"]],
+      total_rows: 1,
+      preview_limited: false,
+    } as any);
+    const leftSrc = node("src-l");
+    const rightSrc: NbNode = {
+      ...node("src-r"),
+      config: { label: "src-r", table: "right" },
+    };
+    const join: NbNode = {
+      id: "join-1",
+      type: "join",
+      x: 200,
+      y: 10,
+      config: {
+        label: "Join",
+        keys: [{ left: "id", right: "id" }],
+      },
+    };
+    const edges: NbEdge[] = [
+      {
+        id: "e-l",
+        from: { node: "src-l", port: "out" },
+        to: { node: "join-1", port: "left" },
+      },
+      {
+        id: "e-r",
+        from: { node: "src-r", port: "out" },
+        to: { node: "join-1", port: "right" },
+      },
+    ];
+    const graph = { nodes: [leftSrc, rightSrc, join], edges };
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: graph,
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-join-in",
+        nodes: [leftSrc, rightSrc, join],
+        edges,
+        liveRef,
+        graphSig: "graph-join-in",
+        dataEpoch: 1,
+        graphForApi: () => graph,
+        graphForRun: () => graph,
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.doPreview(join, "left", "Join · left");
+    });
+    // Upstream Input peek — not a join-port execute.
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[1]).toBe("src-l");
+    expect(run.mock.calls[0]?.[2]).toBe("out");
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        title: "Join · left",
+        columns: ["id", "name"],
+        rows: [[1, "a"]],
+        sourceNodeId: "src-l",
+        sourcePort: "out",
+      }),
+    );
+
+    run.mockClear();
+    run.mockResolvedValue({
+      columns: ["id"],
+      rows: [[2]],
+      total_rows: 1,
+    } as any);
+    await act(async () => {
+      await result.current.doPreview(join, "right", "Join · right");
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[1]).toBe("src-r");
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        title: "Join · right",
+        sourceNodeId: "src-r",
+        rows: [[2]],
+      }),
+    );
+  });
+
+  it("lastRunSeedRequests always includes all Join side ports when only inner is wired", () => {
+    const leftSrc = node("src-l");
+    const rightSrc = node("src-r");
+    const join: NbNode = {
+      id: "join-1",
+      type: "join",
+      x: 200,
+      y: 0,
+      config: { label: "Join", keys: [{ left: "id", right: "id" }] },
+    };
+    const out: NbNode = {
+      id: "out-1",
+      type: "output",
+      x: 360,
+      y: 0,
+      config: { label: "Output", format: "csv" },
+    };
+    const edges: NbEdge[] = [
+      {
+        id: "e-l",
+        from: { node: "src-l", port: "out" },
+        to: { node: "join-1", port: "left" },
+      },
+      {
+        id: "e-r",
+        from: { node: "src-r", port: "out" },
+        to: { node: "join-1", port: "right" },
+      },
+      {
+        id: "e-o",
+        from: { node: "join-1", port: "inner" },
+        to: { node: "out-1", port: "in" },
+      },
+    ];
+    const reqs = lastRunSeedRequests(
+      [leftSrc, rightSrc, join, out],
+      edges,
+      ["out-1"],
+    );
+    expect(reqs).toEqual(
+      expect.arrayContaining([
+        { node: "join-1", port: "left_only" },
+        { node: "join-1", port: "inner" },
+        { node: "join-1", port: "right_only" },
+      ]),
+    );
+  });
+
+  it("lastRunSeedRequests always includes Filter True and False when only True is wired", () => {
+    const src = node("src-f");
+    const flt: NbNode = {
+      id: "flt-1",
+      type: "filter",
+      x: 160,
+      y: 0,
+      config: { label: "Filter", condition: "id > 0", filterMode: "custom" },
+    };
+    const out: NbNode = {
+      id: "out-f",
+      type: "output",
+      x: 320,
+      y: 0,
+      config: { label: "Output", format: "csv" },
+    };
+    const edges: NbEdge[] = [
+      {
+        id: "e-in",
+        from: { node: "src-f", port: "out" },
+        to: { node: "flt-1", port: "in" },
+      },
+      {
+        id: "e-true",
+        from: { node: "flt-1", port: "true" },
+        to: { node: "out-f", port: "in" },
+      },
+    ];
+    expect(
+      lastRunSeedRequests([src, flt, out], edges, ["out-f"]),
+    ).toEqual(
+      expect.arrayContaining([
+        { node: "flt-1", port: "true" },
+        { node: "flt-1", port: "false" },
+      ]),
+    );
+  });
+
+  it("isSemanticConfigPatch ignores cosmetic keys and catches execution edits", () => {
+    const cfg = { label: "A", condition: "x > 1", collapsed: false };
+    expect(isSemanticConfigPatch(cfg, { label: "B" })).toBe(false);
+    expect(isSemanticConfigPatch(cfg, { collapsed: true })).toBe(false);
+    expect(isSemanticConfigPatch(cfg, { condition: "x > 2" })).toBe(true);
+    expect(isSemanticConfigPatch(cfg, { disabled: true })).toBe(true);
+    expect(descendantNodeIds(
+      [
+        {
+          id: "e1",
+          from: { node: "a", port: "out" },
+          to: { node: "b", port: "in" },
+        },
+        {
+          id: "e2",
+          from: { node: "b", port: "out" },
+          to: { node: "c", port: "in" },
+        },
+      ],
+      ["a"],
+    )).toEqual(new Set(["a", "b", "c"]));
+  });
+
+  it("semantic config edit invalidates downstream last-run cache (not cosmetics)", async () => {
+    // Code must drop stale "(cached)" rows after an upstream Select edit;
+    // renaming a label must not wipe seeds.
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["id"],
+      rows: [["term"]],
+      total_rows: 1,
+    } as any);
+    const runBatch = vi.spyOn(api, "nodeflowRunBatch").mockResolvedValue({
+      ok: true,
+      results: [
+        {
+          node: "src",
+          port: "out",
+          columns: ["id"],
+          rows: [["a"]],
+          total_rows: 1,
+        },
+        {
+          node: "sel",
+          port: "out",
+          columns: ["id"],
+          rows: [["b"]],
+          total_rows: 1,
+        },
+        {
+          node: "down",
+          port: "out",
+          columns: ["id"],
+          rows: [["c"]],
+          total_rows: 1,
+        },
+      ],
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+
+    const src: NbNode = {
+      id: "src",
+      type: "input",
+      x: 0,
+      y: 0,
+      config: { label: "Src", table: "t" },
+    };
+    const sel: NbNode = {
+      id: "sel",
+      type: "select",
+      x: 120,
+      y: 0,
+      config: { label: "Sel", fields: [{ name: "id", keep: true }] },
+    };
+    const down: NbNode = {
+      id: "down",
+      type: "select",
+      x: 240,
+      y: 0,
+      config: { label: "Down", fields: [{ name: "id", keep: true }] },
+    };
+    const edges: NbEdge[] = [
+      {
+        id: "e1",
+        from: { node: "src", port: "out" },
+        to: { node: "sel", port: "in" },
+      },
+      {
+        id: "e2",
+        from: { node: "sel", port: "out" },
+        to: { node: "down", port: "in" },
+      },
+    ];
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes: [src, sel, down], edges },
+    };
+    const patch = vi.fn((id: string, config: Record<string, unknown>) => {
+      liveRef.current = {
+        ...liveRef.current,
+        nodes: liveRef.current.nodes.map((n) =>
+          n.id === id ? { ...n, config: { ...n.config, ...config } } : n,
+        ),
+      };
+    });
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-inv",
+        nodes: [src, sel, down],
+        edges,
+        liveRef,
+        graphSig: "g1",
+        dataEpoch: 1,
+        graphForApi: () => liveRef.current,
+        graphForRun: () => liveRef.current,
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch,
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.runAll();
+    });
+    expect(runBatch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.doPreview(down, "out", "Down · out");
+    });
+    expect(result.current.status.text).toMatch(/cached/i);
+    expect(run).toHaveBeenCalledTimes(1); // terminal only
+
+    // Cosmetic label: seeds must survive.
+    await act(async () => {
+      result.current.patchNode("sel", { label: "Sel renamed" });
+    });
+    await act(async () => {
+      await result.current.doPreview(down, "out", "Down · out");
+    });
+    expect(result.current.status.text).toMatch(/cached/i);
+    expect(run).toHaveBeenCalledTimes(1);
+
+    // Semantic field edit: drop sel + down; Select stays cache-only on miss.
+    await act(async () => {
+      result.current.patchNode("sel", {
+        fields: [{ name: "id", keep: true, rename: "idx" }],
+      });
+    });
+    await act(async () => {
+      await result.current.doPreview(down, "out", "Down · out");
+    });
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        rows: [],
+        total: 0,
+        sourceNodeId: "down",
+      }),
+    );
+    expect(result.current.status.text).toMatch(/No cached results/i);
+    // Still no re-execute for transform miss.
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("rewiring invalidates the target downstream last-run cache", async () => {
+    // Keep a single leaf (b) so Run all uses nodeflowRun + seed batch.
+    // An unused Input would also be a leaf and force the multi-leaf batch path.
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["id"],
+      rows: [["leaf"]],
+      total_rows: 1,
+    } as any);
+    const runBatch = vi.spyOn(api, "nodeflowRunBatch").mockResolvedValue({
+      ok: true,
+      results: [
+        {
+          node: "a",
+          port: "out",
+          columns: ["id"],
+          rows: [["a"]],
+          total_rows: 1,
+        },
+        {
+          node: "b",
+          port: "out",
+          columns: ["id"],
+          rows: [["b"]],
+          total_rows: 1,
+        },
+      ],
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+
+    const a: NbNode = {
+      id: "a",
+      type: "input",
+      x: 0,
+      y: 0,
+      config: { label: "A", table: "t1" },
+    };
+    const b: NbNode = {
+      id: "b",
+      type: "select",
+      x: 160,
+      y: 0,
+      config: { label: "B", fields: [] },
+    };
+    const c: NbNode = {
+      id: "c",
+      type: "input",
+      x: 0,
+      y: 80,
+      config: { label: "C", table: "t2" },
+    };
+    const edges0: NbEdge[] = [
+      {
+        id: "e-ab",
+        from: { node: "a", port: "out" },
+        to: { node: "b", port: "in" },
+      },
+    ];
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes: [a, b], edges: edges0 },
+    };
+    const { result, rerender } = renderHook(
+      ({ nodes, edges }) =>
+        useNodeFlowExecutionController({
+          activeTabId: "tab-wire",
+          nodes,
+          edges,
+          liveRef,
+          graphSig: "gw",
+          dataEpoch: 1,
+          graphForApi: () => ({ nodes, edges }),
+          graphForRun: () => ({ nodes, edges }),
+          childCtx: () => null,
+          partialGroupGraph: () => ({ nodes: [], edges: [] }),
+          patch: vi.fn(),
+          setNodes: vi.fn(),
+          setNodeErrors: vi.fn(),
+          setNodeWarnings: vi.fn(),
+          onToast: vi.fn(),
+          fireRipple: vi.fn(),
+        }),
+      { initialProps: { nodes: [a, b], edges: edges0 } },
+    );
+
+    await act(async () => {
+      await result.current.runAll();
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await result.current.doPreview(b, "out", "B · out");
+    });
+    expect(result.current.status.text).toMatch(/cached/i);
+
+    const edges1: NbEdge[] = [
+      {
+        id: "e-cb",
+        from: { node: "c", port: "out" },
+        to: { node: "b", port: "in" },
+      },
+    ];
+    liveRef.current = { nodes: [a, b, c], edges: edges1 };
+    await act(async () => {
+      rerender({ nodes: [a, b, c], edges: edges1 });
+    });
+
+    await act(async () => {
+      await result.current.doPreview(b, "out", "B · out");
+    });
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        rows: [],
+        total: 0,
+        sourceNodeId: "b",
+      }),
+    );
+    expect(result.current.status.text).toMatch(/No cached results/i);
+    // Transform miss stays cache-only (no peek re-run).
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(runBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("Input Preview on cache miss runs preview-limited and shows rows", async () => {
+    // Code was wrong for load/source UX: cache-only doPreview opened an empty
+    // drawer ("No cached results — use Run all") even though Input is a
+    // zero-upstream table peek. Prefer a preview-limited nodeflowRun.
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["id"],
+      rows: [[7]],
+      total_rows: 1,
+      preview_limited: false,
+    } as any);
+    const batch = vi.spyOn(api, "nodeflowRunBatch");
+    const source = node("source-a");
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes: [source], edges: [] },
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-a",
+        nodes: [source],
+        edges: [],
+        liveRef,
+        graphSig: "graph-a",
+        dataEpoch: 1,
+        graphForApi: () => ({ nodes: [source], edges: [] }),
+        graphForRun: () => ({ nodes: [source], edges: [] }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.doPreview(source, "out", "Source · output");
+    });
+
+    expect(batch).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1);
+    // nodeflowRun(graph, node, port, queryId, signal, preview, previewLimit)
+    expect(run.mock.calls[0][1]).toBe("source-a");
+    expect(run.mock.calls[0][2]).toBe("out");
+    expect(run.mock.calls[0][5]).toBe(true);
+    expect(run.mock.calls[0][6]).toBe(200);
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        title: "Source · output",
+        columns: ["id"],
+        rows: [[7]],
+        total: 1,
+        sourceNodeId: "source-a",
+        sourcePort: "out",
+      }),
+    );
+    expect(result.current.status.text).toMatch(/preview/i);
+
+    // Second click is cache-only — no further execute.
+    await act(async () => {
+      await result.current.doPreview(source, "out", "Source · output");
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(result.current.status.text).toMatch(/cached/i);
+  });
+
+  it("SQL Preview on cache miss runs preview-limited and shows rows", async () => {
+    // Former sqljoin was cache-only (not in NODEFLOW_SOURCE_TYPES), so Preview
+    // opened empty until Run all. Unified SQL peeks like other sources.
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["id", "name"],
+      rows: [[1, "Alice"]],
+      total_rows: 1,
+      preview_limited: true,
+    } as any);
+    const batch = vi.spyOn(api, "nodeflowRunBatch");
+    const sqlNode: NbNode = {
+      id: "sql-1",
+      type: "sql",
+      x: 0,
+      y: 0,
+      config: {
+        label: "sql",
+        sql: "SELECT o.id, c.name FROM orders o JOIN customers c ON o.customer_id = c.id",
+      },
+    };
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes: [sqlNode], edges: [] },
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-a",
+        nodes: [sqlNode],
+        edges: [],
+        liveRef,
+        graphSig: "graph-sql",
+        dataEpoch: 1,
+        graphForApi: () => ({ nodes: [sqlNode], edges: [] }),
+        graphForRun: () => ({ nodes: [sqlNode], edges: [] }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.doPreview(sqlNode, "out", "sql · output");
+    });
+
+    expect(batch).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0][1]).toBe("sql-1");
+    expect(run.mock.calls[0][2]).toBe("out");
+    expect(run.mock.calls[0][5]).toBe(true);
+    expect(result.current.preview).toEqual(
+      expect.objectContaining({
+        kind: "table",
+        title: "sql · output",
+        columns: ["id", "name"],
+        rows: [[1, "Alice"]],
+        total: 1,
+        sourceNodeId: "sql-1",
+        sourcePort: "out",
+      }),
+    );
   });
 
   it("does not open the preview drawer when a single leaf run succeeds", async () => {
@@ -599,27 +1416,61 @@ describe("Phase 8 NodeFlow controllers", () => {
     expect(runBatch).toHaveBeenCalledTimes(1);
   });
 
-  it("clears last-run cache on dataEpoch bump so output click does not re-run", async () => {
+  it("clears last-run cache on dataEpoch bump so Select preview does not re-run", async () => {
+    // Select stays cache-only after epoch wipe. Sources / Join / Filter may
+    // preview-execute on miss (separate tests).
     const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
       columns: ["id"],
       rows: [[1]],
       total_rows: 1,
     } as any);
-    const source = node("source-a");
+    vi.spyOn(api, "nodeflowRunBatch").mockResolvedValue({
+      ok: true,
+      results: [
+        {
+          node: "sel-ep",
+          port: "out",
+          columns: ["id"],
+          rows: [[1]],
+          total_rows: 1,
+        },
+      ],
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+    const sel: NbNode = {
+      id: "sel-ep",
+      type: "select",
+      x: 0,
+      y: 0,
+      config: {
+        label: "Select",
+        fields: [{ name: "id", keep: true }],
+      },
+    };
+    const src = node("src-ep");
+    const edges: NbEdge[] = [
+      {
+        id: "e1",
+        from: { node: "src-ep", port: "out" },
+        to: { node: "sel-ep", port: "in" },
+      },
+    ];
     const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
-      current: { nodes: [source], edges: [] },
+      current: { nodes: [src, sel], edges },
     };
     const { result, rerender } = renderHook(
       ({ epoch }) =>
         useNodeFlowExecutionController({
           activeTabId: "tab-a",
-          nodes: [source],
-          edges: [],
+          nodes: [src, sel],
+          edges,
           liveRef,
           graphSig: "graph-a",
           dataEpoch: epoch,
-          graphForApi: () => ({ nodes: [], edges: [] }),
-          graphForRun: () => ({ nodes: [], edges: [] }),
+          graphForApi: () => ({ nodes: [src, sel], edges }),
+          graphForRun: () => ({ nodes: [src, sel], edges }),
           childCtx: () => null,
           partialGroupGraph: () => ({ nodes: [], edges: [] }),
           patch: vi.fn(),
@@ -635,21 +1486,23 @@ describe("Phase 8 NodeFlow controllers", () => {
     await act(async () => {
       await result.current.runAll();
     });
-    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalled();
+    const afterRun = run.mock.calls.length;
 
     rerender({ epoch: 2 });
     expect(result.current.preview).toBeNull();
 
     await act(async () => {
-      await result.current.doPreview(source, "out", "Source · out");
+      await result.current.doPreview(sel, "out", "Select · output");
     });
-    // File-change epoch cleared cache; click shows empty, does not execute.
-    expect(run).toHaveBeenCalledTimes(1);
+    // File-change epoch cleared cache; Select click shows empty, no execute.
+    expect(run).toHaveBeenCalledTimes(afterRun);
     expect(result.current.preview).toEqual(
       expect.objectContaining({
         kind: "table",
         rows: [],
         total: 0,
+        sourcePort: "out",
       }),
     );
     expect(result.current.running).toBe(false);

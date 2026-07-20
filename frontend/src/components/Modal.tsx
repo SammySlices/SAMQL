@@ -21,6 +21,12 @@ interface Props {
    * skips scale/translate that thrash with the dimmed app.
    */
   fast?: boolean;
+  /**
+   * When true, Escape and backdrop click do not dismiss. The header Close
+   * control still closes. Pair with onTogglePin to show a pin control.
+   */
+  pinned?: boolean;
+  onTogglePin?: () => void;
 }
 
 const FOCUSABLE = [
@@ -40,6 +46,8 @@ export const Modal: React.FC<Props> = ({
   wide,
   testId,
   fast,
+  pinned,
+  onTogglePin,
 }) => {
   // .435: every modal EXITS as smoothly as it enters -- a short
   // closing phase plays the soft pop-out (modal-out), then onClose fires.
@@ -64,6 +72,11 @@ export const Modal: React.FC<Props> = ({
     }, closeMs);
   }, [closing, closeMs, onClose]);
 
+  const beginDismiss = useCallback(() => {
+    if (pinned) return;
+    beginClose();
+  }, [beginClose, pinned]);
+
   useEffect(() => {
     previousFocus.current =
       document.activeElement instanceof HTMLElement
@@ -87,7 +100,7 @@ export const Modal: React.FC<Props> = ({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        beginClose();
+        beginDismiss();
         return;
       }
       if (e.key !== "Tab") return;
@@ -114,7 +127,7 @@ export const Modal: React.FC<Props> = ({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [beginClose]);
+  }, [beginDismiss]);
 
   // Portal to body so nested shells (Load File → Browse) are not trapped by
   // an ancestor's contain/overflow/radius — fixed backdrops must cover the
@@ -126,7 +139,7 @@ export const Modal: React.FC<Props> = ({
         (fast ? " fast" : "") +
         (closing ? " closing" : "")
       }
-      onMouseDown={beginClose}
+      onMouseDown={beginDismiss}
     >
       <div
         ref={dialogRef}
@@ -146,6 +159,22 @@ export const Modal: React.FC<Props> = ({
         <div className="modal-head">
           <h2 id={titleId}>{title}</h2>
           <span className="spacer" />
+          {onTogglePin && (
+            <button
+              type="button"
+              className={
+                "btn ghost sm modal-pin-btn" + (pinned ? " pin-on" : "")
+              }
+              onClick={onTogglePin}
+              title={pinned ? "Unpin — allow panel to close" : "Keep panel open"}
+              aria-label={pinned ? "Unpin panel" : "Keep panel open"}
+              aria-pressed={!!pinned}
+              data-testid="modal-pin"
+            >
+              <Icon.Pin size={14} className={pinned ? "pin-on" : undefined} />
+              {pinned ? "Pinned" : "Pin"}
+            </button>
+          )}
           <button
             className="btn ghost icon"
             onClick={beginClose}

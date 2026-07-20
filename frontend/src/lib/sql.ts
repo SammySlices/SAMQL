@@ -314,3 +314,75 @@ export function quoteSqlIdent(ident: string): string {
   if (!needsSqlQuote(s)) return s;
   return `"${s.replace(/"/g, '""')}"`;
 }
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_DT_RE =
+  /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+
+/** True when ``s`` is an ISO date or datetime filter string. */
+export function isIsoTemporal(s: string): boolean {
+  if (!s) return false;
+  return ISO_DATE_RE.test(s) || ISO_DT_RE.test(s);
+}
+
+/**
+ * Strip one layer of matching quotes when the interior is an ISO
+ * date/datetime. Users often paste ``'2026-01-26'`` from SQL; a naive
+ * wrap would emit ``'''2026-01-26'''`` and break DuckDB DATE casts.
+ */
+export function unwrapSqlQuotedTemporal(value: string): string {
+  const s = String(value ?? "").trim();
+  if (s.length >= 2 && (s[0] === "'" || s[0] === '"') && s[0] === s[s.length - 1]) {
+    const inner = s.slice(1, -1).trim();
+    if (isIsoTemporal(inner)) return inner;
+  }
+  return s;
+}
+
+/**
+ * Single-quoted SQL string literal. ISO dates that arrive already
+ * SQL-quoted are unwrapped first so they are not double-wrapped.
+ */
+export function sqlStrLiteral(value: string): string {
+  const s = unwrapSqlQuotedTemporal(value);
+  return "'" + s.replace(/'/g, "''") + "'";
+}
+
+/**
+ * Build a NodeFlow Filter condition from the simple field/op/value UI.
+ * Matches the backend temporal unwrap so a pasted ``'2026-01-26'`` does
+ * not become ``'''2026-01-26'''`` in the generated SQL.
+ */
+export function buildNodeflowFilterCond(
+  field: string,
+  op: string,
+  value: string,
+): string {
+  if (!field) return "";
+  const f = "[" + field + "]";
+  const v = unwrapSqlQuotedTemporal((value ?? "").trim());
+  const num = v !== "" && !isNaN(Number(v));
+  const lit = num ? v : sqlStrLiteral(v);
+  const esc = v.replace(/'/g, "''");
+  switch (op) {
+    case "is null":
+      return f + " IS NULL";
+    case "is not null":
+      return f + " IS NOT NULL";
+    case "contains":
+      return f + " LIKE '%" + esc + "%'";
+    case "starts":
+      return f + " LIKE '" + esc + "%'";
+    case "ends":
+      return f + " LIKE '%" + esc + "'";
+    case "=":
+    case "!=":
+    case ">":
+    case ">=":
+    case "<":
+    case "<=":
+      return f + " " + op + " " + lit;
+    default:
+      return f + " = " + lit;
+  }
+}

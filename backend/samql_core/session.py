@@ -2405,7 +2405,7 @@ class Session:
                     else:
                         _add_name(item)
                 typ = node.get("type")
-                if typ == "sql":
+                if typ == "sql" or typ == "sqljoin":
                     # Free-form SQL can name tables without config.table —
                     # reuse the engine-routing extractor so drops invalidate
                     # flow cache the same way Input nodes do.
@@ -3210,7 +3210,7 @@ class Session:
                     "persistent_cache_mb") or 0) <= 0):
             return skip()
         volatile = {"apinode", "sqlserver", "sharepoint", "webscrape",
-                    "sql", "iterator", "while", "filebrowser",
+                    "sql", "sqljoin", "iterator", "while", "filebrowser",
                     "directory", "appendfolder", "shred", "write"}
         sources = []
         eng, _kind = self._engine_obj(engine_target)
@@ -4708,9 +4708,9 @@ class Session:
                 elif typ == "filebrowser":
                     # reads files directly via DuckDB
                     _note("duckdb")
-                elif typ == "sql":
-                    # the {{in}} token isn't a table name, so it's ignored here;
-                    # any real loaded table the query reads pins the engine.
+                elif typ == "sql" or typ == "sqljoin":
+                    # Logical input names are rewritten to temps; any other
+                    # loaded table the query still names pins the engine.
                     for name in self._table_names_in(cfg.get("sql") or ""):
                         _note(self._engine_of_table(name))
                 elif typ in ("group", "iterator"):
@@ -4805,7 +4805,7 @@ class Session:
             return None
         node_by_id = {n.get("id"): n for n in (graph.get("nodes") or [])}
         unsafe = {"apinode", "iterator", "while", "shred", "write",
-                  "directory", "appendfolder", "sql", "filebrowser",
+                  "directory", "appendfolder", "sql", "sqljoin", "filebrowser",
                   "createtable"}
         # Parallel workers may only execute pure SQL DAG branches. Nodes with
         # network/file side effects remain on the serial path.
@@ -5052,7 +5052,7 @@ class Session:
                 # crosstab), a SQL node's {{in}} token may appear more than
                 # once, and a Python node executes outside SQL — their
                 # inputs are always materialised, never inlined.
-                force = typ in ("pivot", "sql", "python")
+                force = typ in ("pivot", "sql", "sqljoin", "python")
 
                 def get_input(in_port):
                     sn, sp = nodeflow.upstream(graph, nid, in_port)
@@ -5101,7 +5101,7 @@ class Session:
                 sql = nodeflow.node_output_sql(
                     node, prt, get_input, cols_of,
                     "duckdb" if engine_target == DUCKDB_TARGET else "sqlite",
-                    needed=live_out)
+                    needed=live_out, graph=graph)
                 # Keep dependency-only fields available while this node runs,
                 # then remove them before an intermediate checkpoint is cached.
                 # This makes projection pushdown effective across filter/sort/
@@ -5417,7 +5417,7 @@ class Session:
                 return "1" if v else "0"
             if isinstance(v, (int, float)):
                 return repr(v)
-            return "'" + str(v).replace("'", "''") + "'"
+            return sqlutil.sql_str_literal(v)
 
         def mlabel(f, a):
             return "count" if (a == "count" or not f) else "%s(%s)" % (a, f)
@@ -6848,6 +6848,11 @@ class Session:
                         extra[var] = str(idx)
                 else:
                     extra = {var: "" if v is None else str(v)}
+                # A body that reads the accumulator we append to each pass has
+                # identical graph text every round, so its fingerprint is
+                # identical too -- without this clear the cache hands back the
+                # first pass's rows. Same reasoning as run_while.
+                self._flow_cache_clear()
                 rg = applyvars.resolve_graph(graph, extra=extra)
                 created, et = [], None
                 try:
@@ -7115,6 +7120,10 @@ class Session:
                 except Exception:
                     pass
                 extra = _rename_row_vars(row, cfg.get("var_rename"))
+                # See run_iterator: a body reading the accumulator keeps an
+                # identical fingerprint across passes, so stale rows would be
+                # served without this per-pass clear.
+                self._flow_cache_clear()
                 rg = applyvars.resolve_graph(base, extra=extra)
                 created, et = [], None
                 try:
@@ -7326,6 +7335,9 @@ class Session:
 
         Excludes CTE aliases. Returns None when sqlglot is missing or the
         statement cannot be parsed so callers can fall back to regex.
+
+        Tries DuckDB first so DuckDB-only SQL (QUALIFY, EXCLUDE, …) still
+        yields table names for engine pinning when loads live in DuckDB.
         """
         from .sqlutil import HAS_SQLGLOT
         if not HAS_SQLGLOT:
@@ -7336,36 +7348,46 @@ class Session:
         try:
             import sqlglot
             from sqlglot import exp
-            trees = sqlglot.parse(
-                text, error_level=sqlglot.ErrorLevel.IGNORE)
         except Exception:
             return None
-        if not trees:
-            return None
-        names = set()
-        found_table = False
-        for tree in trees:
-            if tree is None:
+
+        def _collect(trees):
+            names = set()
+            found_table = False
+            for tree in trees or []:
+                if tree is None:
+                    continue
+                cte_aliases = set()
+                for cte in tree.find_all(exp.CTE):
+                    alias = getattr(cte, "alias_or_name", None) or getattr(
+                        cte, "alias", None)
+                    if alias:
+                        cte_aliases.add(str(alias))
+                for table in tree.find_all(exp.Table):
+                    found_table = True
+                    name = getattr(table, "name", None)
+                    if not name:
+                        continue
+                    name = str(name)
+                    if name in cte_aliases:
+                        continue
+                    names.add(name)
+            if not found_table and not names:
+                return None
+            return names
+
+        # DuckDB first (default load engine), then dialect-free.
+        for dialect in ("duckdb", None):
+            try:
+                trees = sqlglot.parse(
+                    text, read=dialect,
+                    error_level=sqlglot.ErrorLevel.IGNORE)
+            except Exception:
                 continue
-            cte_aliases = set()
-            for cte in tree.find_all(exp.CTE):
-                alias = getattr(cte, "alias_or_name", None) or getattr(
-                    cte, "alias", None)
-                if alias:
-                    cte_aliases.add(str(alias))
-            for table in tree.find_all(exp.Table):
-                found_table = True
-                name = getattr(table, "name", None)
-                if not name:
-                    continue
-                name = str(name)
-                if name in cte_aliases:
-                    continue
-                names.add(name)
-        # Empty parse / no tables → let regex try (sqlglot IGNORE can yield []).
-        if not found_table and not names:
-            return None
-        return names
+            got = _collect(trees)
+            if got is not None:
+                return got
+        return None
 
     def _table_names_in(self, sql):
         parsed = self._table_names_in_sqlglot(sql)
@@ -13611,17 +13633,53 @@ class Session:
         except (TypeError, ValueError):
             return None
 
+    # Pivot filter temporal / quoting helpers live in sqlutil so NodeFlow
+    # Filter, {{var}} substitution, and Pivot share one unwrap+lit path.
+    @staticmethod
+    def _pivot_is_temporal(s):
+        """True when ``s`` is an ISO date or datetime filter string."""
+        return sqlutil.is_iso_temporal(s)
+
+    @staticmethod
+    def _pivot_filter_text(v):
+        """Normalize a pivot filter value for SQL / Python matching.
+
+        Strips one layer of matching quotes when the interior is an ISO
+        date/datetime -- users often paste ``'2026-01-26'`` from SQL, and
+        DuckDB then tries to CAST the quoted characters as DATE
+        (``invalid date field format: "'2026-01-26'"``).
+        """
+        return sqlutil.unwrap_sql_quoted_temporal(v)
+
     @staticmethod
     def _pivot_where(filters, cidx, colref, castnum):
         """Build a WHERE clause from filter specs (''=no filter)."""
         def lit(x):
-            return "'" + str(x).replace("'", "''") + "'"
+            return sqlutil.sql_str_literal(x)
 
         def numlit(x):
             try:
                 return repr(float(x))
             except (TypeError, ValueError):
                 return lit(x)
+
+        def vlit(x):
+            t = Session._pivot_filter_text(x)
+            if t is None:
+                return "NULL"
+            return lit(t)
+
+        def cmp_side(col, val, sym):
+            """Numeric TRY_CAST for numbers; bare compare for ISO dates.
+
+            Date filters must not go through castnum (TRY_CAST AS DOUBLE):
+            ``TRY_CAST(d AS DOUBLE) >= '2026-01-26'`` fails conversion.
+            """
+            t = Session._pivot_filter_text(val)
+            if Session._pivot_is_temporal(t):
+                return f"{col} {sym} {lit(t)}"
+            return f"{castnum(col)} {sym} {numlit(val)}"
+
         out = []
         for f in filters:
             c = colref(cidx[f["field"]])
@@ -13633,9 +13691,9 @@ class Session:
             elif op in ("notnull", "not_null", "not_blank"):
                 out.append(f"{c} IS NOT NULL")
             elif op in ("equals", "eq", "is"):
-                out.append(f"{c} = {lit(val)}")
+                out.append(f"{c} = {vlit(val)}")
             elif op in ("not_equals", "ne", "is_not"):
-                out.append(f"({c} IS NULL OR {c} <> {lit(val)})")
+                out.append(f"({c} IS NULL OR {c} <> {vlit(val)})")
             elif op == "contains":
                 out.append(f"{c} LIKE {lit('%' + str(val) + '%')}")
             elif op in ("not_contains", "does_not_contain"):
@@ -13646,23 +13704,29 @@ class Session:
             elif op in ("ends_with", "endswith"):
                 out.append(f"{c} LIKE {lit('%' + str(val))}")
             elif op in ("gt", "greater_than", ">"):
-                out.append(f"{castnum(c)} > {numlit(val)}")
+                out.append(cmp_side(c, val, ">"))
             elif op in ("lt", "less_than", "<"):
-                out.append(f"{castnum(c)} < {numlit(val)}")
+                out.append(cmp_side(c, val, "<"))
             elif op in ("gte", ">=", "at_least"):
-                out.append(f"{castnum(c)} >= {numlit(val)}")
+                out.append(cmp_side(c, val, ">="))
             elif op in ("lte", "<=", "at_most"):
-                out.append(f"{castnum(c)} <= {numlit(val)}")
+                out.append(cmp_side(c, val, "<="))
             elif op == "between":
-                out.append(f"{castnum(c)} BETWEEN {numlit(val)} "
-                           f"AND {numlit(val2)}")
+                t1 = Session._pivot_filter_text(val)
+                t2 = Session._pivot_filter_text(val2)
+                if (Session._pivot_is_temporal(t1)
+                        or Session._pivot_is_temporal(t2)):
+                    out.append(f"{c} BETWEEN {lit(t1)} AND {lit(t2)}")
+                else:
+                    out.append(f"{castnum(c)} BETWEEN {numlit(val)} "
+                               f"AND {numlit(val2)}")
             elif op in ("in", "one_of"):
                 if vals:
-                    out.append(f"{c} IN ({', '.join(lit(x) for x in vals)})")
+                    out.append(f"{c} IN ({', '.join(vlit(x) for x in vals)})")
             elif op in ("not_in", "none_of"):
                 if vals:
                     out.append(f"({c} IS NULL OR {c} NOT IN "
-                               f"({', '.join(lit(x) for x in vals)}))")
+                               f"({', '.join(vlit(x) for x in vals)}))")
         return " AND ".join(f"({x})" for x in out)
 
     @staticmethod
@@ -13672,6 +13736,13 @@ class Session:
         val, val2 = f.get("value"), f.get("value2")
         vals = f.get("values") or []
         s = "" if raw is None else str(raw)
+        # datetime.date / datetime -> ISO-ish strings; strip time for date-only
+        # filter equals so Python fallback matches DuckDB DATE = 'YYYY-MM-DD'.
+        s_cmp = s
+        if isinstance(raw, _dt.datetime):
+            s_cmp = raw.date().isoformat()
+        elif isinstance(raw, _dt.date):
+            s_cmp = raw.isoformat()
 
         def num(x):
             try:
@@ -13683,9 +13754,17 @@ class Session:
         if op in ("notnull", "not_null", "not_blank"):
             return not (raw is None or s == "")
         if op in ("equals", "eq", "is"):
-            return s == ("" if val is None else str(val))
+            tv = Session._pivot_filter_text(val)
+            want = "" if tv is None else str(tv)
+            if Session._pivot_is_temporal(want):
+                return s_cmp == want or s == want
+            return s == want
         if op in ("not_equals", "ne", "is_not"):
-            return s != ("" if val is None else str(val))
+            tv = Session._pivot_filter_text(val)
+            want = "" if tv is None else str(tv)
+            if Session._pivot_is_temporal(want):
+                return s_cmp != want and s != want
+            return s != want
         if op == "contains":
             return str(val) in s
         if op in ("not_contains", "does_not_contain"):
@@ -13695,22 +13774,41 @@ class Session:
         if op in ("ends_with", "endswith"):
             return s.endswith(str(val))
         if op in ("in", "one_of"):
-            return s in {str(x) for x in vals}
+            wanted = {Session._pivot_filter_text(x) for x in vals}
+            return s in wanted or s_cmp in wanted
         if op in ("not_in", "none_of"):
-            return s not in {str(x) for x in vals}
-        nv, tv, tv2 = num(raw), num(val), num(val2)
+            wanted = {Session._pivot_filter_text(x) for x in vals}
+            return s not in wanted and s_cmp not in wanted
+        tv = Session._pivot_filter_text(val)
+        tv2 = Session._pivot_filter_text(val2)
+        # ISO date/datetime: lexicographic compare matches chronological order.
+        if (Session._pivot_is_temporal(tv) or Session._pivot_is_temporal(tv2)
+                or Session._pivot_is_temporal(s_cmp)):
+            left = s_cmp if Session._pivot_is_temporal(s_cmp) else s
+            if op in ("gt", "greater_than", ">"):
+                return tv is not None and left > tv
+            if op in ("lt", "less_than", "<"):
+                return tv is not None and left < tv
+            if op in ("gte", ">=", "at_least"):
+                return tv is not None and left >= tv
+            if op in ("lte", "<=", "at_most"):
+                return tv is not None and left <= tv
+            if op == "between":
+                return (tv is not None and tv2 is not None
+                        and tv <= left <= tv2)
+        nv, n1, n2 = num(raw), num(val), num(val2)
         if nv is None:
             return False
         if op in ("gt", "greater_than", ">"):
-            return tv is not None and nv > tv
+            return n1 is not None and nv > n1
         if op in ("lt", "less_than", "<"):
-            return tv is not None and nv < tv
+            return n1 is not None and nv < n1
         if op in ("gte", ">=", "at_least"):
-            return tv is not None and nv >= tv
+            return n1 is not None and nv >= n1
         if op in ("lte", "<=", "at_most"):
-            return tv is not None and nv <= tv
+            return n1 is not None and nv <= n1
         if op == "between":
-            return (tv is not None and tv2 is not None and tv <= nv <= tv2)
+            return (n1 is not None and n2 is not None and n1 <= nv <= n2)
         return True
 
     def _pivot_sql2(self, ctx, cols, row_dims, col_dims, values, filters, cap,

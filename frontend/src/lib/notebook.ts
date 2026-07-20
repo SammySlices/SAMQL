@@ -980,6 +980,13 @@ export function parseNotebookFile(text: string): NbCellDef[] {
           : undefined,
       recon: isRecon ? sanitizeRecon(c.recon) : undefined,
       collapsed: c.collapsed === true ? true : undefined,
+      // Preserve the layout fields that slimCell persists. Dropping them here
+      // pushed every cell into the first group and reset custom cell sizes on
+      // file/workflow open, even though the same fields survive the localStorage
+      // round-trip.
+      group: typeof c.group === "string" && c.group ? c.group : undefined,
+      boxW: typeof c.boxW === "number" && c.boxW > 0 ? c.boxW : undefined,
+      boxH: typeof c.boxH === "number" && c.boxH > 0 ? c.boxH : undefined,
     });
   }
   if (out.length === 0) throw new Error("No cells found in this notebook file.");

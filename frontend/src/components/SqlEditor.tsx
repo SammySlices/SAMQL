@@ -30,6 +30,12 @@ interface Props {
   fmtShimmer?: number;
   /** .462: a SELECTION run hands its range up so it can flash too */
   onRunSelection?: (start: number, end: number) => void;
+  /**
+   * Select a character range and scroll it into view (the find bar's current
+   * match). `tick` re-applies the same range after a replace, which `start`/
+   * `end` alone could not express.
+   */
+  selectRange?: { start: number; end: number; tick: number } | null;
   /** Stable rendered hook. IDE and Journal editors must not share one id. */
   testId?: string;
 }
@@ -59,6 +65,12 @@ const KEYWORDS = [
   "TRUE", "FALSE",
 ];
 
+/** DuckDB-only clauses — offered when any schema table is a DuckDB load. */
+const DUCKDB_KEYWORDS = [
+  "QUALIFY", "EXCLUDE", "REPLACE", "ASOF JOIN", "ANTI JOIN", "SEMI JOIN",
+  "TRY_CAST", "LIST", "STRUCT", "MAP", "UNNEST", "PIVOT", "UNPIVOT",
+];
+
 type SugKind = "table" | "col" | "kw";
 interface Sug {
   text: string;
@@ -85,6 +97,7 @@ export const SqlEditor: React.FC<Props> = ({
   flash,
   fmtShimmer,
   onRunSelection,
+  selectRange,
   caretRef,
   placeholder,
   tables = [] as TableInfo[],
@@ -117,6 +130,14 @@ export const SqlEditor: React.FC<Props> = ({
           out.push(c.name);
         }
     return out;
+  }, [tables]);
+
+  // DuckDB loads → offer DuckDB SQL keywords (QUALIFY, EXCLUDE, …).
+  const keywords = useMemo(() => {
+    const wantsDuck =
+      tables.length === 0 ||
+      tables.some((t) => !t.engine || t.engine === "duckdb");
+    return wantsDuck ? [...KEYWORDS, ...DUCKDB_KEYWORDS] : KEYWORDS;
   }, [tables]);
 
   const lineCount = useMemo(
@@ -304,6 +325,33 @@ export const SqlEditor: React.FC<Props> = ({
     syncScroll();
   }, [value, lineCount, syncScroll]);
 
+  // Find-bar navigation: select the current match and bring it into view.
+  // Runs after the layout effect above so the textarea has its final height and
+  // the mirror measurement lands on the right line.
+  useEffect(() => {
+    if (!selectRange) return;
+    const ta = taRef.current;
+    const sc = scrollRef.current;
+    if (!ta) return;
+    const start = Math.max(0, Math.min(selectRange.start, value.length));
+    const end = Math.max(start, Math.min(selectRange.end, value.length));
+    ta.focus({ preventScroll: true });
+    ta.setSelectionRange(start, end);
+    if (sc) {
+      const { top } = caretOffsetInTa(ta, start);
+      const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 20;
+      const viewH = sc.clientHeight || 0;
+      // Only scroll when the match is outside the viewport, so stepping through
+      // neighbouring matches doesn't jitter the view.
+      if (top < sc.scrollTop || top + lineH > sc.scrollTop + viewH) {
+        sc.scrollTop = Math.max(0, top - Math.floor(viewH / 3));
+      }
+    }
+    // caretOffsetInTa is a stable local helper; re-running on value would fight
+    // the user's own typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectRange?.tick, selectRange?.start, selectRange?.end]);
+
   const closeMenu = useCallback(() => setMenu(null), []);
 
   // recompute suggestions from the current caret; positions the dropdown
@@ -348,9 +396,9 @@ export const SqlEditor: React.FC<Props> = ({
         const cHit: Sug[] = allColumns
           .filter((c) => c.toLowerCase().startsWith(p))
           .map((c) => ({ text: c, kind: "col" }));
-        const kHit: Sug[] = KEYWORDS.filter((k) =>
-          k.toLowerCase().startsWith(p),
-        ).map((k) => ({ text: k, kind: "kw" }));
+        const kHit: Sug[] = keywords
+          .filter((k) => k.toLowerCase().startsWith(p))
+          .map((k) => ({ text: k, kind: "kw" }));
         const seen = new Set<string>();
         for (const s of [...tHit, ...cHit, ...kHit]) {
           const key = s.text.toLowerCase();
@@ -403,7 +451,7 @@ export const SqlEditor: React.FC<Props> = ({
 
       setMenu({ items, index: 0, left, top });
     },
-    [tables, tableNames, allColumns],
+    [tables, tableNames, allColumns, keywords],
   );
 
   // insert the chosen suggestion, replacing the trailing identifier

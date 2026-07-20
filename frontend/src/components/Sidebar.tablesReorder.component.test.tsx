@@ -30,7 +30,11 @@ function tbl(name: string, extra?: Partial<TableInfo>): TableInfo {
 
 const noop = () => {};
 
-function renderSidebar(tables: TableInfo[], onRefresh = vi.fn()) {
+function renderSidebar(
+  tables: TableInfo[],
+  onRefresh = vi.fn(),
+  extra: Record<string, unknown> = {},
+) {
   return render(
     <Sidebar
       tables={tables}
@@ -59,6 +63,7 @@ function renderSidebar(tables: TableInfo[], onRefresh = vi.fn()) {
       onRefresh={onRefresh}
       onClearHistory={noop}
       onOpenLoad={noop}
+      {...extra}
     />,
   );
 }
@@ -73,6 +78,81 @@ describe("flattenFamilyOrderAfterReorder", () => {
     expect(families.map((f) => f.table.name)).toEqual(["hub", "other"]);
     const order = flattenFamilyOrderAfterReorder(families, 0, 1);
     expect(order.map((o) => o.name)).toEqual(["other", "hub", "legs"]);
+  });
+});
+
+describe("Sidebar Tables pin button", () => {
+  // Build every prop once so a re-render changes ONLY tablesPinned. Sidebar is
+  // React.memo'd; the memo comparator must still let a pin-state change through,
+  // which it only does if it compares tablesPinned. Passing fresh arrays/
+  // callbacks would defeat the memo for unrelated reasons and hide the bug.
+  const stableProps = {
+    tables: [tbl("alpha")],
+    history: [],
+    saved: [],
+    workflows: [],
+    onInsertTable: noop,
+    onInsertColumn: noop,
+    onLoadSql: noop,
+    onProfile: noop,
+    onReconcile: noop,
+    onChangeType: noop,
+    onRename: noop,
+    onDrop: noop,
+    onDropMany: noop,
+    onOptimize: noop,
+    onImport: noop,
+    onDisconnect: noop,
+    onDeleteSaved: noop,
+    onLoadWorkflow: noop,
+    onDeleteWorkflow: noop,
+    onActiveSave: noop,
+    onActiveSaveAs: noop,
+    onActiveOpen: noop,
+    activeView: "ide" as const,
+    onRefresh: noop,
+    onClearHistory: noop,
+    onOpenLoad: noop,
+    onToggleTablesPin: noop,
+  };
+
+  it("reflects the active pin state through the memo comparator", () => {
+    const { rerender } = render(
+      <Sidebar {...stableProps} tablesPinned={false} />,
+    );
+
+    const pin = screen.getByTestId("tables-panel-pin-tab");
+    expect(pin.className).not.toContain("pin-on");
+    expect(pin).toHaveAttribute("aria-pressed", "false");
+    expect(pin).toHaveTextContent("Pin");
+
+    // Only tablesPinned changes; every other prop keeps its identity, so this
+    // isolates the memo comparator. Before the fix the comparator ignored
+    // tablesPinned and React.memo swallowed this update — the button stayed
+    // grey/"Pin".
+    rerender(<Sidebar {...stableProps} tablesPinned />);
+
+    const pinned = screen.getByTestId("tables-panel-pin-tab");
+    expect(pinned.className).toContain("pin-on");
+    expect(pinned).toHaveAttribute("aria-pressed", "true");
+    expect(pinned).toHaveTextContent("Pinned");
+    // the icon carries the class CSS paints with the green accent
+    expect(pinned.querySelector("svg")?.getAttribute("class")).toContain(
+      "pin-on",
+    );
+  });
+
+  it("fires the toggle handler on click", () => {
+    const onToggleTablesPin = vi.fn();
+    render(
+      <Sidebar
+        {...stableProps}
+        tablesPinned={false}
+        onToggleTablesPin={onToggleTablesPin}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("tables-panel-pin-tab"));
+    expect(onToggleTablesPin).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -37,9 +37,18 @@ const summaryFor = (node: NbNode, edges: NbEdge[]): string => {
     case "select":
       return `${countConfigured(cfg.fields, (field) => field.keep !== false)} field(s)`;
     case "filter":
-      return cfg.condition || "(set a condition)";
-    case "formula":
-      return `+${countConfigured(cfg.formulas, (formula) => formula.name && formula.expr)} column(s)`;
+      return String(cfg.condition || "").trim() || "(set a condition)";
+    case "formula": {
+      const parts = (cfg.formulas || [])
+        .map((formula: any) => {
+          const name = String(formula?.name || "").trim();
+          const expr = String(formula?.expr || "").trim();
+          if (name && expr) return `${name} = ${expr}`;
+          return name || expr;
+        })
+        .filter(Boolean);
+      return parts.length ? parts.join("; ") : "(set expression)";
+    }
     case "summarize":
       return `${countConfigured(cfg.aggs, (agg) => agg.col)} agg · ${(cfg.group_by || []).length} group`;
     case "sort": {
@@ -311,7 +320,16 @@ export const NODE_DEFINITIONS = {
   })),
   iterator: define("iterator", "Iterator", "Repeat", () => ({ children: [], table: "", accumulate: "append", label: "iterator" })),
   while: define("while", "Repeat until", "RotateCw", () => ({ table: "", var: "", reset_first: true, replace_keys: [], accumulate: "append", max_iters: 100, label: "repeat until" })),
-  sql: define("sql", "SQL", "Code", () => ({ sql: "SELECT *\nFROM input", label: "sql" }), true),
+  sql: define(
+    "sql",
+    "SQL",
+    "Code",
+    () => ({
+      sql: "SELECT *\nFROM ",
+      label: "sql",
+    }),
+    true,
+  ),
   python: define("python", "Python", "Terminal", () => ({
     code:
       "# Wire an upstream table into this node.\n" +
@@ -356,10 +374,10 @@ export const NODE_PALETTE_ORDER: NodeType[] = [
   "unique", "unpivot", "window", "perioddelta", "bin", "rank", "dedupe", "split",
   "jsonextract", "explode", "textclean", "date", "groupconcat", "maprecode", "parse",
   "topn", "coalesce", "renamecols", "validate", "pivot", "join", "multijoin",
-  "crossjoin", "union", "chart", "dashboard", "browse", "profile", "reconcile", "group",
+  "crossjoin", "union", "sql", "chart", "dashboard", "browse", "profile", "reconcile", "group",
   "createtable", "directory", "appendfolder", "filebrowser", "apinode", "sqlserver",
   "sharepoint", "webscrape", "text", "variable",
-  "sql", "python", "write", "output", "samqldash", "iterator", "while", "dyn_input", "dyn_output",
+  "python", "write", "output", "samqldash", "iterator", "while", "dyn_input", "dyn_output",
 ];
 
 export const NODE_PALETTE = NODE_PALETTE_ORDER.map((type) => {
@@ -384,7 +402,7 @@ export const NODE_GROUPS: {
   { id: "input", label: "Input", icon: "Database", types: ["input", "shred", "directory", "appendfolder", "filebrowser", "apinode", "sqlserver", "sharepoint", "webscrape", "createtable", "dyn_input"] },
   { id: "transform", label: "Transform", icon: "Filter", types: ["select", "filter", "formula", "sort", "sample", "unique", "bin", "dedupe", "split", "jsonextract", "explode", "textclean", "date", "maprecode", "parse", "coalesce", "renamecols", "validate", "profile"] },
   { id: "aggregate", label: "Aggregate", icon: "Step", types: ["summarize", "pivot", "unpivot", "window", "perioddelta", "rank", "groupconcat", "topn"] },
-  { id: "combine", label: "Combine", icon: "Swap", types: ["join", "multijoin", "crossjoin", "union", "reconcile", "group"] },
+  { id: "combine", label: "Combine", icon: "Swap", types: ["join", "multijoin", "crossjoin", "union", "sql", "reconcile", "group"] },
   { id: "create", label: "Create", icon: "Table", types: ["chart", "dashboard", "sql", "python", "text", "variable"] },
   { id: "output", label: "Output", icon: "Download", types: ["browse", "write", "output", "samqldash", "iterator", "while", "dyn_output"] },
 ];

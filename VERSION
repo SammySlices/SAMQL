@@ -2,12 +2,28 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-20.673
+Current build:   2026-07-20.674
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-20.674  (v2.16.4)
+
+MASTER APPWINDOW: FIND/REPLACE, RESULTS COPY, PIVOT CSV EXPORT + AUDIT FIXES.
+Draggable Find (Ctrl+F) and Find/Replace (Ctrl+R) across the IDE and every
+Journal cell; right-click the results grid to copy the whole result with
+headers (up to 5,000 rows, fetched server-side); Pivot gains an Export CSV
+button in the IDE and Journal. Tables pin turns green when active (memo
+comparator fix) and the duplicate in-panel pin was removed. Audit fixes:
+read-only mode now blocks COPY/ATTACH/SET/PRAGMA/INSTALL (leading-keyword
+classifier, no longer misflags SELECTs on tables named merge/exec); iterator
+flow-cache cleared per pass so a body reading its accumulator recomputes; date
+node part/unit restricted to known keywords (SQL injection fix); Journal Stop
+no longer wedges later manual/chain/expired runs; pasting a group remaps child
+bindings; flatten-on JSON loads report success instead of a false error.
 
 ----------------------------------------------------------------------
 build 2026-07-20.673  (v2.16.4)

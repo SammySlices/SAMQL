@@ -70,10 +70,27 @@ export function useNodeFlowClipboard({
           (node.type === "group" || node.type === "iterator") &&
           Array.isArray(config.children)
         ) {
-          config.children = config.children.map((child: Record<string, unknown>) => ({
-            ...child,
-            id: uid(),
-          }));
+          // Children get fresh ids; anything keyed by a child id must follow.
+          // `config.bindings` maps childId -> {inputPort: groupInputPort} and is
+          // read that way by the backend group planner, so leaving it on the old
+          // ids silently drops every explicit step-input binding (a bound join
+          // side falls back to linear chaining and the paste computes different
+          // results than the original).
+          const childIdMap: Record<string, string> = {};
+          config.children = config.children.map((child: Record<string, unknown>) => {
+            const newId = uid();
+            const oldId = child.id;
+            if (typeof oldId === "string") childIdMap[oldId] = newId;
+            return { ...child, id: newId };
+          });
+          const bindings = config.bindings;
+          if (bindings && typeof bindings === "object") {
+            const remapped: Record<string, unknown> = {};
+            for (const [childId, value] of Object.entries(bindings)) {
+              remapped[childIdMap[childId] ?? childId] = value;
+            }
+            config.bindings = remapped;
+          }
         }
         return {
           id,

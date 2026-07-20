@@ -60,7 +60,7 @@ const NODE_DOCS: Record<string, string> = {
   profile: "Column statistics: types, nulls, distincts, min/max.",
   reconcile: "Compares two inputs (matched / left-only / right-only, per-field).",
   group: "A visual container that groups nodes on the canvas.",
-  sql: "Free-form SQL over the node's inputs (each input is a named relation).",
+  sql: "Free-form SQL: stack optional inputs and write SELECT/JOIN/WITH using each Input node's table name (or input / {{in}} for the first wire). Catalog queries work with no inputs.",
   python:
     "Run Python in SamQL's bundled runtime (pandas included). Wire an upstream table into the input: the script gets df (pandas DataFrame), columns, rows, and records. Filter/transform with pandas, then assign out (usually a DataFrame). Example: out = df[df['score'] > 50]. Leave the input unwired to build a table from scratch.",
   output: "Exports the upstream result to a file. Leave the folder blank to write into your Downloads folder, or browse to another location.",

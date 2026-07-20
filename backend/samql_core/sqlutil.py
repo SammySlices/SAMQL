@@ -13,10 +13,25 @@ import importlib.util as _ilu
 HAS_SQLGLOT = _ilu.find_spec("sqlglot") is not None
 
 _GO_LINE_RE = re.compile(r"^\s*GO(?:\s+(\d+))?\s*(?:--.*)?$", re.IGNORECASE)
-_SQL_WRITE_RE = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|MERGE|TRUNCATE|DROP|ALTER|CREATE|"
-    r"GRANT|REVOKE|EXEC|EXECUTE|sp_executesql|BACKUP|RESTORE|"
-    r"BULK)\b", re.IGNORECASE)
+# Statements classified by their LEADING keyword. Anchoring on the first
+# keyword (rather than searching the whole body) is what makes ``SELECT * FROM
+# merge`` a read while ``COPY ... TO`` is a write -- the old anywhere-search both
+# missed side-effect leaders (COPY/ATTACH/SET let a "read-only" connection write
+# files and mutate engine state) and false-flagged ordinary identifiers named
+# merge/bulk/exec/grant.
+_WRITE_LEADERS = frozenset((
+    "insert", "update", "delete", "merge", "upsert", "truncate", "drop",
+    "alter", "create", "replace", "grant", "revoke", "exec", "execute",
+    "sp_executesql", "call", "copy", "attach", "detach", "install", "load",
+    "set", "reset", "pragma", "checkpoint", "vacuum", "export", "import",
+    "use", "backup", "restore", "bulk", "comment", "analyze",
+))
+# DML that can legitimately follow a leading WITH (CTE) and still write. CREATE/
+# DROP/ALTER can't -- they lead the statement themselves -- so they're excluded
+# to avoid flagging a CTE literally named "create".
+_WITH_WRITE_RE = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|MERGE|UPSERT)\b", re.IGNORECASE)
+_LEAD_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 @lru_cache(maxsize=4096)
@@ -127,13 +142,29 @@ def _strip_sql_literals(sql):
 
 
 def classify_sql_statement(sql):
-    """'read' / 'write' / 'empty' for read-only enforcement. String
-    literals and comments are stripped first."""
+    """'read' / 'write' / 'empty' for read-only enforcement.
+
+    Classifies on the statement's LEADING keyword after stripping string
+    literals and comments. A leading write/side-effect keyword (INSERT, COPY,
+    ATTACH, SET, PRAGMA, ...) is a write; everything else -- SELECT, VALUES,
+    DuckDB FROM-first, DESCRIBE/SHOW/EXPLAIN, a parenthesised SELECT -- is a
+    read. A leading WITH is a CTE: it's a write only when a top-level DML
+    keyword follows, and a read otherwise (the common ``WITH ... SELECT``).
+
+    Uncertain cases resolve toward 'write' so the read-only guard fails closed.
+    """
     body = _strip_sql_literals(sql or "").strip()
     if not body:
         return "empty"
-    if _SQL_WRITE_RE.search(body):
+    # Skip a leading '(' so a parenthesised SELECT / VALUES reads as a read.
+    m = _LEAD_WORD_RE.search(body)
+    if not m:
+        return "read"
+    lead = m.group(0).lower()
+    if lead in _WRITE_LEADERS:
         return "write"
+    if lead == "with":
+        return "write" if _WITH_WRITE_RE.search(body) else "read"
     return "read"
 
 
@@ -335,3 +366,60 @@ def sql_path(p):
     slashes (Windows-safe) with single quotes doubled. One
     implementation (.413) for what a dozen call sites hand-rolled."""
     return str(p).replace("\\", "/").replace("'", "''")
+
+
+# ISO date / datetime shapes typed into filters (Pivot, NodeFlow Filter,
+# {{var}} substitution). Kept engine-agnostic (plain string literals) so
+# SQLite text dates and DuckDB DATE columns both accept them.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_DT_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}"
+    r"(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$")
+
+
+def is_iso_temporal(s):
+    """True when ``s`` is an ISO date or datetime filter string."""
+    if not s:
+        return False
+    return bool(_ISO_DATE_RE.match(s) or _ISO_DT_RE.match(s))
+
+
+def unwrap_sql_quoted_temporal(value):
+    """Normalize a filter/literal value before SQL quoting.
+
+    Strips one layer of matching quotes when the interior is an ISO
+    date/datetime -- users often paste ``'2026-01-26'`` from SQL, and a
+    naive ``'...'`` wrap would emit ``'''2026-01-26'''`` (DuckDB then
+    fails DATE cast with ``invalid date field format: "'2026-01-26'"``).
+
+    Non-temporal values pass through byte-for-byte: edge whitespace is
+    significant in literals (create-table cells, split/textclean
+    delimiters, replace targets) and must survive quoting.
+
+    Returns ``None`` when ``value`` is ``None``; otherwise a str.
+    """
+    if value is None:
+        return None
+    s = str(value)
+    t = s.strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in "'\"":
+        inner = t[1:-1].strip()
+        if is_iso_temporal(inner):
+            return inner
+    return s
+
+
+def sql_str_literal(value):
+    """Render a value as a single-quoted SQL string literal.
+
+    ISO dates that arrive already SQL-quoted (``'2026-01-26'``) are
+    unwrapped first so they are not double-quoted into
+    ``'''2026-01-26'''``. Embedded quotes are escaped as ``''``.
+    ``None`` becomes the literal text ``None`` (callers that need SQL
+    NULL must handle that themselves).
+    """
+    if value is None:
+        s = "None"
+    else:
+        s = unwrap_sql_quoted_temporal(value)
+    return "'" + str(s).replace("'", "''") + "'"

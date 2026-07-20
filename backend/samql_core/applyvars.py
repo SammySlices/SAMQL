@@ -41,8 +41,13 @@ _RAW_VALUE_NODES = {
 
 
 def _sql_str_literal(value):
-    """Render a value as a single-quoted SQL string literal, escaping quotes."""
-    return "'" + str(value).replace("'", "''") + "'"
+    """Render a value as a single-quoted SQL string literal, escaping quotes.
+
+    Delegates to :func:`sqlutil.sql_str_literal` so a pasted ISO date like
+    ``'2026-01-26'`` is not double-wrapped into ``'''2026-01-26'''``.
+    """
+    from .sqlutil import sql_str_literal
+    return sql_str_literal(value)
 
 
 def collect_vars(graph):

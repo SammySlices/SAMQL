@@ -62,7 +62,7 @@ function indexedVisibleInputCount(
   incoming: readonly NbEdge[],
 ): number {
   const inputs = portsOf(node).inputs;
-  if (node.type === "union") return 1;
+  if (node.type === "union" || node.type === "sql") return 1;
   if (node.type === "usernode") return inputs.length;
   if (node.type !== "group") return PORTS[node.type].inputs.length;
 

@@ -4,12 +4,16 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const pivotMock = vi.hoisted(() => vi.fn());
 const cancelQueryMock = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
+const saveToDownloadsMock = vi.hoisted(() =>
+  vi.fn(async (filename: string) => ({ path: "C:/Downloads/" + filename, filename })),
+);
 
 vi.mock("../lib/api", () => ({
   api: {
     pivot: pivotMock,
     cancelQuery: cancelQueryMock,
   },
+  saveToDownloads: saveToDownloadsMock,
 }));
 
 import { PivotPanel } from "./PivotPanel";

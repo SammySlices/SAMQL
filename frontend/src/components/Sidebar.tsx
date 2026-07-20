@@ -117,6 +117,9 @@ interface Props {
   onActiveTabChange?: (tab: Tab) => void;
   /** Fired when a side-tab is clicked (open drawer / switch content). */
   onSideTabClick?: (tab: Tab) => void;
+  /** Keep the Tables drawer open (Escape / outside click / handle). */
+  tablesPinned?: boolean;
+  onToggleTablesPin?: () => void;
 }
 
 const engineClass = (e: EngineKind) =>
@@ -169,6 +172,34 @@ const SidebarImpl: React.FC<Props> = (props) => {
         >
           Workflows
         </button>
+        {props.onToggleTablesPin && (
+          <button
+            type="button"
+            className={
+              "btn ghost sm modal-pin-btn side-tabs-pin" +
+              (props.tablesPinned ? " pin-on" : "")
+            }
+            data-testid="tables-panel-pin-tab"
+            title={
+              props.tablesPinned
+                ? "Unpin — allow panel to close"
+                : "Keep Tables panel open"
+            }
+            aria-label={
+              props.tablesPinned
+                ? "Unpin Tables panel"
+                : "Keep Tables panel open"
+            }
+            aria-pressed={!!props.tablesPinned}
+            onClick={props.onToggleTablesPin}
+          >
+            <Icon.Pin
+              size={13}
+              className={props.tablesPinned ? "pin-on" : undefined}
+            />
+            {props.tablesPinned ? "Pinned" : "Pin"}
+          </button>
+        )}
       </div>
 
       {tab === "tables" && (
@@ -964,6 +995,8 @@ const TablesTree: React.FC<
       <div className="side-head">
         <span className="title">Tables</span>
         <span className="spacer" />
+        {/* The pin lives once, in the side-tabs header next to Workflows; a
+            second copy here was redundant. */}
         <button
           className={
             "btn ghost icon" + (refreshSpin ? " icon-spin" : "")
@@ -1837,7 +1870,11 @@ function sidebarPropsEqual(a: Props, b: Props): boolean {
     a.saved === b.saved &&
     a.workflows === b.workflows &&
     a.activeView === b.activeView &&
-    a.activeTab === b.activeTab
+    a.activeTab === b.activeTab &&
+    // Without this the memo skips the re-render that flips the Tables pin
+    // button to its active (green) state — the pin behaviour toggled, but the
+    // button kept rendering the stale "Pin" label and colour.
+    a.tablesPinned === b.tablesPinned
   );
 }
 export const Sidebar = React.memo(SidebarImpl, sidebarPropsEqual);

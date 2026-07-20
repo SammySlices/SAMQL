@@ -125,6 +125,51 @@ describe("Phase 10 release compatibility", () => {
     expect(graph.edges[0].id).toBe("edge_0");
   });
 
+  it("migrates sqljoin nodes and legacy sql port in → in1", () => {
+    const graph = parseNodeFlowGraph({
+      format: NODEFLOW_FILE_FORMAT,
+      version: 3,
+      nodes: [
+        { id: "i", type: "input", x: 0, y: 0, config: { table: "data" } },
+        {
+          id: "old",
+          type: "sql",
+          x: 10,
+          y: 0,
+          config: { sql: "SELECT * FROM {{in}}", label: "sql" },
+        },
+        {
+          id: "sj",
+          type: "sqljoin",
+          x: 20,
+          y: 0,
+          config: { sql: "SELECT * FROM data", label: "sql join" },
+        },
+      ],
+      edges: [
+        {
+          id: "e1",
+          from: { node: "i", port: "out" },
+          to: { node: "old", port: "in" },
+        },
+        {
+          id: "e2",
+          from: { node: "i", port: "out" },
+          to: { node: "sj", port: "in1" },
+        },
+      ],
+    });
+
+    expect(graph.version).toBe(NODEFLOW_FILE_VERSION);
+    expect(graph.migratedFrom).toBe(3);
+    const byId = Object.fromEntries(graph.nodes.map((n) => [n.id, n]));
+    expect(byId.sj.type).toBe("sql");
+    expect(byId.sj.config.label).toBe("sql");
+    expect(byId.old.type).toBe("sql");
+    expect(graph.edges.find((e) => e.id === "e1")?.to.port).toBe("in1");
+    expect(graph.edges.find((e) => e.id === "e2")?.to.port).toBe("in1");
+  });
+
   it("rejects malformed current NodeFlow graphs before they reach the canvas", () => {
     const node = { id: "same", type: "input", x: 0, y: 0, config: {} };
     expect(() =>

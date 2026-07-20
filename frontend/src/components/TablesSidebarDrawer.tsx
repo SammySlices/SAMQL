@@ -23,6 +23,8 @@ export interface TablesSidebarDrawerProps {
    * (legacy). When false (default), hover shows only the hamburger; click opens.
    */
   hoverOpenFull?: boolean;
+  /** When true, stay open — ignore Escape / outside click / handle close. */
+  pinned?: boolean;
   children: React.ReactNode;
 }
 
@@ -42,6 +44,7 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
   onResizePointerDown,
   inspectorMode = false,
   hoverOpenFull = false,
+  pinned = false,
   children,
 }) => {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -55,7 +58,7 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
   /** Edge approach while closed (hamburger-only mode): show handle, not panel. */
   const [peeking, setPeeking] = useState(false);
   const shown = enabled;
-  const drawerOpen = shown && (open || inspectorMode);
+  const drawerOpen = shown && (open || inspectorMode || pinned);
   const handleVisible = drawerOpen || peeking;
 
   const clearHideTimer = () => {
@@ -77,9 +80,9 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
   };
 
   const scheduleLeave = () => {
-    if (inspectorMode) return;
+    if (inspectorMode || pinned) return;
     // Default mode: once open, stay until Escape / outside / handle close.
-    if (!hoverOpenFullRef.current && (open || inspectorMode)) return;
+    if (!hoverOpenFullRef.current && (open || inspectorMode || pinned)) return;
     clearHideTimer();
     hideTimerRef.current = setTimeout(() => {
       hideTimerRef.current = null;
@@ -104,7 +107,7 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
   }, [hoverOpenFull]);
 
   useEffect(() => {
-    if (!drawerOpen || !shown) return;
+    if (!drawerOpen || !shown || pinned) return;
     const onPointerDown = (event: PointerEvent) => {
       const root = rootRef.current;
       if (!root) return;
@@ -141,7 +144,7 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
       document.removeEventListener("pointerdown", onPointerDown, true);
       window.removeEventListener("keydown", onKey);
     };
-  }, [drawerOpen, shown, onOpenChange]);
+  }, [drawerOpen, shown, pinned, onOpenChange]);
 
   if (!shown) return null;
 
@@ -158,6 +161,8 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
     if (suppressClickRef.current) return;
     clearHideTimer();
     setPeeking(false);
+    // Pinned: stay open (handle click must not dismiss).
+    if (pinned && drawerOpen) return;
     onOpenChange(!drawerOpen);
   };
 
@@ -179,7 +184,7 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
         }
       },
       onEnd: () => {
-        if (!dragged) {
+        if (!dragged && !pinned) {
           clearHideTimer();
           setPeeking(false);
           onOpenChange(false);

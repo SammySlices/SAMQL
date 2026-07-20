@@ -9903,18 +9903,22 @@ def backend_tests(datadir, csv_path, json_path):
         model = open(os.path.join(FRONTEND, "src", "lib",
                                   "nodeFlowModel.ts"),
                      encoding="utf-8").read()
-        need('if (n.type === "union") return 1;' in model,
+        need(('if (n.type === "union") return 1;' in model
+              or 'if (n.type === "union" || n.type === "sql") return 1;' in model),
              "union renders exactly one input triangle")
         need('"in6", "in7", "in8", "in9", "in10"' in model,
              "the frontend backs it with 10 ports")
-        need("const resolveUnionPort" in nb
-             and "next free" in nb.lower(),
+        # FE renamed resolveUnionPort → resolveStackPort when SQL gained the
+        # same 10-input stacking path; behavior (next free in1..in10) is unchanged.
+        need(("const resolveStackPort" in nb or "const resolveUnionPort" in nb)
+             and ("resolveStackPort" in nb or "next free" in nb.lower()),
              "a wire onto union takes the next free backing slot")
         need((('tgtNode?.type === "union"' in nb)
               or ('targetNode?.type === "union"' in nb))
-             and "Union is full" in nb,
+             and ("Union is full" in nb or "is full" in nb),
              "stacking is capped at 10 with a clear message")
-        need("stack inputs (${c}/10)" in nb or "of 10" in nb,
+        need("stack inputs (${c}/10)" in nb or "of 10" in nb
+             or "stacks up to 10 inputs" in nb,
              "the UI reflects the up-to-10 capacity")
 
     
@@ -16845,6 +16849,21 @@ def backend_tests(datadir, csv_path, json_path):
             need(not sess.run_query("SELECT 2", target="auto",
                                     read_only=True).get("error"),
                  "read_only allows selects")
+            # Side-effect statements classify as writes (COPY ... TO is an
+            # arbitrary file write, SET/ATTACH/PRAGMA mutate engine state) --
+            # the leading-keyword classifier must block them in read-only mode.
+            from samql_core.sqlutil import classify_sql_statement as _cls
+            for _w in ("COPY (SELECT 1) TO 'x.csv' (FORMAT CSV)",
+                       "ATTACH 'y.db'", "SET memory_limit='1GB'",
+                       "PRAGMA enable_profiling", "INSTALL httpfs",
+                       "CALL foo()", "CHECKPOINT", "VACUUM"):
+                eq(_cls(_w), "write", "side-effect is a write: %r" % _w[:24])
+            # ...and ordinary SELECTs on tables/columns named like keywords are
+            # reads, not writes (the old anywhere-search false-flagged them).
+            for _r in ("SELECT * FROM merge", "SELECT exec FROM t",
+                       "SELECT * FROM bulk_data",
+                       "WITH x AS (SELECT 1) SELECT * FROM x"):
+                eq(_cls(_r), "read", "identifier is not a write: %r" % _r[:24])
             for benign in ("-- nothing\n/* still */", ";; ;"):
                 out = sess.run_query(benign, target="auto")
                 need(isinstance(out, dict)
@@ -17871,9 +17890,14 @@ def backend_tests(datadir, csv_path, json_path):
             r"closeTimer\.current = window\.setTimeout\(\(\) => \{.*?"
             r"onClose\(\);.*?\},\s*closeMs\)",
             md, re.S)
+        # Escape and the backdrop route through beginDismiss (a pin-aware
+        # wrapper) which delegates to beginClose; the X closes unconditionally.
         escape_branch = re.search(
-            r'if \(e\.key === "Escape"\) \{.*?beginClose\(\);.*?\}',
+            r'if \(e\.key === "Escape"\) \{.*?beginDismiss\(\);.*?\}',
             md, re.S)
+        dismiss_delegates = re.search(
+            r"const beginDismiss = useCallback\(\(\) => \{.*?"
+            r"beginClose\(\);.*?\}", md, re.S)
         checks += [
             ("modals exit through one closing phase",
              "const beginClose = useCallback" in md
@@ -17883,7 +17907,8 @@ def backend_tests(datadir, csv_path, json_path):
              'classList.contains("motion-reduced")' in md),
             ("Escape, X, and backdrop all route through it",
              escape_branch is not None
-             and "onMouseDown={beginClose}" in md
+             and dismiss_delegates is not None
+             and "onMouseDown={beginDismiss}" in md
              and "onClick={beginClose}" in md),
             ("the accessible close rail clears its timer on unmount",
              "window.clearTimeout(closeTimer.current)" in md
@@ -25015,6 +25040,225 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_pivot_date_equals_filter():
+        # DATE-typed DuckDB columns: equals (plain + SQL-quoted paste) and
+        # range ops must not CAST the ISO string through DOUBLE / re-quote it
+        # into an invalid DATE literal.
+        if not feats.get("duckdb"):
+            return
+        s = _fresh_session()
+        try:
+            dd = tempfile.mkdtemp()
+            p = os.path.join(dd, "dates.csv")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("d,amt,cat\n2026-01-26,10,A\n2026-01-27,20,B\n"
+                        "2026-01-26,5,B\n")
+            s.load_file(p, destination="duckdb", base_name="PD")
+            kind = s.get_duckdb().execute(
+                "SELECT typeof(d) FROM PD LIMIT 1")[1][0][0]
+            eq(str(kind).upper(), "DATE", "fixture column is DATE-typed")
+
+            def _sum_by_cat(filters):
+                out = s.pivot({
+                    "table": "PD", "engine": "duckdb", "rows": ["cat"],
+                    "values": [{"field": "amt", "agg": "sum"}],
+                    "filters": filters,
+                })
+                need(not out.get("error"),
+                     "pivot date filter error: %s" % out.get("error"))
+                return {row[0]: float(row[1]) for row in out["rows"]}
+
+            eq(_sum_by_cat([{"field": "d", "op": "equals",
+                             "value": "2026-01-26"}]),
+               {"A": 10.0, "B": 5.0}, "date equals YYYY-MM-DD")
+            eq(_sum_by_cat([{"field": "d", "op": "equals",
+                             "value": "'2026-01-26'"}]),
+               {"A": 10.0, "B": 5.0},
+               "date equals tolerates SQL-quoted paste")
+            # Generated WHERE must not re-quote a pasted SQL date literal.
+            where_q = Session._pivot_where(
+                [{"field": "d", "op": "equals", "value": "'2026-01-26'"}],
+                {"d": 0}, lambda i: '"d"',
+                lambda c: "TRY_CAST(%s AS DOUBLE)" % c)
+            need("'''2026-01-26'''" not in where_q,
+                 "pivot WHERE must not emit '''2026-01-26'''")
+            need("'2026-01-26'" in where_q,
+                 "pivot WHERE keeps a single-quoted ISO date")
+            eq(_sum_by_cat([{"field": "d", "op": "gte",
+                             "value": "2026-01-26"}]),
+               {"A": 10.0, "B": 25.0}, "date gte (not DOUBLE cast)")
+            eq(_sum_by_cat([{"field": "d", "op": "between",
+                             "value": "2026-01-26",
+                             "value2": "2026-01-26"}]),
+               {"A": 10.0, "B": 5.0}, "date between same day")
+            # Numeric filters still use the castnum path.
+            eq(_sum_by_cat([{"field": "amt", "op": "gt", "value": "10"}]),
+               {"B": 20.0}, "numeric gt unchanged")
+        finally:
+            s.shutdown()
+
+    def t_sql_str_literal_no_double_quote():
+        # Shared quoting helper: bare ISO and already-SQL-quoted ISO must both
+        # become a single-quoted literal -- never '''2026-01-26'''. Covers the
+        # Pivot / Filter / {{var}} / nodeflow._strlit paths that share it.
+        from samql_core import Session, applyvars as A, nodeflow, sqlutil
+        for raw in ("2026-01-26", "'2026-01-26'", '"2026-01-26"'):
+            lit = sqlutil.sql_str_literal(raw)
+            eq(lit, "'2026-01-26'", "sql_str_literal(%r)" % (raw,))
+            need("'''" not in lit,
+                 "sql_str_literal(%r) must not triple-quote" % (raw,))
+        eq(sqlutil.unwrap_sql_quoted_temporal("'hello'"), "'hello'",
+           "non-temporal quoted text is left alone")
+        eq(A.substitute_text("d = {{as_of}}", {"as_of": "2026-01-26"}),
+           "d = '2026-01-26'", "{{as_of}} bare ISO")
+        eq(A.substitute_text("d = {{as_of}}", {"as_of": "'2026-01-26'"}),
+           "d = '2026-01-26'", "{{as_of}} already-quoted ISO")
+        need("'''2026-01-26'''" not in A.substitute_text(
+            "d = {{as_of}}", {"as_of": "'2026-01-26'"}),
+             "{{as_of}} must not emit '''2026-01-26'''")
+        eq(nodeflow._strlit("'2026-01-26'"), "'2026-01-26'",
+           "nodeflow._strlit unwraps quoted ISO")
+        eq(nodeflow._strlit("O'Brien"), "'O''Brien'",
+           "nodeflow._strlit still escapes embedded quotes")
+        where = Session._pivot_where(
+            [{"field": "d", "op": "equals", "value": "'2026-01-26'"}],
+            {"d": 0}, lambda i: '"d"',
+            lambda c: "TRY_CAST(%s AS DOUBLE)" % c)
+        need("'''2026-01-26'''" not in where,
+             "pivot WHERE from shared helper has no triple quote")
+
+    def t_filter_date_equals_no_double_quote():
+        # NodeFlow Filter: equals on a DATE column with bare ISO and with a
+        # SQL-quoted paste (as the Filter UI / {{var}} path can emit).
+        if not feats.get("duckdb"):
+            return
+        from samql_core import applyvars as A, nodeflow
+        s = _fresh_session()
+        try:
+            dd = tempfile.mkdtemp()
+            p = os.path.join(dd, "nf_dates.csv")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("d,name\n2026-01-26,a\n2026-01-27,b\n2026-01-26,c\n")
+            s.load_file(p, destination="duckdb", base_name="NFD")
+            kind = s.get_duckdb().execute(
+                "SELECT typeof(d) FROM NFD LIMIT 1")[1][0][0]
+            eq(str(kind).upper(), "DATE", "fixture column is DATE-typed")
+            src = {"id": "src", "type": "input",
+                   "config": {"table": "NFD"}}
+            edges = [{"from": {"node": "src", "port": "out"},
+                      "to": {"node": "F", "port": "in"}}]
+
+            def _true_names(cond):
+                g = {"nodes": [src, {"id": "F", "type": "filter",
+                                     "config": {"condition": cond}}],
+                     "edges": edges}
+                sql = nodeflow.compile_port(
+                    g, "F", "true", s.relation_columns, None,
+                    engine="duckdb")
+                need("'''2026-01-26'''" not in sql,
+                     "filter SQL must not contain '''2026-01-26''': %s" % sql)
+                need("'2026-01-26'" in sql,
+                     "filter SQL keeps a single-quoted ISO date")
+                rt = s.run_nodeflow(g, "F", "true")
+                need(not rt.get("error"),
+                     "filter date equals error: %s" % rt.get("error"))
+                return sorted(r[1] for r in rt["rows"])
+
+            eq(_true_names("[d] = '2026-01-26'"), ["a", "c"],
+               "filter equals ISO date literal")
+            g_var = {
+                "nodes": [
+                    {"id": "v", "type": "variable",
+                     "config": {"vars": [
+                         {"name": "as_of", "value": "'2026-01-26'"}]}},
+                    src,
+                    {"id": "F", "type": "filter",
+                     "config": {"condition": "[d] = {{as_of}}"}},
+                ],
+                "edges": edges,
+            }
+            rg = A.resolve_graph(g_var)
+            fcfg = next(n["config"] for n in rg["nodes"] if n["id"] == "F")
+            eq(fcfg["condition"], "[d] = '2026-01-26'",
+               "resolve_graph unwraps quoted ISO in {{as_of}}")
+            need("'''2026-01-26'''" not in fcfg["condition"],
+                 "resolved filter condition must not triple-quote")
+            rt = s.run_nodeflow(rg, "F", "true")
+            need(not rt.get("error"),
+                 "filter {{as_of}} date equals error: %s" % rt.get("error"))
+            eq(sorted(r[1] for r in rt["rows"]), ["a", "c"],
+               "filter equals via {{as_of}} quoted ISO paste")
+            # Bare ISO in the variable (UI default) also works.
+            g_bare = {
+                "nodes": [
+                    {"id": "v", "type": "variable",
+                     "config": {"vars": [
+                         {"name": "as_of", "value": "2026-01-26"}]}},
+                    src,
+                    {"id": "F", "type": "filter",
+                     "config": {"condition": "[d] = {{as_of}}"}},
+                ],
+                "edges": edges,
+            }
+            rg2 = A.resolve_graph(g_bare)
+            eq(next(n["config"] for n in rg2["nodes"]
+                    if n["id"] == "F")["condition"],
+               "[d] = '2026-01-26'", "{{as_of}} bare ISO")
+            rt2 = s.run_nodeflow(rg2, "F", "true")
+            need(not rt2.get("error"),
+                 "filter bare {{as_of}} error: %s" % rt2.get("error"))
+            eq(sorted(r[1] for r in rt2["rows"]), ["a", "c"],
+               "filter equals via {{as_of}} bare ISO")
+        finally:
+            s.shutdown()
+
+    def t_filter_numeric_equals_order_id():
+        # Regression: demo_orders-shaped Create Table + Filter
+        # ``[order_id] = 101`` (FE simple UI emits bare numeric) must return
+        # the matching row on True — not empty from type/quote mismatch.
+        from samql_core import nodeflow
+        s = Session()
+        try:
+            cols = ["order_id", "customer_id", "region", "amount", "qty"]
+            rows = [
+                ["101", "C1", "East", "120", "2"],
+                ["102", "C2", "West", "45", "1"],
+                ["103", "C1", "East", "80", "3"],
+            ]
+            g = {
+                "nodes": [
+                    {"id": "orders", "type": "createtable",
+                     "config": {"label": "demo_orders", "columns": cols,
+                                "rows": rows, "dest": "sqlite"}},
+                    {"id": "F", "type": "filter",
+                     "config": {"condition": "[order_id] = 101"}},
+                ],
+                "edges": [
+                    {"from": {"node": "orders", "port": "out"},
+                     "to": {"node": "F", "port": "in"}},
+                ],
+            }
+            sql = nodeflow.compile_port(
+                g, "F", "true", s.relation_columns, None, engine="sqlite")
+            need('"order_id" = 101' in sql,
+                 "filter SQL keeps bare numeric equals: %s" % sql)
+            where = sql.split("WHERE", 1)[-1]
+            need("'101'" not in where,
+                 "filter WHERE must not quote 101 as text: %s" % sql)
+            rt = s.run_nodeflow(g, "F", "true")
+            need(not rt.get("error"),
+                 "filter order_id=101 error: %s" % rt.get("error"))
+            eq(rt.get("total_rows"), 1, "filter true: one matching order")
+            eq([r[0] for r in rt["rows"]], [101],
+               "filter true: order_id 101 row")
+            rf = s.run_nodeflow(g, "F", "false")
+            need(not rf.get("error"),
+                 "filter false error: %s" % rf.get("error"))
+            eq(sorted(r[0] for r in rf["rows"]), [102, 103],
+               "filter false: non-matching order_ids")
+        finally:
+            s.shutdown()
+
     def t_reconcile_true_counts():
         # SQLite: the report carries headline totals + a per-field row;
         # the underlying rows are fetched on demand (drilldown / profile),
@@ -28851,8 +29095,11 @@ def backend_tests(datadir, csv_path, json_path):
                 "sql": "DROP TABLE data"}}], "edges": []}
             need(s.run_nodeflow(g4, "q", "out").get("error"),
                  "a non-read SQL node is refused")
-            eq(nodeflow.NODE_PORTS["sql"], {"in": ["in"], "out": ["out"]},
-               "sql node has one input and one output")
+            eq(nodeflow.NODE_PORTS["sql"]["in"],
+               ["in%d" % i for i in range(1, 11)],
+               "sql stacks 10 inputs (Union cap)")
+            eq(nodeflow.NODE_PORTS["sql"]["out"], ["out"],
+               "sql node has a single out port")
             eq(nodeflow.NODE_PORTS["python"], {"in": ["in"], "out": ["out"]},
                "python node has one optional input and one output")
             # Python node: standalone (no input)
@@ -28921,6 +29168,257 @@ def backend_tests(datadir, csv_path, json_path):
             eq(cols_u, ["name", "twice"], "DataFrame out columns")
             eq(rows_u, [("a", 20.0), ("b", 40.0)], "DataFrame out rows")
         finally:
+            s.shutdown()
+
+    def t_nodeflow_sqljoin_node():
+        # Multi-input SQL (former SQL Join): named Input table names, WITH/CTE,
+        # renamed-column validation, DDL rejection. Type id is ``sql``;
+        # legacy ``sqljoin`` still compiles.
+        from samql_core import nodeflow
+        s = _fresh_session()
+        try:
+            s.db.add_table_streaming(
+                "orders", ["id", "customer_id", "amt"],
+                iter([(1, 10, 100), (2, 11, 50)]))
+            s.db.add_table_streaming(
+                "customers", ["id", "name"],
+                iter([(10, "Alice"), (11, "Bob")]))
+            s.db.sync_catalog()
+
+            eq(nodeflow.NODE_PORTS["sql"]["in"],
+               ["in%d" % i for i in range(1, 11)],
+               "sql stacks 10 inputs (Union cap)")
+            eq(nodeflow.NODE_PORTS["sql"]["out"], ["out"],
+               "sql has a single out port")
+            # Legacy type id keeps the same ports for in-flight graphs.
+            eq(nodeflow.NODE_PORTS["sqljoin"]["in"],
+               nodeflow.NODE_PORTS["sql"]["in"],
+               "sqljoin alias matches sql ports")
+
+            g = {"nodes": [
+                {"id": "o", "type": "input",
+                 "config": {"table": "orders", "label": "orders"}},
+                {"id": "c", "type": "input",
+                 "config": {"table": "customers", "label": "customers"}},
+                {"id": "j", "type": "sql", "config": {
+                    "label": "sql",
+                    "sql": (
+                        "SELECT o.id, c.name, o.amt "
+                        "FROM orders o "
+                        "LEFT JOIN customers c ON o.customer_id = c.id "
+                        "ORDER BY o.id"
+                    )}}],
+                "edges": [
+                    {"from": {"node": "o", "port": "out"},
+                     "to": {"node": "j", "port": "in1"}},
+                    {"from": {"node": "c", "port": "out"},
+                     "to": {"node": "j", "port": "in2"}}]}
+            r = s.run_nodeflow(g, "j", "out")
+            need(not r.get("error"), "multi-input sql runs: %s" % r.get("error"))
+            eq(r["columns"], ["id", "name", "amt"], "sql join columns")
+            eq(len(r["rows"]), 2, "sql returns joined rows")
+            eq(r["rows"][0][1], "Alice", "sql matches on Input table names")
+
+            # WITH / CTE over named inputs
+            g_cte = {"nodes": [
+                {"id": "o", "type": "input",
+                 "config": {"table": "orders", "label": "orders"}},
+                {"id": "j", "type": "sql", "config": {
+                    "sql": (
+                        "WITH big AS (SELECT * FROM orders WHERE amt >= 100) "
+                        "SELECT id, amt FROM big ORDER BY id"
+                    )}}],
+                "edges": [
+                    {"from": {"node": "o", "port": "out"},
+                     "to": {"node": "j", "port": "in1"}}]}
+            r_cte = s.run_nodeflow(g_cte, "j", "out")
+            need(not r_cte.get("error"),
+                 "sql WITH/CTE runs: %s" % r_cte.get("error"))
+            eq(r_cte["rows"], [[1, 100]], "sql CTE filters correctly")
+
+            # Upstream Select rename: new name works, old name fails clearly
+            g_ren = {"nodes": [
+                {"id": "o", "type": "input",
+                 "config": {"table": "orders", "label": "orders"}},
+                {"id": "s", "type": "select", "config": {
+                    "fields": [
+                        {"name": "id", "keep": True},
+                        {"name": "customer_id", "keep": True},
+                        {"name": "amt", "rename": "amount", "keep": True},
+                    ],
+                    "label": "select"}},
+                {"id": "j", "type": "sql", "config": {
+                    "sql": "SELECT id, amount FROM orders ORDER BY id"}}],
+                "edges": [
+                    {"from": {"node": "o", "port": "out"},
+                     "to": {"node": "s", "port": "in"}},
+                    {"from": {"node": "s", "port": "out"},
+                     "to": {"node": "j", "port": "in1"}}]}
+            r_ok = s.run_nodeflow(g_ren, "j", "out")
+            need(not r_ok.get("error"),
+                 "sql uses renamed column: %s" % r_ok.get("error"))
+            eq(r_ok["columns"], ["id", "amount"], "renamed column in output")
+
+            g_old = {
+                "nodes": [
+                    n if n["id"] != "j" else {
+                        "id": "j", "type": "sql",
+                        "config": {
+                            "sql": "SELECT id, amt FROM orders ORDER BY id",
+                        },
+                    }
+                    for n in g_ren["nodes"]
+                ],
+                "edges": g_ren["edges"],
+            }
+            r_bad = s.run_nodeflow(g_old, "j", "out")
+            err = (r_bad.get("error") or "").lower()
+            need(err, "old column name after rename must error")
+            need("amt" in err or "column" in err or "binder" in err
+                 or "does not exist" in err or "not found" in err,
+                 "rename miss surfaces a clear column error: %r"
+                 % r_bad.get("error"))
+
+            # DDL rejected
+            g_ddl = {"nodes": [
+                {"id": "o", "type": "input",
+                 "config": {"table": "orders"}},
+                {"id": "j", "type": "sql",
+                 "config": {"sql": "DROP TABLE orders"}}],
+                "edges": [
+                    {"from": {"node": "o", "port": "out"},
+                     "to": {"node": "j", "port": "in1"}}]}
+            need(s.run_nodeflow(g_ddl, "j", "out").get("error"),
+                 "sql rejects DDL")
+
+            # No wires: catalog / literal SELECT still allowed (source mode).
+            g_empty = {"nodes": [
+                {"id": "j", "type": "sql",
+                 "config": {"sql": "SELECT 1 AS n"}}], "edges": []}
+            r_lit = s.run_nodeflow(g_empty, "j", "out")
+            need(not r_lit.get("error"),
+                 "sql with no inputs allows literal SELECT: %s"
+                 % r_lit.get("error"))
+            eq(r_lit["rows"], [[1]], "literal SELECT returns one row")
+
+            # Legacy type id ``sqljoin`` still runs.
+            g_alias = {"nodes": [
+                {"id": "o", "type": "input",
+                 "config": {"table": "orders", "label": "orders"}},
+                {"id": "j", "type": "sqljoin", "config": {
+                    "sql": "SELECT id, amt FROM orders ORDER BY id"}}],
+                "edges": [
+                    {"from": {"node": "o", "port": "out"},
+                     "to": {"node": "j", "port": "in1"}}]}
+            r_alias = s.run_nodeflow(g_alias, "j", "out")
+            need(not r_alias.get("error"),
+                 "legacy sqljoin type still runs: %s" % r_alias.get("error"))
+            eq(len(r_alias["rows"]), 2, "legacy sqljoin returns rows")
+        finally:
+            s.shutdown()
+
+    def t_nodeflow_sql_duckdb_flowed_bind():
+        # DuckDB loads must bind the SQL node to the *flowed* upstream
+        # relation (Select renames), never the raw catalog table, and must
+        # accept DuckDB SQL (QUALIFY).
+        from samql_core import nodeflow
+        from samql_core.engines import HAS_DUCKDB
+        from samql_core.session import DUCKDB_TARGET
+        need(HAS_DUCKDB, "DuckDB required for SQL DuckDB bind test")
+        s = _fresh_session()
+        try:
+            r_create = s.run_query(
+                "CREATE OR REPLACE TABLE duck_orders AS "
+                "SELECT 1 AS id, 100 AS amt UNION ALL SELECT 2, 50",
+                target=DUCKDB_TARGET)
+            need(not r_create.get("error"),
+                 "create duck_orders: %s" % r_create.get("error"))
+            eq(s._engine_of_table("duck_orders"), "duckdb",
+               "duck_orders lives in DuckDB")
+
+            g = {"nodes": [
+                {"id": "o", "type": "input",
+                 "config": {"table": "duck_orders", "label": "duck_orders"}},
+                {"id": "s", "type": "select", "config": {
+                    "fields": [
+                        {"name": "id", "keep": True},
+                        {"name": "amt", "rename": "amount", "keep": True},
+                    ]}},
+                {"id": "j", "type": "sql", "config": {
+                    "sql": ("SELECT id, amount FROM duck_orders "
+                            "ORDER BY id")}}],
+                "edges": [
+                    {"from": {"node": "o", "port": "out"},
+                     "to": {"node": "s", "port": "in"}},
+                    {"from": {"node": "s", "port": "out"},
+                     "to": {"node": "j", "port": "in1"}}]}
+            eq(s._flow_pinned_engine(g), "duckdb",
+               "DuckDB Input pins the flow to DuckDB")
+
+            def cols_of(nid, _prt):
+                return (["id", "amount"] if nid == "s"
+                        else ["id", "amt"])
+
+            compiled = nodeflow.compile_port(
+                g, "j", "out", cols_of, engine="duckdb")
+            need(compiled, "compile_port returns SQL")
+            # Must not leave a bare catalog FROM duck_orders (that would
+            # ignore the Select rename and read the raw load).
+            need(not re.search(
+                    r"(?i)\bfrom\s+duck_orders\b", compiled),
+                 "compiled SQL must not bare-FROM the catalog table: %s"
+                 % compiled)
+            need("amount" in compiled.lower(),
+                 "compiled SQL keeps the renamed column")
+
+            r_ok = s.run_nodeflow(g, "j", "out")
+            need(not r_ok.get("error"),
+                 "DuckDB flowed SQL runs: %s" % r_ok.get("error"))
+            eq(r_ok["columns"], ["id", "amount"],
+               "DuckDB SQL sees Select renames")
+            eq(r_ok["rows"], [[1, 100], [2, 50]],
+               "DuckDB SQL rows from flowed Select")
+
+            g_old = {
+                "nodes": [
+                    n if n["id"] != "j" else {
+                        "id": "j", "type": "sql",
+                        "config": {
+                            "sql": ("SELECT id, amt FROM duck_orders "
+                                    "ORDER BY id"),
+                        },
+                    }
+                    for n in g["nodes"]
+                ],
+                "edges": g["edges"],
+            }
+            r_bad = s.run_nodeflow(g_old, "j", "out")
+            err = (r_bad.get("error") or "").lower()
+            need(err, "old column after Select rename must error on DuckDB")
+            need("amt" in err or "column" in err or "binder" in err,
+                 "DuckDB rename miss is clear: %r" % r_bad.get("error"))
+
+            # DuckDB-only clause against a DuckDB load
+            g_q = {"nodes": [
+                {"id": "o", "type": "input",
+                 "config": {"table": "duck_orders"}},
+                {"id": "j", "type": "sql", "config": {
+                    "sql": ("SELECT id, amt FROM duck_orders "
+                            "QUALIFY row_number() "
+                            "OVER (ORDER BY id) = 1")}}],
+                "edges": [
+                    {"from": {"node": "o", "port": "out"},
+                     "to": {"node": "j", "port": "in1"}}]}
+            r_q = s.run_nodeflow(g_q, "j", "out")
+            need(not r_q.get("error"),
+                 "DuckDB QUALIFY in SQL node: %s" % r_q.get("error"))
+            eq(r_q["rows"], [[1, 100]], "QUALIFY keeps first row")
+        finally:
+            try:
+                s.run_query("DROP TABLE IF EXISTS duck_orders",
+                            target=DUCKDB_TARGET)
+            except Exception:
+                pass
             s.shutdown()
 
     def t_python_node_pandas_bindings():
@@ -39560,6 +40058,10 @@ def backend_tests(datadir, csv_path, json_path):
         ("drop_table escapes quote-named identifiers", t_drop_table_escapes_identifier),
         ("fields with spaces + quotes survive CSV/grid/node", t_fields_with_spaces_and_quotes),
         ("NodeFlow SQL node (source / {{in}} transform / routing)", t_nodeflow_sql_node),
+        ("NodeFlow SQL multi-input (named / CTE / rename / DDL)",
+         t_nodeflow_sqljoin_node),
+        ("NodeFlow SQL DuckDB flowed bind + QUALIFY",
+         t_nodeflow_sql_duckdb_flowed_bind),
         ("Python node: pandas DataFrame bindings + DataFrame out",
          t_python_node_pandas_bindings),
         ("NodeFlow column-level data lineage export (Excel, 2 tabs)", t_nodeflow_lineage),
@@ -40680,6 +41182,13 @@ def backend_tests(datadir, csv_path, json_path):
         ("deep sorted/filtered paging (deferred lookup)", t_deep_sorted_paging),
         ("column projection (page subset)", t_column_projection),
         ("pivot values + filters (single source)", t_pivot_values_and_filters),
+        ("pivot DATE equals / range filters", t_pivot_date_equals_filter),
+        ("sql_str_literal no double-quote ISO dates",
+         t_sql_str_literal_no_double_quote),
+        ("filter DATE equals no double-quote / {{as_of}}",
+         t_filter_date_equals_no_double_quote),
+        ("filter numeric equals order_id (demo_orders)",
+         t_filter_numeric_equals_order_id),
         ("reconcile true counts (SQLite)", t_reconcile_true_counts),
         ("reconcile counts with duplicate keys", t_reconcile_dupe_keys_counts),
         ("reconcile balance parses currency text", t_reconcile_balance_currency),

@@ -23,6 +23,12 @@ import {
   ReorderList,
 } from "./InspectorControls";
 import { InspectorShell } from "./InspectorShell";
+import { SqlJoinIdeWindow } from "./SqlJoinIdeWindow";
+import {
+  resolveSqlJoinWiredTables,
+  sqlJoinEditorTables,
+  SQLJOIN_INPUT_CAP,
+} from "./sqlJoinTableNames";
 import { findChildNode } from "./nodeFlowGraphCommands";
 import {
   filterSelectFields,
@@ -248,6 +254,9 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
   } = context;
   const [apiPwDraft, setApiPwDraft] = useState("");
   const [inspW, setInspW] = useState<number | null>(null);
+  // SQL floating IDE — opens with the node; user can close and reopen.
+  const [sqlJoinIdeOpen, setSqlJoinIdeOpen] = useState(false);
+  const sqlJoinIdeNodeRef = useRef<string | null>(null);
   // Select-node field list: search filters the visible rows; sort toggles
   // A→Z / Z→A on the underlying config.fields order.
   const [selectFieldSearch, setSelectFieldSearch] = useState("");
@@ -423,6 +432,27 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
 
   const inspectorType = sel ? getNodeInspectorType(sel.type) : null;
   const inspectorDefinition = sel ? getNodeDefinition(sel.type) : null;
+
+  useEffect(() => {
+    if (sel?.type === "sql") {
+      if (sqlJoinIdeNodeRef.current !== sel.id) {
+        sqlJoinIdeNodeRef.current = sel.id;
+        setSqlJoinIdeOpen(true);
+      }
+    } else {
+      sqlJoinIdeNodeRef.current = null;
+      setSqlJoinIdeOpen(false);
+    }
+  }, [sel?.id, sel?.type]);
+
+  const sqlJoinWired =
+    sel?.type === "sql"
+      ? resolveSqlJoinWiredTables(sel, nodes, edges, inspCols)
+      : [];
+  const sqlJoinTables =
+    sel?.type === "sql"
+      ? sqlJoinEditorTables(sqlJoinWired, tables)
+      : [];
 
   return (
         <InspectorShell
@@ -811,6 +841,15 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     the list ordinal, then to the base on <code>_rid</code>.
                     The OUT port emits the table picked above.
                   </div>
+                  <button
+                    className="btn sm primary nb2-prev"
+                    disabled={running}
+                    onClick={() =>
+                      doPreview(sel, "out", `${sel.config.label} · output`)
+                    }
+                  >
+                    <Icon.Table size={13} /> Preview output
+                  </button>
                 </>
               )}
               {inspectorType === "input" && (
@@ -1616,6 +1655,26 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   >
                     Connect both <b>left</b> and <b>right</b> inputs to pick keys.
                   </InspColsHint>
+                  <div className="nb2-prev-row">
+                    <button
+                      className="btn sm"
+                      disabled={running}
+                      onClick={() =>
+                        doPreview(sel, "left", `${sel.config.label} · left`)
+                      }
+                    >
+                      <Icon.Table size={12} /> Preview left
+                    </button>
+                    <button
+                      className="btn sm"
+                      disabled={running}
+                      onClick={() =>
+                        doPreview(sel, "right", `${sel.config.label} · right`)
+                      }
+                    >
+                      <Icon.Table size={12} /> Preview right
+                    </button>
+                  </div>
                   {(sel.config.keys || []).map((k: any, i: number) => (
                     <div className="nb2-keyrow" key={i}>
                       <select
@@ -6625,49 +6684,59 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
 
               {inspectorType === "sql" && (
                 <>
-                  <label className="nb2-lbl">Query</label>
-                  <textarea
-                    className="nb2-in nb2-sql-area"
-                    rows={Math.max(
-                      6,
-                      Math.min(
-                        80,
-                        String(sel.config.sql || "").split("\n").length + 1,
-                      ),
-                    )}
-                    spellCheck={false}
-                    value={sel.config.sql || ""}
-                    placeholder={"SELECT *\nFROM input\nWHERE ..."}
-                    onChange={(e) => patch(sel.id, { sql: e.target.value })}
-                  />
-                  <div className="nb2-hint-sm">
-                    A read-only SELECT. Use <code>input</code> to mean the data
-                    wired into this node (e.g.{" "}
-                    <code>SELECT * FROM input</code>), or <code>{"{{in}}"}</code>{" "}
-                    to splice it in. Workflow variables work here too:{" "}
-                    <code>{"{{name}}"}</code> for a text value (auto-quoted, no
-                    quotes needed) or <code>{"${name}"}</code> for a raw number.
+                  <div className="nb2-note">
+                    Stack up to {SQLJOIN_INPUT_CAP} table inputs (optional).
+                    Reference each by the Input node&apos;s table name (e.g.{" "}
+                    <code>FROM orders LEFT JOIN customers ON …</code>), or use{" "}
+                    <code>input</code> / <code>{"{{in}}"}</code> for the first
+                    wired table. Names bind the <em>upstream NodeFlow
+                    result</em> (Select renames/filters), not a fresh read of
+                    the loaded catalog table. DuckDB-loaded tables run as
+                    DuckDB SQL (QUALIFY, etc.). SELECT, JOINs, and WITH/CTE
+                    are allowed; DDL/DML is blocked. Catalog tables work with
+                    no inputs.
                   </div>
-                  {edges.some(
-                    (e) => e.to.node === sel.id && e.to.port === "in",
-                  ) &&
-                    !/\b(from|join)\s+input\b/i.test(sel.config.sql || "") &&
-                    !/\{\{\s*in(put)?\s*\}\}/.test(sel.config.sql || "") && (
-                      <div className="nb2-warn-sm">
-                        This query doesn't read from <code>input</code>. Keep
-                        <code> FROM input</code> so it uses the wired data
-                        instead of a table that may not exist.
-                      </div>
-                    )}
-                  <button
-                    className="btn sm primary nb2-prev"
-                    disabled={running}
-                    onClick={() =>
+                  <label className="nb2-lbl">Inputs connected</label>
+                  <div className="nb2-note" data-testid="sql-wired-list">
+                    {sqlJoinWired.length === 0
+                      ? `0 of ${SQLJOIN_INPUT_CAP}`
+                      : sqlJoinWired
+                          .map((t) => `${t.name} (${t.columns.length} cols)`)
+                          .join(" · ") +
+                        ` — ${sqlJoinWired.length} of ${SQLJOIN_INPUT_CAP}`}
+                  </div>
+                  <div className="nb2-row" style={{ gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className="btn sm primary"
+                      data-testid="sql-open-ide"
+                      onClick={() => setSqlJoinIdeOpen(true)}
+                    >
+                      <Icon.Code size={13} /> Open SQL editor
+                    </button>
+                    <button
+                      className="btn sm primary nb2-prev"
+                      disabled={running}
+                      onClick={() =>
+                        doPreview(sel, "out", `${sel.config.label} · output`)
+                      }
+                    >
+                      <Icon.Table size={13} /> Preview output
+                    </button>
+                  </div>
+                  <SqlJoinIdeWindow
+                    open={sqlJoinIdeOpen}
+                    title={String(sel.config.label || "SQL")}
+                    sql={String(sel.config.sql || "")}
+                    tables={sqlJoinTables}
+                    wiredNames={sqlJoinWired.map((t) => t.name)}
+                    running={running}
+                    onChange={(v) => patch(sel.id, { sql: v })}
+                    onPreview={() =>
                       doPreview(sel, "out", `${sel.config.label} · output`)
                     }
-                  >
-                    <Icon.Table size={13} /> Preview output
-                  </button>
+                    onClose={() => setSqlJoinIdeOpen(false)}
+                  />
                 </>
               )}
 

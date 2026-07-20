@@ -179,7 +179,7 @@ def _node_columns_info(session, graph, node_id, port, memo):
         for c in _resolve_columns(session, graph, node_id, port):
             info[c] = {"kind": "source", "srcs": [], "file": fname}
 
-    elif typ == "sql":
+    elif typ in ("sql", "sqljoin"):
         for c in _resolve_columns(session, graph, node_id, port):
             info[c] = {"kind": "sql", "srcs": [], "step": _step(typ, node)}
 

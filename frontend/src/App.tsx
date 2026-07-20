@@ -37,6 +37,8 @@ import {
   type TablesSideTab,
 } from "./components/TablesSidebarDrawer";
 import { SqlEditor } from "./components/SqlEditor";
+import { FindReplaceDialog } from "./components/FindReplaceDialog";
+import { useFindReplace } from "./lib/useFindReplace";
 import { DataGrid } from "./components/DataGrid";
 import {
   ExportResultsCtxItem,
@@ -49,6 +51,10 @@ import { Profiler } from "./components/Profiler";
 import { ChartPanel } from "./components/ChartPanel";
 import { PivotPanel } from "./components/PivotPanel";
 import { LoadDataModal, FileBrowser, RootIdPicker } from "./components/LoadDataModal";
+import {
+  readTablesPanelPinned,
+  writeTablesPanelPinned,
+} from "./lib/tablesPanelPin";
 // .547 startup: lazy-load NodeFlow so its canvas + chart libraries are
 // fetched only when the user opens that view, not on first paint.
 const NodeFlow = lazy(() =>
@@ -903,6 +909,20 @@ export default function App() {
   // (hover edge → hamburger; click to open). No Settings path to hide it.
   const showTables = true;
   const [tablesPanelOpen, setTablesPanelOpen] = useState(false);
+  const [tablesPanelPinned, setTablesPanelPinned] = useState(() =>
+    readTablesPanelPinned(),
+  );
+  useEffect(() => {
+    if (tablesPanelPinned) setTablesPanelOpen(true);
+  }, [tablesPanelPinned]);
+  const toggleTablesPanelPin = () => {
+    setTablesPanelPinned((prev) => {
+      const next = !prev;
+      writeTablesPanelPinned(next);
+      if (next) setTablesPanelOpen(true);
+      return next;
+    });
+  };
   const [tablesSideTab, setTablesSideTab] =
     useState<TablesSideTab>("tables");
   // when in the Node view with the tables panel shown, selecting a node swaps
@@ -1643,6 +1663,36 @@ export default function App() {
   };
 
   const runAll = (sql: string) => runResolved(sql);
+
+  // Ctrl+F / Ctrl+R over the IDE's single SQL buffer. The match is selected in
+  // the textarea via `selectRange`, so Escape leaves the caret on the hit.
+  const [ideSelectRange, setIdeSelectRange] = useState<{
+    start: number;
+    end: number;
+    tick: number;
+  } | null>(null);
+  const ideFind = useFindReplace({
+    enabled: view === "ide",
+    getScopes: () => [{ id: "ide", field: "sql", text: activeTab?.sql ?? "" }],
+    applyEdits: (edits) => {
+      const next = edits[0];
+      if (next) setSql(next.text);
+    },
+    revealMatch: (m) =>
+      setIdeSelectRange({ start: m.start, end: m.end, tick: Date.now() }),
+    getCaret: () => ({ offset: editorCaret.current.start }),
+  });
+  // Keep the textarea selection on the active match as the user types a query
+  // or steps through hits, not only when `revealMatch` fires.
+  const ideActive = ideFind.activeMatch;
+  useEffect(() => {
+    if (!ideActive) return;
+    setIdeSelectRange({
+      start: ideActive.start,
+      end: ideActive.end,
+      tick: Date.now(),
+    });
+  }, [ideActive?.start, ideActive?.end, ideActive]);
 
   // .459: flash the statement (or selection) that just ran, once.
   const [stmtFlash, setStmtFlash] = useState<{
@@ -3369,7 +3419,9 @@ export default function App() {
         <TablesSidebarDrawer
           enabled={showTables}
           open={tablesPanelOpen}
+          pinned={tablesPanelPinned}
           onOpenChange={(next) => {
+            if (tablesPanelPinned && !next) return;
             setTablesPanelOpen(next);
             // Match canvas outside-click: dismiss inspector by clearing selection
             // so the drawer does not stay force-open with an empty/stale dock.
@@ -3380,11 +3432,14 @@ export default function App() {
           width={sidebarW}
           onResizePointerDown={dragSidebar}
           inspectorMode={
-            (view === "nodeflow" && nbSel) || (view === "dashboard" && dashSel)
+            !tablesPanelPinned &&
+            ((view === "nodeflow" && nbSel) ||
+              (view === "dashboard" && dashSel))
           }
           hoverOpenFull={tablesDrawerHoverOpen}
         >
-          {((view === "nodeflow" && showTables && nbSel) ||
+          {!tablesPanelPinned &&
+          ((view === "nodeflow" && showTables && nbSel) ||
             (view === "dashboard" && showTables && dashSel)) ? (
             // config panel takes over this slot; portals into this host
             <div
@@ -3466,6 +3521,8 @@ export default function App() {
               activeTab={tablesSideTab}
               onActiveTabChange={setTablesSideTab}
               onSideTabClick={() => setTablesPanelOpen(true)}
+              tablesPinned={tablesPanelPinned}
+              onToggleTablesPin={toggleTablesPanelPin}
             />
           )}
         </TablesSidebarDrawer>
@@ -3883,6 +3940,7 @@ export default function App() {
               flash={stmtFlash}
               fmtShimmer={fmtShimmer}
               caretRef={editorCaret}
+              selectRange={ideSelectRange}
               value={activeTab.sql}
               onChange={setSql}
               onRunAll={runAll}
@@ -3891,6 +3949,11 @@ export default function App() {
               tables={tables}
               testId="ide-sql-editor"
               placeholder="Write SQL here…  Ctrl/Cmd+Enter to run, F5 for the current statement."
+            />
+            <FindReplaceDialog
+              {...ideFind.dialogProps}
+              scopeLabel="this query"
+              testId="ide-find"
             />
           </div>
 

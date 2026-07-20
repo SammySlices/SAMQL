@@ -147,6 +147,132 @@ describe("NodeFlowInspector", () => {
     expect(doPreview).toHaveBeenCalledWith(node, "out", "input · output");
   });
 
+  it("opens SQL IDE on select and Preview uses out", async () => {
+    const orders: NbNode = {
+      id: "in-orders",
+      type: "input",
+      x: 0,
+      y: 0,
+      config: { table: "orders", label: "orders" },
+    };
+    const customers: NbNode = {
+      id: "in-customers",
+      type: "input",
+      x: 0,
+      y: 0,
+      config: { table: "customers", label: "customers" },
+    };
+    const node: NbNode = {
+      id: "sj-1",
+      type: "sql",
+      x: 0,
+      y: 0,
+      config: {
+        label: "sql",
+        sql: "SELECT *\nFROM orders\nLEFT JOIN customers ON orders.id = customers.id",
+      },
+    };
+    const doPreview = vi.fn().mockResolvedValue(undefined);
+    const patch = vi.fn();
+    render(
+      <NodeFlowInspector
+        context={context(node, {
+          nodes: [orders, customers, node],
+          edges: [
+            {
+              id: "e1",
+              from: { node: "in-orders", port: "out" },
+              to: { node: "sj-1", port: "in1" },
+            },
+            {
+              id: "e2",
+              from: { node: "in-customers", port: "out" },
+              to: { node: "sj-1", port: "in2" },
+            },
+          ],
+          inspCols: {
+            in1: ["id", "customer_id"],
+            in2: ["id", "name"],
+          },
+          doPreview,
+          patch,
+        })}
+      />,
+    );
+
+    expect(screen.getByText("SQL node")).toBeInTheDocument();
+    expect(await screen.findByTestId("sql-ide-window")).toBeInTheDocument();
+    expect(screen.getByTestId("sql-wired-list").textContent).toMatch(
+      /orders/,
+    );
+    expect(screen.getByTestId("sql-wired-list").textContent).toMatch(
+      /customers/,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /preview output/i }));
+    expect(doPreview).toHaveBeenCalledWith(node, "out", "sql · output");
+
+    fireEvent.click(screen.getByTitle("Close editor"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("sql-ide-window")).not.toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId("sql-open-ide"));
+    expect(await screen.findByTestId("sql-ide-window")).toBeInTheDocument();
+  });
+
+  it("renders shred Preview output wired to doPreview port out", () => {
+    const node: NbNode = {
+      id: "shred-1",
+      type: "shred",
+      x: 0,
+      y: 0,
+      config: { table: "nested", label: "shred nested", base: "built" },
+    };
+    const doPreview = vi.fn().mockResolvedValue(undefined);
+    render(
+      <NodeFlowInspector
+        context={context(node, {
+          tables: [table("nested"), table("built")],
+          doPreview,
+        })}
+      />,
+    );
+    expect(screen.getByText("Shred node")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /preview output/i }));
+    expect(doPreview).toHaveBeenCalledWith(node, "out", "shred nested · output");
+  });
+
+  it("renders Join Preview left/right and only L / only R wired to doPreview", () => {
+    const node: NbNode = {
+      id: "join-1",
+      type: "join",
+      x: 0,
+      y: 0,
+      config: {
+        label: "join",
+        keys: [{ left: "id", right: "id" }],
+      },
+    };
+    const doPreview = vi.fn().mockResolvedValue(undefined);
+    render(
+      <NodeFlowInspector
+        context={context(node, {
+          doPreview,
+          inspCols: { left: ["id"], right: ["id"] },
+        })}
+      />,
+    );
+    expect(screen.getByText("Join node")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /preview left/i }));
+    expect(doPreview).toHaveBeenCalledWith(node, "left", "join · left");
+    fireEvent.click(screen.getByRole("button", { name: /preview right/i }));
+    expect(doPreview).toHaveBeenCalledWith(node, "right", "join · right");
+    fireEvent.click(screen.getByRole("button", { name: /^only L$/i }));
+    expect(doPreview).toHaveBeenCalledWith(node, "left_only", "join · only L");
+    fireEvent.click(screen.getByRole("button", { name: /^only R$/i }));
+    expect(doPreview).toHaveBeenCalledWith(node, "right_only", "join · only R");
+  });
+
   it("renders SharePoint drive mode and downloads via api.sharepointDownload", async () => {
     const onToast = vi.fn();
     const node: NbNode = {

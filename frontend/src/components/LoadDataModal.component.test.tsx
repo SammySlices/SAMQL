@@ -1,6 +1,6 @@
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LoadDataModal } from "./LoadDataModal";
 
 const mocks = vi.hoisted(() => ({
@@ -23,11 +23,11 @@ vi.mock("../lib/api", () => ({
   },
 }));
 
-function mount() {
+function mount(onClose = vi.fn()) {
   return render(
     <LoadDataModal
       features={{ duckdb: true, secrets: true } as any}
-      onClose={vi.fn()}
+      onClose={onClose}
       onBeginLoad={vi.fn()}
       onBeginLoadFolder={vi.fn()}
       onLoaded={vi.fn()}
@@ -65,4 +65,5 @@ describe("LoadDataModal source tabs", () => {
     expect(screen.getByText("JSON file")).toBeInTheDocument();
     expect(screen.getByText("Output folder")).toBeInTheDocument();
   });
+
 });

@@ -22,9 +22,13 @@ assistant/**/*.partial
 .pytest_cache/
 backend/build/
 backend/dist/
+backend/frontend_dist/
 build/
 dist/
 *.spec.bak
+
+# Scratch / local working tree (extracted builds, one-off scripts, benchmarks)
+tmp/
 
 # Editors / OS
 .DS_Store

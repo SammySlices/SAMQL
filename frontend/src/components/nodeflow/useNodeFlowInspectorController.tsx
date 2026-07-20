@@ -16,6 +16,7 @@ import {
   tablesSchemaSig,
 } from "../../lib/nodeflowColumnsCache";
 import { runAfterPaint } from "../../lib/prettyStruct";
+import { buildNodeflowFilterCond } from "../../lib/sql";
 import { staleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
 import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import type { NodeFlowInspectorContext } from "./NodeFlowInspector";
@@ -635,35 +636,8 @@ export function useNodeFlowInspectorController({
     });
   };
   // build a SQL condition from the simple field/operator/value controls
-  const buildFilterCond = (field: string, op: string, value: string): string => {
-    if (!field) return "";
-    const f = "[" + field + "]";
-    const v = (value ?? "").trim();
-    const q = "'" + v.replace(/'/g, "''") + "'";
-    const num = v !== "" && !isNaN(Number(v));
-    const lit = num ? v : q;
-    switch (op) {
-      case "is null":
-        return f + " IS NULL";
-      case "is not null":
-        return f + " IS NOT NULL";
-      case "contains":
-        return f + " LIKE '%" + v.replace(/'/g, "''") + "%'";
-      case "starts":
-        return f + " LIKE '" + v.replace(/'/g, "''") + "%'";
-      case "ends":
-        return f + " LIKE '%" + v.replace(/'/g, "''") + "'";
-      case "=":
-      case "!=":
-      case ">":
-      case ">=":
-      case "<":
-      case "<=":
-        return f + " " + op + " " + lit;
-      default:
-        return f + " = " + lit;
-    }
-  };
+  // (shared helper unwraps SQL-quoted ISO dates so they are not double-quoted)
+  const buildFilterCond = buildNodeflowFilterCond;
   const toggleInArray = (field: string, col: string) => {
     if (!sel) return;
     const cur: string[] = sel.config[field] || [];

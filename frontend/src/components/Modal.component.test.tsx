@@ -117,4 +117,42 @@ describe("Modal accessibility and lifecycle", () => {
     unmount();
     expect(launch).toHaveFocus();
   });
+
+  it("when pinned, ignores Escape and backdrop but still closes via the X control", () => {
+    vi.useFakeTimers();
+    const onClose = vi.fn();
+    const onTogglePin = vi.fn();
+    try {
+      render(
+        <Modal
+          title="Load a Table"
+          onClose={onClose}
+          pinned
+          onTogglePin={onTogglePin}
+          fast
+        >
+          body
+        </Modal>,
+      );
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      vi.advanceTimersByTime(200);
+      expect(onClose).not.toHaveBeenCalled();
+
+      const backdrop = document.querySelector(".modal-backdrop");
+      expect(backdrop).toBeTruthy();
+      fireEvent.mouseDown(backdrop!);
+      vi.advanceTimersByTime(200);
+      expect(onClose).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: /Close Load a Table/ }));
+      vi.advanceTimersByTime(120);
+      expect(onClose).toHaveBeenCalledTimes(1);
+
+      fireEvent.click(screen.getByTestId("modal-pin"));
+      expect(onTogglePin).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

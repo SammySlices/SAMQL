@@ -3380,8 +3380,52 @@ kbd {
   cursor: default;
   background: transparent;
 }
+/* Pinned keep-open control: TD brand green (not muted --text). */
 .pin-on {
-  color: var(--accent-hi);
+  color: var(--accent) !important;
+}
+.modal-pin-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 1;
+}
+.modal-pin-btn.pin-on,
+.btn.ghost.modal-pin-btn.pin-on,
+.btn.ghost.sm.modal-pin-btn.pin-on {
+  color: var(--accent) !important;
+}
+.modal-pin-btn.pin-on:hover,
+.btn.ghost.modal-pin-btn.pin-on:hover,
+.btn.ghost.sm.modal-pin-btn.pin-on:hover {
+  color: var(--accent-hi) !important;
+}
+.modal-pin-btn.pin-on svg,
+.pin-on svg {
+  color: inherit;
+  stroke: currentColor;
+}
+html.theme-light .modal-pin-btn.pin-on,
+html.theme-light .btn.ghost.modal-pin-btn.pin-on,
+html.theme-light .btn.ghost.sm.modal-pin-btn.pin-on,
+html[data-theme="light"] .modal-pin-btn.pin-on,
+html[data-theme="light"] .btn.ghost.modal-pin-btn.pin-on,
+html[data-theme="light"] .btn.ghost.sm.modal-pin-btn.pin-on {
+  color: var(--accent) !important;
+}
+html.theme-light .modal-pin-btn.pin-on:hover,
+html.theme-light .btn.ghost.modal-pin-btn.pin-on:hover,
+html[data-theme="light"] .modal-pin-btn.pin-on:hover,
+html[data-theme="light"] .btn.ghost.modal-pin-btn.pin-on:hover {
+  color: var(--accent-hi) !important;
+}
+.side-tabs-pin {
+  margin-left: auto;
+  margin-right: 6px;
+  flex: 0 0 auto;
 }
 
 /* grid/chart segmented toggle */
@@ -6610,7 +6654,7 @@ button.nb2-sphere-container-toggle:focus-visible {
   white-space: nowrap;
   font-family: var(--mono);
 }
-/* Sphere Input: table name under the icon (classic cards use .nb2-node-sub). */
+/* Sphere Input/Filter/Formula caption under the icon (classic cards use .nb2-node-sub). */
 .nb2-node.sphere .nb2-sphere-caption {
   position: absolute;
   left: 50%;
@@ -6629,6 +6673,11 @@ button.nb2-sphere-container-toggle:focus-visible {
   pointer-events: none;
   z-index: 1;
 }
+/* Filter true/false fan past the lower-right rim; push the condition caption
+   below the False port. Input/Formula keep the tight 4px gap (single out). */
+.nb2-node.sphere.filter .nb2-sphere-caption {
+  top: calc(100% + 22px);
+}
 .nb2-port {
   position: absolute;
   display: flex;
@@ -6646,33 +6695,53 @@ button.nb2-sphere-container-toggle:focus-visible {
   flex-direction: row; /* label inside, arrow outermost (mirrors the input) */
   cursor: crosshair;
 }
+/* Port arrow host: real 14×16 box so L/R/T/F can flex-center. The triangle
+   is .nb2-dot-shape (sibling of the mark) so drop-shadow never tints letters. */
 .nb2-dot {
+  position: relative;
+  width: 14px;
+  height: 16px;
+  flex: 0 0 auto;
+  display: inline-block;
+  background: none;
+  border: 0;
+}
+.nb2-dot-shape {
+  position: absolute;
+  left: 0;
+  top: 0;
   width: 0;
   height: 0;
-  background: none;
-  border-radius: 0;
   border-top: 8px solid transparent;
   border-bottom: 8px solid transparent;
   border-left: 14px solid var(--accent);
   border-right: 0;
-  flex: 0 0 auto;
-  position: relative;
-  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.35)); /* a little shadow */
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.35));
+  pointer-events: none;
 }
-/* L / R mark inside join (and other left/right) input arrows */
+/*
+ * L / R / T / F: fill the host box, center the glyph, slight pad toward tip.
+ * Forced black — never inherit --text (near-white on dark theme).
+ */
 .nb2-dot-mark {
   position: absolute;
-  left: -13px;
-  top: -5px;
-  width: 12px;
-  text-align: center;
-  font-size: 8px;
-  font-weight: 700;
-  line-height: 10px;
-  color: #fff;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0 0 2px; /* optical center toward tip (triangles point right) */
+  box-sizing: border-box;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+  color: #000 !important;
+  -webkit-text-fill-color: #000 !important;
   pointer-events: none;
-  text-shadow: 0 0 2px rgba(0, 0, 0, 0.55);
+  text-shadow: none;
   font-family: var(--mono);
+  -webkit-text-stroke: 0.3px #000;
+  transform: none;
 }
 /* a top-edge input (the iterator's "values" driver): a down-pointing arrow
    centered on the node's top edge, with a small label above it. */
@@ -6690,43 +6759,42 @@ button.nb2-sphere-container-toggle:focus-visible {
   font-size: 9px;
 }
 .nb2-dot.down {
+  width: 16px;
+  height: 14px;
+}
+.nb2-dot.down > .nb2-dot-shape {
   border-top: 14px solid var(--accent);
   border-bottom: 0;
   border-left: 8px solid transparent;
   border-right: 8px solid transparent;
 }
-.nb2-port.out .nb2-dot {
-  border-left-color: #e5484d; /* default output arrows are red */
+/*
+ * Output arrows: data-out-tone is authoritative. Every non-False out
+ * (Join only-L/R/inner, Cross Join, Union, SQL, err, outN, True, …) is
+ * green. Only Filter False is red.
+ */
+.nb2-node .nb2-port.out[data-out-tone="accent"] > .nb2-dot > .nb2-dot-shape,
+.nb2-node .nb2-port.out.out-std > .nb2-dot > .nb2-dot-shape {
+  border-left-color: var(--accent) !important;
 }
-/* Filter branch ports: True = accent green, False = error red (theme-aware). */
-.nb2-port.out.true .nb2-dot {
-  border-left-color: var(--accent);
+.nb2-node .nb2-port.out[data-out-tone="error"] > .nb2-dot > .nb2-dot-shape,
+.nb2-node .nb2-port.out.false > .nb2-dot > .nb2-dot-shape {
+  border-left-color: var(--error) !important;
 }
-.nb2-port.out.false .nb2-dot {
-  border-left-color: var(--error);
-}
-.nb2-port.out.right_only .nb2-dot,
-.nb2-port.out.left_only .nb2-dot {
-  border-left-color: #e0a458; /* secondary join outputs stay amber */
-}
-/* hover brightens the arrow in its OWN colour -- inputs/True green, default
-   outputs + False red (and amber for a join's secondary outputs) -- never
-   the green accent on a red output */
-.nb2-port.in:hover .nb2-dot {
+/* hover brightens the arrow in its OWN colour — green outs / True, red False */
+.nb2-port.in:hover > .nb2-dot > .nb2-dot-shape {
   border-left-color: var(--accent-hi);
 }
-.nb2-port.out:hover .nb2-dot {
-  border-left-color: #f2555a;
+.nb2-port.top:hover > .nb2-dot > .nb2-dot-shape {
+  border-top-color: var(--accent-hi);
 }
-.nb2-port.out.true:hover .nb2-dot {
-  border-left-color: var(--accent-hi);
+.nb2-node .nb2-port.out[data-out-tone="accent"]:hover > .nb2-dot > .nb2-dot-shape,
+.nb2-node .nb2-port.out.out-std:hover > .nb2-dot > .nb2-dot-shape {
+  border-left-color: var(--accent-hi) !important;
 }
-.nb2-port.out.false:hover .nb2-dot {
-  border-left-color: color-mix(in srgb, var(--error) 72%, #fff);
-}
-.nb2-port.out.right_only:hover .nb2-dot,
-.nb2-port.out.left_only:hover .nb2-dot {
-  border-left-color: #e8b86a;
+.nb2-node .nb2-port.out[data-out-tone="error"]:hover > .nb2-dot > .nb2-dot-shape,
+.nb2-node .nb2-port.out.false:hover > .nb2-dot > .nb2-dot-shape {
+  border-left-color: color-mix(in srgb, var(--error) 72%, #fff) !important;
 }
 .nb2-port-lbl {
   font-size: 10.5px;
@@ -6839,6 +6907,80 @@ button.nb2-sphere-container-toggle:focus-visible {
 }
 .nb2-warn-sm code {
   font-family: var(--mono, monospace);
+}
+/* SQL floating IDE — draggable + resizable portal over the canvas */
+.nb2-sqljoin-ide {
+  position: fixed;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel, #1e1e24);
+  color: var(--fg, #e8e8ec);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  min-width: 420px;
+  min-height: 280px;
+}
+.nb2-sqljoin-ide-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: grab;
+  user-select: none;
+  background: var(--panel-2, rgba(255, 255, 255, 0.04));
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+}
+.nb2-sqljoin-ide-head:active {
+  cursor: grabbing;
+}
+.nb2-sqljoin-ide-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.nb2-sqljoin-ide-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.nb2-sqljoin-ide-hint {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  color: var(--muted, #9a9aa8);
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+}
+.nb2-sqljoin-ide-body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+}
+.nb2-sqljoin-ide-body .code,
+.nb2-sqljoin-ide-body [data-testid="sql-sql-editor"] {
+  flex: 1;
+  min-height: 160px;
+  height: 100%;
+}
+.nb2-sqljoin-ide-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background: linear-gradient(
+    135deg,
+    transparent 50%,
+    var(--border, rgba(255, 255, 255, 0.35)) 50%
+  );
 }
 .nb2-stale-list {
   margin: 6px 0 0;
@@ -7062,13 +7204,6 @@ button.nb2-sphere-container-toggle:focus-visible {
 }
 .nb2-node.union {
   border-top: 3px solid #c98bc9;
-}
-.nb2-port.out.left_only .nb2-dot,
-.nb2-port.out.right_only .nb2-dot {
-  border-color: #e0a458;
-}
-.nb2-port.out.inner .nb2-dot {
-  border-color: var(--accent);
 }
 .nb2-row-between {
   display: flex;
@@ -12890,4 +13025,104 @@ html[data-theme="light"] .canvas-color-head {
 html.theme-light .canvas-color-head *,
 html[data-theme="light"] .canvas-color-head * {
   color: var(--chrome-fg) !important;
+}
+
+/* Find / replace — draggable, non-modal bar over the IDE and Journal */
+.find-win {
+  position: fixed;
+  z-index: 210;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 8px;
+  background: var(--panel, #1e1e24);
+  color: var(--fg, #e8e8ec);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+.find-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px 7px 10px;
+  cursor: grab;
+  user-select: none;
+  background: var(--panel-2, rgba(255, 255, 255, 0.04));
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: 10px 10px 0 0;
+}
+.find-head:active {
+  cursor: grabbing;
+}
+.find-title {
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.find-scope {
+  font-weight: 400;
+  color: var(--muted, #9a9aa8);
+}
+/* The chevron points down when the replace row is showing. */
+.find-toggle svg {
+  transition: transform 0.15s ease;
+  transform: rotate(-90deg);
+}
+.find-toggle[aria-expanded="true"] svg {
+  transform: rotate(0deg);
+}
+.find-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 10px;
+}
+.find-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: var(--mono, monospace);
+  color: var(--fg, #e8e8ec);
+  background: var(--input-bg, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  border-radius: 6px;
+}
+.find-input:focus {
+  outline: none;
+  border-color: var(--accent, #6ea8fe);
+}
+.find-count {
+  flex: none;
+  min-width: 64px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted, #9a9aa8);
+  font-variant-numeric: tabular-nums;
+}
+.find-count.none {
+  color: var(--danger, #f87171);
+}
+.find-opts {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--muted, #9a9aa8);
+}
+.find-opts label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+/* The active match, painted under the textarea's own selection. */
+.find-hit {
+  background: var(--find-hit, rgba(250, 204, 21, 0.32));
+  border-radius: 2px;
 }

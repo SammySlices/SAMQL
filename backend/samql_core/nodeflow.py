@@ -194,7 +194,20 @@ def project_output_sql(base_sql, needed, cols_of):
 
 
 def _strlit(s):
-    return "'%s'" % str(s).replace("'", "''")
+    """Single-quoted SQL string literal (shared temporal unwrap via sqlutil)."""
+    from .sqlutil import sql_str_literal
+    return sql_str_literal(s)
+
+
+# date_part / date_trunc / date_diff take these as bare quoted literals, so the
+# config value must be a known keyword -- never interpolated text.
+_DATE_PARTS = frozenset((
+    "year", "month", "day", "hour", "minute", "second", "millisecond",
+    "microsecond", "quarter", "week", "dow", "doy", "isodow", "era",
+    "epoch", "decade", "century", "millennium", "yearweek"))
+_DATE_UNITS = frozenset((
+    "year", "month", "day", "hour", "minute", "second", "millisecond",
+    "microsecond", "quarter", "week", "decade", "century", "millennium"))
 
 
 def _snake(s):
@@ -410,7 +423,287 @@ def _sqlite_split_rows(src, col, delim, name, cols):
     )
 
 
-def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
+# SQL node stacks up to 10 table inputs (same hard cap as Union).
+_SQL_INPUT_CAP = 10
+_SQL_PORTS = ["in%d" % i for i in range(1, _SQL_INPUT_CAP + 1)]
+# Back-compat aliases used by older helpers / in-flight graphs.
+_SQLJOIN_INPUT_CAP = _SQL_INPUT_CAP
+_SQLJOIN_PORTS = _SQL_PORTS
+
+
+def sqljoin_relation_name(graph, start_nid):
+    """Walk upstream from ``start_nid`` to an Input-style table name.
+
+    Prefers ``config.table`` on input / directory / appendfolder / shred.
+    Falls back to a non-default node label, then None (caller uses tN).
+    """
+    nodes = _node_map(graph)
+    nid = start_nid
+    seen = set()
+    while nid and nid not in seen:
+        seen.add(nid)
+        n = nodes.get(nid)
+        if n is None:
+            break
+        typ = n.get("type")
+        cfg = n.get("config") or {}
+        if typ in ("input", "directory", "appendfolder", "shred"):
+            table = (cfg.get("table") or "").strip()
+            if table:
+                return table
+        # Prefer walking the first connected input of a transform.
+        ins = NODE_PORTS.get(typ, {}).get("in") or []
+        next_nid = None
+        for p in ins:
+            sn, _sp = upstream(graph, nid, p)
+            if sn is not None:
+                next_nid = sn
+                break
+        if next_nid is None:
+            lab = (cfg.get("label") or "").strip()
+            if lab and lab.lower() not in (
+                    typ or "", "sql", "python", "select", "filter",
+                    "new_table", "input"):
+                return lab
+            break
+        nid = next_nid
+    return None
+
+
+def _sqljoin_cte_names(q):
+    """Rough CTE name set so WITH aliases are not rewritten as inputs."""
+    names = set()
+    if not re.match(r"(?is)^\s*with\b", q or ""):
+        return names
+    for m in re.finditer(
+            r"(?is)(?:\bwith\b|,)\s*(?:recursive\s+)?"
+            r"(\"([^\"]+)\"|\[([^\]]+)\]|([A-Za-z_][\w$]*))\s+as\b",
+            q or ""):
+        raw = m.group(2) or m.group(3) or m.group(4) or ""
+        if raw:
+            names.add(raw)
+            names.add(raw.lower())
+    return names
+
+
+# Keywords that can directly follow a table reference — anything else in that
+# position is a user alias, which must be preserved by the regex rewrite.
+_SQL_POST_TABLE_KEYWORDS = frozenset({
+    "where", "join", "left", "right", "inner", "outer", "full", "cross",
+    "natural", "on", "using", "group", "order", "limit", "offset", "having",
+    "union", "intersect", "except", "qualify", "window", "when", "as",
+    "asof", "positional", "anti", "semi", "lateral", "fetch", "for",
+})
+
+
+def _sqlglot_parse_one(q, dialect=None):
+    """Parse ``q`` with sqlglot, trying DuckDB when dialect is unset.
+
+    Product loads default to DuckDB, so DuckDB-only syntax (QUALIFY, EXCLUDE,
+    …) must parse for rewrite / engine pinning. When ``dialect`` is given it
+    is tried first; otherwise try DuckDB then a dialect-free parse.
+    """
+    try:
+        import sqlglot
+    except Exception:
+        return None
+    dialects = []
+    if dialect in ("duckdb", "sqlite"):
+        dialects.append(dialect)
+    else:
+        dialects.extend(("duckdb", None))
+    # Always allow a second attempt without a forced dialect.
+    if "duckdb" in dialects and None not in dialects:
+        dialects.append(None)
+    seen = set()
+    for d in dialects:
+        key = d or ""
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            return sqlglot.parse_one(
+                q, read=d, error_level=sqlglot.ErrorLevel.RAISE), d
+        except Exception:
+            continue
+    return None
+
+
+def _rewrite_tables_sqlglot(q, name_to_rel, dialect=None):
+    """Parser-backed rewrite of wired input-table references.
+
+    Replaces every plain table reference whose name matches a wired input
+    (case-insensitive, CTE aliases excluded) with the materialised relation,
+    preserving an explicit alias or aliasing back to the friendly name so
+    qualified ``table.column`` references keep binding. Handles the shapes
+    the regex path can't see safely: quoted / bracketed names, second and
+    later tables of a comma-separated FROM list, and derived-table
+    subqueries. Returns None when sqlglot is unavailable or the statement
+    doesn't round-trip, so the caller can fall back to the regex rewrite.
+    """
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except Exception:
+        return None
+    parsed = _sqlglot_parse_one(q, dialect=dialect)
+    if parsed is None:
+        return None
+    tree, used_dialect = parsed
+    if tree is None:
+        return None
+    write_dialect = dialect if dialect in ("duckdb", "sqlite") else used_dialect
+    lower_map = {str(k).lower(): v for k, v in name_to_rel.items() if k}
+    cte_names = set()
+    for cte in tree.find_all(exp.CTE):
+        alias = getattr(cte, "alias_or_name", None)
+        if alias:
+            cte_names.add(str(alias).lower())
+    changed = False
+    for table in list(tree.find_all(exp.Table)):
+        # Plain named tables only: skip read_csv()-style function tables and
+        # schema-qualified names (those can't be a wired NodeFlow input).
+        if not isinstance(table.this, exp.Identifier):
+            continue
+        if table.args.get("db") or table.args.get("catalog"):
+            continue
+        key = str(table.name or "").lower()
+        if not key or key in cte_names or key not in lower_map:
+            continue
+        rel = lower_map[key]
+        alias = table.alias or str(table.name)
+        try:
+            snippet = sqlglot.parse_one(
+                "SELECT * FROM %s AS %s" % (rel, exp.to_identifier(
+                    alias, quoted=True).sql(dialect=write_dialect)),
+                read=write_dialect, error_level=sqlglot.ErrorLevel.RAISE)
+            from_clause = snippet.find(exp.From)
+            replacement = from_clause.this if from_clause is not None else None
+        except Exception:
+            return None
+        if replacement is None:
+            return None
+        table.replace(replacement)
+        changed = True
+    if not changed:
+        # Nothing referenced a wired input — keep the user's text verbatim.
+        return q
+    try:
+        return tree.sql(dialect=write_dialect)
+    except Exception:
+        return None
+
+
+def _rewrite_tables_regex(q, name_to_rel):
+    """Regex fallback: rewrite FROM/JOIN <input-table> references.
+
+    Quoted (``"orders"``) and bracketed (``[orders]``) names are matched
+    (they are self-delimiting; the word boundary applies to bare names
+    only). When the reference has no explicit alias, the relation is
+    aliased back to the friendly name so qualified ``orders.col``
+    references keep binding to the flowed data.
+    """
+    cte = _sqljoin_cte_names(q)
+    # Longest names first so `orders_detail` wins over `orders`.
+    items = sorted(name_to_rel.items(), key=lambda kv: -len(kv[0]))
+    alias_probe = re.compile(
+        r'^\s+(?:"[^"]+"|\[[^\]]+\]|[A-Za-z_][\w$]*)')
+
+    def has_alias(tail):
+        m = alias_probe.match(tail)
+        if not m:
+            return False
+        token = m.group(0).strip()
+        if token.startswith('"') or token.startswith("["):
+            return True
+        if token.lower() == "as":
+            return True
+        return token.lower() not in _SQL_POST_TABLE_KEYWORDS
+
+    out = q
+    for name, rel in items:
+        if not name or name.lower() in cte or name in cte:
+            continue
+        esc = re.escape(name)
+        pat = re.compile(
+            r"(?i)\b(from|join)\s+(?:\"%s\"|\[%s\]|%s\b)"
+            % (esc, esc, esc))
+
+        def repl(m, r=rel, nm=name):
+            tail = m.string[m.end():]
+            if has_alias(tail):
+                return m.group(1) + " " + r
+            return '%s %s AS "%s"' % (m.group(1), r, nm.replace('"', '""'))
+
+        out = pat.sub(repl, out)
+    return out
+
+
+def _wired_table_still_bare(q, name):
+    """True when ``name`` still appears as a bare FROM/JOIN table reference."""
+    if not q or not name:
+        return False
+    esc = re.escape(name)
+    return bool(re.search(
+        r"(?i)\b(from|join)\s+(?:\"%s\"|\[%s\]|%s\b)" % (esc, esc, esc),
+        q))
+
+
+def _assert_wired_tables_rewritten(q_before, q_after, name_to_rel):
+    """Refuse fallthrough onto the raw loaded catalog table.
+
+    Wired friendly names that the user referenced must be rewritten to the
+    flowed upstream relation. Leaving ``FROM orders`` after rewrite would
+    silently read the loaded table and ignore Select/Filter upstream.
+
+    Upstream relations often embed the catalog name themselves
+    (``SELECT * FROM "orders"`` inside an Input subquery). Those are scrubbed
+    out before the bare-name check so only an unre-written user FROM/JOIN
+    trips the guard.
+    """
+    if not name_to_rel:
+        return
+    scrubbed = q_after or ""
+    # Longest relations first so nested replacements don't leave fragments.
+    for rel in sorted((v for v in name_to_rel.values() if v),
+                      key=len, reverse=True):
+        scrubbed = scrubbed.replace(rel, " _REL_ ")
+    for name in name_to_rel:
+        if not name:
+            continue
+        if not _wired_table_still_bare(q_before, name):
+            continue
+        if _wired_table_still_bare(scrubbed, name):
+            raise NodeflowError(
+                'SQL still references loaded table "%s" directly after '
+                "binding. Wired inputs must use the upstream NodeFlow "
+                "result (renames/filters included), not the raw catalog "
+                "table. Re-check the FROM/JOIN clause." % name)
+
+
+def _sqljoin_rewrite_tables(q, name_to_rel, dialect=None):
+    """Replace FROM/JOIN <input-table> with the materialised relation.
+
+    A wired input's friendly table name must bind the flowed (possibly
+    renamed/filtered) upstream relation — never the raw loaded table.
+    Prefer the sqlglot rewrite (quoted names, comma-list FROM clauses,
+    subqueries, alias preservation); fall back to the regex rewrite when
+    sqlglot is missing or cannot round-trip the statement. DuckDB is the
+    preferred parse dialect when unset (matches default load engine).
+    """
+    if not name_to_rel:
+        return q
+    # Prefer DuckDB SQL when the caller did not pin an engine — SamQL loads
+    # default to DuckDB and DuckDB-only clauses must survive rewrite.
+    use_dialect = dialect if dialect in ("duckdb", "sqlite") else "duckdb"
+    parsed = _rewrite_tables_sqlglot(q, name_to_rel, dialect=use_dialect)
+    out = parsed if parsed is not None else _rewrite_tables_regex(q, name_to_rel)
+    _assert_wired_tables_rewritten(q, out, name_to_rel)
+    return out
+
+
+def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
+                    graph=None):
     """SQL producing the relation at (node, port).
 
     ``engine`` is "duckdb" / "sqlite" / None and lets a few nodes emit
@@ -420,8 +713,14 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
     downstream of this node (None = all). Source nodes use it to read only
     those columns, and projection-aware transforms omit unused passthrough or
     derived outputs. This keeps wide flows narrow without changing a target
-    that is materialised in full."""
+    that is materialised in full.
+
+    ``graph`` is required for multi-input SQL (named wired relations).
+    """
     typ = node.get("type")
+    # Legacy type id from the former SQL Join node.
+    if typ == "sqljoin":
+        typ = "sql"
     cfg = node.get("config") or {}
     label = cfg.get("label") or typ or "node"
 
@@ -1119,7 +1418,7 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
                         float(vs)
                         expr = vs
                     except Exception:
-                        expr = "'%s'" % vs.replace("'", "''")
+                        expr = _strlit(vs)
             sel.append("COALESCE(%s, %s) AS %s" % (_q(c), expr, _q(c)))
         if not sel:
             return "SELECT * FROM %s AS _fill" % src
@@ -1435,6 +1734,8 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             default_name = col + "_" + part
             if engine == "duckdb":
                 duck = {"weekday": "dow", "dayofyear": "doy"}.get(part, part)
+                if duck not in _DATE_PARTS:
+                    raise NodeflowError("Unknown date part: %s" % part)
                 expr = "CAST(date_part('%s', %s) AS INTEGER)" % (duck, qcol)
             elif part == "quarter":
                 expr = ("((CAST(strftime('%%m', %s) AS INTEGER) + 2) / 3)"
@@ -1451,6 +1752,9 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             unit = (cfg.get("unit") or "month").strip().lower()
             default_name = col + "_" + unit
             if engine == "duckdb":
+                if unit not in _DATE_UNITS:
+                    raise NodeflowError(
+                        "Truncate to year, month, day, or hour.")
                 expr = "date_trunc('%s', %s)" % (unit, qcol)
             else:
                 tmap = {"year": "%Y-01-01", "month": "%Y-%m-01",
@@ -1467,6 +1771,8 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             other_expr = (_q(other) if other and other.lower() != "now"
                           else "CURRENT_TIMESTAMP")
             if engine == "duckdb":
+                if unit not in _DATE_UNITS:
+                    raise NodeflowError("Unknown date unit: %s" % unit)
                 expr = "date_diff('%s', %s, %s)" % (unit, other_expr, qcol)
             else:
                 days = "(julianday(%s) - julianday(%s))" % (qcol, other_expr)
@@ -1786,7 +2092,7 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             s = str(v)
             if isnum:
                 return s.strip()
-            return "'" + s.replace("'", "''") + "'"
+            return _strlit(s)
         selects = []
         for ri, r in enumerate(body):
             if ri == 0:
@@ -1804,6 +2110,10 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
                             "output to run.")
 
     if typ == "sql":
+        # Free-form read-only SQL. Modes (combined former SQL + SQL Join):
+        # - Zero inputs: catalog / literal SELECT (source).
+        # - Legacy single-input: FROM input / {{in}} / {{input}} (port in or in1).
+        # - Multi-input: wire up to 10 tables; reference each by Input table name.
         q = (cfg.get("sql") or "").strip()
         while q.endswith(";"):
             q = q[:-1].rstrip()
@@ -1815,21 +2125,57 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None):
             raise NodeflowError(
                 "The SQL node must be a read query "
                 "(SELECT ... or WITH ... SELECT ...).")
-        up = get_input("in")
+        ports = list(NODE_PORTS.get("sql", {}).get("in") or _SQL_PORTS)
+        name_to_rel = {}
+        used_names = {}
+        first_rel = None
+        for i, p in enumerate(ports):
+            rel = get_input(p)
+            if rel is None:
+                continue
+            if first_rel is None:
+                first_rel = rel
+            logical = None
+            if graph is not None:
+                sn, _sp = upstream(graph, node.get("id"), p)
+                logical = sqljoin_relation_name(graph, sn) if sn else None
+            if not logical:
+                logical = "t%d" % (i + 1)
+            key = logical.lower()
+            if key in used_names:
+                raise NodeflowError(
+                    'SQL has two inputs both named "%s". Rename or '
+                    "disconnect one so each wired table has a unique name."
+                    % logical)
+            used_names[key] = p
+            name_to_rel[logical] = rel
+        # Legacy single-input port "in" (pre multi-input SQL).
+        legacy = get_input("in")
+        if legacy is not None and first_rel is None:
+            first_rel = legacy
+            name_to_rel.setdefault("input", legacy)
         from_input = re.search(r"(?i)\b(from|join)\s+input\b", q)
         uses_mustache = "{{in}}" in q or "{{input}}" in q
-        if (from_input or uses_mustache) and up is None:
+        if (from_input or uses_mustache) and first_rel is None:
             raise NodeflowError(
                 "The SQL node reads from `input`, but nothing is connected "
                 "to its input.")
         if uses_mustache:
-            q = q.replace("{{input}}", up).replace("{{in}}", up)
+            q = q.replace("{{input}}", first_rel).replace("{{in}}", first_rel)
         if from_input:
             # `input` is the data wired into this node -- splice it in wherever
             # the query does FROM input / JOIN input (leaving the IN operator,
             # column names, etc. untouched)
+            up = first_rel
             q = re.sub(r"(?i)\b(from|join)\s+input\b",
                        lambda m: m.group(1) + " " + up, q)
+        if name_to_rel:
+            # DuckDB loads must rewrite with DuckDB SQL; SQLite-pinned flows
+            # keep sqlite. Unset engine defaults to duckdb (product default).
+            q = _sqljoin_rewrite_tables(
+                q, name_to_rel,
+                dialect=(engine if engine in ("duckdb", "sqlite")
+                         else "duckdb"))
         return "SELECT * FROM (%s) AS _sql" % q
 
     if typ == "python":
@@ -2065,7 +2411,8 @@ def _compile_usernode_port(graph, node_id, port, cols_of, engine, outer_get,
             graph, sn, sp, cols_of, engine, outer_get, dyn_in_by_id,
             stack, _memo) + ")"
 
-    sql = node_output_sql(node, port, get_input, cols_of, engine, needed)
+    sql = node_output_sql(node, port, get_input, cols_of, engine, needed,
+                          graph=graph)
     if len(sql) > _MAX_COMPILED_SQL:
         raise NodeflowError(
             "This created node expands into too much SQL. Materialise a "
@@ -2106,7 +2453,7 @@ def compile_port(graph, node_id, port, cols_of, _stack=None, engine=None,
         return "(" + compile_port(graph, sn, sp, cols_of, stack, engine,
                                   _memo) + ")"
 
-    sql = node_output_sql(node, port, get_input, cols_of, engine)
+    sql = node_output_sql(node, port, get_input, cols_of, engine, graph=graph)
     # .481 audit: even with memoised COMPILATION, a diamond graph inlines
     # a shared subquery once per reference, so the SQL TEXT can still grow
     # exponentially (a deep fan-out lattice reached tens of MB and OOM'd
@@ -2184,7 +2531,15 @@ NODE_PORTS = {
     "webscrape": {"in": [], "out": ["out"]},
     "iterator": {"in": ["vars", "in"], "out": ["out"]},
     "while": {"in": ["in"], "out": []},
-    "sql": {"in": ["in"], "out": ["out"]},
+    # Cap 10 — same stacked multi-input hard cap as Union. Legacy port "in"
+    # is still accepted at compile time as an alias for the first wire.
+    "sql": {"in": ["in1", "in2", "in3", "in4", "in5",
+                   "in6", "in7", "in8", "in9", "in10"],
+            "out": ["out"]},
+    # Alias for saved / in-flight graphs that still use the former type id.
+    "sqljoin": {"in": ["in1", "in2", "in3", "in4", "in5",
+                       "in6", "in7", "in8", "in9", "in10"],
+                "out": ["out"]},
     "python": {"in": ["in"], "out": ["out"]},
     "write": {"in": ["in"], "out": ["out"]},
     "output": {"in": ["in"], "out": []},
@@ -2768,9 +3123,10 @@ def _incremental_node_safe(node):
         return False
     if typ == "sample" and str(cfg.get("mode") or "head").lower() == "random":
         return False
-    if typ == "sql":
-        # A SQL node may contain random(), current_timestamp, external table
-        # functions, or other runtime-only state that cannot be proven stable.
+    if typ in ("sql", "sqljoin"):
+        # Free-form SQL may contain random(), current_timestamp, external
+        # table functions, or other runtime-only state that cannot be proven
+        # stable.
         return False
     if typ == "python":
         # Arbitrary Python is opaque and may be non-deterministic.

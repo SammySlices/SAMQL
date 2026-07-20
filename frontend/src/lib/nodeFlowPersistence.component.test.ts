@@ -17,7 +17,7 @@ describe("NodeFlow persistence", () => {
     expect(raw).toBeTruthy();
     const parsed = JSON.parse(raw!);
     expect(parsed.format).toBe("samql-nodeflow");
-    expect(parsed.version).toBe(3);
+    expect(parsed.version).toBe(4);
     expect(parsed.nodes[0].config.value).toBe("20");
     expect(parsed.nodes[0].config.condition).toBe("[amount] >= 20");
   });

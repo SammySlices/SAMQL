@@ -843,7 +843,14 @@ def _shred_nested_json_load(session, res, root_id=None):
     if fr and not fr.get("error") and fr.get("created"):
         out = []
         for t in fr["created"]:
-            out.append({"table": t["name"],
+            # Every other loader keys its descriptor by "name"; strict consumers
+            # (directory/folder load's readable-data check, origin-watch
+            # registration, record_load) read only "name", so keying this by
+            # "table" alone made a successful flatten load report an error and
+            # leak its tables. Provide "name" (with "table" kept as an alias for
+            # the fallback readers).
+            out.append({"name": t["name"],
+                        "table": t["name"],
                         "rows": t.get("rows"),
                         "engine": "duckdb",
                         "method": "flatten-table",

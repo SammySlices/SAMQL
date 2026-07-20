@@ -51,6 +51,8 @@ const TRUNC_RE = /… \[\d+ chars — truncated\]$/;
 
 const ROW_H = 28;
 const OVERSCAN = 12;
+/** Ceiling for "copy all results" — a clipboard-sized slice of a big result. */
+const COPY_ALL_MAX = 5000;
 const DEFAULT_W = 150;
 const ROWNUM_W = 56;
 /** Virtualize data columns only past this count (small grids stay simple). */
@@ -315,6 +317,12 @@ const DataGridImpl: React.FC<Props> = ({
   const dragging = useRef(false);
   const selMode = useRef<"cell" | "row">("cell");
   const copyOwnerRef = useRef(0);
+  /** True while a whole-result copy is fetching rows from the server. */
+  const [copyingAll, setCopyingAll] = useState(false);
+  /** Right-click on the panel background (no cell under the pointer). */
+  const [panelMenu, setPanelMenu] = useState<{ x: number; y: number } | null>(
+    null,
+  );
   const [cellMenu, setCellMenu] = useState<{
     x: number;
     y: number;
@@ -549,6 +557,72 @@ const DataGridImpl: React.FC<Props> = ({
     if (!tsv) return;
     await copyText(tsv);
   };
+
+  /**
+   * How many rows a "copy all" would actually put on the clipboard.
+   *
+   * Without a result id there is no way to reach past the loaded window (a
+   * NodeFlow preview holds a fixed slice), so the count must reflect the rows
+   * in hand rather than the result's true size — otherwise the menu would
+   * promise more than it copies.
+   */
+  const copyableRows = Math.min(
+    cellFetch?.resultId ? totalRows : rows.length,
+    COPY_ALL_MAX,
+  );
+
+  /** Serialize whole rows (every column) rather than a selected block. */
+  const buildTSVAll = (all: Cell[][], withHeaders: boolean) => {
+    const out: string[] = [];
+    if (withHeaders) out.push(cols.join("\t"));
+    for (const row of all) {
+      const cells: string[] = [];
+      for (let c = 0; c < cols.length; c += 1) {
+        const v = row[c];
+        cells.push(v === null || v === undefined ? "" : String(v));
+      }
+      out.push(cells.join("\t"));
+    }
+    return out.join("\n");
+  };
+
+  /**
+   * Copy the whole result — not just what is selected or scrolled into view —
+   * capped at COPY_ALL_MAX rows.
+   *
+   * The grid holds a sliding window, so when the result is larger than what is
+   * loaded this refetches from the server using the same sort/filter view the
+   * user is looking at. Without a result id (NodeFlow previews build their page
+   * inline) it falls back to the loaded rows.
+   */
+  const copyAllRows = async (withHeaders: boolean) => {
+    setCellMenu(null);
+    if (copyingAll) return;
+    const resultId = cellFetch?.resultId;
+    const wanted = copyableRows;
+    // Everything already in memory: no round trip.
+    if (!resultId || rows.length >= wanted) {
+      await copyText(buildTSVAll(rows.slice(0, wanted), withHeaders));
+      return;
+    }
+    setCopyingAll(true);
+    try {
+      const full = await api.page(resultId, {
+        offset: 0,
+        limit: wanted,
+        sort_col: sortCol,
+        descending,
+        filters: cellFetch?.filters,
+      });
+      const fetched = full.rows ?? [];
+      await copyText(buildTSVAll(fetched.slice(0, wanted), withHeaders));
+    } catch {
+      // Fall back to what is already loaded rather than copying nothing.
+      await copyText(buildTSVAll(rows.slice(0, wanted), withHeaders));
+    } finally {
+      setCopyingAll(false);
+    }
+  };
   const onCellContext = (idx: number, ci: number, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -658,7 +732,16 @@ const DataGridImpl: React.FC<Props> = ({
         } else if (e.key === "Escape") {
           setSel(null);
           setCellMenu(null);
+          setPanelMenu(null);
         }
+      }}
+      onContextMenu={(e) => {
+        // Cells and headers handle their own right-click and stop propagation;
+        // reaching here means the click landed on the panel background (below
+        // the last row, or the empty gutter), so offer whole-result actions.
+        e.preventDefault();
+        setCellMenu(null);
+        setPanelMenu({ x: e.clientX, y: e.clientY });
       }}
       onScroll={(e) => {
         const el = e.target as HTMLDivElement;
@@ -913,6 +996,18 @@ const DataGridImpl: React.FC<Props> = ({
             >
               Copy with headers
             </button>
+            <div className="sep" />
+            <button
+              type="button"
+              data-testid="grid-menu-copy-all"
+              disabled={copyingAll}
+              title={`Copy the whole result with headers (up to ${COPY_ALL_MAX.toLocaleString()} rows)`}
+              onClick={() => void copyAllRows(true)}
+            >
+              {copyingAll
+                ? "Copying results…"
+                : `Copy all results with headers (${copyableRows.toLocaleString()} rows)`}
+            </button>
             {onExportResults && exportFormats && exportFormats.length > 0 && (
               <>
                 <div className="sep" />
@@ -955,6 +1050,76 @@ const DataGridImpl: React.FC<Props> = ({
             >
               Clear selection
             </button>
+          </div>
+        </>,
+        document.body,
+      )}
+    {panelMenu &&
+      createPortal(
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 120 }}
+            onMouseDown={() => setPanelMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setPanelMenu(null);
+            }}
+          />
+          <div
+            className="ctx-menu"
+            data-testid="grid-panel-menu"
+            style={{ ...menuPos(panelMenu.x, panelMenu.y, 260), zIndex: 121 }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="label">
+              {totalRows.toLocaleString()} row{totalRows === 1 ? "" : "s"}
+            </div>
+            <button
+              type="button"
+              data-testid="grid-panel-copy-all"
+              disabled={copyingAll}
+              title={`Copy the whole result with headers (up to ${COPY_ALL_MAX.toLocaleString()} rows)`}
+              onClick={() => {
+                setPanelMenu(null);
+                void copyAllRows(true);
+              }}
+            >
+              {copyingAll
+                ? "Copying results…"
+                : `Copy results with headers (${copyableRows.toLocaleString()} rows)`}
+            </button>
+            <button
+              type="button"
+              data-testid="grid-panel-copy-all-noheaders"
+              disabled={copyingAll}
+              onClick={() => {
+                setPanelMenu(null);
+                void copyAllRows(false);
+              }}
+            >
+              Copy results without headers
+            </button>
+            {totalRows > copyableRows && (
+              <div className="label faint">
+                {totalRows.toLocaleString()} rows total — copying{" "}
+                {copyableRows.toLocaleString()}. Export the result for the full
+                set.
+              </div>
+            )}
+            {onExportResults && exportFormats && exportFormats.length > 0 && (
+              <>
+                <div className="sep" />
+                <ExportResultsCtxItem
+                  testId="grid-panel-export"
+                  showIcon={false}
+                  formats={exportFormats}
+                  onExport={(fmt) => {
+                    onExportResults(fmt);
+                    setPanelMenu(null);
+                  }}
+                />
+              </>
+            )}
           </div>
         </>,
         document.body,

@@ -484,4 +484,27 @@ describe("TablesSidebarDrawer", () => {
     );
     delete document.documentElement.dataset.samqlNfDrag;
   });
+
+  it("when pinned, stays open through Escape and outside click", () => {
+    const onOpenChange = vi.fn();
+    render(
+      <TablesSidebarDrawer
+        enabled
+        open
+        pinned
+        onOpenChange={onOpenChange}
+        width={280}
+        onResizePointerDown={() => {}}
+      >
+        <div>tables</div>
+      </TablesSidebarDrawer>,
+    );
+    expect(screen.getByTestId("tables-sidebar-drawer")).toHaveAttribute(
+      "data-open",
+      "1",
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.pointerDown(document.body);
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
 });

@@ -3,7 +3,7 @@ import type { ChartData } from "../../lib/types";
 import {
   PORTS,
   PORT_LABEL,
-  inputPortMark,
+  portArrowMark,
   isTopInput,
   nodeShowsBody,
   nodeUnderBodySize,
@@ -40,6 +40,18 @@ function sphereHoverTitle(node: NbNode): string {
     const table = String(node.config.table || "").trim();
     return table ? `${base}: ${table}` : `${base} (pick a table)`;
   }
+  if (node.type === "filter") {
+    const condition = String(node.config.condition || "").trim();
+    return condition
+      ? `${base}: ${condition}`
+      : `${base} (set a condition)`;
+  }
+  if (node.type === "formula") {
+    const summary = getNodeCardSummary(node, []);
+    return summary === "(set expression)"
+      ? `${base} (set expression)`
+      : `${base}: ${summary}`;
+  }
   return base;
 }
 
@@ -57,6 +69,27 @@ function SphereNodeIcon({ node }: { node: NbNode }) {
   return (
     <span className="nb2-sphere-icon" aria-hidden="true">
       <NodeIcon size={22} />
+    </span>
+  );
+}
+
+/** Triangle + optional L/R/T/F mark. Mark is a sibling of the shape so
+ *  filter/drop-shadow on the triangle cannot wash the letter to white. */
+function PortArrow({
+  mark,
+  down,
+}: {
+  mark?: string | null;
+  down?: boolean;
+}) {
+  return (
+    <span className={"nb2-dot" + (down ? " down" : "")}>
+      <span className="nb2-dot-shape" aria-hidden />
+      {mark ? (
+        <span className="nb2-dot-mark" aria-hidden>
+          {mark}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -409,11 +442,22 @@ function NodeFlowCanvasCardImpl({
       node.type === "dashboard")
       ? nodeUnderBodySize(node)
       : null;
-  // Sphere leaves omit classic .nb2-node-sub; Input still needs the table name.
-  const inputTableCaption =
-    sphere && node.type === "input"
+  // Sphere leaves omit classic .nb2-node-sub; Input/Filter/Formula still need a caption.
+  const sphereLeafCaption =
+    sphere &&
+    (node.type === "input" ||
+      node.type === "filter" ||
+      node.type === "formula")
       ? getNodeCardSummary(node, incomingEdges as NbEdge[])
       : null;
+  const sphereLeafCaptionTestId =
+    node.type === "input"
+      ? "nodeflow-input-table"
+      : node.type === "filter"
+        ? "nodeflow-filter-condition"
+        : node.type === "formula"
+          ? "nodeflow-formula-expression"
+          : null;
   return (
     <CanvasNodeFrameView
       node={node}
@@ -500,13 +544,13 @@ function NodeFlowCanvasCardImpl({
                   </button>
                 )}
               </div>
-              {inputTableCaption != null && (
+              {sphereLeafCaption != null && sphereLeafCaptionTestId && (
                 <div
                   className="nb2-sphere-caption"
-                  data-testid="nodeflow-input-table"
-                  title={inputTableCaption}
+                  data-testid={sphereLeafCaptionTestId}
+                  title={sphereLeafCaption}
                 >
-                  {inputTableCaption}
+                  {sphereLeafCaption}
                 </div>
               )}
               {underBody && (
@@ -734,9 +778,9 @@ function NodeFlowCanvasCardImpl({
               // Sphere: classic top-edge ports (iterator vars) join the left rim fan.
               .filter((port) => sphere || !isTopInput(node.type, port))
               .map((port, index, leftPorts) => {
-                const mark = inputPortMark(port);
+                const mark = portArrowMark(port);
                 const label =
-                  node.type === "union"
+                  node.type === "union" || node.type === "sql"
                     ? incomingCount > 0
                       ? `stack inputs (${incomingCount}/10)`
                       : "stack inputs"
@@ -747,11 +791,11 @@ function NodeFlowCanvasCardImpl({
                 const portTitle =
                   port === "vars"
                     ? "Wire a table here — its rows drive the loop (one pass per row, columns bound as ${vars})"
-                    : mark
-                      ? mark === "L"
-                        ? "Left input"
-                        : "Right input"
-                      : label || port;
+                    : mark === "L"
+                      ? "Left input"
+                      : mark === "R"
+                        ? "Right input"
+                        : label || port;
                 return (
                   <div
                     key={`i${port}`}
@@ -776,13 +820,7 @@ function NodeFlowCanvasCardImpl({
                     onPointerLeave={() => actions.setHoveredInput(node.id, null)}
                     title={portTitle}
                   >
-                    <span className="nb2-dot">
-                      {mark && (
-                        <span className="nb2-dot-mark" aria-hidden>
-                          {mark}
-                        </span>
-                      )}
-                    </span>
+                    <PortArrow mark={mark} />
                     {!sphere && label && (
                       <span className="nb2-port-lbl in">{label}</span>
                     )}
@@ -805,21 +843,37 @@ function NodeFlowCanvasCardImpl({
                   <span className="nb2-port-lbl top">
                     {PORT_LABEL[port] || port}
                   </span>
-                  <span className="nb2-dot down" />
+                  <PortArrow down />
                 </div>
               ))}
 
             {ports.outputs.map((port, index, outs) => {
+              const mark = portArrowMark(port);
               const label = sidePortLabel(port);
               const pos = sphere
                 ? spherePortOffset(node, "out", index, outs.length)
                 : null;
+              const markTitle =
+                mark === "T"
+                  ? "True"
+                  : mark === "F"
+                    ? "False"
+                    : mark === "L"
+                      ? "Only left"
+                      : mark === "R"
+                        ? "Only right"
+                        : null;
+              // out-std + data-out-tone: every non-False out is green.
+              const isFalseOut = port === "false";
               return (
                 <div
                   key={`o${port}`}
                   className={
-                    `nb2-port out ${port}` + (sphere ? " sphere-port" : "")
+                    `nb2-port out ${port}` +
+                    (isFalseOut ? "" : " out-std") +
+                    (sphere ? " sphere-port" : "")
                   }
+                  data-out-tone={isFalseOut ? "error" : "accent"}
                   style={
                     pos
                       ? { left: pos.left, top: pos.top }
@@ -827,15 +881,15 @@ function NodeFlowCanvasCardImpl({
                   }
                   onPointerDown={(event) => actions.startWire(event, node, port)}
                   title={
-                    label
-                      ? `${label} — drag to an input to connect · click to preview`
+                    label || markTitle
+                      ? `${label || markTitle} — drag to an input to connect · click to preview`
                       : "Drag to an input to connect · click to preview this output"
                   }
                 >
                   {!sphere && label && (
                     <span className="nb2-port-lbl out">{label}</span>
                   )}
-                  <span className="nb2-dot" />
+                  <PortArrow mark={mark} />
                 </div>
               );
             })}

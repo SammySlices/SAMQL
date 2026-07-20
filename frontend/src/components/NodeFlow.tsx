@@ -421,6 +421,7 @@ export const NodeFlow: React.FC<{
     doRunWhile,
     doCreateTable,
     doPreview,
+    patchNode,
     outputKind,
     IMAGE_FORMATS_CHART,
     IMAGE_FORMATS_DASH,
@@ -476,7 +477,7 @@ export const NodeFlow: React.FC<{
     setSelectedIds: setSelIds,
     setSelectedEdge: setSelEdge,
     moveNodeIntoGroup,
-    patchNode: patch,
+    patchNode,
     onToast,
     snap,
     onInspectorOpen: () => onSelectionChange?.(true),
@@ -527,7 +528,7 @@ export const NodeFlow: React.FC<{
   // and execution-controller implementation.
   const sceneAddNodeAt = useStableEvent(addNodeAt);
   const sceneGroupAddChild = useStableEvent(groupAddChild);
-  const scenePatchNode = useStableEvent(patch);
+  const scenePatchNode = useStableEvent(patchNode);
   const sceneEnsureChartFor = useStableEvent(ensureChartFor);
   const sceneUpstreamChartNode = useStableEvent(upstreamChartNode);
   const sceneSetDashboardPane = useStableEvent(setDashPane);
@@ -652,7 +653,7 @@ export const NodeFlow: React.FC<{
           graphForApi={graphForApi}
           childCtx={childCtx}
           partialGroupGraph={partialGroupGraph}
-          patch={patch}
+          patch={patchNode}
           showTables={showTables}
           inspectorHost={inspectorHost}
           onSelectionChange={onSelectionChange}
@@ -711,13 +712,13 @@ export const NodeFlow: React.FC<{
           onClose={() => setBrowseFolder(false)}
           onPick={(dir) => {
             if (sel.type === "directory") {
-              patch(sel.id, { folder: dir, file: "", path: "", table: "", columns: [] });
+              patchNode(sel.id, { folder: dir, file: "", path: "", table: "", columns: [] });
               void loadDirList(dir);
             } else if (sel.type === "appendfolder") {
-              patch(sel.id, { folder: dir, table: "", columns: [], files: 0 });
+              patchNode(sel.id, { folder: dir, table: "", columns: [], files: 0 });
               void doReadFolder(sel, dir);
             } else {
-              patch(sel.id, { folder: dir });
+              patchNode(sel.id, { folder: dir });
             }
             setBrowseFolder(false);
           }}

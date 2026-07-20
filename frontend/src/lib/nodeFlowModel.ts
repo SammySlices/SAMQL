@@ -140,7 +140,13 @@ export const PORTS: Record<NodeType, { inputs: string[]; outputs: string[] }> = 
   webscrape: { inputs: [], outputs: ["out"] },
   iterator: { inputs: ["vars", "in"], outputs: ["out"] },
   while: { inputs: ["in"], outputs: [] },
-  sql: { inputs: ["in"], outputs: ["out"] },
+  // Cap 10 — same stacked multi-input hard cap as Union.
+  // Legacy port "in" is remapped to in1 on load (v4 migration).
+  sql: {
+    inputs: ["in1", "in2", "in3", "in4", "in5",
+             "in6", "in7", "in8", "in9", "in10"],
+    outputs: ["out"],
+  },
   python: { inputs: ["in"], outputs: ["out"] },
   group: { inputs: ["in", "in2", "in3", "in4", "in5"], outputs: ["out"] },
   write: { inputs: ["in"], outputs: ["out"] },
@@ -188,21 +194,37 @@ export const PORT_LABEL: Record<string, string> = {
   vars: "values",
 };
 
+/** Letter drawn inside a port arrow (join L/R, Filter T/F, …). */
+export type PortArrowMark = "L" | "R" | "T" | "F";
+
+/**
+ * Letter drawn inside an input or output arrow.
+ * Join: L/R on left/right inputs and left_only/right_only outs.
+ * Filter: T on true, F on false.
+ */
+export function portArrowMark(port: string): PortArrowMark | null {
+  if (port === "left" || port === "left_only") return "L";
+  if (port === "right" || port === "right_only") return "R";
+  if (port === "true") return "T";
+  if (port === "false") return "F";
+  return null;
+}
+
 /** Letter drawn inside a left/right input arrow (join, reconcile, …). */
 export function inputPortMark(port: string): "L" | "R" | null {
-  if (port === "left") return "L";
-  if (port === "right") return "R";
-  return null;
+  const mark = portArrowMark(port);
+  return mark === "L" || mark === "R" ? mark : null;
 }
 
 /**
  * Side-port caption next to the arrow. Plain in/out (and numbered inN/outN)
- * and left/right are suppressed — left/right use {@link inputPortMark} instead.
- * Semantic captions (True/False, only L, inner, errors, …) still show.
+ * and left/right / True/False are suppressed — those use {@link portArrowMark}.
+ * Other semantic captions (only L, inner, errors, …) still show.
  */
 export function sidePortLabel(port: string): string | null {
   if (port === "in" || port === "out") return null;
   if (port === "left" || port === "right") return null;
+  if (port === "true" || port === "false") return null;
   if (/^in\d+$/.test(port) || /^out\d+$/.test(port)) return null;
   return PORT_LABEL[port] || port;
 }
@@ -252,9 +274,72 @@ export function migrateJoinEdges(nodes: any[], edges: any[]): any[] {
   );
 }
 
+/**
+ * Unify former SQL Join (`sqljoin`) into SQL (`sql`), and remap legacy
+ * single-input port `in` → `in1`. Walks nested group/iterator children and
+ * Created-node inner graphs.
+ */
+export function migrateSqlNodesAndEdges(
+  nodes: any[],
+  edges: any[],
+): { nodes: any[]; edges: any[] } {
+  const mapNode = (n: any): any => {
+    if (!n || typeof n !== "object") return n;
+    let next = n;
+    if (n.type === "sqljoin") {
+      const cfg =
+        n.config && typeof n.config === "object" ? { ...n.config } : {};
+      const lab = String(cfg.label || "").trim().toLowerCase();
+      if (!lab || lab === "sql join") cfg.label = "sql";
+      next = { ...n, type: "sql", config: cfg };
+    }
+    const cfg = next.config;
+    if (cfg && typeof cfg === "object") {
+      let touched = false;
+      let config = cfg;
+      if (Array.isArray(cfg.children)) {
+        config = { ...config, children: cfg.children.map(mapNode) };
+        touched = true;
+      }
+      if (cfg.graph && typeof cfg.graph === "object") {
+        const inner = migrateSqlNodesAndEdges(
+          Array.isArray(cfg.graph.nodes) ? cfg.graph.nodes : [],
+          Array.isArray(cfg.graph.edges) ? cfg.graph.edges : [],
+        );
+        config = {
+          ...config,
+          graph: { ...cfg.graph, nodes: inner.nodes, edges: inner.edges },
+        };
+        touched = true;
+      }
+      if (touched) next = { ...next, config };
+    }
+    return next;
+  };
+  const mappedNodes = (nodes || []).map(mapNode);
+  const sqlIds = new Set<string>();
+  const collect = (list: any[]) => {
+    for (const n of list || []) {
+      if (!n) continue;
+      if (n.type === "sql") sqlIds.add(n.id);
+      const ch = n.config?.children;
+      if (Array.isArray(ch)) collect(ch);
+      const g = n.config?.graph;
+      if (g && Array.isArray(g.nodes)) collect(g.nodes);
+    }
+  };
+  collect(mappedNodes);
+  const mappedEdges = (edges || []).map((e) =>
+    e && e.to && sqlIds.has(e.to.node) && e.to.port === "in"
+      ? { ...e, to: { ...e.to, port: "in1" } }
+      : e,
+  );
+  return { nodes: mappedNodes, edges: mappedEdges };
+}
+
 export const NODEFLOW_FILE_FORMAT = "samql-nodeflow";
 export const LEGACY_NODEFLOW_FILE_FORMAT = "samql-nodebook";
-export const NODEFLOW_FILE_VERSION = 3;
+export const NODEFLOW_FILE_VERSION = 4;
 export const NODEFLOW_TABS_VERSION = 3;
 
 export interface NodeFlowGraphFile {
@@ -290,6 +375,13 @@ const GRAPH_MIGRATIONS = {
     return { ...raw, format: LEGACY_NODEFLOW_FILE_FORMAT, version: 2, nodes, edges };
   },
   2: (raw: any) => ({ ...raw, format: NODEFLOW_FILE_FORMAT, version: 3 }),
+  3: (raw: any) => {
+    const { nodes, edges } = migrateSqlNodesAndEdges(
+      Array.isArray(raw?.nodes) ? raw.nodes : [],
+      Array.isArray(raw?.edges) ? raw.edges : [],
+    );
+    return { ...raw, format: NODEFLOW_FILE_FORMAT, version: 4, nodes, edges };
+  },
 };
 
 function validateNodeFlowGraphFile(value: any): asserts value is NodeFlowGraphFile {
@@ -854,9 +946,9 @@ export function nodeHeight(n: NbNode) {
       return base + bodyH(SQL_BODY_H, densify(SQL_BODY_H_MAX));
     }
     const src =
-      n.type === "sql"
-        ? String(n.config.sql || "")
-        : String(n.config.code || "");
+      n.type === "python"
+        ? String(n.config.code || "")
+        : String(n.config.sql || "");
     const lines = src.split("\n").reduce(
       (acc, ln) => acc + Math.max(1, Math.ceil(ln.length / 42)),
       0,
@@ -925,7 +1017,8 @@ export function visibleInputCount(n: NbNode, edges: NbEdge[]): number {
   // .551: UNION shows ONE input triangle that accepts up to 10 stacked
   // connections. The 10 in1..in10 ports are backing slots; each new wire
   // auto-routes to the next free one, but only a single arrow is drawn.
-  if (n.type === "union") return 1;
+  // SQL uses the same stacked multi-input pattern as Union.
+  if (n.type === "union" || n.type === "sql") return 1;
   if (n.type === "usernode") return Math.max(arr.length, 0);
   if (n.type !== "group") return arr.length;
   let maxIdx = -1;

@@ -277,11 +277,17 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   },
   sql: {
     title: "SQL",
-    what: "Runs any SQL against the upstream input(s) and passes the result on.",
-    use: "Reference an input as a table by its port; the result becomes this node's output.",
+    what: "Free-form read-only SQL: optional stacked table inputs, named JOINs/CTEs, or catalog queries with no wires.",
+    use: "Wire Input (or transform) nodes into the stacked inputs and reference each by the Input node's table name — e.g. FROM orders LEFT JOIN customers ON …. Or use input / {{in}} for the first wire. Leave unwired to query loaded catalog tables. Autocomplete uses upstream field names. DDL/DML is blocked.",
     funcs: {
       label: "Uses your engine's full SQL (DuckDB / SQLite)",
-      items: ["SELECT / WHERE / GROUP BY / ORDER BY", "JOINs and CTEs (WITH …)", "window functions (OVER …)", "all built-in scalar + aggregate functions"],
+      items: [
+        "Up to 10 stacked table inputs (same cap as Union)",
+        "Table names = Input node table names (fallback t1…tN)",
+        "Legacy input / {{in}} for the first wired table",
+        "SELECT / JOIN / WITH (CTE); catalog queries with no inputs",
+        "Preview and Run-all on the out port",
+      ],
     },
   },
   python: {
