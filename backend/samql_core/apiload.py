@@ -121,13 +121,19 @@ class FetchCancelled(Exception):
 
 
 def fetch_json(url, auth_user=None, auth_pass=None, timeout=60,
-               max_bytes=512 * 1024 * 1024, headers=None):
+               max_bytes=512 * 1024 * 1024, headers=None, should_cancel=None):
     """Fetch and parse JSON from ``url``. Returns
     (status, content_type, data, text, error_str). Only http(s) URLs are
     allowed, private/link-local targets are blocked by default, and the
     response is capped at ``max_bytes`` so a huge or hostile endpoint can't
     exhaust memory. ``headers`` is an optional dict of extra request headers
-    (e.g. an API-key header)."""
+    (e.g. an API-key header).
+
+    ``should_cancel`` (optional, a no-arg predicate) is polled while the body
+    is read in chunks, so a Stop aborts a single huge response promptly instead
+    of waiting for the whole page to arrive or the socket timeout to fire. It
+    raises ``FetchCancelled``, which callers translate into a cancelled result.
+    """
     status, ctype, raw, error = None, "", b"", None
     try:
         validate_outbound_http_url(url, purpose="fetch")
@@ -158,8 +164,22 @@ def fetch_json(url, auth_user=None, auth_pass=None, timeout=60,
         try:
             status = getattr(resp, "status", None) or resp.getcode()
             ctype = resp.headers.get("Content-Type", "")
-            # read with a hard cap (+1 byte so we can detect an overrun)
-            raw = resp.read(max_bytes + 1)
+            # Read the body in bounded chunks (not one blocking .read of the
+            # whole page) so ``should_cancel`` is polled as it streams in --
+            # a Stop aborts a single huge response mid-download. Still capped at
+            # max_bytes (+1 byte so an overrun is detectable).
+            chunks = []
+            got = 0
+            limit = max_bytes + 1
+            while got < limit:
+                if should_cancel is not None and should_cancel():
+                    raise FetchCancelled()
+                buf = resp.read(min(1024 * 1024, limit - got))
+                if not buf:
+                    break
+                chunks.append(buf)
+                got += len(buf)
+            raw = b"".join(chunks)
             if len(raw) > max_bytes:
                 return (status, ctype, None, "",
                         "The response is larger than the %d MB limit; "
@@ -172,6 +192,10 @@ def fetch_json(url, auth_user=None, auth_pass=None, timeout=60,
                 pass
         if http_err is not None and not raw:
             raise http_err
+    except FetchCancelled:
+        # A Stop during the body read must surface as a cancel, not be
+        # flattened into a generic error string by the handler below.
+        raise
     except Exception as e:
         return None, "", None, "", f"{type(e).__name__}: {e}"
 
@@ -443,13 +467,21 @@ def _not_json_error(status, ctype, snippet, empty=False):
 
 
 def preview_api(url, auth_user=None, auth_pass=None, params=None,
-                json_path=None, max_records=20):
+                json_path=None, max_records=20, should_cancel=None):
     """Fetch + walk an optional ``json_path`` and return a JSON *sample*
     without loading anything into an engine. Returns
-    {ok, status, url, count, shown, truncated, sample, error}."""
+    {ok, status, url, count, shown, truncated, sample, error}.
+
+    ``should_cancel`` makes a slow preview interruptible by Stop: it is polled
+    while the response body streams in, and a cancel returns
+    ``{ok: False, cancelled: True}``."""
     full_url = build_url(url, params)
-    status, ctype, data, text, error = fetch_json(
-        full_url, auth_user, auth_pass)
+    try:
+        status, ctype, data, text, error = fetch_json(
+            full_url, auth_user, auth_pass, should_cancel=should_cancel)
+    except FetchCancelled:
+        return {"ok": False, "cancelled": True, "error": "cancelled",
+                "url": full_url}
     if error:
         return {"ok": False, "status": status, "error": error,
                 "url": full_url}

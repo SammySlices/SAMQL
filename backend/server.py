@@ -3667,11 +3667,13 @@ class Api:
         sk = b.get("secret_key")
         if not pwd and sk:
             pwd = s.secrets.get(sk)
+        _REQ_LOCAL.qid = b.get("query_id")
         return s.preview_api(b.get("url", ""),
                              auth_user=b.get("auth_user"),
                              auth_pass=pwd,
                              json_path=b.get("json_path"),
-                             params=b.get("params"))
+                             params=b.get("params"),
+                             query_id=b.get("query_id"))
 
     # ---- saved secrets (DPAPI-encrypted passwords) -----------------
     @staticmethod
@@ -3843,7 +3845,7 @@ class Api:
                "records": 0, "tables_done": 0, "tables_total": 0,
                "detail": "", "name": os.path.basename(src),
                "started": time.time(), "result": None, "error": None,
-               "cancel": False}
+               "query_id": job_id, "cancel": False}
         with JOBS_LOCK:
             for k, v in list(JOBS.items()):
                 if v.get("done_at") and time.time() - v["done_at"] > 300:
@@ -3852,6 +3854,18 @@ class Api:
 
         def run():
             job["state"] = "running"
+            # Register this file->file flatten in the shared run registry so a
+            # global Stop and (unlike before) an engine reset -- which flags
+            # every in-flight run id -- reach it. It runs no engine statement,
+            # so interrupt_loads can't stop it; the entry carries no engine, so
+            # the run-id interrupt is a safe no-op and the worker cancels
+            # cooperatively via _run_is_cancelled below.
+            try:
+                with s._running_lock:
+                    s._running[job_id] = {"engine": None,
+                                          "tid": threading.get_ident()}
+            except Exception:
+                pass
 
             def prog(info):
                 st = info.get("stage")
@@ -3862,10 +3876,18 @@ class Api:
                     if k in info:
                         job[k] = info[k]
 
+            def _cancelled():
+                if job.get("cancel"):
+                    return True
+                try:
+                    return s._run_is_cancelled(job_id)
+                except Exception:
+                    return False
+
             try:
                 res = s.flatten_json_to_csv_dir(
                     src, out_dir, base_name, progress=prog,
-                    cancel=lambda: bool(job.get("cancel")))
+                    cancel=_cancelled)
                 if res.get("error"):
                     _fail_job(job, res["error"])
                 else:
@@ -3876,13 +3898,19 @@ class Api:
                 job["state"] = "cancelled"
                 job["stage"] = "cancelled"
             except Exception as e:
-                if job.get("cancel"):
+                if _cancelled():
                     job["state"] = "cancelled"
                     job["stage"] = "cancelled"
                 else:
                     _fail_job(job, err_str(e))
             finally:
                 job["done_at"] = time.time()
+                try:
+                    with s._running_lock:
+                        s._running.pop(job_id, None)
+                        s._cancelled_runs.discard(job_id)
+                except Exception:
+                    pass
 
         threading.Thread(target=run, daemon=True).start()
         return {"job_id": job_id, "bytes_total": total, "name": job["name"]}

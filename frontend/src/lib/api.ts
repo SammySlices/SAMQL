@@ -880,14 +880,18 @@ export const api = {
       signal,
     }),
 
-  apiPreview: (body: {
-    url: string;
-    auth_user?: string;
-    auth_pass?: string;
-    json_path?: string;
-    params?: Record<string, string>;
-    secret_key?: string;
-  }) =>
+  apiPreview: (
+    body: {
+      url: string;
+      auth_user?: string;
+      auth_pass?: string;
+      json_path?: string;
+      params?: Record<string, string>;
+      secret_key?: string;
+    },
+    queryId?: string,
+    signal?: AbortSignal,
+  ) =>
     jsonFetch<{
       ok: boolean;
       status?: number;
@@ -897,7 +901,12 @@ export const api = {
       truncated?: boolean;
       sample?: string;
       error?: string;
-    }>("/api/api-preview", { method: "POST", body: JSON.stringify(body) }),
+      cancelled?: boolean;
+    }>("/api/api-preview", {
+      method: "POST",
+      body: JSON.stringify({ ...body, query_id: queryId }),
+      signal,
+    }),
 
   nodeApiFetch: (
     body: {

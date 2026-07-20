@@ -101,6 +101,12 @@ const ChartPanelImpl: React.FC<Props> = ({
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const inflight = useRef<{ qid: string; ctrl: AbortController } | null>(null);
+  // onExpired is often a fresh closure each parent render. Hold it in a ref so
+  // the data-fetch effect below doesn't cancel + re-issue the chart aggregate
+  // just because the callback identity changed (matches how PivotPanel keys its
+  // effect on the spec alone). See the memo note at the bottom of this file.
+  const onExpiredRef = useRef(onExpired);
+  onExpiredRef.current = onExpired;
   const cancelInflight = useCallback(() => {
     const cur = inflight.current;
     if (!cur) return;
@@ -179,7 +185,7 @@ const ChartPanelImpl: React.FC<Props> = ({
           }
           setErr(d.error);
           setData(null);
-          if (d.error === "result expired") onExpired?.();
+          if (d.error === "result expired") onExpiredRef.current?.();
         } else setData(d);
       })
       .catch((e) => {
@@ -196,8 +202,10 @@ const ChartPanelImpl: React.FC<Props> = ({
     return () => {
       cancelInflight();
     };
+    // onExpired is intentionally omitted: it is read through onExpiredRef so a
+    // new callback identity never forces a needless cancel + refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resultId, type, x, y, agg, bins, cOpen, cHigh, cLow, cClose, x2, y2, onExpired]);
+  }, [resultId, type, x, y, agg, bins, cOpen, cHigh, cLow, cClose, x2, y2]);
 
   const needsY = type !== "histogram" && type !== "candlestick";
   const isCandle = type === "candlestick";

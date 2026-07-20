@@ -187,14 +187,31 @@ export const ApiLoadTab: React.FC<{
       return;
     }
     setBusy(true);
+    // Preview a slow endpoint used to be uninterruptible. Give it the same
+    // run id + abort handle as the real load so Stop / window-close cancels it.
+    const queryId =
+      "apipreview_" +
+      Date.now().toString(36) +
+      Math.random().toString(36).slice(2, 8);
+    const ctrl = new AbortController();
+    registerRun(queryId, ctrl);
+    if (cancelRef)
+      cancelRef.current = () => {
+        cancelOne(queryId, ctrl);
+      };
     try {
-      const r = await api.apiPreview({
-        url: composedUrl,
-        auth_user: user || undefined,
-        auth_pass: pass || undefined,
-        json_path: jsonPath.trim() || undefined,
-        secret_key: secretKey || undefined,
-      });
+      const r = await api.apiPreview(
+        {
+          url: composedUrl,
+          auth_user: user || undefined,
+          auth_pass: pass || undefined,
+          json_path: jsonPath.trim() || undefined,
+          secret_key: secretKey || undefined,
+        },
+        queryId,
+        ctrl.signal,
+      );
+      if ((r as any).cancelled) return;
       if (!r.ok) {
         onError(r.error || "Fetch failed.");
         setSample(null);
@@ -208,8 +225,11 @@ export const ApiLoadTab: React.FC<{
         truncated: !!r.truncated,
       });
     } catch (e: any) {
+      if (isCancelledError(e, queryId)) return;
       onError(e.message || String(e));
     } finally {
+      unregisterRun(queryId, ctrl);
+      if (cancelRef) cancelRef.current = null;
       setBusy(false);
     }
   };

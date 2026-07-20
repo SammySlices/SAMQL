@@ -4494,7 +4494,8 @@ class Session:
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
-            tmp = self._materialize_flow(graph, sn, sp, et, created)
+            tmp = self._materialize_flow(graph, sn, sp, et, created,
+                                         query_id=query_id)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -4523,7 +4524,8 @@ class Session:
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
-            tmp = self._materialize_flow(graph, sn, sp, et, created)
+            tmp = self._materialize_flow(graph, sn, sp, et, created,
+                                         query_id=query_id)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -4601,7 +4603,8 @@ class Session:
             self._register_run(
                 query_id, eng0, surface="node",
                 label=self._flow_node_label(graph, node_id))
-            tmp = self._materialize_flow(graph, sn, sp, et, created)
+            tmp = self._materialize_flow(graph, sn, sp, et, created,
+                                         query_id=query_id)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -4636,8 +4639,10 @@ class Session:
             self._register_run(
                 query_id, eng0, surface="node",
                 label=self._flow_node_label(graph, node_id))
-            ltmp = self._materialize_flow(graph, ls[0], ls[1], et, created)
-            rtmp = self._materialize_flow(graph, rs[0], rs[1], et, created)
+            ltmp = self._materialize_flow(graph, ls[0], ls[1], et, created,
+                                          query_id=query_id)
+            rtmp = self._materialize_flow(graph, rs[0], rs[1], et, created,
+                                          query_id=query_id)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -4791,7 +4796,7 @@ class Session:
         return [g[0] for g in groups]
 
     def _parallel_flow_groups(self, graph, targets, engine_target, collect,
-                              target_limits):
+                              target_limits, query_id=None):
         """Build independent DuckDB target groups on separate connections."""
         if (engine_target != DUCKDB_TARGET or not self.parallel_nodeflows
                 or len(targets) < 2):
@@ -4847,7 +4852,8 @@ class Session:
                 out = self._materialize_flows(
                     graph, group, engine_target, local_names,
                     target_limits=limits, _allow_parallel=False,
-                    _engine_override=branch, _persistent_tables=True)
+                    _engine_override=branch, _persistent_tables=True,
+                    query_id=query_id)
                 return out, local_names
             except Exception:
                 # A failed worker never reaches the parent's completed-name
@@ -4878,7 +4884,7 @@ class Session:
     def _materialize_flows(self, graph, targets, engine_target,
                            collect=None, target_limits=None,
                            _allow_parallel=True, _engine_override=None,
-                           _persistent_tables=False):
+                           _persistent_tables=False, query_id=None):
         """Build every (node_id, port) in ``targets`` and everything upstream
         of them on ``engine_target`` in ONE pass, returning
         ``{(node_id, port): temp_table_name}``.
@@ -4901,7 +4907,8 @@ class Session:
         target_limits = target_limits or {}
         if _allow_parallel and _engine_override is None:
             parallel = self._parallel_flow_groups(
-                graph, targets, engine_target, collect, target_limits)
+                graph, targets, engine_target, collect, target_limits,
+                query_id=query_id)
             if parallel is not None:
                 return parallel
         # resolve ${name} workflow-variable tokens once, up front: everything
@@ -4929,7 +4936,7 @@ class Session:
         # compile so Dashboard / Run all work with a saved profile + password
         # without a prior interactive Fetch.
         self._ensure_source_nodes_fetched(
-            graph, [nid for nid, _port in targets], query_id=None)
+            graph, [nid for nid, _port in targets], query_id=query_id)
         # SHRED nodes create their relational tables before anything composes
         self._shred_flow_prepass(graph, targets)
         import re as _re
@@ -5331,16 +5338,20 @@ class Session:
                 raise nodeflow.NodeflowError("cancelled")
 
     def _materialize_flow(self, graph, node_id, port, engine_target,
-                          collect=None, row_limit=None):
+                          collect=None, row_limit=None, query_id=None):
         """Single-target convenience wrapper over :meth:`_materialize_flows`.
 
         ``row_limit`` is used by fast previews: only the terminal relation is
         capped, while reusable upstream cache checkpoints stay complete.
+
+        ``query_id`` is the owning run's id so an external source fetch that
+        happens during the build (SQL Server / SharePoint / Web scrape) is
+        registered under the run and Stop can actually cancel it.
         """
         limits = {(node_id, port): row_limit} if row_limit else None
         out = self._materialize_flows(
             graph, [(node_id, port)], engine_target, collect,
-            target_limits=limits)
+            target_limits=limits, query_id=query_id)
         return out[(node_id, port)]
 
     def _flow_cleanup(self, query_id, engine_target, names):
@@ -5763,7 +5774,7 @@ class Session:
                 label=self._flow_node_label(graph, node_id))
             tmp = self._materialize_flow(
                 graph, node_id, port, et, created,
-                row_limit=preview_limit)
+                row_limit=preview_limit, query_id=query_id)
         except nodeflow.NodeflowError as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_err(e, graph)
@@ -5833,7 +5844,8 @@ class Session:
                 query_id, eng, surface="node",
                 label="NodeFlow batch (%d branches)" % len(norm))
             built = self._materialize_flows(
-                graph, norm, et, created, target_limits=limits)
+                graph, norm, et, created, target_limits=limits,
+                query_id=query_id)
             results = []
             for nid, port in norm:
                 if self._run_is_cancelled(query_id):
@@ -6043,7 +6055,8 @@ class Session:
             self._register_run(
                 query_id, eng, kind="export", surface="node",
                 label=self._flow_node_label(graph, node_id))
-            tmp = self._materialize_flow(graph, node_id, "out", et, created)
+            tmp = self._materialize_flow(graph, node_id, "out", et, created,
+                                         query_id=query_id)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -6115,7 +6128,8 @@ class Session:
                 query_id, eng, surface="node",
                 label="export (%d)" % len(items or []))
             targets = [(it["node_id"], "out") for it in norm]
-            built = self._materialize_flows(graph, targets, et, created)
+            built = self._materialize_flows(graph, targets, et, created,
+                                            query_id=query_id)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -6459,7 +6473,8 @@ class Session:
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
-            tmp = self._materialize_flow(graph, node_id, "out", et, created)
+            tmp = self._materialize_flow(graph, node_id, "out", et, created,
+                                         query_id=query_id)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -6811,7 +6826,7 @@ class Session:
             if vn is not None:
                 values = self._materialize_var_rows(
                     graph, vn, vp, distinct=bool(cfg.get("vars_distinct")),
-                    cap=max_passes)
+                    cap=max_passes, query_id=query_id)
                 note = None
                 if not values:
                     return {"error": "The values input produced no rows to "
@@ -6872,7 +6887,8 @@ class Session:
                             "err_table": fr.get("err_table")})
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
-                    tmp = self._materialize_flow(rg, bn, bp, et, created)
+                    tmp = self._materialize_flow(rg, bn, bp, et, created,
+                                                 query_id=query_id)
                     mode = "overwrite" if (first and reset_first) else "append"
                     self._write_into_table(eng, accum, tmp, mode, replace_keys)
                     if accumulate == "reduce":
@@ -6923,18 +6939,20 @@ class Session:
                 "all": self.tables_tree()}
 
     def _materialize_var_rows(self, graph, node, port, distinct=False,
-                              cap=1000):
+                              cap=1000, query_id=None):
         """Materialise the iterator's wired "variables" input once and read its
         rows as per-pass scalar bindings -- one dict per row keyed by column
         name. Each row drives one pass with its columns bound as ${vars}. Reads
         at most cap+1 rows so the pass cap is detectable without pulling a huge
-        table into memory."""
+        table into memory. ``query_id`` ties any source fetch in that input to
+        the owning run so Stop can cancel it."""
         rg = applyvars.resolve_graph(graph)
         et = self._flow_engine_target(rg)
         eng, _kind = self._engine_obj(et)
         created = []
         try:
-            tmp = self._materialize_flow(rg, node, port, et, created)
+            tmp = self._materialize_flow(rg, node, port, et, created,
+                                         query_id=query_id)
             try:
                 lim = max(1, min(int(cap or 1000), 100000))
             except (TypeError, ValueError):
@@ -7023,7 +7041,7 @@ class Session:
             try:
                 var_rows = self._materialize_var_rows(
                     graph, vn, vp, distinct=bool(cfg.get("vars_distinct")),
-                    cap=max_passes)
+                    cap=max_passes, query_id=query_id)
             except nodeflow.NodeflowError as e:
                 return {"error": str(e)}
             except Exception as e:
@@ -7133,7 +7151,8 @@ class Session:
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
                     tmp = self._materialize_flow(
-                        rg, "__iter_body", "out", et, created)
+                        rg, "__iter_body", "out", et, created,
+                        query_id=query_id)
                     mode = "overwrite" if (first and reset_first) else "append"
                     self._write_into_table(eng, accum, tmp, mode, replace_keys)
                     if accumulate == "reduce":
@@ -7263,7 +7282,8 @@ class Session:
                             "err_table": fr.get("err_table")})
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
-                    tmp = self._materialize_flow(rg, bn, bp, et, created)
+                    tmp = self._materialize_flow(rg, bn, bp, et, created,
+                                                 query_id=query_id)
                     mode = "overwrite" if (first and reset_first) else "append"
                     before = 0
                     if not (first and reset_first):
@@ -8644,13 +8664,21 @@ class Session:
         ``DuckDBManager.interrupt`` sets ``_cancel`` and never clears it.
         ``_BeatDaemon`` then re-interrupts every subsequent statement while the
         flag stays set -- so a cancelled load made the next right-click Profile
-        (and other dashboard reads) auto-cancel. Clear only when no other run
-        is still in flight (a live cancel may still need BeatDaemon nudges).
+        (and other dashboard reads) auto-cancel.
+
+        A flag is preserved only for an engine that ANOTHER in-flight run still
+        targets (its cancel may need BeatDaemon nudges). Previously any other
+        run at all -- even one on the *other* engine -- blocked the clear, so a
+        stale flag could linger under overlapping runs; now an unrelated engine
+        is cleared promptly. When another run's target can't be resolved to a
+        concrete engine we stay conservative and preserve every flag.
         """
         with self._running_lock:
-            others = [k for k in self._running if k != except_qid]
-            if others:
-                return
+            other_targets = [self._entry_engine(v)
+                             for k, v in self._running.items()
+                             if k != except_qid]
+        # An unresolved (None) target could be on any engine -> preserve all.
+        unresolved = any(t is None for t in other_targets)
         engines = []
         if eng is not None:
             engines.append(eng)
@@ -8659,12 +8687,25 @@ class Session:
         for e in engines:
             if e is None:
                 continue
+            if unresolved or any(t is e for t in other_targets):
+                continue
             try:
                 ev = getattr(e, "_cancel", None)
                 if ev is not None and ev.is_set():
                     ev.clear()
             except Exception:
                 pass
+
+    @staticmethod
+    def _entry_engine(entry):
+        """The manager engine a ``_running`` entry is bound to, for deciding
+        whose ``_cancel`` Event is safe to clear. Only the ``{engine, tid}``
+        registration cleanly identifies a manager; a per-run cursor handle or a
+        bare handle can't be mapped to one here, so return None and let the
+        caller stay conservative (preserve every flag)."""
+        if isinstance(entry, dict):
+            return entry.get("engine")
+        return None
 
     def interrupt_loads(self):
         """Best-effort interrupt of any engine work currently in flight, used
@@ -14621,10 +14662,24 @@ class Session:
         return res
 
     def preview_api(self, url, auth_user=None, auth_pass=None,
-                    json_path=None, params=None):
+                    json_path=None, params=None, query_id=None):
         from .apiload import preview_api as _preview_api
-        return _preview_api(url, auth_user=auth_user, auth_pass=auth_pass,
-                            json_path=json_path, params=params)
+        # Make the API preview interruptible by Stop / window-close, exactly
+        # like load_api: the fetch isn't an engine statement, so it polls this
+        # cooperative flag while the response body streams in.
+        should = ((lambda: self._run_is_cancelled(query_id))
+                  if query_id else None)
+        if query_id:
+            self._register_run(query_id, None, kind="fetch", target="preview")
+        try:
+            if query_id and self._run_is_cancelled(query_id):
+                return {"ok": False, "cancelled": True, "error": "cancelled"}
+            return _preview_api(url, auth_user=auth_user, auth_pass=auth_pass,
+                                json_path=json_path, params=params,
+                                should_cancel=should)
+        finally:
+            if query_id:
+                self._end_run_keep_cancel(query_id)
 
     def import_from_connection(self, name, query, base_name="import",
                                destination="duckdb", query_id=None):
@@ -14652,6 +14707,17 @@ class Session:
         # cancel flag also stops the local-load phase via cancel_query's
         # interrupt-every-engine safety net. A query already executing on the
         # server may take a moment to actually stop, depending on the server.
+        #
+        # When this import runs INSIDE a NodeFlow build (a SQL Server source
+        # node on Dashboard / Run all), the run is already registered with the
+        # flow engine. We rebind it to the import engines below so Stop reaches
+        # the pull, then restore the outer binding in `finally` -- tearing it
+        # down would leave the rest of the build uncancellable.
+        prev_entry = None
+        if query_id:
+            with self._running_lock:
+                prev_entry = self._running.get(query_id)
+        nested = prev_entry is not None
         self._register_run(query_id, conn, kind="mssql", target=name)
         try:
             if self._run_is_cancelled(query_id):
@@ -14711,7 +14777,14 @@ class Session:
                 return {"cancelled": True}
             return {"error": str(e)}
         finally:
-            self._end_run_keep_cancel(query_id)
+            if nested:
+                # Restore the outer run's engine binding so the rest of the
+                # build stays cancellable; don't end its activity op.
+                with self._running_lock:
+                    if query_id in self._running:
+                        self._running[query_id] = prev_entry
+            else:
+                self._end_run_keep_cancel(query_id)
 
     def write_image(self, out_dir, base_name, fmt, data_url):
         """Write a chart/dashboard image (produced client-side by ECharts'
@@ -15281,11 +15354,16 @@ class Session:
         # Persist resolved secret_key so later runs find the OAuth blob.
         if auth.get("secret_key") and not (cfg.get("secret_key") or "").strip():
             cfg["secret_key"] = auth["secret_key"]
-        own_run = bool(query_id)
+        # Only own the run registration when this fetch is standalone (the
+        # interactive per-node Fetch). When it runs inside a Dashboard / Run all
+        # build the run is already registered with the flow engine, so we must
+        # NOT re-register or unregister it (that would erase the outer run's
+        # binding mid-build) -- but we still honor its cooperative cancel flag.
+        own_run = bool(query_id) and query_id not in self._running
         if own_run:
             self._register_run(query_id, None, kind="fetch", target="sharepoint")
         try:
-            if own_run and self._run_is_cancelled(query_id):
+            if query_id and self._run_is_cancelled(query_id):
                 return {"cancelled": True}
             if mode == "drive":
                 records, meta = _sp.browse_drive(
@@ -15435,11 +15513,14 @@ class Session:
             return {"error": "Give the Web scrape node a URL."}
         mode = (cfg.get("mode") or "tables").strip().lower()
         json_path = (cfg.get("json_path") or "").strip() or None
-        own_run = bool(query_id)
+        # Own the run only when standalone; when nested in a Dashboard / Run all
+        # build the outer run already holds the registration (see the note in
+        # fetch_sharepoint_node). Honor the cancel flag either way.
+        own_run = bool(query_id) and query_id not in self._running
         if own_run:
             self._register_run(query_id, None, kind="fetch", target="webscrape")
         try:
-            if own_run and self._run_is_cancelled(query_id):
+            if query_id and self._run_is_cancelled(query_id):
                 return {"cancelled": True}
             cols, rows, meta = _ws.scrape_to_columns_rows(
                 url,
