@@ -81,8 +81,7 @@ function isNumeric(v: Cell): boolean {
 function fmtCell(v: Cell): { text: string; cls: string } {
   if (v === null || v === undefined) return { text: "NULL", cls: "null" };
   if (typeof v === "number") {
-    const t = Number.isInteger(v) ? String(v) : String(v);
-    return { text: t, cls: "num" };
+    return { text: String(v), cls: "num" };
   }
   if (typeof v === "boolean") return { text: v ? "true" : "false", cls: "" };
   return { text: String(v), cls: "" };
@@ -600,8 +599,15 @@ const DataGridImpl: React.FC<Props> = ({
     if (copyingAll) return;
     const resultId = cellFetch?.resultId;
     const wanted = copyableRows;
-    // Everything already in memory: no round trip.
-    if (!resultId || rows.length >= wanted) {
+    // Fast path (copy the loaded rows) ONLY when the window still starts at row
+    // 0. The grid keeps a sliding window: once you scroll far enough it drops
+    // the oldest rows and rowBase (page.offset) moves past 0, so the loaded
+    // rows no longer begin at the top -- slicing them would copy from the
+    // middle while claiming to be the whole result. When the window has slid we
+    // fall through to the server refetch below (offset 0), which is correct.
+    // Without a resultId (NodeFlow inline previews) there's nothing to refetch,
+    // so use the loaded rows regardless.
+    if (!resultId || (rowBase === 0 && rows.length >= wanted)) {
       await copyText(buildTSVAll(rows.slice(0, wanted), withHeaders));
       return;
     }

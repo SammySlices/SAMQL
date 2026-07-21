@@ -35853,6 +35853,55 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_store_filter_sort_parity():
+        # A result is served by different stores depending on size (in-memory
+        # list vs spilled SQLite DiskBackedRows). They MUST filter and sort
+        # identically, or the same query returns different rows/order purely
+        # because it was bigger. Covers the three historical divergences:
+        # ne+NULL, numeric-vs-text comparison, and NULL sort placement.
+        from samql_core.session import _CachedResult
+        from samql_core.rows import DiskBackedRows
+        cols = ["v"]
+        data = [[5], [12], [3], ["7"], ["apple"], ["banana"], [None], [0],
+                [-2], ["10"]]
+
+        def rows_for(store, filters, sort_desc=None):
+            cr = _CachedResult("r", cols, store, len(data), "sql", "t", "e")
+            view, _ = cr.filtered_view(
+                filters, sort_col=("v" if sort_desc is not None else None),
+                descending=bool(sort_desc))
+            return [list(r) for r in view]
+
+        def mem(filters, sort_desc=None):
+            return rows_for([tuple(r) for r in data], filters, sort_desc)
+
+        def disk(filters, sort_desc=None):
+            st = DiskBackedRows(block=2)
+            st.extend([tuple(r) for r in data])
+            return rows_for(st, filters, sort_desc)
+
+        def key(rowlist):
+            return sorted(repr(r) for r in rowlist)
+
+        for f in ([{"column": "v", "op": "ne", "value": "5"}],
+                  [{"column": "v", "op": "gt", "value": "5"}],
+                  [{"column": "v", "op": "lte", "value": "5"}],
+                  [{"column": "v", "op": "equals", "value": "12"}],
+                  [{"column": "v", "op": "gt", "value": "apple"}],
+                  [{"column": "v", "op": "ne", "value": "apple"}]):
+            eq(key(mem(f)), key(disk(f)),
+               "in-memory and spilled stores must agree on filter %s" % f)
+        # ne excludes NULL (both stores), numeric strings compare numerically
+        eq(len(mem([{"column": "v", "op": "ne", "value": "5"}])), 8,
+           "ne must exclude the matching row AND NULL")
+        eq(len(mem([{"column": "v", "op": "gt", "value": "5"}])), 3,
+           "gt 5 matches 12, '7', '10' (numeric strings), not 'apple'")
+        # NULL sort placement identical (last ascending, first descending)
+        for desc in (False, True):
+            eq([r[0] for r in mem([], desc)], [r[0] for r in disk([], desc)],
+               "in-memory and spilled stores must sort identically (desc=%s)"
+               % desc)
+
     def t_progress_registry():
         # The heartbeat registry backs the dashboard and the watchdog. A bare
         # beat() (no id) must update the op running on the *calling thread*, so
@@ -40943,6 +40992,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_source_bundle_roundtrip),
         ("filter ops accept symbolic and word forms",
          t_filter_op_symbols),
+        ("result stores filter/sort identically (in-memory vs spilled)",
+         t_store_filter_sort_parity),
         ("JSON streaming parser", t_json_streaming_parser),
         ("JSON stream+spill equivalence", t_json_stream_spill_equiv),
         ("JSON NDJSON load (streamed)", t_json_load_ndjson),

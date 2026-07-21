@@ -466,8 +466,12 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
             f.op === "not_null" ||
             (f.op === "in" || f.op === "not_in"
               ? (f.values || []).length > 0
-              : (f.value ?? "") !== "" ||
-                (f.op === "between" && (f.value2 ?? "") !== "")),
+              : f.op === "between"
+                ? // a between needs BOTH bounds; a half-filled one used to be
+                  // dispatched with the other bound empty -> a wrong/unbounded
+                  // aggregate. Wait until both are set.
+                  (f.value ?? "") !== "" && (f.value2 ?? "") !== ""
+                : (f.value ?? "") !== ""),
         )
         .map((f) => ({
           field: f.field,
@@ -658,7 +662,6 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
   // "collapse to subtotal"); otherwise the representative shows blanked values
   // and a count of what is hidden. Only meaningful while rows are in dimension
   // order, so it is disabled when sorted by a value.
-  const TOTAL_MARKER = "Total";
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   useEffect(() => {
     setCollapsed(new Set());
@@ -668,13 +671,18 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
   // A row that is the subtotal totalling exactly the group collapsed at `lvl`:
   // the 'Total' marker sits in dimension `lvl` and every dimension after it is
   // blank -- the shape the backend emits for a ROLLUP subtotal at that level.
+  // This panel's pivot always comes from api.pivot (_pivot_inner), which does a
+  // plain GROUP BY and never emits ROLLUP "Total" subtotal rows. So matching a
+  // dimension value against the literal "Total" could only ever be a FALSE
+  // positive — a genuine innermost value of "Total" would be promoted as a
+  // group's subtotal and its siblings blanked, fabricating aggregates. With no
+  // real subtotal rows to find, detection is disabled; collapse falls back to
+  // the correct blanked-representative + hidden-count behaviour. (If backend
+  // ROLLUP subtotals are ever wired into this panel, drive this off an explicit
+  // per-row flag from the backend rather than string-matching the value.)
   const isGroupSubtotal = useCallback(
-    (r: Cell[], lvl: number) =>
-      lvl >= 1 &&
-      lvl < nDims &&
-      r[lvl] === TOTAL_MARKER &&
-      r.slice(lvl + 1, nDims).every((c) => c === ""),
-    [nDims],
+    (_r: Cell[], _lvl: number) => false,
+    [],
   );
   const toggleCollapse = (key: string) =>
     setCollapsed((prev) => {

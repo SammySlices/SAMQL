@@ -377,7 +377,9 @@ export function buildChartOption(data: ChartData): Record<string, any> {
     return {
       ...base,
       tooltip: { trigger: "axis", ...tooltip },
-      legend: { type: "scroll", bottom: 0, textStyle: { color: theme.axis } },
+      legend: (style.showLegend ?? true)
+        ? { type: "scroll", bottom: 0, textStyle: { color: theme.axis } }
+        : undefined,
       grid: { left: 8, right: 24, top: titleOpt ? 56 : 44, bottom: 56, containLabel: true },
       xAxis: [axis(labels, false, style.xLabel), axis(labels2, true)],
       yAxis: {
@@ -437,7 +439,9 @@ export function buildChartOption(data: ChartData): Record<string, any> {
     return {
       ...base,
       tooltip: { trigger: "axis", ...tooltip },
-      legend: { type: "scroll", bottom: 0, textStyle: { color: theme.axis } },
+      legend: (style.showLegend ?? true)
+        ? { type: "scroll", bottom: 0, textStyle: { color: theme.axis } }
+        : undefined,
       grid: { left: 8, right: 16, top: titleOpt ? 48 : 32, bottom: 56, containLabel: true },
       xAxis: {
         type: "category",

@@ -173,9 +173,15 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
             : cell.error
               ? "error"
               : cell.ranOnce
-                ? `✓ ${total.toLocaleString()} row${total === 1 ? "" : "s"}${
-                    cell.elapsedMs != null ? ` · ${cell.elapsedMs} ms` : ""
-                  }`
+                ? // When stale, the retained rows/total have been zeroed to stop
+                  // a stale grid looking current -- so don't claim "✓ 0 rows"
+                  // (the cell returned data and is merely out of date). The
+                  // stale badge already signals it needs a rerun.
+                  props.stale
+                  ? "stale — rerun"
+                  : `✓ ${total.toLocaleString()} row${total === 1 ? "" : "s"}${
+                      cell.elapsedMs != null ? ` · ${cell.elapsedMs} ms` : ""
+                    }`
                 : "ready"}
         </span>
 

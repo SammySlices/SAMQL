@@ -542,7 +542,26 @@ const TAB_MIGRATIONS = {
     tabs: Array.isArray(raw?.tabs)
       ? raw.tabs
           .filter((t: any) => t && typeof t.id === "string")
-          .map((t: any) => ({ id: t.id, name: String(t.name || "Tab") }))
+          .map((t: any) => {
+            const out: {
+              id: string;
+              name: string;
+              savedWorkflowName?: string;
+              savedFilePath?: string;
+              editingDefinitionId?: string;
+            } = { id: t.id, name: String(t.name || "Tab") };
+            // Preserve the optional linkage fields (all valid in v3) instead of
+            // dropping them, matching the field-preservation of the other
+            // migrations -- so a tab's saved-file / editing association survives
+            // the upgrade.
+            if (typeof t.savedWorkflowName === "string")
+              out.savedWorkflowName = t.savedWorkflowName;
+            if (typeof t.savedFilePath === "string")
+              out.savedFilePath = t.savedFilePath;
+            if (typeof t.editingDefinitionId === "string")
+              out.editingDefinitionId = t.editingDefinitionId;
+            return out;
+          })
       : [],
     activeTabId: typeof raw?.activeTabId === "string" ? raw.activeTabId : "",
   }),

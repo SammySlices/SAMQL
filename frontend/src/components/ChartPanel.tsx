@@ -412,7 +412,16 @@ const ChartPanelImpl: React.FC<Props> = ({
             <label className="chart-style-check">
               <input
                 type="checkbox"
-                checked={style.showLegend !== undefined ? !!style.showLegend : isPieish || isMultiX}
+                checked={
+                  style.showLegend !== undefined
+                    ? !!style.showLegend
+                    : // match what actually renders: pie / multi-X / multi-Y
+                      // and any multi-series chart default to a legend shown.
+                      isPieish ||
+                      isMultiX ||
+                      isMultiY ||
+                      (data?.series?.length ?? 0) > 1
+                }
                 onChange={(e) => patchStyle("showLegend", e.target.checked)}
               />{" "}
               Legend
@@ -473,7 +482,15 @@ const ChartPanelImpl: React.FC<Props> = ({
                 <span className="faint">Render the chart to tune individual colours.</span>
               ) : (
                 colorTargets.map((name, i) => {
-                  const cur = (style.seriesColors && style.seriesColors[name]) || pal[i % pal.length];
+                  // The delta/waterfall renderers draw decreases with the 4th
+                  // palette colour (colorFor("Decrease", 3)), not the positional
+                  // one, so the swatch must use the same index or it shows a
+                  // different colour than the bars.
+                  const palIx =
+                    (isDelta || isWaterfall) && name === "Decrease" ? 3 : i;
+                  const cur =
+                    (style.seriesColors && style.seriesColors[name]) ||
+                    pal[palIx % pal.length];
                   const overridden = !!(style.seriesColors && style.seriesColors[name]);
                   return (
                     <span className="chart-color-chip" key={name} title={name}>

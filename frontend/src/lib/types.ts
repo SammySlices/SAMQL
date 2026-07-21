@@ -184,8 +184,8 @@ export interface LoadedTable {
   name: string;
   rows: number;
   columns: string[];
-  multiline?: number;
-  excluded?: number;
+  /** Rows reshaped to fit the header (short padded, long truncated), not dropped. */
+  reshaped?: number;
   engine?: EngineKind;
 }
 

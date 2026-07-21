@@ -40,8 +40,12 @@ class _StoreSortedView:
         self._store = store
         self._col_ix = int(col_ix)
         self._desc = bool(descending)
+        # Match the in-memory sort's NULL placement (NULLs last ascending,
+        # first descending) so a result sorts identically whether or not it
+        # spilled -- SQLite's default puts NULLs first ascending.
         self._order = (f"ORDER BY c{self._col_ix} "
-                       f"{'DESC' if descending else 'ASC'}, i")
+                       f"{'DESC' if descending else 'ASC'} "
+                       f"{'NULLS FIRST' if descending else 'NULLS LAST'}, i")
 
     def __len__(self):
         return len(self._store)
@@ -105,6 +109,7 @@ class DiskBackedRows:
             self._conn.execute("PRAGMA cache_size=-16000")
         except Exception:
             pass
+        self._register_sqlite_funcs(self._conn)
         self._lock = threading.RLock()
         self._block = max(100, int(block or 2000))
         self._buf = []
@@ -112,6 +117,25 @@ class DiskBackedRows:
         self._ncols = None
         self._closed = False
         self._indexed = set()
+
+    @staticmethod
+    def _register_sqlite_funcs(conn):
+        # try_number(x) -> numeric value of x (native number or numeric string),
+        # else NULL. Registered on EVERY connection that runs a filtered WHERE
+        # (including the fresh streaming connections) so the SQL match mirrors
+        # _match's _to_number semantics exactly -- numeric strings compare
+        # numerically, non-numeric cells are excluded -- instead of SQLite CAST
+        # turning 'apple' into 0. Deterministic where supported (indexable).
+        try:
+            conn.create_function(
+                "try_number", 1, _to_number, deterministic=True)
+        except TypeError:
+            try:
+                conn.create_function("try_number", 1, _to_number)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     @staticmethod
     def _san(v):
@@ -350,29 +374,39 @@ class DiskBackedRows:
                 clauses.append(f"{c} LIKE ?")
                 params.append(pat)
             elif op in ("gt", "gte", "lt", "lte"):
+                # Shared filter semantics with _match / the DuckDB store: a
+                # numeric value compares numerically against any cell that
+                # parses as a number (native or numeric string) via try_number;
+                # a non-numeric cell yields NULL and is excluded. A non-numeric
+                # value compares as text (stringified, matching str(v)).
                 sym = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[op]
                 num = _to_number(val)
                 if num is not None:
-                    clauses.append(f"CAST({c} AS REAL) {sym} ?")
+                    clauses.append(f"try_number({c}) {sym} ?")
                     params.append(num)
                 else:
-                    clauses.append(f"{c} {sym} ?")
+                    clauses.append(f"CAST({c} AS TEXT) {sym} ?")
                     params.append(str(val))
             elif op == "equals":
                 num = _to_number(val)
                 if num is not None:
-                    clauses.append(f"CAST({c} AS REAL) = ?")
+                    clauses.append(f"try_number({c}) = ?")
                     params.append(num)
                 else:
-                    clauses.append(f"{c} = ?")
+                    clauses.append(f"CAST({c} AS TEXT) = ?")
                     params.append(str(val))
             elif op == "ne":
+                # A NULL cell never matches "not equal" (matches _match, which
+                # returns False for NULL). A non-number matches a numeric ne.
                 num = _to_number(val)
                 if num is not None:
-                    clauses.append(f"({c} IS NULL OR CAST({c} AS REAL) <> ?)")
+                    clauses.append(
+                        f"({c} IS NOT NULL AND (try_number({c}) IS NULL "
+                        f"OR try_number({c}) <> ?))")
                     params.append(num)
                 else:
-                    clauses.append(f"({c} IS NULL OR {c} <> ?)")
+                    clauses.append(
+                        f"({c} IS NOT NULL AND CAST({c} AS TEXT) <> ?)")
                     params.append(str(val))
         return (" AND ".join(clauses) if clauses else ""), params
 
@@ -389,7 +423,8 @@ class DiskBackedRows:
                 pass
         order = ("ORDER BY i" if sort_ix is None
                  else f"ORDER BY c{int(sort_ix)} "
-                      f"{'DESC' if descending else 'ASC'}, i")
+                      f"{'DESC' if descending else 'ASC'} "
+                      f"{'NULLS FIRST' if descending else 'NULLS LAST'}, i")
         where, params = self._where(terms)
         return _StoreFilteredView(self, where, params, order, total=total)
 
@@ -474,6 +509,7 @@ class DiskBackedRows:
         wsql = (" WHERE " + where) if where else ""
         try:
             conn = sqlite3.connect(self.path, check_same_thread=False)
+            self._register_sqlite_funcs(conn)
         except Exception:
             pos = 0
             while True:
@@ -727,6 +763,9 @@ class ParquetResultStore:
                 clauses.append(f"CAST({c} AS VARCHAR) LIKE ?")
                 params.append(pat)
             elif op in ("gt", "gte", "lt", "lte"):
+                # Shared filter semantics with _match / the SQLite store:
+                # TRY_CAST parses a numeric string and yields NULL for a
+                # non-numeric cell (so it is excluded), matching _to_number.
                 sym = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[op]
                 num = _to_number(val)
                 if num is not None:
@@ -744,14 +783,17 @@ class ParquetResultStore:
                     clauses.append(f"CAST({c} AS VARCHAR) = ?")
                     params.append(str(val))
             elif op == "ne":
+                # A NULL cell never matches "not equal" (matches _match). A
+                # non-number (TRY_CAST -> NULL) matches a numeric ne.
                 num = _to_number(val)
                 if num is not None:
                     clauses.append(
-                        f"({c} IS NULL OR TRY_CAST({c} AS DOUBLE) <> ?)")
+                        f"({c} IS NOT NULL AND (TRY_CAST({c} AS DOUBLE) IS NULL "
+                        f"OR TRY_CAST({c} AS DOUBLE) <> ?))")
                     params.append(num)
                 else:
                     clauses.append(
-                        f"({c} IS NULL OR CAST({c} AS VARCHAR) <> ?)")
+                        f"({c} IS NOT NULL AND CAST({c} AS VARCHAR) <> ?)")
                     params.append(str(val))
         return (" AND ".join(clauses) if clauses else ""), params
 
@@ -853,7 +895,8 @@ class ParquetResultStore:
 
     def sorted_view(self, col_ix, descending=False):
         col = str(self._cols[col_ix]).replace('"', '""')
-        order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"}, '
+        order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"} '
+                 f'{"NULLS FIRST" if descending else "NULLS LAST"}, '
                  f'"__rn"')
         key = ("sort", int(col_ix), bool(descending))
         return self._deferred_snap_view(key, order, total=len(self))
@@ -863,7 +906,8 @@ class ParquetResultStore:
             order = 'ORDER BY "__rn"'
         else:
             col = str(self._cols[int(sort_ix)]).replace('"', '""')
-            order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"}, '
+            order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"} '
+                     f'{"NULLS FIRST" if descending else "NULLS LAST"}, '
                      f'"__rn"')
         where, params = self._where(terms)
         key = ("filt", where, tuple(params), order)

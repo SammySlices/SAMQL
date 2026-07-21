@@ -882,6 +882,7 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         except Exception:
             up_live = None
         sel = []
+        seen = {}
         for f in fields:
             if f.get("keep") is False:
                 continue
@@ -891,6 +892,15 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
             if up_live is not None and col.lower() not in up_live:
                 continue
             alias = (f.get("rename") or col).strip() or col
+            # Avoid duplicate output names (which SQL rejects with a cryptic
+            # duplicate-column error): two kept fields renamed to the same name
+            # become x / x_2, mirroring the renamecols and join de-dup. Done
+            # before the want filter so the emitted name is the deduped one.
+            base_alias, k = alias, 2
+            while alias in seen:
+                alias = "%s_%d" % (base_alias, k)
+                k += 1
+            seen[alias] = True
             # A downstream projection may make configured fields dead. Omitting
             # them here is essential once their source columns have also been
             # pruned; otherwise strict engines bind a now-missing dead column.

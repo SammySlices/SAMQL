@@ -2723,14 +2723,38 @@ class DuckDBManager:
                 tmp = name + "__varchar"
                 self.conn.execute(
                     f'DROP TABLE IF EXISTS {_quote_ident(tmp)}')
-                self.conn.execute(
-                    f'CREATE TABLE {_quote_ident(tmp)} AS '
-                    f'SELECT {casts} FROM {_quote_ident(name)}')
-                self.conn.execute(
-                    f'DROP TABLE {_quote_ident(name)}')
-                self.conn.execute(
-                    f'ALTER TABLE {_quote_ident(tmp)} '
-                    f'RENAME TO {_quote_ident(name)}')
+                try:
+                    self.conn.execute(
+                        f'CREATE TABLE {_quote_ident(tmp)} AS '
+                        f'SELECT {casts} FROM {_quote_ident(name)}')
+                    self.conn.execute(
+                        f'DROP TABLE {_quote_ident(name)}')
+                    self.conn.execute(
+                        f'ALTER TABLE {_quote_ident(tmp)} '
+                        f'RENAME TO {_quote_ident(name)}')
+                except Exception:
+                    # Don't leak the __varchar scratch table, and never lose the
+                    # live table: if `name` still exists the scratch is a safe
+                    # leftover to drop; if `name` was already dropped (the rename
+                    # failed after the drop) the data lives only in the scratch,
+                    # so rename it back into place.
+                    try:
+                        row = self.conn.execute(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_name = ? LIMIT 1", [name]).fetchone()
+                    except Exception:
+                        row = None
+                    try:
+                        if row:
+                            self.conn.execute(
+                                f'DROP TABLE IF EXISTS {_quote_ident(tmp)}')
+                        else:
+                            self.conn.execute(
+                                f'ALTER TABLE {_quote_ident(tmp)} '
+                                f'RENAME TO {_quote_ident(name)}')
+                    except Exception:
+                        pass
+                    raise
                 types = {c: "VARCHAR" for c in columns}
                 text_cols = set(columns)
                 widen_all[0] = True

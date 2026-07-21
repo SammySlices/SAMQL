@@ -18,7 +18,7 @@ import tempfile
 
 from .flatten import JSONFlattener, stream_json_records
 from .nodeflow import sanitize_ident
-from .sqlutil import sanitize_column_header
+from .sqlutil import sanitize_column_header, sql_path
 
 # Per-table row buffer kept in memory before the JSON flattener spills it
 # to disk. Small/medium files never reach this, so they stay fully in-memory;
@@ -194,7 +194,11 @@ def load_csv(db, path, base_name=None, sep=None, source=None, progress=None):
     except Exception:
         pass
     for enc in _encs:
-        stats = {"multiline": 0, "excluded": 0}
+        # Rows whose field count didn't match the header and were reshaped
+        # (short rows padded with NULLs, long rows truncated) rather than
+        # dropped. Previously mis-reported as "excluded" (they are still loaded)
+        # alongside a "multiline" counter that was never incremented.
+        stats = {"reshaped": 0}
         raw = None
         try:
             raw = open(path, "rb", buffering=0)
@@ -249,7 +253,7 @@ def load_csv(db, path, base_name=None, sep=None, source=None, progress=None):
                         except Exception:
                             pass
                     if len(rawrow) != n_exp:
-                        stats["excluded"] += 1
+                        stats["reshaped"] += 1
                         if len(rawrow) < n_exp:
                             rawrow = rawrow + [None] * (n_exp - len(rawrow))
                     yield tuple(
@@ -269,8 +273,7 @@ def load_csv(db, path, base_name=None, sep=None, source=None, progress=None):
                 "name": name,
                 "rows": n,
                 "columns": db.table_columns.get(name, columns),
-                "multiline": stats["multiline"],
-                "excluded": stats["excluded"],
+                "reshaped": stats["reshaped"],
                 "engine": "sqlite",
             }
         except UnicodeDecodeError as e:
@@ -711,6 +714,16 @@ def _load_into_duckdb(session, path, base_name, kind, delimiter=None,
         cache = tmputil.new_tempfile("cache_", ".parquet")
         try:
             duck.view_to_parquet(table_name, cache)
+            # Prove the parquet is actually readable BEFORE dropping the source
+            # table. Previously the table was dropped first and the replacement
+            # view built afterward -- so if the write was incomplete/unreadable
+            # (e.g. the disk filled mid-copy) the drop had already destroyed the
+            # only copy of the loaded data. This probe fails closed: on any read
+            # error we fall through to the handler below and keep the in-engine
+            # table. Once the parquet reads cleanly, create_view over the same
+            # file cannot fail from the file, so the drop below is safe.
+            duck.execute(
+                "SELECT 1 FROM read_parquet('%s') LIMIT 1" % sql_path(cache))
             try:
                 duck.drop_table(table_name)
             except Exception:

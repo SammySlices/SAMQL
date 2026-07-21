@@ -573,15 +573,37 @@ class LoadManifestStore:
         import os as _os
         t = str(table_name).lower()
 
+        try:
+            from .nodeflow import sanitize_ident as _san
+        except Exception:
+            _san = None
+
         def _matches(e):
             if e.get("kind") != "file":
                 return False
+            # The live table name is the SANITIZED base/stem (spaces and
+            # punctuation become underscores), so a file like "my report.csv"
+            # loads as table "my_report". Compare both the raw and sanitized
+            # forms of base_name and the file stem, or a drop of such a table
+            # leaves the entry and the file reloads on restart.
+            cands = []
             bn = e.get("base_name")
-            if bn and str(bn).lower() == t:
-                return True
+            if bn:
+                cands.append(str(bn))
             stem = _os.path.splitext(
                 _os.path.basename(e.get("path") or ""))[0]
-            return stem.lower() == t
+            if stem:
+                cands.append(stem)
+            for c in cands:
+                if c.lower() == t:
+                    return True
+                if _san is not None:
+                    try:
+                        if _san(c).lower() == t:
+                            return True
+                    except Exception:
+                        pass
+            return False
 
         before = len(self.entries)
         self.entries = [e for e in self.entries if not _matches(e)]

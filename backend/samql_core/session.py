@@ -498,8 +498,17 @@ def _normalize_op(op):
 
 
 def _match(v, op, val):
-    """Python-side equivalent of the SQLite filter semantics, used for
-    in-memory and Parquet-backed result stores."""
+    """Python-side filter semantics for the in-memory result store. Kept in
+    exact lockstep with the SQLite (``DiskBackedRows._where``) and DuckDB
+    (``ParquetResultStore._where``) stores so a result filters IDENTICALLY
+    whether it stayed in memory or spilled to disk. The shared rules:
+
+    * a NULL cell matches ONLY is_null (never equals/ne/gt/.../contains);
+    * a numeric filter value compares numerically against NATIVE-number cells
+      only -- a non-number never matches equals/gt/gte/lt/lte and always
+      matches ne;
+    * a non-numeric filter value compares as text (str vs str).
+    """
     if op == "is_null":
         return v is None
     if op == "not_null":
@@ -514,9 +523,17 @@ def _match(v, op, val):
         if op == "starts":
             return s.startswith(t)
         return s.endswith(t)
-    nv = _to_number(v)
     tv = _to_number(val)
-    if nv is not None and tv is not None:
+    if tv is not None:
+        # numeric filter value: a cell that parses as a number (native OR a
+        # numeric string like "5") compares numerically; one that does not
+        # (e.g. "apple") never matches an ordering/equality test and always
+        # matches "not equal". The disk stores mirror this exactly -- SQLite via
+        # a registered ``try_number`` function, DuckDB via ``TRY_CAST`` -- so a
+        # result filters the same whether it stayed in memory or spilled.
+        nv = _to_number(v)
+        if nv is None:
+            return op == "ne"
         a, b = nv, tv
     else:
         a, b = str(v), str(val)
@@ -5483,6 +5500,21 @@ class Session:
                          else "%s(%s)" % (fn, q(f)))
                 thdr = ("Total / " + mlabel(f, a)) if multi_meas else "Total"
                 cells.append((texpr, thdr))
+        # Disambiguate colliding column headers before emitting the crosstab.
+        # Otherwise a pivot value that stringifies to "Total" (the grand-total
+        # header), or two distinct values that stringify to the same label
+        # (e.g. number 1 vs text "1", or a 2-column pivot whose "a / b" labels
+        # coincide), would produce duplicate column names and crash the
+        # CREATE TABLE AS. Suffix repeats _2/_3, matching the node de-dup style.
+        seen_hdr, deduped = {}, []
+        for (e, h) in cells:
+            base_h, k = h, 2
+            while h in seen_hdr:
+                h = "%s_%d" % (base_h, k)
+                k += 1
+            seen_hdr[h] = True
+            deduped.append((e, h))
+        cells = deduped
         cell_sql = ["%s AS %s" % (e, q(h)) for (e, h) in cells]
 
         # ---- no rollup needed: a single GROUP BY (or one aggregate row) ----
@@ -6231,19 +6263,35 @@ class Session:
             eng.execute('CREATE TABLE "%s" AS SELECT * FROM "%s"' % (name, src))
             return
         tcols = self._col_names(eng, table=name)
-        sset = set(self._col_names(eng, table=src))
+        scols = self._col_names(eng, table=src)
+        # Case-INSENSITIVE alignment: match each target column to a source
+        # column ignoring case, so a later pass whose casing differs (e.g.
+        # `amount` where the accumulator's first pass wrote `Amount`) still
+        # fills the existing column instead of inserting NULL over real data.
+        slower = {}
+        for c in scols:
+            slower.setdefault(c.lower(), c)
         bad = [k for k in (replace_keys or []) if k not in tcols]
         if bad:
             raise nodeflow.NodeflowError(
                 "Replace-key column(s) not found in the table: "
                 + ", ".join(bad))
         if replace_keys:
-            kp = ", ".join('"%s"' % k for k in replace_keys)
-            eng.execute('DELETE FROM "%s" WHERE (%s) IN '
-                        '(SELECT DISTINCT %s FROM "%s")' % (name, kp, kp, src))
+            # NULL-safe key match so a row with a NULL key is REPLACED, not
+            # duplicated on re-run -- SQL `(keys) IN (...)` never matches NULL,
+            # so the old idempotent-delete silently skipped NULL-keyed rows.
+            # The OR/IS NULL form is portable across DuckDB and SQLite.
+            conds = " AND ".join(
+                '("%s"."%s" = _s."%s" OR '
+                '("%s"."%s" IS NULL AND _s."%s" IS NULL))'
+                % (name, k, k, name, k, k) for k in replace_keys)
+            eng.execute('DELETE FROM "%s" WHERE EXISTS '
+                        '(SELECT 1 FROM "%s" AS _s WHERE %s)'
+                        % (name, src, conds))
         collist = ", ".join('"%s"' % c for c in tcols)
         sellist = ", ".join(
-            ('"%s"' % c) if c in sset else "NULL" for c in tcols)
+            ('"%s"' % slower[c.lower()]) if c.lower() in slower else "NULL"
+            for c in tcols)
         eng.execute('INSERT INTO "%s" (%s) SELECT %s FROM "%s"'
                     % (name, collist, sellist, src))
 
@@ -6831,6 +6879,14 @@ class Session:
                 if not values:
                     return {"error": "The values input produced no rows to "
                             "iterate over."}
+                # _materialize_var_rows reads cap+1 rows as a "there are more
+                # than the cap" sentinel; trim to the cap and surface the note,
+                # matching the driver (_iterator_values) and container paths.
+                # Without this the loop ran one extra pass and hid the cap.
+                if max_passes and len(values) > max_passes:
+                    note = ("Stopped at the %d-pass cap (more rows were "
+                            "available)." % max_passes)
+                    values = values[:max_passes]
             else:
                 values, note = self._iterator_values(
                     cfg.get("driver"), max_passes)
@@ -6908,7 +6964,18 @@ class Session:
                         raise
                     msg = (str(e) if isinstance(e, nodeflow.NodeflowError)
                            else err_str(e))
-                    errors.append({"value": extra[var], "error": msg})
+                    # With a wired vars table the loop variable may be blank, so
+                    # extra has no `var` key -- reading extra[var] would raise
+                    # KeyError and escape before the continue-on-error check,
+                    # aborting the whole run. Build the label defensively.
+                    if var and var in extra:
+                        label = extra[var]
+                    elif extra:
+                        label = ", ".join("%s=%s" % (k, val)
+                                          for k, val in extra.items())
+                    else:
+                        label = str(idx)
+                    errors.append({"value": label, "error": msg})
                     if not continue_on_error:
                         break
                 finally:
@@ -7969,9 +8036,10 @@ class Session:
             # for the remainder of this session; the next restart reloads the
             # source and safely re-enables it.
             self._persistent_cache_tainted = True
-            # a write may change row counts -> drop the cached counts so the
-            # next /api/tables recomputes them
-            self._invalidate_counts()
+            # NOTE: cached counts are invalidated AFTER the write succeeds (see
+            # the post-execution block below). Doing it here meant a write that
+            # then FAILED (syntax error, constraint violation) still bumped the
+            # freshness epoch and expired every open result grid for no change.
 
         # Capture freshness before materialization. Concurrent mutations that
         # bump `_data_epoch` while this query runs must expire the snapshot.
@@ -8092,6 +8160,15 @@ class Session:
                     engine_obj.sync_catalog()
             except Exception:
                 pass
+            if stmt_kind == "write":
+                # The write has actually succeeded now: drop cached counts and
+                # bump the freshness epoch (moved here from before execution so
+                # a failed write no longer spuriously expires open grids). Then
+                # re-capture the epoch so a write that returns rows (e.g. DuckDB
+                # RETURNING) caches under the post-write epoch, not the stale
+                # pre-write one.
+                self._invalidate_counts()
+                epoch0 = int(getattr(self, "_data_epoch", 0) or 0)
         if cols is None:
             self.history.add(original_sql, target=first_target, row_count=None,
                              elapsed_sec=round(elapsed, 3))
@@ -9158,8 +9235,8 @@ class Session:
                     "sql": cr.sql,
                     "engine": cr.engine,
                     "cell_capped": False,
-                    "result_capped": bool(cr.capped) and not filters,
-                    "result_cap": cr.cap if (cr.capped and not filters) else None,
+                    "result_capped": bool(cr.capped),
+                    "result_cap": cr.cap if cr.capped else None,
                 }
             # Optional column projection: return only the requested columns
             # (in the requested order). Keeps the wire payload and the client's
@@ -9194,8 +9271,8 @@ class Session:
                 "sql": cr.sql,
                 "engine": cr.engine,
                 "cell_capped": cell_capped,
-                "result_capped": bool(cr.capped) and not filters,
-                "result_cap": cr.cap if (cr.capped and not filters) else None,
+                "result_capped": bool(cr.capped),
+                "result_cap": cr.cap if cr.capped else None,
                 "data_epoch": int(getattr(cr, "data_epoch", 0) or 0),
             }
         except Exception as e:
