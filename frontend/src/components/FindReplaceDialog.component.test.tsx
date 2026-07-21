@@ -234,6 +234,65 @@ describe("useFindReplace wired to the dialog", () => {
     expect(screen.getByTestId("find-replace-count")).toHaveTextContent("of 2");
   });
 
+  it("walks Replace forward when the replacement contains the query", () => {
+    render(<Host initial={[{ id: "a", text: "x x", field: "code" }]} />);
+    fireEvent.keyDown(window, { key: "r", ctrlKey: true });
+    fireEvent.change(screen.getByTestId("find-replace-query"), {
+      target: { value: "x" },
+    });
+    fireEvent.change(screen.getByTestId("find-replace-replacement"), {
+      target: { value: "xx" },
+    });
+    const replace = () =>
+      fireEvent.click(screen.getByTestId("find-replace-replace"));
+    replace();
+    replace();
+    // Each original "x" expands once; the first is NOT re-ground into "xxx x".
+    expect(screen.getByTestId("doc-a").textContent).toBe("xx xx");
+  });
+
+  it("advances Replace past a prefix-expanding replacement (col -> column)", () => {
+    render(<Host initial={[{ id: "a", text: "col col", field: "code" }]} />);
+    fireEvent.keyDown(window, { key: "r", ctrlKey: true });
+    fireEvent.change(screen.getByTestId("find-replace-query"), {
+      target: { value: "col" },
+    });
+    fireEvent.change(screen.getByTestId("find-replace-replacement"), {
+      target: { value: "column" },
+    });
+    const replace = () =>
+      fireEvent.click(screen.getByTestId("find-replace-replace"));
+    replace();
+    replace();
+    // Both "col"s become "column"; the first is not re-expanded to "columnumn".
+    expect(screen.getByTestId("doc-a").textContent).toBe("column column");
+  });
+
+  it("walks Replace across scopes past an inserted match", () => {
+    render(
+      <Host
+        initial={[
+          { id: "a", text: "cat", field: "code" },
+          { id: "b", text: "cat", field: "code" },
+        ]}
+      />,
+    );
+    fireEvent.keyDown(window, { key: "r", ctrlKey: true });
+    fireEvent.change(screen.getByTestId("find-replace-query"), {
+      target: { value: "cat" },
+    });
+    fireEvent.change(screen.getByTestId("find-replace-replacement"), {
+      target: { value: "cats" },
+    });
+    const replace = () =>
+      fireEvent.click(screen.getByTestId("find-replace-replace"));
+    replace();
+    replace();
+    // First press edits scope a, second must move to scope b (not re-hit a).
+    expect(screen.getByTestId("doc-a").textContent).toBe("cats");
+    expect(screen.getByTestId("doc-b").textContent).toBe("cats");
+  });
+
   it("closes on the dialog's close button", () => {
     render(<Host initial={docs} />);
     fireEvent.keyDown(window, { key: "f", ctrlKey: true });
