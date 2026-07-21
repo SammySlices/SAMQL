@@ -197,7 +197,9 @@ const SidebarImpl: React.FC<Props> = (props) => {
               size={13}
               className={props.tablesPinned ? "pin-on" : undefined}
             />
-            {props.tablesPinned ? "Pinned" : "Pin"}
+            <span className="side-tabs-pin-label">
+              {props.tablesPinned ? "Pinned" : "Pin"}
+            </span>
           </button>
         )}
       </div>

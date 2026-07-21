@@ -1580,15 +1580,21 @@ html[data-theme="light"] .tables-sidebar-drawer.is-open .tables-sidebar-panel {
   display: flex;
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 .side-tab {
   flex: 1;
+  min-width: 0;
   text-align: center;
   padding: 9px 4px;
   color: var(--text-dim);
   border-bottom: 2px solid transparent;
   font-size: 12px;
   letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .side-tab:hover {
   color: var(--text);
@@ -1955,6 +1961,23 @@ html[data-theme="light"] .tables-sidebar-drawer.is-open .tables-sidebar-panel {
 }
 .toolbar .spacer {
   flex: 1;
+}
+.ide-run-button {
+  /* Run and Stop have different labels/icons. Keep the control's footprint
+     fixed so an instant query cannot nudge every following toolbar item. */
+  width: 68px;
+  justify-content: center;
+}
+.ide-run-progress-slot {
+  /* The progress widget used to be inserted into the flex row only while a
+     query ran. Reserving its exact footprint also keeps toolbar wrapping
+     stable for queries that begin and finish in consecutive frames. */
+  flex: 0 0 162px;
+  width: 162px;
+  min-height: 16px;
+}
+.ide-run-progress-slot .run-progress {
+  width: 100%;
 }
 .seg {
   display: inline-flex;
@@ -3423,9 +3446,27 @@ html[data-theme="light"] .btn.ghost.modal-pin-btn.pin-on:hover {
   color: var(--accent-hi) !important;
 }
 .side-tabs-pin {
-  margin-left: auto;
+  /* At the drawer's 180px minimum, the three tabs may truncate and this
+     control may shed its label, but the pin itself remains visible and
+     contained. The icon is first in the flex row, so overflow never pushes it
+     outside the right edge. */
+  flex: 0 1 78px;
+  min-width: 30px;
+  max-width: 78px;
+  overflow: hidden;
+  justify-content: flex-start;
+  margin-left: 0;
   margin-right: 6px;
+  padding-left: 7px;
+  padding-right: 7px;
+}
+.side-tabs-pin > svg {
   flex: 0 0 auto;
+}
+.side-tabs-pin-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 /* grid/chart segmented toggle */
@@ -6661,10 +6702,14 @@ button.nb2-sphere-container-toggle:focus-visible {
   top: calc(100% + 4px);
   transform: translateX(-50%);
   max-width: 108px;
-  padding: 0 2px;
+  box-sizing: border-box;
+  padding: 2px 4px;
+  background: #fff;
+  border: 1px solid #fff;
+  border-radius: 3px;
   font-size: 10.5px;
   line-height: 1.2;
-  color: var(--text-dim);
+  color: #000;
   font-family: var(--mono);
   text-align: center;
   overflow: hidden;
@@ -6742,6 +6787,17 @@ button.nb2-sphere-container-toggle:focus-visible {
   font-family: var(--mono);
   -webkit-text-stroke: 0.3px #000;
   transform: none;
+}
+/* Input and output arrows point right: keep T/F/L/R at the left/base, away
+   from the narrowing tip. This applies to both classic cards and sphere
+   ports. */
+.nb2-port.in .nb2-dot-mark {
+  justify-content: flex-start;
+  padding: 0 0 0 1px;
+}
+.nb2-port.out .nb2-dot-mark {
+  justify-content: flex-start;
+  padding: 0 0 0 1px;
 }
 /* a top-edge input (the iterator's "values" driver): a down-pointing arrow
    centered on the node's top edge, with a small label above it. */
@@ -6824,6 +6880,12 @@ button.nb2-sphere-container-toggle:focus-visible {
   background: var(--panel);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
 }
+/* Pinned Tables keeps its own contents at z-index 45. A selected node still
+   needs an editable config surface, so pinned mode explicitly lifts the
+   floating inspector above that drawer instead of hiding/docking behind it. */
+.nodeflow.inspector-over-tables .nb2-inspector:not(.docked) {
+  z-index: 55;
+}
 .nb2-inspector.is-empty {
   display: none;
 }
@@ -6902,7 +6964,7 @@ button.nb2-sphere-container-toggle:focus-visible {
   padding: 6px 8px;
   border-radius: 6px;
   color: var(--warn-fg, #92400e);
-  background: var(--warn-bg, rgba(245, 158, 11, 0.14));
+  background: color-mix(in srgb, #fff 82%, var(--warn, #d9a13b));
   border: 1px solid var(--warn-border, rgba(245, 158, 11, 0.4));
 }
 .nb2-warn-sm code {
@@ -9914,25 +9976,30 @@ html[data-theme="light"] .col-lineage-value-chip.on {
 
 /* .412: running-tab pulse + stalled pill + inspector window */
 .tab-pulse {
-  display: inline-block;
+  position: absolute;
+  right: 4px;
+  top: 4px;
   width: 7px;
   height: 7px;
-  margin-left: 6px;
   border-radius: 50%;
   background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+.tab-pulse.is-running {
   animation: tabpulse 1.1s ease-in-out infinite;
-  vertical-align: middle;
 }
 .tab[data-pulse="1"]::after {
   content: "";
-  display: inline-block;
+  position: absolute;
+  right: 4px;
+  top: 4px;
   width: 7px;
   height: 7px;
-  margin-left: 6px;
   border-radius: 50%;
   background: var(--accent);
   animation: tabpulse 1.1s ease-in-out infinite;
-  vertical-align: middle;
+  pointer-events: none;
 }
 @keyframes tabpulse {
   0%, 100% { opacity: 0.25; transform: scale(0.8); }

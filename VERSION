@@ -2,12 +2,33 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-21.677
+Current build:   2026-07-21.678
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-21.678  (v2.16.4)
+
+MASTER APPWINDOW: NODEFLOW RESILIENCE + UI POLISH + CSV PASTE.
+NodeFlow now keeps successful upstream previews available when a downstream
+node fails, including the Select -> Formula failure path. Missing-column
+warnings use a lighter, higher-contrast surface; node captions render on a
+white bordered backing; pinned Tables chrome stays contained at narrow widths
+and selected-node configuration floats above the pinned drawer. Input and
+output connector marks now sit consistently at the broad base of each arrow.
+
+The IDE no longer shifts its toolbar or tab widths during an instant rerun:
+Run/Stop share one footprint, progress space stays reserved, and running dots
+overlay rather than reflow tabs. Create Table paste accepts comma-delimited
+CSV as well as tabs, with quoted commas, escaped quotes, and multiline fields.
+
+Windows AppWindow branding now supplies the multi-size SamQL icon through the
+launcher and taskbar paths instead of falling back to a blank document icon.
+The production icon assets were regenerated and launcher behavior is covered
+by backend tests.
 
 ----------------------------------------------------------------------
 build 2026-07-21.677  (v2.16.4)

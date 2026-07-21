@@ -1,6 +1,14 @@
 import React from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "fs";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
+
+const STYLES_CSS = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "./styles.css"),
+  "utf8",
+);
 
 const apiMock = vi.hoisted(() => ({
   health: vi.fn(),
@@ -9,6 +17,7 @@ const apiMock = vi.hoisted(() => ({
   saved: vi.fn(),
   workflowsList: vi.fn(),
   assistantStatus: vi.fn(),
+  query: vi.fn(),
 }));
 
 vi.mock("./lib/api", () => ({
@@ -28,13 +37,23 @@ vi.mock("./lib/api", () => ({
   exportResultToFile: vi.fn(),
   registerBgCancel: vi.fn(() => vi.fn()),
   saveToDownloads: vi.fn(),
+  stampResultEpoch: vi.fn((_result, fallback: number) => fallback),
 }));
 
 vi.mock("./components/ServerWatchdog", () => ({ ServerWatchdog: () => null }));
 vi.mock("./components/FieldExplorer", () => ({ FieldExplorer: () => null }));
 vi.mock("./components/NodeFlow", () => ({
-  NodeFlow: (props: { active?: boolean }) => (
-    <div data-testid="nodeflow-view" data-active={props.active === false ? "0" : "1"}>
+  NodeFlow: (props: {
+    active?: boolean;
+    showTables?: boolean;
+    inspectorOverTables?: boolean;
+  }) => (
+    <div
+      data-testid="nodeflow-view"
+      data-active={props.active === false ? "0" : "1"}
+      data-show-tables={props.showTables ? "1" : "0"}
+      data-inspector-over-tables={props.inspectorOverTables ? "1" : "0"}
+    >
       NodeFlow
     </div>
   ),
@@ -70,12 +89,24 @@ vi.mock("./components/Notebook", () => ({
   ),
 }));
 vi.mock("./components/Sidebar", () => ({
-  Sidebar: (props: { tables: { name: string }[]; onRefresh: () => void }) => (
+  Sidebar: (props: {
+    tables: { name: string }[];
+    onRefresh: () => void;
+    tablesPinned?: boolean;
+    onToggleTablesPin?: () => void;
+  }) => (
     <aside>
       <output data-testid="sidebar-tables">
         {props.tables.map((table) => table.name).join(",")}
       </output>
       <button onClick={props.onRefresh}>Refresh tables</button>
+      <button
+        data-testid="mock-tables-pin"
+        aria-pressed={!!props.tablesPinned}
+        onClick={props.onToggleTablesPin}
+      >
+        Pin tables
+      </button>
     </aside>
   ),
 }));
@@ -85,6 +116,7 @@ vi.mock("./components/ActivityShared", () => ({
   useTasks: () => ({ activeCount: 0, opsCount: 0, stalled: false }),
   useWinDrag: () => ({
     pos: { x: 40, y: 40 },
+    setPos: vi.fn(),
     startDrag: vi.fn(),
     dragging: false,
     settled: false,
@@ -118,11 +150,101 @@ async function renderFreshApp() {
 describe("App runtime behavior", () => {
   beforeEach(() => {
     vi.resetModules();
+    localStorage.removeItem("samql.tablesPanel.pinned");
     apiMock.health.mockReset().mockResolvedValue(health);
     apiMock.tables.mockReset().mockResolvedValue({ tables: [], data_epoch: 0 });
     apiMock.history.mockReset().mockResolvedValue([]);
     apiMock.saved.mockReset().mockResolvedValue([]);
     apiMock.workflowsList.mockReset().mockResolvedValue({ workflows: [] });
+    apiMock.query.mockReset().mockResolvedValue({
+      result_id: "result-1",
+      columns: ["value"],
+      rows: [[1]],
+      total_rows: 1,
+      stmt_kind: "read",
+    });
+  });
+
+  it("keeps IDE toolbar and tab footprints stable during an instant rerun", async () => {
+    const firstRun = deferred<any>();
+    apiMock.query.mockReturnValueOnce(firstRun.promise);
+    localStorage.setItem(
+      "samql.session.v1",
+      JSON.stringify({
+        version: 2,
+        edTabs: [{ id: "tab", title: "Query", sql: "SELECT 1" }],
+        activeId: "tab",
+        target: "__local__",
+      }),
+    );
+
+    await renderFreshApp();
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute("data-ready", "true"),
+    );
+
+    const progressSlot = screen.getByTestId("ide-run-progress-slot");
+    const editorTab = document.querySelector(".ed-tabs .tab");
+    const tabPulse = editorTab?.querySelector(".tab-pulse");
+    expect(progressSlot).toHaveAttribute("data-active", "0");
+    expect(tabPulse).not.toHaveClass("is-running");
+
+    // Establish the live result tab, then rerun the same editor query. The
+    // second request is held open just long enough to inspect running state.
+    fireEvent.click(screen.getByTestId("run-query"));
+    await waitFor(() => expect(screen.getByTestId("stop-query")).toBeTruthy());
+    firstRun.resolve({
+      result_id: "result-1",
+      columns: ["value"],
+      rows: [[1]],
+      total_rows: 1,
+      stmt_kind: "read",
+    });
+    await waitFor(() =>
+      expect(document.querySelector(".res-tabs .tab:not(.empty-tab)")).toBeTruthy(),
+    );
+    const resultTab = document.querySelector(".res-tabs .tab:not(.empty-tab)");
+    const gate = deferred<any>();
+    apiMock.query.mockReturnValueOnce(gate.promise);
+
+    fireEvent.click(screen.getByTestId("run-query"));
+    await waitFor(() => expect(screen.getByTestId("stop-query")).toBeTruthy());
+    expect(screen.getByTestId("ide-run-progress-slot")).toBe(progressSlot);
+    expect(progressSlot).toHaveAttribute("data-active", "1");
+    expect(editorTab?.querySelector(".tab-pulse")).toBe(tabPulse);
+    expect(tabPulse).toHaveClass("is-running");
+    expect(document.querySelector(".res-tabs .tab:not(.empty-tab)")).toBe(
+      resultTab,
+    );
+    expect(resultTab).toHaveAttribute("data-pulse", "1");
+
+    gate.resolve({
+      result_id: "result-1",
+      columns: ["value"],
+      rows: [[1]],
+      total_rows: 1,
+      stmt_kind: "read",
+    });
+    await waitFor(() => expect(screen.getByTestId("run-query")).toBeTruthy());
+    expect(screen.getByTestId("ide-run-progress-slot")).toBe(progressSlot);
+    expect(progressSlot).toHaveAttribute("data-active", "0");
+    expect(editorTab?.querySelector(".tab-pulse")).toBe(tabPulse);
+    expect(tabPulse).not.toHaveClass("is-running");
+    expect(document.querySelector(".res-tabs .tab:not(.empty-tab)")).toBe(
+      resultTab,
+    );
+    expect(resultTab).not.toHaveAttribute("data-pulse");
+
+    expect(STYLES_CSS).toMatch(/\.ide-run-button\s*\{[^}]*width:\s*68px/s);
+    expect(STYLES_CSS).toMatch(
+      /\.ide-run-progress-slot\s*\{[^}]*flex:\s*0 0 162px/s,
+    );
+    expect(STYLES_CSS).toMatch(
+      /\.tab-pulse\s*\{[^}]*position:\s*absolute/s,
+    );
+    expect(STYLES_CSS).toMatch(
+      /\.tab\[data-pulse="1"\]::after\s*\{[^}]*position:\s*absolute/s,
+    );
   });
 
   it("publishes data-ready only after the backend health request resolves", async () => {
@@ -219,6 +341,26 @@ describe("App runtime behavior", () => {
       "data-active",
       "1",
     );
+  });
+
+  it("floats the node inspector above the Tables drawer while it is pinned", async () => {
+    await renderFreshApp();
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute("data-ready", "true"),
+    );
+
+    fireEvent.click(screen.getByTestId("view-nodeflow"));
+    const nodeFlow = await screen.findByTestId("nodeflow-view");
+    expect(nodeFlow).toHaveAttribute("data-show-tables", "1");
+    expect(nodeFlow).toHaveAttribute("data-inspector-over-tables", "0");
+
+    fireEvent.click(screen.getByTestId("mock-tables-pin"));
+
+    await waitFor(() => {
+      expect(nodeFlow).toHaveAttribute("data-show-tables", "0");
+      expect(nodeFlow).toHaveAttribute("data-inspector-over-tables", "1");
+    });
+    expect(localStorage.getItem("samql.tablesPanel.pinned")).toBe("1");
   });
 
   it("opens SQL assistant from Journal in copy-only mode", async () => {

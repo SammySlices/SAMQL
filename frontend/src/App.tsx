@@ -3619,9 +3619,13 @@ export default function App() {
                     {t.title}
                   </span>
                 )}
-                {runsNow()[t.id] ? (
-                  <span className="tab-pulse" title="Running" />
-                ) : null}
+                <span
+                  className={
+                    "tab-pulse" + (runsNow()[t.id] ? " is-running" : "")
+                  }
+                  title={runsNow()[t.id] ? "Running" : undefined}
+                  aria-hidden="true"
+                />
                 <span
                   className="close"
                   onClick={(e) => {
@@ -3651,10 +3655,10 @@ export default function App() {
           </div>
 
           {/* toolbar */}
-          <div className="toolbar">
+          <div className="toolbar ide-toolbar">
             {running ? (
               <button
-                className="btn sm danger"
+                className="btn sm danger ide-run-button"
                 data-testid="stop-query"
                 onClick={cancelRunning}
                 title="Stop the running query"
@@ -3663,7 +3667,10 @@ export default function App() {
               </button>
             ) : (
               <button
-                className={"btn primary sm" + (runFlash ? " flash-ok" : "")}
+                className={
+                  "btn primary sm ide-run-button" +
+                  (runFlash ? " flash-ok" : "")
+                }
                 data-testid="run-query"
                 onClick={() => {
                   const sel = selectedSql();
@@ -3709,32 +3716,39 @@ export default function App() {
             <button className="btn sm" onClick={doFormat} title="Format SQL">
               <Icon.Format size={14} /> Format
             </button>
-            {running && (
-              <div
-                className="run-progress"
-                title={
-                  runProg.value != null
-                    ? Math.round(runProg.value * 100) +
-                      "% complete — click Stop to cancel"
-                    : "Query running… click Stop to cancel"
-                }
-              >
-                <ProgressBar
-                  value={runProg.value}
-                  rows={runProg.rows}
-                  unit={runProg.unit}
-                  done={runProg.done}
-                  total={runProg.total}
-                />
-                <span className="run-elapsed">
-                  <RunTimer
-                    startedAt={
-                      runs[activeTab?.id ?? ""]?.startedAt ?? Date.now()
-                    }
+            <div
+              className="ide-run-progress-slot"
+              data-testid="ide-run-progress-slot"
+              data-active={running ? "1" : "0"}
+              aria-hidden={running ? undefined : "true"}
+            >
+              {running && (
+                <div
+                  className="run-progress"
+                  title={
+                    runProg.value != null
+                      ? Math.round(runProg.value * 100) +
+                        "% complete — click Stop to cancel"
+                      : "Query running… click Stop to cancel"
+                  }
+                >
+                  <ProgressBar
+                    value={runProg.value}
+                    rows={runProg.rows}
+                    unit={runProg.unit}
+                    done={runProg.done}
+                    total={runProg.total}
                   />
-                </span>
-              </div>
-            )}
+                  <span className="run-elapsed">
+                    <RunTimer
+                      startedAt={
+                        runs[activeTab?.id ?? ""]?.startedAt ?? Date.now()
+                      }
+                    />
+                  </span>
+                </div>
+              )}
+            </div>
             <div className="sep" />
             <label className="dim" style={{ fontSize: 12 }}>
               Engine
@@ -4706,8 +4720,13 @@ export default function App() {
                   onToast={toast}
                   features={feats || null}
                   onTablesChanged={refreshTables}
-                  showTables={showTables}
+                  // A pinned Tables drawer keeps its own contents. In that
+                  // state the node inspector floats above it instead of
+                  // waiting for the dock host that intentionally is not
+                  // mounted.
+                  showTables={showTables && !tablesPanelPinned}
                   inspectorHost={nbHostEl}
+                  inspectorOverTables={tablesPanelPinned}
                   onSelectionChange={setNbSel}
                   showNodeSearch={showNodeSearch}
                   loadRequest={nodeLoad}

@@ -457,9 +457,10 @@ export function useNodeFlowExecutionController({
   };
 
   /**
-   * After terminals succeed, fetch preview rows for every data node in the
-   * ancestor closure and store them under that node's id/port. Backend run
-   * APIs only return terminal envelopes; intermediates were never remembered.
+   * After terminals finish, fetch preview rows for every data node in the
+   * ancestor closure and store them under that node's id/port. The backend's
+   * isolated batch response preserves successful ancestors when a downstream
+   * target fails, so passing nodes remain inspectable up to the failed node.
    * Preview-limited so this does not rematerialize full tables for tracing.
    */
   const seedLastRunCaches = async (terminalIds: string[]) => {
@@ -2256,6 +2257,10 @@ export function useNodeFlowExecutionController({
     }
 
     const totalTerminals = runList.length;
+    // Preserve the complete attempted closure before the batching paths remove
+    // terminals from runList. Even a failed terminal can have healthy ancestors
+    // whose rows should remain available from their output-port previews.
+    const attemptedTerminalIds = runList.map((n) => n.id);
     // Top-level data leaves can use the backend multi-target scheduler. It
     // keeps shared ancestors single and runs genuinely independent DuckDB
     // branches concurrently. Child nodes need their own truncated group graph.
@@ -2362,11 +2367,12 @@ export function useNodeFlowExecutionController({
     if (successfulTerminalIds.length) {
       await pruneMissingRefsAfterSuccessfulRun(successfulTerminalIds);
     }
-    // Seed last-run rows for every data node in the successful terminals'
-    // ancestor closure (Select/Join/Filter/…), not only the sink leaf/Output.
-    // Most transforms stay cache-only; sources, Join sides, and Filter may peek.
-    if (successfulTerminalIds.length && !cancelRequested.current) {
-      await seedLastRunCaches(successfulTerminalIds);
+    // Seed last-run rows for every passing data node in each attempted
+    // terminal's ancestor closure (Select/Join/Filter/…), not only successful
+    // sinks. The isolated backend seed batch omits the failed node while still
+    // returning its healthy upstream prefix.
+    if (attemptedTerminalIds.length && !cancelRequested.current) {
+      await seedLastRunCaches(attemptedTerminalIds);
     }
     if (batchScope !== scopeVersionRef.current) return;
     // Open drawer: swap to new last-run rows (or clear if this node wasn't
