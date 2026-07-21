@@ -5231,7 +5231,14 @@ class Session:
                         self._flow_cache_registry.discard(
                             fp, drop=False, stale=True)
                 if persistent_fp:
-                    restored = "__nfpersist_%s_%s" % (_tok, persistent_fp[:16])
+                    # Include the port key explicitly: persistent_fp is
+                    # "<40-hex fingerprint>_<port>", so persistent_fp[:16] slices
+                    # entirely inside the digest and drops the port suffix --
+                    # every output port of a multi-output node would restore into
+                    # the SAME table name and clobber each other (True showing
+                    # False's rows). Appending port_key keeps them distinct.
+                    restored = "__nfpersist_%s_%s_%s" % (
+                        _tok, persistent_fp[:16], port_key)
                     if self._persistent_flow_restore(
                             eng, persistent_fp, restored,
                             persistent_tables=_persistent_tables):
@@ -13813,14 +13820,19 @@ class Session:
             elif op in ("not_equals", "ne", "is_not"):
                 out.append(f"({c} IS NULL OR {c} <> {vlit(val)})")
             elif op == "contains":
-                out.append(f"{c} LIKE {lit('%' + str(val) + '%')}")
+                # LOWER() both sides so contains/starts/ends are case-
+                # insensitive on BOTH SQLite (already) and DuckDB (LIKE is
+                # case-sensitive there) -- and consistent with the Python
+                # current-result path.
+                out.append(
+                    f"LOWER({c}) LIKE {lit('%' + str(val).lower() + '%')}")
             elif op in ("not_contains", "does_not_contain"):
-                out.append(f"({c} IS NULL OR {c} NOT LIKE "
-                           f"{lit('%' + str(val) + '%')})")
+                out.append(f"({c} IS NULL OR LOWER({c}) NOT LIKE "
+                           f"{lit('%' + str(val).lower() + '%')})")
             elif op in ("starts_with", "startswith"):
-                out.append(f"{c} LIKE {lit(str(val) + '%')}")
+                out.append(f"LOWER({c}) LIKE {lit(str(val).lower() + '%')}")
             elif op in ("ends_with", "endswith"):
-                out.append(f"{c} LIKE {lit('%' + str(val))}")
+                out.append(f"LOWER({c}) LIKE {lit('%' + str(val).lower())}")
             elif op in ("gt", "greater_than", ">"):
                 out.append(cmp_side(c, val, ">"))
             elif op in ("lt", "less_than", "<"):
@@ -13883,14 +13895,18 @@ class Session:
             if Session._pivot_is_temporal(want):
                 return s_cmp != want and s != want
             return s != want
+        # contains / starts / ends are case-INSENSITIVE, matching the SQL path
+        # (LIKE/LOWER). Previously this Python current-result path was
+        # case-sensitive, so `contains "north"` matched "North Region" on a
+        # loaded table but not on the current result.
         if op == "contains":
-            return str(val) in s
+            return str(val).lower() in s.lower()
         if op in ("not_contains", "does_not_contain"):
-            return str(val) not in s
+            return str(val).lower() not in s.lower()
         if op in ("starts_with", "startswith"):
-            return s.startswith(str(val))
+            return s.lower().startswith(str(val).lower())
         if op in ("ends_with", "endswith"):
-            return s.endswith(str(val))
+            return s.lower().endswith(str(val).lower())
         if op in ("in", "one_of"):
             wanted = {Session._pivot_filter_text(x) for x in vals}
             return s in wanted or s_cmp in wanted
@@ -13945,8 +13961,12 @@ class Session:
             if agg in ("count_distinct", "distinct"):
                 return ("count(*)" if not fld
                         else f"count(DISTINCT {colref(cidx[fld])})")
-            fn = {"sum": "sum", "avg": "avg", "mean": "avg", "min": "min",
-                  "max": "max"}.get(agg, "sum")
+            if agg in ("min", "max"):
+                # min/max are meaningful on dates and text; casting the operand
+                # to a number (castnum) blanked max(date) / min(name). Compare
+                # the column natively.
+                return f"{agg}({colref(cidx[fld])})"
+            fn = {"sum": "sum", "avg": "avg", "mean": "avg"}.get(agg, "sum")
             return f"{fn}({castnum(colref(cidx[fld]))})"
 
         aggsel = ", ".join(agg_expr(v) for v in values)
@@ -13984,11 +14004,16 @@ class Session:
             for vj, v in enumerate(values):
                 fld = v.get("field")
                 if fld is None:
-                    acc[key][vj].append(1.0)
+                    acc[key][vj].append(1)
                 else:
-                    nv = self._to_num(r[cidx[fld]])
-                    if nv is not None:
-                        acc[key][vj].append(nv)
+                    # Accumulate the RAW non-null cell (not just numeric-
+                    # coercible ones). Dropping text here made count/
+                    # count_distinct of a text column return 0 and min/max of a
+                    # text/date column blank; the SQL path counts all non-null
+                    # values. Numeric coercion now happens per-agg in reduce().
+                    cell = r[cidx[fld]]
+                    if cell is not None:
+                        acc[key][vj].append(cell)
 
         def reduce(vals, agg):
             agg = (agg or "sum").lower()
@@ -13998,15 +14023,21 @@ class Session:
                 return len(set(vals))
             if not vals:
                 return None
-            if agg == "sum":
-                return sum(vals)
+            if agg in ("min", "max"):
+                fn = min if agg == "min" else max
+                try:
+                    return fn(vals)
+                except TypeError:
+                    # mixed types in one column: order by (type, string) so a
+                    # min/max is still well-defined instead of raising.
+                    return fn(vals, key=lambda x: (type(x).__name__, str(x)))
+            # sum / avg need numbers; coerce and ignore non-numeric cells.
+            nums = [n for n in (self._to_num(x) for x in vals) if n is not None]
+            if not nums:
+                return None
             if agg in ("avg", "mean"):
-                return round(sum(vals) / len(vals), 6)
-            if agg == "min":
-                return min(vals)
-            if agg == "max":
-                return max(vals)
-            return sum(vals)
+                return round(sum(nums) / len(nums), 6)
+            return sum(nums)
         grouped = []
         for (rk, ck) in order:
             grouped.append(list(rk) + list(ck) + [
@@ -14032,8 +14063,18 @@ class Session:
                 col_seen.add(ck)
                 col_keys.append(ck)
             cells[(rk, ck)] = vv
-        col_keys.sort()
-        row_keys.sort()
+        # Sort keys numerically when a dimension value parses as a number, else
+        # lexically -- so a numeric column dimension (month 1..12, year) orders
+        # 1,2,..,12 not 1,10,11,12,2,.. AND the MAXCOLS cap keeps the smallest
+        # 400, not an arbitrary lexicographic slice ("1","10","100",..).
+        def _key_sort(t):
+            out = []
+            for x in t:
+                n = self._to_num(x)
+                out.append((0, n, "") if n is not None else (1, 0.0, str(x)))
+            return out
+        col_keys.sort(key=_key_sort)
+        row_keys.sort(key=_key_sort)
         truncated = len(col_keys) > MAXCOLS
         if truncated:
             col_keys = col_keys[:MAXCOLS]

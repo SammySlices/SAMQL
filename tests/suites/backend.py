@@ -25040,6 +25040,60 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_pivot_python_sql_parity():
+        # The SQL pivot path (table source) and the Python pivot path (small
+        # "current result" source) must agree. Locks the fixes for: count/
+        # count_distinct/min/max over a TEXT column (Python used to drop
+        # non-numeric cells -> 0/blank), and case-insensitive contains.
+        s = _fresh_session()
+        try:
+            dd = tempfile.mkdtemp()
+            p = os.path.join(dd, "P.csv")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("cat,sub,amt,d\n"
+                        "A,North,10,2026-01-05\n"
+                        "A,South,20,2026-03-01\n"
+                        "B,north,5,2026-02-02\n"
+                        "B,South,,2026-01-01\n")
+            s.load_file(p, destination="sqlite", base_name="P")
+            rid = s.run_query("SELECT * FROM P",
+                              target="__local__")["result_id"]
+
+            def bycat(res):
+                return {row[0]: row[1] for row in res["rows"]}
+
+            def both(values, filters=None):
+                spec = {"rows": ["cat"], "values": values}
+                if filters:
+                    spec["filters"] = filters
+                sql = s.pivot({**spec, "table": "P", "engine": "sqlite"})
+                py = s.pivot({**spec, "result_id": rid})
+                need(not sql.get("error"), "sql pivot: %s" % sql.get("error"))
+                need(not py.get("error"), "py pivot: %s" % py.get("error"))
+                return bycat(sql), bycat(py)
+
+            # count of a TEXT column: non-zero and equal across paths
+            sql, py = both([{"field": "sub", "agg": "count"}])
+            eq(py, {"A": 2, "B": 2}, "python count(text) per group")
+            eq(sql, py, "count(text) SQL == Python")
+            # count_distinct of a text column
+            sql, py = both([{"field": "sub", "agg": "count_distinct"}])
+            eq(py, {"A": 2, "B": 2}, "python count_distinct(text)")
+            eq(sql, py, "count_distinct(text) SQL == Python")
+            # max of a date-ish text column: latest value, not blank
+            sql, py = both([{"field": "d", "agg": "max"}])
+            eq(py, {"A": "2026-03-01", "B": "2026-02-02"},
+               "python max(date text) not blank")
+            eq(sql, py, "max(date text) SQL == Python")
+            # case-insensitive contains: "NORTH" matches North and north
+            sql, py = both([{"field": "sub", "agg": "count"}],
+                           filters=[{"field": "sub", "op": "contains",
+                                     "value": "NORTH"}])
+            eq(py, {"A": 1, "B": 1}, "python contains is case-insensitive")
+            eq(sql, py, "contains SQL == Python (case-insensitive)")
+        finally:
+            s.shutdown()
+
     def t_pivot_date_equals_filter():
         # DATE-typed DuckDB columns: equals (plain + SQL-quoted paste) and
         # range ops must not CAST the ISO string through DOUBLE / re-quote it
@@ -41233,6 +41287,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("deep sorted/filtered paging (deferred lookup)", t_deep_sorted_paging),
         ("column projection (page subset)", t_column_projection),
         ("pivot values + filters (single source)", t_pivot_values_and_filters),
+        ("pivot SQL vs Python path parity (count/min-max/case)",
+         t_pivot_python_sql_parity),
         ("pivot DATE equals / range filters", t_pivot_date_equals_filter),
         ("sql_str_literal no double-quote ISO dates",
          t_sql_str_literal_no_double_quote),

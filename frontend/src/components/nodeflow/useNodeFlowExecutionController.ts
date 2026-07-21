@@ -910,10 +910,17 @@ export function useNodeFlowExecutionController({
       return;
     }
 
+    const cctx = childCtx(node.id);
+    // Join-side / Filter non-primary ports are peekable only when the node is
+    // NOT inside a group: a grouped child is run via the group's "out" port, so
+    // previewing its "false" / "left_only" port would wrongly show the group's
+    // PRIMARY output mislabeled as that port. Inside a group we fall through to
+    // the no-peek branch ("use Run all") rather than show wrong rows.
     const mayPeek =
       NODEFLOW_SOURCE_TYPES.has(node.type) ||
-      (node.type === "join" && isJoinSidePreviewPort(port)) ||
-      (node.type === "filter" && isFilterPreviewPort(port));
+      (!cctx &&
+        ((node.type === "join" && isJoinSidePreviewPort(port)) ||
+          (node.type === "filter" && isFilterPreviewPort(port))));
 
     if (!mayPeek) {
       // Empty / stale transform: open the drawer with no rows so the click
@@ -940,7 +947,6 @@ export function useNodeFlowExecutionController({
     const id = startRun(`Previewing ${node.config.label || node.id}…`, [
       node.id,
     ]);
-    const cctx = childCtx(node.id);
     const graph = cctx
       ? partialGroupGraph(cctx.groupId, cctx.index + 1)
       : graphForRun();
@@ -1211,7 +1217,10 @@ export function useNodeFlowExecutionController({
   // cache of rendered chart data per chart-node id (used under chart nodes and
   // inside dashboard panes).
   const [chartData, setChartData] = useState<
-    Record<string, { data?: ChartData; loading?: boolean; error?: string }>
+    Record<
+      string,
+      { data?: ChartData; loading?: boolean; error?: string; sig?: string }
+    >
   >({});
   const chartDataRef = useRef(chartData);
   useLayoutEffect(() => {
@@ -1219,7 +1228,7 @@ export function useNodeFlowExecutionController({
   }, [chartData]);
   const setChartEntry = (
     nodeId: string,
-    entry: { data?: ChartData; loading?: boolean; error?: string },
+    entry: { data?: ChartData; loading?: boolean; error?: string; sig?: string },
   ) => {
     const next = { ...chartDataRef.current, [nodeId]: entry };
     chartDataRef.current = next;
@@ -1305,10 +1314,19 @@ export function useNodeFlowExecutionController({
   const ensureChartFor = (node: NbNode | null, force = false): Promise<void> => {
     if (!node || node.type !== "chart") return Promise.resolve();
     const key = `chart:${node.id}`;
+    // Signature of everything that affects the fetched/rendered chart data, so a
+    // config change (X/Y, aggregation, series, bins, chart type) invalidates the
+    // cache. Without this, a chart that already had data never refetched after a
+    // data-config edit -- it kept showing the old aggregates (and bar->donut
+    // re-tagged stale bar-shaped data as a pie), until a manual refresh.
+    const specSig =
+      JSON.stringify(chartSpecOf(node)) +
+      "|" +
+      (node.config.chart_type || "bar");
     const existing = chartPromisesRef.current.get(key);
     if (!force && existing) return existing;
     const cur = chartDataRef.current[node.id];
-    if (!force && cur?.data) return Promise.resolve();
+    if (!force && cur?.data && cur.sig === specSig) return Promise.resolve();
     if (!node.config.x) {
       cancelAuxRequest(key);
       setChartEntry(node.id, {
@@ -1341,7 +1359,7 @@ export function useNodeFlowExecutionController({
           setChartEntry(node.id, { error: r.error });
           return;
         }
-        setChartEntry(node.id, { data: styleChartData(node, r) });
+        setChartEntry(node.id, { data: styleChartData(node, r), sig: specSig });
       } catch (e: any) {
         if (
           !isAuxRequestCurrent(owner) ||
