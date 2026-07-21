@@ -10236,11 +10236,15 @@ class Session:
                                    or "list"))
                             # Peel off the projected nest expression.
                             if "->" in _path_sql or "::" in _path_sql:
-                                from .diagnostics import _json_path_seg
+                                from .diagnostics import (_json_path_seg,
+                                                          _sql_str)
+                                # _sql_str escapes any apostrophe in the field
+                                # name so it can't terminate the '$...' literal
+                                # (no-op for ordinary keys).
                                 _peel_sql = (
                                     "json_extract(%s, '$%s')"
                                     % (_path_sql,
-                                       _json_path_seg(_fname)))
+                                       _sql_str(_json_path_seg(_fname))))
                             else:
                                 _peel_sql = "%s.%s" % (
                                     _path_sql, _qid_path(_fname))

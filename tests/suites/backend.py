@@ -21984,6 +21984,47 @@ def backend_tests(datadir, csv_path, json_path):
             need(prev.get("sample") == "test",
                  "preview sample is non-NULL: %r" % prev.get("sample"))
             need(prev.get("sql"), "preview returns validated SQL")
+
+            # 7) Hostile JSON keys: an apostrophe, an embedded double-quote and
+            # a backslash must not produce invalid SQL. A single quote used to
+            # terminate the string literal ("unterminated quoted identifier")
+            # and a double-quote was doubled ("") which DuckDB's JSONPath
+            # rejects ("JSON path error"). Build recipes from a live sample and
+            # EXECUTE every First/All/Count SQL — nested under an array too.
+            rec = {"it's": 1, 'a"b': 2, "a\\b": 3, "plain": 4}
+            hostile = {"top": rec, "arr": [rec, rec]}
+            duck.conn.execute(
+                "CREATE OR REPLACE TABLE fx_hostile AS SELECT ?::JSON AS j",
+                [json.dumps(hostile)])
+            ht = s.column_field_tree("duckdb", "fx_hostile", "j")
+            hfields = ht.get("fields") or []
+            need(hfields, "hostile-key column yields a field tree")
+            from samql_core.diagnostics import field_access_sql as _fas
+            ran = 0
+            for f in hfields:
+                # The display `path` (tooltip) must itself be runnable.
+                p = f.get("path")
+                if p and " ->> " in p:
+                    duck.conn.execute(
+                        "SELECT %s FROM fx_hostile LIMIT 1" % p).fetchall()
+                    ran += 1
+                acc = f.get("access") or {}
+                for which in ("first", "all", "count"):
+                    sql = _fas("fx_hostile", acc, which=which)
+                    if not sql:
+                        continue
+                    duck.conn.execute(sql).fetchall()  # must not raise
+                    ran += 1
+            need(ran >= 8,
+                 "hostile-key recipes/paths executed (ran=%d)" % ran)
+            # Spot-check a value comes back through the apostrophe key.
+            aq = [f for f in hfields
+                  if f.get("name") == "it's" and (f.get("access") or {}).get("first")]
+            need(aq, "apostrophe key 'it's' present with a recipe")
+            got = duck.conn.execute(
+                _fas("fx_hostile", aq[-1]["access"], which="first")).fetchall()
+            need(got and str(got[0][0]) == "1",
+                 "apostrophe-key recipe returns the right value: %r" % got)
         finally:
             s.shutdown()
 

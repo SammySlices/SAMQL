@@ -438,11 +438,17 @@ def discover_load_fields(path, sample=0, time_budget_s=8):
 
 
 def _json_path_seg(key):
-    """A JSON-path segment for DuckDB, quoting keys that aren't simple."""
+    """A JSON-path segment for DuckDB, quoting keys that aren't simple.
+
+    DuckDB's JSONPath quotes a member with ``"..."`` and escapes an inner
+    double-quote (and backslash) C-style with a backslash -- NOT by doubling.
+    A doubled ``""`` produces ``JSON path error near '"..."'``. Escape the
+    backslash first so a literal ``\\`` in a key is not read as an escape."""
     import re
     if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', key or ""):
         return "." + key
-    return '."%s"' % (key or "").replace('"', '""')
+    esc = (key or "").replace("\\", "\\\\").replace('"', '\\"')
+    return '."%s"' % esc
 
 
 def access_recipes(column, rows, access_style="struct", cast_to_json=False,
@@ -546,18 +552,27 @@ def _access_recipes_struct(column, rows):
     return rows
 
 
+def _sql_str(s):
+    """Escape a Python string for a single-quoted DuckDB string literal.
+
+    The JSONPath is interpolated into ``'...'``; a key with an apostrophe
+    (``it's``) would otherwise terminate the literal early (``unterminated
+    quoted identifier``). Double every single quote."""
+    return str(s).replace("'", "''")
+
+
 def _json_extract_expr(base, jptr, as_text=True):
     """``base ->> '$.a[0].b'`` (text) or ``base -> '$.a'`` (JSON)."""
     if not jptr or jptr == "$":
         return base
-    return "%s %s '%s'" % (base, "->>" if as_text else "->", jptr)
+    return "%s %s '%s'" % (base, "->>" if as_text else "->", _sql_str(jptr))
 
 
 def _json_array_sql(base, jptr):
     """SQL expression for a JSON array value at ``jptr`` under ``base``."""
     if not jptr or jptr == "$":
         return base
-    return "json_extract(%s, '%s')" % (base, jptr)
+    return "json_extract(%s, '%s')" % (base, _sql_str(jptr))
 
 
 def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
@@ -1134,10 +1149,20 @@ def _field_tree_from_root(root, colname="json", access_style="json",
         ts = sorted(nd["types"] - {"null"}) or ["null"]
         return "/".join(ts)
 
+    def seg(key):
+        # Struct-style splices the path as SQL identifiers (double-quote
+        # doubling); JSON-style needs a JSONPath member (C-style backslash).
+        if access_style == "struct":
+            q = ('"%s"' % key.replace('"', '""')) if _needs_quote(key) else key
+            return "." + q
+        return _json_path_seg(key)
+
     def expr(jptr):
         if access_style == "struct":
             return colname + jptr.replace("$", "", 1)  # $.a.b -> .a.b
-        return "%s ->> '%s'" % (colname, jptr)
+        # Single-quote-escape the JSONPath: a key with an apostrophe would
+        # otherwise terminate this string literal (unterminated identifier).
+        return "%s ->> '%s'" % (colname, _sql_str(jptr))
 
     def walk(name, nd, depth, jptr, in_array):
         if len(rows) >= JSON_TREE_MAX_NODES:
@@ -1150,7 +1175,7 @@ def _field_tree_from_root(root, colname="json", access_style="json",
                          "note": None})
             for key in nd["children"]:
                 walk(key, nd["children"][key], depth + 1,
-                     None if in_array else jptr + _json_path_seg(key), in_array)
+                     None if in_array else jptr + seg(key), in_array)
         elif k == "array":
             scalar_elem = bool(nd["elem"] and nd["elem"]["kind"] == "scalar")
             rows.append({"depth": depth, "name": name, "type": label(nd),
