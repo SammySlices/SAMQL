@@ -38,6 +38,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# API nodes may target services on a private/LAN address.  Keep this override
+# scoped to SamQL's process tree; cloud-metadata protection remains separate.
+$env:SAMQL_ALLOW_PRIVATE_FETCH = "1"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $self = $MyInvocation.MyCommand.Path
 $url = "http://127.0.0.1:$Port"

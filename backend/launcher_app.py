@@ -31,6 +31,11 @@ import threading
 import tempfile
 import time
 
+# API nodes may target services on a private/LAN address.  This environment
+# override is inherited by the server launched below; cloud-metadata blocking
+# remains controlled separately by SAMQL_ALLOW_METADATA_FETCH.
+os.environ.setdefault("SAMQL_ALLOW_PRIVATE_FETCH", "1")
+
 # Boot wait for a server WE spawned: idle timeout + absolute ceiling.
 # .490/.500/.623/.624: wall-clock alone was raised 60 -> 300 s for OneDrive/AV
 # cold starts, but a dead child still burned the whole budget, and a hung-but-
