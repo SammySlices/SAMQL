@@ -136,24 +136,53 @@ function pushStale(out: StaleColumnRef[], area: string, columns: string[]) {
   out.push({ area, columns: [...columns] });
 }
 
+/** Drop spans that can never name a column: single-quoted string literals and
+ *  ``{{var}}`` / ``${var}`` workflow placeholders. */
+function stripNonColumnSpans(text: string): string {
+  return String(text || "")
+    .replace(/'(?:[^']|'')*'/g, " ")
+    .replace(/\{\{[^}]*\}\}/g, " ")
+    .replace(/\$\{[^}]*\}/g, " ");
+}
+
+/** Column refs written with explicit ``[brackets]`` or ``"quotes"``.
+ *
+ *  These are the only unambiguous form: a bare word in a free-form expression
+ *  may equally be a function name or an identifier the user is still halfway
+ *  through typing. Callers that DESTROY user text must use this, not
+ *  ``exprColumnRefs``. */
+export function delimitedExprColumnRefs(text: string): string[] {
+  const stripped = stripNonColumnSpans(text);
+  const names = new Set<string>();
+  for (const m of stripped.matchAll(/\[([^\]]+)\]/g)) names.add(m[1].trim());
+  for (const m of stripped.matchAll(/"((?:[^"]|"")*)"/g))
+    names.add(m[1].replace(/""/g, '"').trim());
+  return [...names].filter(Boolean);
+}
+
 /** Pull column-ish identifiers from a free-form expression (filter / formula).
  *  Bracketed / double-quoted names are taken as whole identifiers (so
  *  ``[Order Date]`` is one ref, not bare ``Order`` + ``Date``). Bare-word
  *  scanning runs only on the leftover text after those spans are removed. */
 export function exprColumnRefs(text: string): string[] {
-  const stripped = String(text || "").replace(/'(?:[^']|'')*'/g, " ");
-  const names = new Set<string>();
-  for (const m of stripped.matchAll(/\[([^\]]+)\]/g)) names.add(m[1].trim());
-  for (const m of stripped.matchAll(/"((?:[^"]|"")*)"/g))
-    names.add(m[1].replace(/""/g, '"').trim());
+  const stripped = stripNonColumnSpans(text);
+  const names = new Set<string>(delimitedExprColumnRefs(text));
   // Do not re-tokenize insides of [..] / ".." — spaced headers would otherwise
   // look like missing bare columns while the real quoted/bracketed name exists.
   const bareSrc = stripped
     .replace(/\[[^\]]*\]/g, " ")
-    .replace(/"(?:[^"]|"")*"/g, " ");
+    .replace(/"(?:[^"]|"")*"/g, " ")
+    // A trailing unclosed ``[Amoun`` is a reference still being typed (the
+    // autocomplete popup is open on it) — not a missing column.
+    .replace(/\[[^\]]*$/, " ");
   for (const m of bareSrc.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
     const w = m[0];
-    if (!SQL_WORDS.has(w.toLowerCase())) names.add(w);
+    if (SQL_WORDS.has(w.toLowerCase())) continue;
+    // ``FOO(`` is a call, not a column. Skipping these keeps every function
+    // the engine supports (LTRIM, regexp_replace, strftime, …) out of the
+    // missing-column list without having to enumerate them all here.
+    if (/^\s*\(/.test(bareSrc.slice(m.index + w.length))) continue;
+    names.add(w);
   }
   return [...names].filter(Boolean);
 }
@@ -243,7 +272,11 @@ export function clearStaleNodeflowColumnRefs(
 
   switch (nodeType) {
     case "filter":
-      if (exprColumnRefs(cfg.condition || "").some((r) => isDead(r, dead))) {
+      // Only a delimited ref justifies destroying the user's text. A bare
+      // word that merely looks dead may be a function name or an identifier
+      // still being typed, and blanking the whole condition over one is how
+      // hand-written expressions used to vanish.
+      if (delimitedExprColumnRefs(cfg.condition || "").some((r) => isDead(r, dead))) {
         cfg.condition = "";
         changed = true;
       }
@@ -254,7 +287,9 @@ export function clearStaleNodeflowColumnRefs(
     case "formula":
       cfg.formulas = (cfg.formulas || []).map((f: any) => {
         if (!f?.expr) return f;
-        if (!exprColumnRefs(f.expr).some((r) => isDead(r, dead))) return f;
+        // Delimited refs only — see the filter case above. Bare-word matching
+        // here is what erased formulas the user had just typed.
+        if (!delimitedExprColumnRefs(f.expr).some((r) => isDead(r, dead))) return f;
         changed = true;
         return { ...f, expr: "" };
       });
@@ -502,14 +537,23 @@ export function staleNodeflowColumnRefs(
       staleExprs("condition", [cfg.condition], inLive, out);
       pushStale(out, "field", missingMany([cfg.field].filter(Boolean), inLive));
       break;
-    case "formula":
+    case "formula": {
+      // A formula may reference a column an earlier formula in the same node
+      // creates, so this node's own outputs are live too — otherwise every
+      // chained formula reports its own input as missing.
+      const fxLive = new Set(inLive);
+      for (const f of cfg.formulas || []) {
+        const name = String(f?.name || "").trim();
+        if (name) fxLive.add(name.toLowerCase());
+      }
       staleExprs(
         "formula",
         (cfg.formulas || []).map((f: any) => f.expr).filter(Boolean),
-        inLive,
+        fxLive,
         out,
       );
       break;
+    }
     case "summarize":
       pushStale(out, "group by", missingMany(cfg.group_by || [], inLive));
       pushStale(

@@ -2,12 +2,42 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-20.675
+Current build:   2026-07-21.676
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-21.676  (v2.16.4)
+
+MASTER NODEFLOW: BRANCH ERROR ISOLATION + FORMULA REF FIXES.
+Run all no longer loses every branch when one node fails. The batch
+materialiser built all terminals in a single try, so the first node that
+raised aborted the pass before any result was read, returned a run-level
+error with no results array, and dropped the temp tables of branches that had
+already finished. A failure now rebuilds the graph's independent target groups
+separately (they share no upstream work, so nothing is recomputed twice) and
+each failed terminal reports its own error inside results; a group with
+several terminals retries them one at a time so a branch that never reaches
+the broken node still returns rows. Every-branch-failed and single-target runs
+keep the old run-level envelope with the culprit node attributed, and a clean
+run is untouched. Each group builds into its own temp list -- sharing one list
+let an unfused rebuild drop a finished group's tables out from under it.
+
+Formula/filter column references: bare words in an expression were all treated
+as column refs against a 47-word SQL list, so most of the function palette
+(LTRIM, regexp_replace, strftime, …) and every half-typed identifier were
+reported missing. Worse, the post-run prune blanked the WHOLE expression on
+one such token and autosave persisted it -- the formula did not survive
+exiting the inspector. Identifiers followed by "(" are now read as calls,
+{{var}}/${var} placeholders and a trailing unclosed "[Amoun" are skipped,
+destroying user text requires a delimited [name]/"name" ref, and a formula's
+own new columns count as live for later formulas in the same node. The warning
+is debounced for freeform filter/formula so it no longer fires mid-keystroke.
+Formula target no longer flips from overwrite to "new column" when the
+inspector opens before the upstream schema has loaded.
 
 ----------------------------------------------------------------------
 build 2026-07-20.675  (v2.16.4)

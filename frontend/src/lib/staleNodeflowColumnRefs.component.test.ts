@@ -186,3 +186,74 @@ describe("clearStaleNodeflowColumnRefs", () => {
     ).toBeNull();
   });
 });
+
+describe("free-form expressions (filter / formula)", () => {
+  it("does not read a function call as a column reference", () => {
+    expect(exprColumnRefs("LTRIM([Name])")).toEqual(["Name"]);
+    expect(exprColumnRefs("regexp_replace([a], 'x', 'y')")).toEqual(["a"]);
+    expect(
+      staleNodeflowColumnRefs(
+        "formula",
+        { formulas: [{ name: "clean", expr: "LTRIM(RTRIM([Name]))" }] },
+        { in: ["Name"] },
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not read a workflow variable as a column reference", () => {
+    expect(exprColumnRefs("[a] = {{run_date}}")).toEqual(["a"]);
+    expect(exprColumnRefs("[a] = ${env_name}")).toEqual(["a"]);
+  });
+
+  it("does not flag a reference still being typed", () => {
+    expect(exprColumnRefs("[Amoun")).toEqual([]);
+    expect(
+      staleNodeflowColumnRefs("filter", { condition: "[Amoun" }, { in: ["Amount"] }),
+    ).toEqual([]);
+  });
+
+  it("treats a formula's own new columns as live for later formulas", () => {
+    expect(
+      staleNodeflowColumnRefs(
+        "formula",
+        {
+          formulas: [
+            { name: "gross", expr: "[qty] * [price]", mode: "new" },
+            { name: "net", expr: "[gross] * 0.9", mode: "new" },
+          ],
+        },
+        { in: ["qty", "price"] },
+      ),
+    ).toEqual([]);
+  });
+
+  it("never destroys a formula over an undelimited word", () => {
+    expect(
+      clearStaleNodeflowColumnRefs(
+        "formula",
+        { formulas: [{ name: "Sales", expr: "amount * 2" }] },
+        [{ area: "formula", columns: ["amount"] }],
+      ),
+    ).toBeNull();
+  });
+
+  it("still clears a formula whose bracketed column really went away", () => {
+    expect(
+      clearStaleNodeflowColumnRefs(
+        "formula",
+        { formulas: [{ name: "Sales", expr: "[amount] * 2" }] },
+        [{ area: "formula", columns: ["amount"] }],
+      ),
+    ).toEqual({ formulas: [{ name: "Sales", expr: "" }] });
+  });
+
+  it("never destroys a filter condition over an undelimited word", () => {
+    expect(
+      clearStaleNodeflowColumnRefs(
+        "filter",
+        { condition: "amount > 2" },
+        [{ area: "condition", columns: ["amount"] }],
+      ),
+    ).toBeNull();
+  });
+});

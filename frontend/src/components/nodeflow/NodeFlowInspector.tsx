@@ -1344,8 +1344,14 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   </InspColsHint>
                   {(sel.config.formulas || []).map((f: any, i: number) => {
                     const cols = inspCols.in || [];
+                    // Infer "new column" from a name that is absent upstream
+                    // only once the upstream schema is actually known. While
+                    // it is still loading cols is empty, so every overwrite
+                    // target looked new — and touching the field then wrote
+                    // mode:"new" for good, silently losing the overwrite.
                     const newMode =
-                      f.mode === "new" || (!!f.name && !cols.includes(f.name));
+                      f.mode === "new" ||
+                      (cols.length > 0 && !!f.name && !cols.includes(f.name));
                     const selVal =
                       !newMode && f.name && cols.includes(f.name)
                         ? f.name

@@ -5271,6 +5271,67 @@ class Session:
                 del collect[:]
             return run_pass(False)
 
+    def _materialize_flows_isolated(self, graph, targets, engine_target,
+                                    collect=None, target_limits=None):
+        """Build ``targets`` group by group so one broken branch cannot sink
+        the others.
+
+        ``_independent_flow_target_groups`` partitions targets by upstream
+        overlap, so distinct groups share no computation and building them
+        separately loses nothing. A group that raises is retried target by
+        target: a shared ancestor only means the members *might* share the
+        failure, and a branch that never reaches the broken node still has
+        rows to return.
+
+        Returns ``(built, errors)`` -- ``built`` maps the targets that
+        succeeded to their table, ``errors`` maps each failed target to its
+        error envelope.
+        """
+        from . import nodeflow
+        built = {}
+        errors = {}
+
+        def attempt(group):
+            """Build one group; return its error envelope, or None on success."""
+            limits = None
+            if target_limits:
+                limits = {k: v for k, v in target_limits.items() if k in group}
+            # Every group needs its OWN temp list. _materialize_flows drops the
+            # list it is handed when it falls back to an unfused rebuild, so a
+            # shared list would take finished groups' tables down with it and
+            # leave their results pointing at dropped relations.
+            local = []
+            try:
+                out = self._materialize_flows(
+                    graph, group, engine_target, local, target_limits=limits)
+            except nodeflow.NodeflowError as e:
+                self._drop_flow_temps(engine_target, local)
+                return self._flow_err(e, graph)
+            except Exception as e:
+                self._drop_flow_temps(engine_target, local)
+                if _is_interrupt(e):
+                    raise
+                return {"error": _duckdb_oom_flow_message(
+                    _iter_missing_accum_hint(err_str(e), graph),
+                    getattr(self, "duckdb", None))}
+            built.update(out)
+            if collect is not None:
+                collect.extend(local)
+            return None
+
+        for group in self._independent_flow_target_groups(graph, targets):
+            env = attempt(group)
+            if env is None:
+                continue
+            if len(group) == 1:
+                errors[group[0]] = env
+                continue
+            for target in group:
+                single = attempt([target])
+                if single is not None:
+                    errors[target] = single
+        return built, errors
+
     def _shred_flow_prepass(self, graph, targets):
         """Run every SHRED node feeding a flow target before composing: the
         CREATEs are a side effect, so they happen once, up front, with the
@@ -5832,13 +5893,41 @@ class Session:
             self._register_run(
                 query_id, eng, surface="node",
                 label="NodeFlow batch (%d branches)" % len(norm))
-            built = self._materialize_flows(
-                graph, norm, et, created, target_limits=limits)
+            flow_errors = {}
+            try:
+                built = self._materialize_flows(
+                    graph, norm, et, created, target_limits=limits)
+            except nodeflow.NodeflowError:
+                # A node that fails must not sink the branches that never
+                # touch it. Drop the aborted pass, then rebuild the
+                # independent groups on their own so the healthy ones still
+                # return rows. Only re-raise when nothing at all survives.
+                if len(norm) < 2:
+                    raise
+                if created:
+                    self._drop_flow_temps(et, list(created))
+                    del created[:]
+                built, flow_errors = self._materialize_flows_isolated(
+                    graph, norm, et, created, target_limits=limits)
+                if not built:
+                    raise
             results = []
             for nid, port in norm:
                 if self._run_is_cancelled(query_id):
                     return {"error": "cancelled", "cancelled": True,
                             "results": results}
+                failed = flow_errors.get((nid, port))
+                if failed is not None:
+                    # Per-branch failure rides in the results array so the UI
+                    # marks this terminal only, not every branch in the batch.
+                    res = dict(failed)
+                    culprit = res.get("node")
+                    if culprit and culprit != nid:
+                        res["error_node"] = culprit
+                    res["node"] = nid
+                    res["port"] = port
+                    results.append(res)
+                    continue
                 res = self.run_query(
                     'SELECT * FROM "%s"' % built[(nid, port)],
                     target=et, query_id=query_id)
