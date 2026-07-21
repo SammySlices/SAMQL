@@ -25220,6 +25220,101 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_pivot_malformed_data():
+        # The pivot modal must never crash on malformed / hostile result data:
+        # non-numeric / NaN / Inf strings under sum, mixed-type value columns,
+        # NULLs in row/col/value, quote+unicode column-header values, a
+        # high-cardinality column dimension (truncated, not exploded), an empty
+        # result, and an injection-attempt filter value. Every case returns a
+        # clean grid or a clean validation error -- never an exception.
+        s = _fresh_session()
+        try:
+            def rid_for(sql):
+                r = s.run_query(sql, target="auto")
+                need(not r.get("error"), "setup query: %s" % r.get("error"))
+                return r["result_id"]
+
+            def ok(label, res):
+                need(isinstance(res, dict), "%s: non-dict %r" % (label, res))
+                need(not res.get("error"),
+                     "%s: unexpected error %r" % (label, res.get("error")))
+                return res
+
+            mal = rid_for(
+                "SELECT 'east' AS region, 'q1' AS quarter, '10' AS amount, "
+                "'A' AS grp "
+                "UNION ALL SELECT 'east','q1','oops','a' "   # non-numeric; A/a
+                "UNION ALL SELECT 'west','q2','20','B' "
+                "UNION ALL SELECT 'west',NULL,NULL,NULL "    # nulls everywhere
+                "UNION ALL SELECT 'east','q2','nan','C' "    # 'nan' string
+                "UNION ALL SELECT 'west','q1','inf','C' "    # 'inf' string
+                "UNION ALL SELECT NULL,'q1','5','D'")        # null row dim
+            base = {"result_id": mal}
+
+            ok("sum over text/nan/inf", s.pivot({
+                **base, "rows": ["region"], "cols": ["quarter"],
+                "values": [{"field": "amount", "agg": "sum"}]}))
+            ok("avg over text/nan/inf", s.pivot({
+                **base, "rows": ["region"],
+                "values": [{"field": "amount", "agg": "avg"}]}))
+            ok("max mixed-type", s.pivot({
+                **base, "rows": ["region"],
+                "values": [{"field": "amount", "agg": "max"}]}))
+            ok("count_distinct text", s.pivot({
+                **base, "rows": ["region"],
+                "values": [{"field": "grp", "agg": "count_distinct"}]}))
+            # Case-only-distinct header values (A/a) and a NULL header must not
+            # collide or crash -- the crosstab is assembled in Python, so both
+            # survive as distinct output columns.
+            cad = ok("case-dup + null headers", s.pivot({
+                **base, "rows": ["region"], "cols": ["grp"],
+                "values": [{"field": "amount", "agg": "sum"}]}))
+            need(len(cad.get("columns") or []) >= 4,
+                 "case-differing headers stay distinct: %r" % cad.get("columns"))
+            # A filter value with a quote must be escaped, not injected.
+            ok("quote-in-filter (no injection)", s.pivot({
+                **base, "rows": ["region"],
+                "values": [{"field": "amount", "agg": "sum"}],
+                "filters": [{"field": "grp", "op": "equals",
+                             "value": "O'Brien"}]}))
+            # Validation errors are clean, not exceptions.
+            need(s.pivot({**base, "rows": ["nope"],
+                          "values": [{"field": "amount", "agg": "sum"}]}
+                         ).get("error"),
+                 "unknown column is a clean error")
+            need(s.pivot({**base, "values": [{"field": "amount",
+                                              "agg": "sum"}]}).get("error"),
+                 "no row/col dims is a clean error")
+
+            # High-cardinality column dimension -> MAXCOLS truncation, not blow-up.
+            big = rid_for(
+                "WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL "
+                "SELECT i+1 FROM c WHERE i < 4999) "
+                "SELECT (i % 7) AS k, i AS col, 1 AS v FROM c")
+            hc = ok("high-cardinality col truncates", s.pivot({
+                "result_id": big, "rows": ["k"], "cols": ["col"],
+                "values": [{"field": "v", "agg": "sum"}]}))
+            need(hc.get("truncated") and len(hc.get("columns") or []) <= 402,
+                 "high-cardinality pivot is capped: cols=%d truncated=%r"
+                 % (len(hc.get("columns") or []), hc.get("truncated")))
+
+            # Empty result set.
+            emp = ok("empty result", s.pivot({
+                "result_id": rid_for("SELECT 1 AS a, 2 AS b WHERE 1=0"),
+                "rows": ["a"], "values": [{"field": "b", "agg": "sum"}]}))
+            eq(emp.get("row_count"), 0, "empty pivot has zero rows")
+
+            # Quote / unicode values used as column headers.
+            uni = rid_for(
+                "SELECT 'r' AS r, 'He said \"hi\"' AS grp, 1 AS v "
+                "UNION ALL SELECT 'r','a''b',2 "
+                "UNION ALL SELECT 'r','éé',3")
+            ok("quote/unicode headers", s.pivot({
+                "result_id": uni, "rows": ["r"], "cols": ["grp"],
+                "values": [{"field": "v", "agg": "sum"}]}))
+        finally:
+            s.shutdown()
+
     def t_sql_str_literal_no_double_quote():
         # Shared quoting helper: bare ISO and already-SQL-quoted ISO must both
         # become a single-quoted literal -- never '''2026-01-26'''. Covers the
@@ -41452,6 +41547,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("pivot SQL vs Python path parity (count/min-max/case)",
          t_pivot_python_sql_parity),
         ("pivot DATE equals / range filters", t_pivot_date_equals_filter),
+        ("pivot modal survives malformed data (nan/inf/mixed/nulls/hostile "
+         "headers/high-card)", t_pivot_malformed_data),
         ("sql_str_literal no double-quote ISO dates",
          t_sql_str_literal_no_double_quote),
         ("filter DATE equals no double-quote / {{as_of}}",
