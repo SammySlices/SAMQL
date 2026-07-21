@@ -187,6 +187,41 @@ export function exprColumnRefs(text: string): string[] {
   return [...names].filter(Boolean);
 }
 
+/** True while a free-form expression is still being written: an unclosed
+ *  quote, bracket or paren, a dangling operator or clause keyword, or a CASE
+ *  with no END.
+ *
+ *  A half-written expression cannot be judged for missing columns — its
+ *  identifiers are partial and its operands are not all there yet — so no
+ *  warning should be drawn from one, and its text must never be pruned. */
+export function looksIncompleteExpr(text: string): boolean {
+  const raw = String(text || "");
+  if (!raw.trim()) return false; // empty is absent, not malformed
+  // Odd number of ' means a string literal is still open. Checked on the raw
+  // text, before the stripper (which only matches balanced literals).
+  if ((raw.match(/'/g) || []).length % 2 !== 0) return true;
+  const s = stripNonColumnSpans(raw);
+  if ((s.match(/"/g) || []).length % 2 !== 0) return true;
+  let paren = 0;
+  let square = 0;
+  for (const ch of s) {
+    if (ch === "(") paren += 1;
+    else if (ch === ")") paren -= 1;
+    else if (ch === "[") square += 1;
+    else if (ch === "]") square -= 1;
+    if (paren < 0 || square < 0) return true; // closed what was never opened
+  }
+  if (paren !== 0 || square !== 0) return true;
+  const tail = s.trim();
+  // A trailing operator or clause keyword means the next operand is still
+  // on its way.
+  if (/[+\-*/%,<>=!|&~^]$/.test(tail)) return true;
+  if (/\b(and|or|not|case|when|then|else|like|between|in|is|as|cast)$/i.test(tail))
+    return true;
+  if (/\bcase\b/i.test(s) && !/\bend\b/i.test(s)) return true;
+  return false;
+}
+
 function staleExprs(
   area: string,
   exprs: string[],
@@ -196,6 +231,7 @@ function staleExprs(
   const stale: string[] = [];
   const seen = new Set<string>();
   for (const e of exprs) {
+    if (looksIncompleteExpr(e)) continue;
     for (const ref of exprColumnRefs(e)) {
       const m = missing(ref, live);
       if (m && !seen.has(m.toLowerCase())) {
@@ -276,7 +312,10 @@ export function clearStaleNodeflowColumnRefs(
       // word that merely looks dead may be a function name or an identifier
       // still being typed, and blanking the whole condition over one is how
       // hand-written expressions used to vanish.
-      if (delimitedExprColumnRefs(cfg.condition || "").some((r) => isDead(r, dead))) {
+      if (
+        !looksIncompleteExpr(cfg.condition || "") &&
+        delimitedExprColumnRefs(cfg.condition || "").some((r) => isDead(r, dead))
+      ) {
         cfg.condition = "";
         changed = true;
       }
@@ -286,7 +325,7 @@ export function clearStaleNodeflowColumnRefs(
       break;
     case "formula":
       cfg.formulas = (cfg.formulas || []).map((f: any) => {
-        if (!f?.expr) return f;
+        if (!f?.expr || looksIncompleteExpr(f.expr)) return f;
         // Delimited refs only — see the filter case above. Bare-word matching
         // here is what erased formulas the user had just typed.
         if (!delimitedExprColumnRefs(f.expr).some((r) => isDead(r, dead))) return f;

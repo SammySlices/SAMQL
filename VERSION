@@ -2,12 +2,33 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-21.676
+Current build:   2026-07-21.677
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-21.677  (v2.16.4)
+
+MASTER NODEFLOW: NO MISSING-COLUMN WARNING ON A HALF-WRITTEN EXPRESSION.
+.676 debounced the Filter/Formula missing-column banner, which only delayed
+it: pausing partway through a function still raised the warning against the
+half-typed operand. Suppression is now structural rather than timed. A new
+looksIncompleteExpr gates both the banner and the prune, and reports an
+expression as unfinished when it has an unclosed ( [ ' or ", a closing bracket
+that was never opened, a trailing operator or clause keyword (+ - * / , < > =
+AND OR WHEN THEN ELSE LIKE IN IS AS CAST), or a CASE with no END. So
+LTRIM([Name] , UPPER(sco , REPLACE([a], 'x , [score] + and CASE WHEN [score] >
+5 THEN 'hi' all stay quiet while being written, and a half-written expression
+can no longer be pruned either.
+
+A finished expression is still judged normally: UPPER([gone]) against an
+upstream without "gone" reports the missing column as before. A bare word that
+parses on its own (plain "sco", no brackets, parens or pending operator) also
+still warns -- at that point it is a valid expression naming a column that does
+not exist, which is exactly the renamed-upstream case the warning is for.
 
 ----------------------------------------------------------------------
 build 2026-07-21.676  (v2.16.4)
