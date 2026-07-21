@@ -996,6 +996,10 @@ export default function App() {
     refreshWorkflows,
     onDisconnect,
   } = useCatalogController(toast);
+  // Stable getter for the current freshness epoch (used by callbacks that must
+  // not be re-created on every epoch bump, e.g. the reconcile detail controller).
+  const dataEpochRef = useRef(dataEpoch);
+  dataEpochRef.current = dataEpoch;
 
   const {
     startBgOp,
@@ -1819,14 +1823,19 @@ export default function App() {
     try {
       const pg = await api.page(ent.result_id, { offset: 0 });
       if (pg.error) return;
+      // Compute staleness from the fetched result's epoch instead of forcing
+      // dataStale:false -- a still-cached statement result from a PRIOR epoch
+      // must be shown as stale, not revived as fresh (the grid guard then hides
+      // its pre-change rows).
+      const stampedEpoch = stampResultEpoch(pg, dataEpoch);
       setResTabs((prev) =>
         prev.map((t) =>
           t.id === tabId
             ? {
                 ...t,
                 resultId: ent.result_id ?? null,
-                ranDataEpoch: stampResultEpoch(pg, dataEpoch),
-                dataStale: false,
+                ranDataEpoch: stampedEpoch,
+                dataStale: stampedEpoch !== dataEpoch,
                 page: { ...pg, result_id: ent.result_id },
                 sortCol: null,
                 descending: false,
@@ -2576,6 +2585,7 @@ export default function App() {
         setActiveResId,
         patchRes: patchRes as any,
         pageLimit: LAZY_CHUNK,
+        getDataEpoch: () => dataEpochRef.current,
       }),
     [toast, setResTabs, setActiveResId, patchRes],
   );
@@ -2898,6 +2908,14 @@ export default function App() {
           <div className="inner">
             <p>No rows.</p>
           </div>
+        </div>
+      );
+    if (r.dataStale)
+      // Same stale guard as the main grid: never re-show pre-change rows in a
+      // float window or compare pane.
+      return (
+        <div className="result-data-stale-panel faint">
+          Data changed — re-run to refresh these rows.
         </div>
       );
     return (
@@ -4385,6 +4403,16 @@ export default function App() {
                   ) : (
                     <>
                       {stmtStrip(activeResultTab)}
+                      {activeResultTab.dataStale ? (
+                        // The grid must NOT re-show pre-change rows. Unlike the
+                        // chart/pivot views it used to have no stale guard, so
+                        // any path that refilled page.rows after the stale
+                        // effect (statement switch, tab reactivation, a late
+                        // sort) silently re-exposed old rows. Guard it too.
+                        <div className="result-data-stale-panel faint">
+                          Data changed — re-run to refresh these rows.
+                        </div>
+                      ) : (
                       <DataGrid
                       page={activeResultTab.page}
                       sortCol={activeResultTab.sortCol ?? null}
@@ -4421,6 +4449,7 @@ export default function App() {
                       }}
                       onShowLineage={(col, cell) => openColumnLineage(col, undefined, cell)}
                       />
+                      )}
                     </>
                   )
                 ) : (

@@ -600,6 +600,34 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_write_clears_profile_cache():
+        # A write must clear the (engine, table) profile cache so the Profile
+        # panel never shows pre-write min/max/nulls. Regression: a DuckDB write
+        # returns a "Count" row (cols is NOT None) and so skipped the profile
+        # clear that the SQLite (cols is None) path did -- leaving stale
+        # aggregates. Both engines must invalidate.
+        from samql_core.engines import HAS_DUCKDB
+        engines = ["sqlite"] + (["duckdb"] if HAS_DUCKDB else [])
+        for eng_name in engines:
+            s = _fresh_session()
+            try:
+                eng = s.get_duckdb() if eng_name == "duckdb" else s.db
+                eng.add_table_streaming(
+                    "T", ["id", "amount"],
+                    [(i, float(i)) for i in range(10)], source="test")
+                eng.sync_catalog()
+                s.profile("T", engine=eng_name)
+                need((eng_name, "T") in s._profile_cache,
+                     "%s: profile cached" % eng_name)
+                r = s.run_query("UPDATE T SET amount = amount + 1",
+                                target="__local__")
+                need(not r.get("error"),
+                     "%s: update ran: %s" % (eng_name, r.get("error")))
+                need((eng_name, "T") not in s._profile_cache,
+                     "%s: write cleared the profile cache" % eng_name)
+            finally:
+                s.shutdown()
+
     def t_table_count_cache_scoped_drop():
         # CODE was wrong: every mutation cleared ALL sidebar counts. Dropping
         # one table must only forget that table's key; unrelated counts stay.
@@ -40033,6 +40061,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("change type persists", t_change_type_persists),
         ("duckdb change column type", t_duckdb_change_column_type),
         ("table count cache + invalidation", t_table_count_cache),
+        ("write clears profile cache (incl. DuckDB Count-row writes)",
+         t_write_clears_profile_cache),
         ("table count cache scopes drop to changed table",
          t_table_count_cache_scoped_drop),
         ("flow cache clears on unrelated table drop",

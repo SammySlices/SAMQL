@@ -228,6 +228,7 @@ describe("NodeFlow Phase 9 canvas performance", () => {
         useNodeFlowChartHydration({
           activeTabId: "tab-a",
           graphSignature: signature,
+          dataEpoch: 0,
           nodes,
           edges: [] as NbEdge[],
           ensureChartFor,

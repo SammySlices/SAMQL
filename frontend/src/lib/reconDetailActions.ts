@@ -49,6 +49,7 @@ export function createReconDetailController(opts: {
   setActiveResId: (id: string) => void;
   patchRes: (id: string, patch: Partial<ResTabPatch>) => void;
   pageLimit: number;
+  getDataEpoch: () => number;
 }) {
   let abortCtrl: AbortController | null = null;
   let activeQid: string | null = null;
@@ -92,6 +93,10 @@ export function createReconDetailController(opts: {
     queryId?: string,
   ) => {
     const id = uid();
+    // Stamp the current freshness epoch so this drill tab starts FRESH. Created
+    // without it, `ranDataEpoch` was undefined and `undefined === dataEpoch` is
+    // always false -> the tab was marked stale (and blanked) on the very first
+    // data change, even one unrelated to the drill, with no way to recover.
     opts.setResTabs((rs) => [
       ...rs,
       {
@@ -104,6 +109,8 @@ export function createReconDetailController(opts: {
         sortCol: null,
         descending: false,
         view: "grid",
+        ranDataEpoch: opts.getDataEpoch(),
+        dataStale: false,
       },
     ]);
     opts.setActiveResId(id);
@@ -118,7 +125,13 @@ export function createReconDetailController(opts: {
         signal,
       );
       if (signal?.aborted) return;
-      opts.patchRes(id, { page: pg });
+      // Prefer the epoch the backend stamped the result with (its start-of-run
+      // epoch), falling back to the current one.
+      opts.patchRes(id, {
+        page: pg,
+        ranDataEpoch: pg.data_epoch ?? opts.getDataEpoch(),
+        dataStale: false,
+      });
     } catch (e: any) {
       if (isCancelledError(e, queryId)) return;
       opts.toast("error", "Could not open rows", e?.message);

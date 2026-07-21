@@ -503,6 +503,7 @@ export const NodeFlow: React.FC<{
   useNodeFlowChartHydration({
     activeTabId,
     graphSignature: graphSig,
+    dataEpoch,
     nodes,
     edges,
     ensureChartFor,

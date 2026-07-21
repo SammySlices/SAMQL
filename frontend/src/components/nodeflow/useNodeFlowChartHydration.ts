@@ -4,6 +4,7 @@ import { nodeShowsBody, type NbEdge, type NbNode } from "../../lib/nodeFlowModel
 interface UseNodeFlowChartHydrationOptions {
   activeTabId: string;
   graphSignature: string;
+  dataEpoch: number;
   nodes: NbNode[];
   edges: NbEdge[];
   ensureChartFor: (node: NbNode | null, force?: boolean) => Promise<void>;
@@ -19,6 +20,7 @@ interface UseNodeFlowChartHydrationOptions {
 export function useNodeFlowChartHydration({
   activeTabId,
   graphSignature,
+  dataEpoch,
   nodes,
   edges,
   ensureChartFor,
@@ -81,5 +83,8 @@ export function useNodeFlowChartHydration({
       cancelled = true;
       if (frame != null) window.cancelAnimationFrame(frame);
     };
-  }, [activeTabId, graphSignature]);
+    // dataEpoch is a dep so a data change (which clears the chart-data cache in
+    // the exec controller) re-queues the redraw -- otherwise expanded charts /
+    // dashboards stayed blank until a manual refresh.
+  }, [activeTabId, graphSignature, dataEpoch]);
 }

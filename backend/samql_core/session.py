@@ -3058,17 +3058,17 @@ class Session:
                 st = os.stat(path)
                 h = hashlib.sha256()
                 size = int(st.st_size)
-                # Sample across the whole source rather than only its ends.
-                # ctime/inode catch ordinary in-place rewrites even when a
-                # producer preserves mtime; the samples make accidental stale
-                # reuse highly unlikely without re-reading a multi-GB file.
-                offsets = sorted(set([
-                    0,
-                    max(0, size // 4 - 32 * 1024),
-                    max(0, size // 2 - 32 * 1024),
-                    max(0, (size * 3) // 4 - 32 * 1024),
-                    max(0, size - 64 * 1024),
-                ]))
+                # Sample across the whole source rather than only its ends, and
+                # scale the number of windows with size so a same-stat in-place
+                # edit to a multi-GB file is far less likely to slip between
+                # windows. ctime/inode catch ordinary in-place rewrites even
+                # when a producer preserves mtime. Cost stays bounded: at most
+                # 64 windows x 64 KB = 4 MB read, regardless of file size.
+                n = min(64, max(5, size // (256 * 1024 * 1024)))
+                offsets = sorted(set(
+                    max(0, min(size - 64 * 1024, (size * i) // n))
+                    for i in range(n)
+                )) if size else [0]
                 with open(path, "rb") as fh:
                     for offset in offsets:
                         fh.seek(offset)
@@ -3080,21 +3080,32 @@ class Session:
                         h.hexdigest()[:32]]
             if os.path.isdir(path):
                 rows = []
-                # Bound directory signatures: enough for ordinary load folders
-                # without turning cache lookup into a full workload itself.
+                total_files = 0
+                # Bound the expensive per-file stat at 10k, but keep COUNTING
+                # every file so an addition/edit past the cap changes the
+                # signature (the old "truncated" marker was constant for any
+                # >10k folder -> stale restore). Record ctime per file too --
+                # the file branch relies on ctime to catch a same-mtime in-place
+                # edit; the dir branch previously recorded none, so a folder
+                # source was strictly weaker than a single-file source.
                 for root, dirs, files in os.walk(path):
                     dirs.sort()
                     for name in sorted(files):
+                        total_files += 1
+                        if len(rows) >= 10000:
+                            continue
                         fp = os.path.join(root, name)
                         try:
                             st = os.stat(fp)
                         except Exception:
                             continue
                         rows.append((os.path.relpath(fp, path),
-                                     int(st.st_size), int(st.st_mtime_ns)))
-                        if len(rows) >= 10000:
-                            return ["dir", path, rows, "truncated"]
-                return ["dir", path, rows]
+                                     int(st.st_size), int(st.st_mtime_ns),
+                                     int(getattr(st, "st_ctime_ns", 0) or 0)))
+                sig = ["dir", path, rows, total_files]
+                if total_files > len(rows):
+                    sig.append("truncated")
+                return sig
         except Exception:
             return None
         return None
@@ -8175,6 +8186,13 @@ class Session:
                 # RETURNING) caches under the post-write epoch, not the stale
                 # pre-write one.
                 self._invalidate_counts()
+                # Profile aggregates are keyed by (engine, table) with no epoch
+                # salt, so the epoch bump alone doesn't expire them -- they need
+                # an explicit clear. The `cols is None` branch below clears them
+                # for SQLite writes, but a DuckDB write returns a "Count" row
+                # (cols is not None) and would skip it, leaving a stale Profile
+                # panel. Clear here so EVERY write invalidates profiles.
+                self._invalidate_profiles()
                 epoch0 = int(getattr(self, "_data_epoch", 0) or 0)
         if cols is None:
             self.history.add(original_sql, target=first_target, row_count=None,
@@ -11533,6 +11551,28 @@ class Session:
                 if not path and ow is not None:
                     path = ow.path_for(eng_name, table)
                 if not path:
+                    # Folder-backed input (a re-scanning glob view): a directory
+                    # source has no single watchable file, so it used to be
+                    # skipped entirely -- its file changes never bumped the
+                    # freshness epoch, and the volatile flow cache (salted only
+                    # by that epoch) served the prior run's stale intermediates.
+                    # Recheck the directory's content signature and flag a
+                    # change so _clear_last_run_caches (below) bumps the epoch.
+                    try:
+                        src = (getattr(eng, "table_sources", {}) or {}).get(
+                            table)
+                    except Exception:
+                        src = None
+                    if src and os.path.isdir(src):
+                        store = getattr(self, "_folder_input_sigs", None)
+                        if store is None:
+                            store = self._folder_input_sigs = {}
+                        key = (eng_name, table)
+                        sig = self._stable_path_signature(src)
+                        prev = store.get(key)
+                        store[key] = sig
+                        if prev is not None and prev != sig:
+                            changed_any = True
                     continue
                 baseline = ow.token_for(eng_name, table) if ow else None
                 # Cheap-stat short-circuit: reuse prior digest when stats match.
@@ -14548,6 +14588,10 @@ class Session:
                                   "non_matching")):
             return {"error": "left, right, keys and a valid bucket "
                     "are required."}
+        # Stamp the epoch observed at read START, so a mutation that lands
+        # mid-run expires this snapshot instead of it pinning to the finish-time
+        # epoch and pageing as "live" (the main query path does the same).
+        epoch0 = int(getattr(self, "_data_epoch", 0) or 0)
         try:
             target, _ = self._recon_engine(left, right)
             sql = self._recon_bucket_sql(left, right, keys, bucket,
@@ -14566,7 +14610,8 @@ class Session:
                 except Exception:
                     pass
             return {"result_id": None, "columns": list(cols), "count": 0}
-        rid = self._cache_result(cols, store, int(total), sql, target, kind)
+        rid = self._cache_result(cols, store, int(total), sql, target, kind,
+                                 data_epoch=epoch0)
         self._schedule_cleanup(full=False)
         return {"result_id": rid, "columns": list(cols), "count": int(total)}
 
@@ -14650,6 +14695,9 @@ class Session:
                            surface="reconcile",
                            target="recon failures csv")
         rid = None
+        # Stamp the read-start epoch so a mid-run mutation expires this
+        # snapshot rather than freezing pre-change rows into the CSV.
+        epoch0 = int(getattr(self, "_data_epoch", 0) or 0)
         try:
             if query_id and self._run_is_cancelled(query_id):
                 return {"cancelled": True}
@@ -14677,7 +14725,7 @@ class Session:
                 return {"ok": True, "path": out_path, "rows": 0,
                         "fields": len(fields)}
             rid = self._cache_result(cols, store, int(total), sql,
-                                     target, kind)
+                                     target, kind, data_epoch=epoch0)
             cr = self._results.get(rid)
             res = self._export_inner(cr, "csv", out_path, None, False,
                                      query_id)

@@ -1322,7 +1322,9 @@ export function useNodeFlowExecutionController({
     const specSig =
       JSON.stringify(chartSpecOf(node)) +
       "|" +
-      (node.config.chart_type || "bar");
+      (node.config.chart_type || "bar") +
+      "|e" +
+      dataEpochRef.current;
     const existing = chartPromisesRef.current.get(key);
     if (!force && existing) return existing;
     const cur = chartDataRef.current[node.id];

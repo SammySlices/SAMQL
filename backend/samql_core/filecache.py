@@ -9,9 +9,13 @@ This module keeps those conversions in a STABLE directory
 (<system-temp>/samql/filecache/) keyed by the source file's identity
 (absolute path + size + mtime/ctime/inode + bounded content samples +
 reader kind/options + a format version), so a restart re-attaches the
-existing Parquet in milliseconds. An in-place rewrite that preserves
-mtime still misses (content samples / ctime / inode). Stale entries are
-never served, only aged out.
+existing Parquet in milliseconds. An in-place rewrite is normally caught by
+ctime/inode and the content samples; the residual risk is an edit that
+preserves size + mtime + ctime + inode AND whose changed bytes all fall
+between the sampled windows -- unlikely, and made more so by scaling the
+window count with file size, but not a cryptographic guarantee. Callers
+needing certainty on a mutated-in-place source should disable the cache or
+change the path. Entries are aged out; a real change yields a new key + miss.
 
 Budgeted + aged: SAMQL_FILECACHE_GB (default 32) caps total size with
 least-recently-USED eviction (a cache hit touches the file's mtime), and
@@ -157,13 +161,14 @@ def content_digest(path, size=None):
     if size is None:
         size = int(os.path.getsize(path))
     size = int(size)
-    offsets = sorted(set([
-        0,
-        max(0, size // 4 - 32 * 1024),
-        max(0, size // 2 - 32 * 1024),
-        max(0, (size * 3) // 4 - 32 * 1024),
-        max(0, size - 64 * 1024),
-    ]))
+    # Scale the number of 64 KiB windows with size so a same-stat in-place edit
+    # to a large file is far less likely to fall entirely between samples.
+    # Bounded: at most 64 windows x 64 KiB = 4 MiB read regardless of size.
+    n = min(64, max(5, size // (256 * 1024 * 1024)))
+    offsets = sorted(set(
+        max(0, min(size - 64 * 1024, (size * i) // n))
+        for i in range(n)
+    )) if size else [0]
     with open(path, "rb") as fh:
         for offset in offsets:
             fh.seek(offset)

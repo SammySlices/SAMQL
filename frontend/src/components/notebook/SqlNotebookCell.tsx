@@ -239,9 +239,17 @@ export const SqlNotebookCell: React.FC<NotebookCellProps> = (props) => {
       {cell.error ? (
         <div className="nb-err">{cell.error}</div>
       ) : cell.ranOnce && !cell.collapsed && cell.resultId && cell.page ? (
-        props.stale && (cell.outView === "chart" || cell.outView === "pivot") ? (
+        props.stale ? (
+          // Guard the grid view too (not just chart/pivot): a stale cell must
+          // never re-show pre-change rows if its page gets repopulated.
           <div className="nb-out-stale faint">
-            Data changed — re-run to {cell.outView === "chart" ? "chart" : "pivot"}.
+            Data changed — re-run to{" "}
+            {cell.outView === "chart"
+              ? "chart"
+              : cell.outView === "pivot"
+                ? "pivot"
+                : "refresh"}
+            .
           </div>
         ) : cell.outView === "chart" ? (
           <div className="nb-out-chart">
