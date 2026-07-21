@@ -67,6 +67,56 @@ describe("staleNodeflowColumnRefs", () => {
     ]);
   });
 
+  it("does not explode an unbracketed multi-word name into fragments", () => {
+    // The user's example: renaming `a` -> `hi my name is Bob` must never show
+    // hi/my/name/is/Bob as separate missing refs. Typed unbracketed it is
+    // invalid SQL the app never emits (autocomplete brackets names), so the
+    // hardening simply refuses to fragment a run of >=2 adjacent words.
+    const refs = exprColumnRefs("hi my name is Bob = 5");
+    expect(refs).not.toContain("hi");
+    expect(refs).not.toContain("my");
+    expect(refs).not.toContain("name");
+    expect(refs).not.toContain("is");
+    expect(refs).not.toContain("Bob");
+    expect(refs).toEqual([]);
+  });
+
+  it("still splits boolean-connected bare columns (col1 and col2)", () => {
+    expect(exprColumnRefs("col1 and col2")).toEqual(["col1", "col2"]);
+    expect(exprColumnRefs("a > 1 OR b < 2")).toEqual(["a", "b"]);
+  });
+
+  it("still yields a lone bare column and operator-separated columns", () => {
+    expect(exprColumnRefs("amount * 2")).toEqual(["amount"]);
+    expect(exprColumnRefs("qty + price")).toEqual(["qty", "price"]);
+  });
+
+  it("multijoin: an unprobed input port flags no missing keys on that side", () => {
+    // `against` (in1) is known; the joined input (in2) has not been probed yet.
+    // Only the left side's key is checked -- the right side stays silent rather
+    // than reporting every key as missing against an empty column set.
+    const stale = staleNodeflowColumnRefs(
+      "multijoin",
+      {
+        base: "in1",
+        joins: [{ input: "in2", against: "in1", on: [{ left: "id", right: "ref" }] }],
+      },
+      { in1: ["id", "name"] },
+    );
+    expect(stale).toEqual([]);
+    const staleGone = staleNodeflowColumnRefs(
+      "multijoin",
+      {
+        base: "in1",
+        joins: [{ input: "in2", against: "in1", on: [{ left: "missing", right: "ref" }] }],
+      },
+      { in1: ["id", "name"] },
+    );
+    expect(staleGone).toEqual([
+      { area: "join 1 key 1 left", columns: ["missing"] },
+    ]);
+  });
+
   it("keeps spaced bracketed headers as one ref (no Order/Date split)", () => {
     expect(exprColumnRefs("[Order Date] > 5")).toEqual(["Order Date"]);
     expect(

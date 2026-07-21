@@ -897,10 +897,10 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
             # become x / x_2, mirroring the renamecols and join de-dup. Done
             # before the want filter so the emitted name is the deduped one.
             base_alias, k = alias, 2
-            while alias in seen:
+            while alias.lower() in seen:
                 alias = "%s_%d" % (base_alias, k)
                 k += 1
-            seen[alias] = True
+            seen[alias.lower()] = True
             # A downstream projection may make configured fields dead. Omitting
             # them here is essential once their source columns have also been
             # pruned; otherwise strict engines bind a now-missing dead column.
@@ -1361,7 +1361,15 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                          % (_q(col), le, lbl.replace("'", "''")))
         case = "CASE %s ELSE '%s' END" % (
             " ".join(whens), else_label.replace("'", "''"))
-        return "SELECT *, %s AS %s FROM %s AS _bin" % (case, _q(out), src)
+        # Pass through every input column except one already named `out`, then
+        # append the bucket. `SELECT *, .. AS out` would emit two `out` columns
+        # when the input already has one (ambiguous / duplicate-name downstream).
+        incols = _cols_of_rel(cols_of, src)
+        if not incols:
+            return "SELECT *, %s AS %s FROM %s AS _bin" % (case, _q(out), src)
+        sel = [_q(c) for c in incols if c.lower() != out.lower()]
+        sel.append("%s AS %s" % (case, _q(out)))
+        return "SELECT %s FROM %s AS _bin" % (", ".join(sel), src)
 
     if typ == "rank":
         src = need("in")
@@ -1378,8 +1386,17 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         over = ("PARTITION BY %s " % ", ".join(_q(p) for p in parts)) \
             if parts else ""
         over += "ORDER BY %s %s" % (_q(order), direction)
-        ranked = "SELECT *, %s() OVER (%s) AS %s FROM %s AS _r" % (
-            method, over, _q(out), src)
+        # Pass through every input column except one already named `out`, then
+        # append the rank. `SELECT *, .. AS out` would emit two `out` columns
+        # when the input already has one (ambiguous / duplicate-name downstream).
+        incols = _cols_of_rel(cols_of, src)
+        if not incols:
+            ranked = "SELECT *, %s() OVER (%s) AS %s FROM %s AS _r" % (
+                method, over, _q(out), src)
+        else:
+            sel = [_q(c) for c in incols if c.lower() != out.lower()]
+            sel.append("%s() OVER (%s) AS %s" % (method, over, _q(out)))
+            ranked = "SELECT %s FROM %s AS _r" % (", ".join(sel), src)
         top = cfg.get("top_n")
         try:
             topn = int(top) if top not in (None, "") else None
@@ -1964,12 +1981,13 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                     new = new.replace(find, repl)
                 new = prefix + new + suffix
             new = (new or "").strip() or c
-            # avoid duplicate output names (which SQL would reject)
+            # avoid duplicate output names (which SQL would reject) — matched
+            # case-insensitively so ID/id collide (engines bind case-insensitively)
             base, k = new, 2
-            while new in seen:
+            while new.lower() in seen:
                 new = "%s_%d" % (base, k)
                 k += 1
-            seen[new] = True
+            seen[new.lower()] = True
             if needed is None or new.lower() in {str(x).lower() for x in needed}:
                 sel.append("%s AS %s" % (_q(c), _q(new)))
         if not sel and cols:
@@ -1992,10 +2010,10 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                     new = prefix + new + suffix
                 new = (new or "").strip() or c
                 base, k = new, 2
-                while new in seen:
+                while new.lower() in seen:
                     new = "%s_%d" % (base, k)
                     k += 1
-                seen[new] = True
+                seen[new.lower()] = True
                 sel.append("%s AS %s" % (_q(c), _q(new)))
         if not sel:
             raise NodeflowError("Connect an input to rename its columns.")
@@ -2704,9 +2722,24 @@ def _node_needed_inputs(node, in_port, needed_out):
         if needed_out is None:
             return {(f.get("name") or "").strip() for f in kept}
         want = {str(n).lower() for n in needed_out}
-        return {(f.get("name") or "").strip() for f in kept
-                if ((f.get("rename") or f.get("name") or "")
-                    .strip().lower() in want)}
+        # Two fields renamed to the same target de-dup to x / x_2 in the run
+        # (node_output_sql). The `_N` alias can't be mapped back to a single
+        # field here, so when a target collides keep every colliding source
+        # regardless of `want` — otherwise pushdown prunes the source feeding
+        # `x_2` whenever only `x_2` is consumed downstream, dropping it from the
+        # run while the UI still lists it. Collisions are rare; the extra read
+        # is negligible.
+        target_counts = {}
+        for f in kept:
+            t = (f.get("rename") or f.get("name") or "").strip().lower()
+            target_counts[t] = target_counts.get(t, 0) + 1
+        out = set()
+        for f in kept:
+            name = (f.get("name") or "").strip()
+            target = (f.get("rename") or f.get("name") or "").strip().lower()
+            if target_counts.get(target, 0) > 1 or target in want:
+                out.add(name)
+        return out
 
     if typ == "summarize":
         if in_port != "in":

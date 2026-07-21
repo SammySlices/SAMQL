@@ -28958,6 +28958,95 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_nodeflow_field_propagation_dedup():
+        # Field propagation outliers: bin/rank must not emit a DUPLICATE output
+        # column when the input already carries one; select/renamecols de-dup
+        # output names case-insensitively (ID/id -> ID/ID_2); and select
+        # projection pushdown must keep a de-duped `_2` column that a downstream
+        # node consumes (else the run loses it while the UI still lists it).
+        from samql_core.session import Session
+        s = Session()
+        try:
+            def run_cols(g, node, port):
+                r = s.run_nodeflow(g, node, port, query_id="fp_%s" % node)
+                need(not r.get("error"), "run %s: %r" % (node, r.get("error")))
+                pg = s.page(r["result_id"], offset=0, limit=50)
+                return pg["columns"], pg["rows"]
+
+            def edge(eid, fn, fp, tn, tp):
+                return {"id": eid, "from": {"node": fn, "port": fp},
+                        "to": {"node": tn, "port": tp}}
+
+            # FIX #2: bin over an input that already has `bucket`.
+            s.run_query("CREATE TABLE fpbin AS SELECT 1 AS bucket, 10 AS amount "
+                        "UNION ALL SELECT 2, 20", target="auto")
+            gbin = {"nodes": [
+                {"id": "t", "type": "input", "config": {"table": "fpbin"}},
+                {"id": "b", "type": "bin", "config": {
+                    "col": "amount", "out": "bucket", "else_label": "hi",
+                    "cuts": [{"le": 15, "label": "lo"}]}},
+            ], "edges": [edge("e1", "t", "out", "b", "in")]}
+            cols, _r = run_cols(gbin, "b", "out")
+            eq(len([c for c in cols if str(c).lower() == "bucket"]), 1,
+               "bin emits a single `bucket` column, not a duplicate")
+
+            # FIX #2: rank over an input that already has `rank`.
+            s.run_query("CREATE TABLE fprank AS SELECT 1 AS rank, 10 AS amount "
+                        "UNION ALL SELECT 2, 20", target="auto")
+            grank = {"nodes": [
+                {"id": "t", "type": "input", "config": {"table": "fprank"}},
+                {"id": "r", "type": "rank", "config": {
+                    "order": "amount", "out": "rank", "dir": "desc"}},
+            ], "edges": [edge("e1", "t", "out", "r", "in")]}
+            cols, _r = run_cols(grank, "r", "out")
+            eq(len([c for c in cols if str(c).lower() == "rank"]), 1,
+               "rank emits a single `rank` column, not a duplicate")
+
+            # FIX #3: select de-dups a case-only collision (ID/id -> ID/ID_2).
+            s.run_query("CREATE TABLE fpcase AS SELECT 1 AS a, 2 AS b",
+                        target="auto")
+            gsel = {"nodes": [
+                {"id": "t", "type": "input", "config": {"table": "fpcase"}},
+                {"id": "sel", "type": "select", "config": {"fields": [
+                    {"name": "a", "keep": True, "rename": "ID"},
+                    {"name": "b", "keep": True, "rename": "id"}]}},
+            ], "edges": [edge("e1", "t", "out", "sel", "in")]}
+            cols, _r = run_cols(gsel, "sel", "out")
+            eq([str(c).lower() for c in cols], ["id", "id_2"],
+               "select de-dups a case-only collision to ID/ID_2")
+
+            # FIX #3: renamecols de-dups a case-only collision too.
+            grn = {"nodes": [
+                {"id": "t", "type": "input", "config": {"table": "fpcase"}},
+                {"id": "rn", "type": "renamecols", "config": {"mappings": [
+                    {"from": "a", "to": "ID"}, {"from": "b", "to": "id"}]}},
+            ], "edges": [edge("e1", "t", "out", "rn", "in")]}
+            cols, _r = run_cols(grn, "rn", "out")
+            eq([str(c).lower() for c in cols], ["id", "id_2"],
+               "renamecols de-dups a case-only collision to ID/ID_2")
+
+            # FIX #5: projection pushdown keeps a de-duped `_2` column that a
+            # downstream node consumes. Both a and b rename to `amount`
+            # (-> amount / amount_2); a downstream select keeps only amount_2.
+            s.run_query("CREATE TABLE fpdup AS SELECT 10 AS a, 20 AS b",
+                        target="auto")
+            gdup = {"nodes": [
+                {"id": "t", "type": "input", "config": {"table": "fpdup"}},
+                {"id": "s1", "type": "select", "config": {"fields": [
+                    {"name": "a", "keep": True, "rename": "amount"},
+                    {"name": "b", "keep": True, "rename": "amount"}]}},
+                {"id": "s2", "type": "select", "config": {"fields": [
+                    {"name": "amount_2", "keep": True}]}},
+            ], "edges": [edge("e1", "t", "out", "s1", "in"),
+                         edge("e2", "s1", "out", "s2", "in")]}
+            cols, rows = run_cols(gdup, "s2", "out")
+            eq([str(c).lower() for c in cols], ["amount_2"],
+               "downstream keeps only the de-duped amount_2")
+            eq(rows[0][0], 20,
+               "amount_2 carries b's value (20) through projection pushdown")
+        finally:
+            s.shutdown()
+
     def t_excel_load():
         # Excel workbooks load one table per non-empty sheet (openpyxl).
         if not feats.get("openpyxl"):
@@ -40183,6 +40272,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("catalog columns are lazy (list omits them + col_count)", t_catalog_columns_lazy),
         ("free memory keeps loaded tables", t_free_memory_keeps_tables),
         ("NodeFlow create-table + text nodes", t_nodeflow_createtable_and_text),
+        ("NodeFlow field propagation: bin/rank/select/renamecols de-dup + "
+         "pushdown", t_nodeflow_field_propagation_dedup),
         ("load Excel workbooks (one table per sheet)", t_excel_load),
         ("Excel: a large sheet read is cancellable (polls progress)",
          t_excel_load_cancellable),

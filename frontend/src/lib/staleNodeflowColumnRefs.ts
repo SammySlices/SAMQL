@@ -101,6 +101,11 @@ const SQL_WORDS = new Set([
   "input",
 ]);
 
+/** Boolean connectives that separate operands in a filter expression. They
+ *  break a run of adjacent identifier words (so `col1 and col2` yields both)
+ *  and are never themselves emitted as column refs. */
+const BOOL_CONNECTIVES = new Set(["and", "or", "not", "xor"]);
+
 function colSet(cols: string[] | undefined): Set<string> {
   return new Set((cols || []).map((c) => c.toLowerCase()));
 }
@@ -151,10 +156,36 @@ export function exprColumnRefs(text: string): string[] {
   const bareSrc = stripped
     .replace(/\[[^\]]*\]/g, " ")
     .replace(/"(?:[^"]|"")*"/g, " ");
+  // Bare-scan the leftover, but never explode an *unbracketed* multi-word name
+  // (e.g. `hi my name is Bob`) into fragments. Group consecutive identifier
+  // words separated by whitespace only into a "run"; a run of >=2 words is
+  // treated as one (invalid) spaced name and emits nothing, while a lone word
+  // is a genuine bare column. Runs break on operators/punctuation and on the
+  // boolean connectives so `col1 and col2` still yields both columns.
+  let run: string[] = [];
+  let prevEnd = -1;
+  const flushRun = () => {
+    if (run.length === 1) {
+      const w = run[0];
+      if (!SQL_WORDS.has(w.toLowerCase())) names.add(w);
+    }
+    run = [];
+  };
   for (const m of bareSrc.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
     const w = m[0];
-    if (!SQL_WORDS.has(w.toLowerCase())) names.add(w);
+    const start = m.index ?? 0;
+    const whitespaceGap = prevEnd >= 0 && /^\s*$/.test(bareSrc.slice(prevEnd, start));
+    if (BOOL_CONNECTIVES.has(w.toLowerCase())) {
+      // A connective terminates the current run and is not itself a column.
+      flushRun();
+      prevEnd = start + w.length;
+      continue;
+    }
+    if (run.length && !whitespaceGap) flushRun();
+    run.push(w);
+    prevEnd = start + w.length;
   }
+  flushRun();
   return [...names].filter(Boolean);
 }
 
@@ -651,10 +682,15 @@ export function staleNodeflowColumnRefs(
         const against = j.against || (i === 0 ? base : joins[i - 1]?.input) || base;
         const left = colSet(upstreamCols[against]);
         const right = colSet(upstreamCols[j.input]);
-        if (!left.size && !right.size) continue;
+        // Check each side independently: an unprobed input port yields an empty
+        // column set, and comparing keys against nothing marks every key
+        // "missing". Only flag a side whose columns are actually known (mirrors
+        // how `join` requires both sides live before warning).
         for (const [pi, pair] of (j.on || []).entries()) {
-          pushStale(out, `join ${i + 1} key ${pi + 1} left`, missingMany([pair.left].filter(Boolean), left));
-          pushStale(out, `join ${i + 1} key ${pi + 1} right`, missingMany([pair.right].filter(Boolean), right));
+          if (left.size)
+            pushStale(out, `join ${i + 1} key ${pi + 1} left`, missingMany([pair.left].filter(Boolean), left));
+          if (right.size)
+            pushStale(out, `join ${i + 1} key ${pi + 1} right`, missingMany([pair.right].filter(Boolean), right));
         }
       }
       break;
