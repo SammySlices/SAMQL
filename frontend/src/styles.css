@@ -10894,6 +10894,32 @@ body.motion-reduced .nb2-canvas-wrap.flowing .nb2-wire-glow.active {
   font-size: 12px;
 }
 .tt-table-head:hover { background: var(--panel-2); }
+.tt-context-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 154px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--raised, var(--panel));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+.tt-context-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 4px;
+  padding: 7px 8px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tt-context-menu button:hover { background: var(--panel-2); }
 .tt-caret { color: var(--text-faint); width: 12px; }
 .tt-engine {
   font-size: 10px;

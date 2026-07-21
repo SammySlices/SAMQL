@@ -39,6 +39,7 @@ describe("PivotPanel Stop", () => {
   beforeEach(() => {
     pivotMock.mockReset();
     cancelQueryMock.mockReset();
+    cancelQueryMock.mockResolvedValue({ ok: true });
     pivotMock.mockImplementation(
       () =>
         new Promise(() => {
@@ -73,6 +74,36 @@ describe("PivotPanel Stop", () => {
     // Wait past the 300ms debounce so a buggy Stop would still fire api.pivot.
     await new Promise((r) => setTimeout(r, 400));
     expect(pivotMock).not.toHaveBeenCalled();
+  });
+
+  it("aborts an active pivot request and interrupts that exact backend run", async () => {
+    render(
+      <PivotPanel
+        tables={[
+          {
+            name: "t",
+            engine: "sqlite",
+            columns: [{ name: "g" }, { name: "bal" }],
+          } as any,
+        ]}
+        result={null}
+        onToast={vi.fn()}
+      />,
+    );
+
+    dropFieldOnRows("g");
+    await waitFor(() => expect(pivotMock).toHaveBeenCalledTimes(1));
+    const [spec, signal] = pivotMock.mock.calls[0];
+    expect(spec.query_id).toMatch(/^pivot-/);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+
+    fireEvent.click(screen.getByTestId("pivot-stop"));
+
+    await waitFor(() =>
+      expect(cancelQueryMock).toHaveBeenCalledWith(spec.query_id),
+    );
+    expect(signal.aborted).toBe(true);
   });
 
   it("treats interrupt responses as soft cancel and keeps the prior grid", async () => {

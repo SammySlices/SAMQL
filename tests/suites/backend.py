@@ -885,6 +885,17 @@ def backend_tests(datadir, csv_path, json_path):
                 need("SELECT" in out["result"].upper(), "not formatted")
             else:
                 skip("sqlglot not installed (format degrades gracefully)")
+            # The formatter must preserve the selected dialect instead of
+            # falling through to sqlglot's generic/default rendering.
+            native = s.format_sql("select * exclude (x) from t", "native", "__duckdb__")
+            spark = s.format_sql(
+                "select * from t distribute by a", "spark", "__duckdb__",
+            )
+            if feats["sqlglot"]:
+                need(native["ok"] and "EXCLUDE" in native["result"].upper(),
+                     "native formatter did not retain DuckDB dialect")
+                need(spark["ok"] and "DISTRIBUTE BY" in spark["result"].upper(),
+                     "spark formatter did not retain Spark dialect")
         finally:
             s.shutdown()
 

@@ -12520,8 +12520,29 @@ class Session:
         return path
 
     # ---- SQL helpers ------------------------------------------------
-    def format_sql(self, sql, dialect=None):
-        ok, out = sqlglot_transform(sql, read=dialect, write=dialect,
+    def format_sql(self, sql, dialect=None, target=None):
+        """Pretty-print SQL without changing its selected language.
+
+        The IDE exposes ``native`` and ``spark`` as input dialects.  sqlglot
+        does not have a native dialect, so native resolves to the active local
+        engine (DuckDB unless SQLite is explicitly selected).  Keeping the
+        same read/write dialect is important: formatting must not transpile a
+        DuckDB query into Spark SQL, or vice versa.
+        """
+        selected = str(dialect or "native").strip().lower()
+        if selected == "spark":
+            fmt_dialect = "spark"
+        elif selected in ("sqlite", "local", "__local__"):
+            fmt_dialect = "sqlite"
+        elif selected in ("duckdb", "__duckdb__"):
+            fmt_dialect = "duckdb"
+        elif str(target or "").strip().lower() in ("sqlite", "local", "__local__"):
+            fmt_dialect = "sqlite"
+        else:
+            # Auto-route is DuckDB-first in SamQL, matching the IDE's Native
+            # SQL default and avoiding sqlglot's generic/Spark-like output.
+            fmt_dialect = "duckdb"
+        ok, out = sqlglot_transform(sql, read=fmt_dialect, write=fmt_dialect,
                                     pretty=True)
         return {"ok": ok, "result": out}
 

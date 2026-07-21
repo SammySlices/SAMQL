@@ -64,7 +64,17 @@ interface Props {
   tables: TableInfo[];
   onRefreshTables?: () => void;
   onOpenLoad?: () => void;
+  /** Open the whole-table JSON shred flow for a loaded DuckDB JSON table. */
+  onShredJsonTable?: (table: TableInfo) => void;
   palette: ReturnType<typeof useNodeFlowPalette>;
+}
+
+function isShreddableJsonTable(table: TableInfo): boolean {
+  return (
+    table.engine === "duckdb" &&
+    !table.remote &&
+    /\.(?:json|ndjson|jsonl)(?:$|[?#])/i.test(table.source || "")
+  );
 }
 
 export const ToolsTablesPanel: React.FC<Props> = ({
@@ -73,6 +83,7 @@ export const ToolsTablesPanel: React.FC<Props> = ({
   tables,
   onRefreshTables,
   onOpenLoad,
+  onShredJsonTable,
   palette,
 }) => {
   const saved = useMemo(() => loadChrome(), []);
@@ -89,6 +100,11 @@ export const ToolsTablesPanel: React.FC<Props> = ({
   const [tableQ, setTableQ] = useState("");
   const [favDrop, setFavDrop] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [tableMenu, setTableMenu] = useState<{
+    table: TableInfo;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const initPos = {
     x: typeof saved.x === "number" ? saved.x : 72,
@@ -431,6 +447,21 @@ export const ToolsTablesPanel: React.FC<Props> = ({
                       onClick={() =>
                         setExpanded((p) => ({ ...p, [key]: !p[key] }))
                       }
+                      onContextMenu={(event) => {
+                        if (!isShreddableJsonTable(t) || !onShredJsonTable)
+                          return;
+                        event.preventDefault();
+                        setTableMenu({
+                          table: t,
+                          x: event.clientX,
+                          y: event.clientY,
+                        });
+                      }}
+                      title={
+                        isShreddableJsonTable(t)
+                          ? "Click to show columns; right-click to shred JSON"
+                          : undefined
+                      }
                     >
                       <span className="tt-caret">{openRow ? "▾" : "▸"}</span>
                       <span className={"tt-engine " + engineBadge(t.engine)}>
@@ -470,6 +501,27 @@ export const ToolsTablesPanel: React.FC<Props> = ({
               })
             )}
           </div>
+          {tableMenu && (
+            <div
+              className="tt-context-menu"
+              role="menu"
+              aria-label={`${tableMenu.table.name} actions`}
+              style={{ left: tableMenu.x, top: tableMenu.y }}
+              data-testid="tools-tables-json-menu"
+            >
+              <button
+                type="button"
+                role="menuitem"
+                data-testid="tools-tables-shred-json"
+                onClick={() => {
+                  onShredJsonTable?.(tableMenu.table);
+                  setTableMenu(null);
+                }}
+              >
+                <Icon.ListTree size={14} /> Shred JSON…
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="tt-body tt-nodes-body">

@@ -51,6 +51,7 @@ import { Profiler } from "./components/Profiler";
 import { ChartPanel } from "./components/ChartPanel";
 import { PivotPanel } from "./components/PivotPanel";
 import { LoadDataModal, FileBrowser, RootIdPicker } from "./components/LoadDataModal";
+import { FlattenUidModal } from "./components/FlattenUidModal";
 import {
   readTablesPanelPinned,
   writeTablesPanelPinned,
@@ -465,6 +466,10 @@ export default function App() {
   // Tools & Tables is NodeFlow-only; open flag lives here so Ctrl+K can open it
   // and it reappears when returning to NodeFlow (hidden in IDE/Journal).
   const [toolsTablesOpen, setToolsTablesOpen] = useState(false);
+  // A JSON table's context-menu shred starts only after its root identifier is
+  // chosen. The backend performs the same relational flatten pipeline used by
+  // the Field Explorer, preserving the original loaded table.
+  const [jsonShredTarget, setJsonShredTarget] = useState<TableInfo | null>(null);
   const [errorLogOpen, setErrorLogOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const [lineageOpen, setLineageOpen] =
@@ -1791,7 +1796,10 @@ export default function App() {
   // ---- format ----
   const doFormat = async () => {
     try {
-      const res = await api.formatSql(activeTab.sql);
+      // Format in the language currently selected by the IDE. Native SQL
+      // follows the selected execution engine (DuckDB by default); Spark SQL
+      // stays Spark rather than being silently rewritten as another dialect.
+      const res = await api.formatSql(activeTab.sql, dialect, target);
       if (res.ok) {
         setSql(res.result);
         fireFmtShimmer();
@@ -3518,6 +3526,7 @@ export default function App() {
               onRefresh={refreshTables}
               onClearHistory={onClearHistory}
               onOpenLoad={() => setLoadOpen(true)}
+              onShredJsonTable={setJsonShredTarget}
               activeTab={tablesSideTab}
               onActiveTabChange={setTablesSideTab}
               onSideTabClick={() => setTablesPanelOpen(true)}
@@ -3566,6 +3575,19 @@ export default function App() {
             onShred={onShredColumn}
             onFlatten={onFlattenColumn}
           />
+          {jsonShredTarget && (
+            <FlattenUidModal
+              open
+              engine={jsonShredTarget.engine}
+              table={jsonShredTarget.name}
+              onCancel={() => setJsonShredTarget(null)}
+              onConfirm={(rootId) => {
+                const target = jsonShredTarget;
+                setJsonShredTarget(null);
+                void onFlattenColumn(target.engine, target.name, rootId);
+              }}
+            />
+          )}
           <CommandPalette
             open={commandPaletteOpen}
             onClose={() => setCommandPaletteOpen(false)}
@@ -4737,6 +4759,7 @@ export default function App() {
                   toolsTablesOpen={toolsTablesOpen}
                   onToolsTablesOpenChange={setToolsTablesOpen}
                   onOpenLoad={() => setLoadOpen(true)}
+                  onShredJsonTable={setJsonShredTarget}
                   denseMode={nodeFlowDense}
                   sphereMode={nodeSphere}
                   snap={nodeSnap}

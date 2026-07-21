@@ -326,6 +326,29 @@ describe("Sidebar loaded-tables drag reorder", () => {
   });
 });
 
+describe("Sidebar JSON shred", () => {
+  it("offers Shred JSON from a loaded JSON table's right-click menu", () => {
+    const onShredJsonTable = vi.fn();
+    renderSidebar(
+      [tbl("orders_json", { source: "C:/data/orders.json" })],
+      vi.fn(),
+      { onShredJsonTable },
+    );
+
+    fireEvent.contextMenu(screen.getByText("orders_json"));
+    fireEvent.click(screen.getByTestId("sidebar-shred-json"));
+    expect(onShredJsonTable).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "orders_json" }),
+    );
+  });
+
+  it("does not offer Shred JSON for a non-JSON table", () => {
+    renderSidebar([tbl("orders_csv")]);
+    fireEvent.contextMenu(screen.getByText("orders_csv"));
+    expect(screen.queryByTestId("sidebar-shred-json")).toBeNull();
+  });
+});
+
 describe("Sidebar source-changed badge copy", () => {
   it("shows Updating… for auto-reload and Reload failed on error", () => {
     renderSidebar([

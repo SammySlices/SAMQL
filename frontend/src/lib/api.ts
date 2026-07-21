@@ -1485,10 +1485,10 @@ export const api = {
     }),
 
   // --- sql helpers ---
-  formatSql: (sql: string) =>
+  formatSql: (sql: string, dialect?: string, target?: string) =>
     jsonFetch<FormatResult>("/api/sql/format", {
       method: "POST",
-      body: JSON.stringify({ sql }),
+      body: JSON.stringify({ sql, dialect, target }),
     }),
 
 
@@ -2406,4 +2406,3 @@ export async function exportResultToFile(
     unregisterRun(exportId, ctrl);
   }
 }
-

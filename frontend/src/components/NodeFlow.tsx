@@ -74,6 +74,7 @@ export const NodeFlow: React.FC<{
   toolsTablesOpen?: boolean;
   onToolsTablesOpenChange?: (open: boolean) => void;
   onOpenLoad?: () => void;
+  onShredJsonTable?: (table: TableInfo) => void;
   /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
   denseMode?: boolean;
   /** Icon-sphere chrome (owned by App Settings → Visual). Default ON. */
@@ -100,6 +101,7 @@ export const NodeFlow: React.FC<{
   toolsTablesOpen,
   onToolsTablesOpenChange,
   onOpenLoad,
+  onShredJsonTable,
   denseMode = false,
   sphereMode = true,
   snap = false,
@@ -592,6 +594,7 @@ export const NodeFlow: React.FC<{
         tables={tables}
         onRefreshTables={onTablesChanged}
         onOpenLoad={onOpenLoad}
+        onShredJsonTable={onShredJsonTable}
         palette={paletteModel}
       />
 

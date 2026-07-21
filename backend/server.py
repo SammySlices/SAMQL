@@ -3332,7 +3332,12 @@ class Api:
     # ---- SQL helpers -----------------------------------------------
     @staticmethod
     def sql_format(s, m, body, ctx):
-        return s.format_sql((body or {}).get("sql", ""))
+        b = body or {}
+        return s.format_sql(
+            b.get("sql", ""),
+            dialect=b.get("dialect"),
+            target=b.get("target"),
+        )
 
     @staticmethod
     def sql_statement_at(s, m, body, ctx):
