@@ -29148,6 +29148,69 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_nodeflow_run_clears_sticky_engine_cancel():
+        # A prior Stop leaves DuckDBManager._cancel SET (interrupt() never
+        # clears it). While set, the BeatDaemon re-interrupts every statement
+        # running past its interval -- so a heavier NodeFlow node (e.g. unique's
+        # window-function build) got auto-cancelled on the NEXT run. Every other
+        # run path clears the sticky flag first; run_nodeflow / run_nodeflows
+        # must too. Assert the flag is CLEARED before materialization (the
+        # window the BeatDaemon would interrupt) and the run is not cancelled.
+        if not feats.get("duckdb"):
+            skip("duckdb not installed")
+            return
+        from samql_core.session import Session
+        s = Session()
+        try:
+            d = tempfile.mkdtemp()
+            p = os.path.join(d, "usticky.csv")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("a,b\n1,10\n1,10\n2,20\n")
+            s.load_file(p, destination="duckdb", base_name="usticky")
+            duck = s.get_duckdb()
+
+            seen = {}
+            orig1 = s._materialize_flow
+            orig2 = s._materialize_flows
+
+            def spy1(*a, **k):
+                seen["single"] = duck._cancel.is_set()
+                return orig1(*a, **k)
+
+            def spy2(*a, **k):
+                seen["batch"] = duck._cancel.is_set()
+                return orig2(*a, **k)
+
+            s._materialize_flow = spy1
+            s._materialize_flows = spy2
+
+            g = {"nodes": [
+                {"id": "t", "type": "input", "config": {"table": "usticky"}},
+                {"id": "u", "type": "unique", "config": {"by": ["a"]}},
+            ], "edges": [{"id": "e1", "from": {"node": "t", "port": "out"},
+                          "to": {"node": "u", "port": "in"}}]}
+
+            duck._cancel.set()
+            r1 = s.run_nodeflow(g, "u", "out", query_id="stk1")
+            eq(seen.get("single"), False,
+               "run_nodeflow clears the sticky engine cancel before "
+               "materializing (else the beat auto-cancels a heavy build)")
+            need(not r1.get("cancelled") and not r1.get("error"),
+                 "run_nodeflow is not spuriously cancelled: %r" % r1)
+
+            duck._cancel.set()
+            r2 = s.run_nodeflows(g, [{"node": "u", "port": "out"}],
+                                 query_id="stk2")
+            eq(seen.get("batch"), False,
+               "run_nodeflows clears the sticky engine cancel before "
+               "materializing")
+            need(not r2.get("cancelled") and not r2.get("error"),
+                 "run_nodeflows is not spuriously cancelled: %r" % r2)
+        finally:
+            s.shutdown()
+            import shutil as _sh
+            _sh.rmtree(d, ignore_errors=True)
+
     def t_nodeflow_field_propagation_dedup():
         # Field propagation outliers: bin/rank must not emit a DUPLICATE output
         # column when the input already carries one; select/renamecols de-dup
@@ -40464,6 +40527,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("NodeFlow create-table + text nodes", t_nodeflow_createtable_and_text),
         ("NodeFlow field propagation: bin/rank/select/renamecols de-dup + "
          "pushdown", t_nodeflow_field_propagation_dedup),
+        ("NodeFlow run clears sticky engine cancel (no spurious cancel on "
+         "unique/heavy nodes)", t_nodeflow_run_clears_sticky_engine_cancel),
         ("load Excel workbooks (one table per sheet)", t_excel_load),
         ("Excel: a large sheet read is cancellable (polls progress)",
          t_excel_load_cancellable),

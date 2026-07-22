@@ -5882,6 +5882,12 @@ class Session:
                 preview_limit = None
             et = self._flow_engine_target(graph)
             eng, _kind = self._engine_obj(et)
+            # Clear a sticky engine cancel left SET by a prior Stop/stall so the
+            # BeatDaemon does not auto-interrupt this run's materialization (a
+            # heavy node like unique's window-function build runs past the beat
+            # interval and would otherwise report a spurious cancel). Same guard
+            # the query / pivot / chart / profile / page paths already use.
+            self._clear_stale_engine_cancel(eng, except_qid=query_id)
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
@@ -5953,6 +5959,12 @@ class Session:
         try:
             et = self._flow_engine_target(graph)
             eng, _kind = self._engine_obj(et)
+            # Clear a sticky engine cancel left SET by a prior Stop/stall so the
+            # BeatDaemon does not auto-interrupt this batch's materialization
+            # (a heavy node like unique's window-function build runs past the
+            # beat interval and would otherwise report a spurious cancel). Same
+            # guard the query / pivot / chart / profile / page paths already use.
+            self._clear_stale_engine_cancel(eng, except_qid=query_id)
             self._register_run(
                 query_id, eng, surface="node",
                 label="NodeFlow batch (%d branches)" % len(norm))
