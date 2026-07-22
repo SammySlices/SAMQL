@@ -30924,8 +30924,14 @@ def backend_tests(datadir, csv_path, json_path):
             cols = set(r["columns"])
             need("cname" in cols and "pname" in cols,
                  "columns from every joined input come through")
-            need("reg" not in cols and "pcode" not in cols,
-                 "duplicate right-side join keys are dropped")
+            # A right join key is dropped only when it is REDUNDANT with its
+            # paired left key by name (id = id). Here every pair is distinct-
+            # named (region=reg, cust=cid, prod=pcode), so the right keys are
+            # their own data and are kept -- matching the join node's behaviour
+            # (see "Fix NodeFlow join dropping distinct-named right key
+            # columns"). Only a same-named key would be dropped as duplicate.
+            need("reg" in cols and "cid" in cols and "pcode" in cols,
+                 "distinct-named right join keys are kept, not dropped")
 
             # chaining: in3 joins to in2 rather than the base
             mj2 = {"id": "mj", "type": "multijoin", "config": {
