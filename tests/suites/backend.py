@@ -28206,6 +28206,41 @@ def backend_tests(datadir, csv_path, json_path):
                "only the left key column survives once: %s" % r2["columns"])
             eq(r2["total_rows"], 1, "case-insensitive key still joins the row")
 
+            # (ii-b) DISTINCT-named keys must both survive: a join on
+            # column_name = source_field keeps BOTH keys (they are different
+            # columns the user asked to join on). A distinct right-key name
+            # passes through as-is (no r_ prefix -- that is only added on a
+            # name collision). Only same-named keys are dropped as redundant.
+            g2b = {"nodes": [
+                {"id": "L", "type": "sql", "config": {
+                    "sql": "SELECT 'a' AS column_name, 'x' AS lval",
+                    "label": "L"}},
+                {"id": "R", "type": "sql", "config": {
+                    "sql": "SELECT 'a' AS source_field, 'y' AS rval",
+                    "label": "R"}},
+                {"id": "J", "type": "join", "config": {
+                    "label": "join",
+                    "keys": [{"left": "column_name",
+                              "right": "source_field"}]}}],
+                "edges": [
+                    {"from": {"node": "L", "port": "out"},
+                     "to": {"node": "J", "port": "left"}},
+                    {"from": {"node": "R", "port": "out"},
+                     "to": {"node": "J", "port": "right"}}]}
+            r2b = s.run_nodeflow(g2b, "J", "inner")
+            need(not r2b.get("error"),
+                 "distinct-key join runs: %s" % r2b.get("error"))
+            lc2b = [c.lower() for c in r2b["columns"]]
+            need("source_field" in lc2b,
+                 "a distinct right key survives with its own name (no r_ "
+                 "prefix without a collision): %s" % r2b["columns"])
+            need("r_source_field" not in lc2b,
+                 "a unique right-key name is NOT prefixed r_: %s"
+                 % r2b["columns"])
+            need("column_name" in lc2b,
+                 "the left key still survives: %s" % r2b["columns"])
+            eq(r2b["total_rows"], 1, "distinct-named keys still join the row")
+
             # crossjoin de-dups too (no keys): right `a` collides with left
             # `a` and the existing `r_a`, so it becomes `r_a_2`.
             g3 = {"nodes": [
