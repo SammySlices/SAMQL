@@ -639,7 +639,11 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         need("error" not in d, f"pivot error: {d.get('error')}")
 
     def t_sql_format():
-        st, d = c.js("POST", "/api/sql/format", {"sql": "select 1"})
+        st, d = c.js("POST", "/api/sql/format", {
+            "sql": "select * exclude (x) from t",
+            "dialect": "native",
+            "target": "__duckdb__",
+        })
         eq(st, 200, "status")
         need("result" in d, "no format result")
 

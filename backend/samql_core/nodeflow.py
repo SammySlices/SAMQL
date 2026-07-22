@@ -978,11 +978,17 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         join_kw = "JOIN" if mode == "inner" else "LEFT JOIN"
         lcols = _cols_of_rel(cols_of, left)
         rcols = _cols_of_rel(cols_of, right)
-        # exclude join keys case-insensitively (a configured "ID" must still
-        # drop a real "id"), and de-dup right aliases against the left columns
-        # AND each other -- same proven scheme as multijoin -- so the result
-        # never carries two columns with one name.
-        rkeys = {r.lower() for _, r in pairs}
+        # Drop a right key column ONLY when it duplicates its paired left key
+        # by name (a true "id = id" join, matched case-insensitively so a
+        # configured "ID" still drops a real "id"). When the pair names differ
+        # (e.g. COLUMN_NAME = source_field) the right column is distinct data
+        # the user asked to join on, so keep it. A right column only gets the
+        # "r_" prefix when its name is NOT unique (it collides with a left
+        # column); a distinct name (e.g. source_field) passes through as-is.
+        # Right aliases are de-dup'd against the left columns AND each other --
+        # same proven scheme as multijoin -- so the result never carries two
+        # columns with one name.
+        rkeys = {r.lower() for l, r in pairs if l.lower() == r.lower()}
         lset = {c.lower() for c in lcols}
         used = set(lset)
         sel = ["a.%s" % _q(c) for c in lcols]
@@ -1058,7 +1064,9 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
             sel.append("%s.%s AS %s"
                        % (alias_of[base], _q(c), _q(uniq(c))))
         for inp, _against, pairs in steps:
-            rkeys = {r for _, r in pairs}
+            # drop a right key only when it duplicates its paired left key by
+            # name; keep distinct-named join keys (e.g. COLUMN_NAME = source_field)
+            rkeys = {r for l, r in pairs if l.lower() == r.lower()}
             for c in _cols_of_rel(cols_of, rels[inp]):
                 if c in rkeys:
                     continue

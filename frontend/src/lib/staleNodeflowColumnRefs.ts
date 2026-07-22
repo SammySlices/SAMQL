@@ -141,27 +141,51 @@ function pushStale(out: StaleColumnRef[], area: string, columns: string[]) {
   out.push({ area, columns: [...columns] });
 }
 
+/** Drop spans that can never name a column: single-quoted string literals and
+ *  ``{{var}}`` / ``${var}`` workflow placeholders. */
+function stripNonColumnSpans(text: string): string {
+  return String(text || "")
+    .replace(/'(?:[^']|'')*'/g, " ")
+    .replace(/\{\{[^}]*\}\}/g, " ")
+    .replace(/\$\{[^}]*\}/g, " ");
+}
+
+/** Column refs written with explicit ``[brackets]`` or ``"quotes"``.
+ *
+ *  These are the only unambiguous form: a bare word in a free-form expression
+ *  may equally be a function name or an identifier the user is still halfway
+ *  through typing. Callers that DESTROY user text must use this, not
+ *  ``exprColumnRefs``. */
+export function delimitedExprColumnRefs(text: string): string[] {
+  const stripped = stripNonColumnSpans(text);
+  const names = new Set<string>();
+  for (const m of stripped.matchAll(/\[([^\]]+)\]/g)) names.add(m[1].trim());
+  for (const m of stripped.matchAll(/"((?:[^"]|"")*)"/g))
+    names.add(m[1].replace(/""/g, '"').trim());
+  return [...names].filter(Boolean);
+}
+
 /** Pull column-ish identifiers from a free-form expression (filter / formula).
  *  Bracketed / double-quoted names are taken as whole identifiers (so
  *  ``[Order Date]`` is one ref, not bare ``Order`` + ``Date``). Bare-word
  *  scanning runs only on the leftover text after those spans are removed. */
 export function exprColumnRefs(text: string): string[] {
-  const stripped = String(text || "").replace(/'(?:[^']|'')*'/g, " ");
-  const names = new Set<string>();
-  for (const m of stripped.matchAll(/\[([^\]]+)\]/g)) names.add(m[1].trim());
-  for (const m of stripped.matchAll(/"((?:[^"]|"")*)"/g))
-    names.add(m[1].replace(/""/g, '"').trim());
+  const stripped = stripNonColumnSpans(text);
+  const names = new Set<string>(delimitedExprColumnRefs(text));
   // Do not re-tokenize insides of [..] / ".." — spaced headers would otherwise
   // look like missing bare columns while the real quoted/bracketed name exists.
   const bareSrc = stripped
     .replace(/\[[^\]]*\]/g, " ")
-    .replace(/"(?:[^"]|"")*"/g, " ");
+    .replace(/"(?:[^"]|"")*"/g, " ")
+    // A trailing unclosed ``[Amoun`` is a reference still being typed (the
+    // autocomplete popup is open on it) — not a missing column.
+    .replace(/\[[^\]]*$/, " ");
   // Bare-scan the leftover, but never explode an *unbracketed* multi-word name
   // (e.g. `hi my name is Bob`) into fragments. Group consecutive identifier
   // words separated by whitespace only into a "run"; a run of >=2 words is
   // treated as one (invalid) spaced name and emits nothing, while a lone word
-  // is a genuine bare column. Runs break on operators/punctuation and on the
-  // boolean connectives so `col1 and col2` still yields both columns.
+  // is a genuine bare column. Runs break on operators/punctuation, on the
+  // boolean connectives, and on a function call (`FOO(`).
   let run: string[] = [];
   let prevEnd = -1;
   const flushRun = () => {
@@ -174,7 +198,16 @@ export function exprColumnRefs(text: string): string[] {
   for (const m of bareSrc.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
     const w = m[0];
     const start = m.index ?? 0;
-    const whitespaceGap = prevEnd >= 0 && /^\s*$/.test(bareSrc.slice(prevEnd, start));
+    const whitespaceGap =
+      prevEnd >= 0 && /^\s*$/.test(bareSrc.slice(prevEnd, start));
+    // ``FOO(`` is a call, not a column. Skipping these keeps every function
+    // the engine supports (LTRIM, regexp_replace, strftime, …) out of the
+    // missing-column list without having to enumerate them all here.
+    if (/^\s*\(/.test(bareSrc.slice(start + w.length))) {
+      flushRun();
+      prevEnd = start + w.length;
+      continue;
+    }
     if (BOOL_CONNECTIVES.has(w.toLowerCase())) {
       // A connective terminates the current run and is not itself a column.
       flushRun();
@@ -189,6 +222,41 @@ export function exprColumnRefs(text: string): string[] {
   return [...names].filter(Boolean);
 }
 
+/** True while a free-form expression is still being written: an unclosed
+ *  quote, bracket or paren, a dangling operator or clause keyword, or a CASE
+ *  with no END.
+ *
+ *  A half-written expression cannot be judged for missing columns — its
+ *  identifiers are partial and its operands are not all there yet — so no
+ *  warning should be drawn from one, and its text must never be pruned. */
+export function looksIncompleteExpr(text: string): boolean {
+  const raw = String(text || "");
+  if (!raw.trim()) return false; // empty is absent, not malformed
+  // Odd number of ' means a string literal is still open. Checked on the raw
+  // text, before the stripper (which only matches balanced literals).
+  if ((raw.match(/'/g) || []).length % 2 !== 0) return true;
+  const s = stripNonColumnSpans(raw);
+  if ((s.match(/"/g) || []).length % 2 !== 0) return true;
+  let paren = 0;
+  let square = 0;
+  for (const ch of s) {
+    if (ch === "(") paren += 1;
+    else if (ch === ")") paren -= 1;
+    else if (ch === "[") square += 1;
+    else if (ch === "]") square -= 1;
+    if (paren < 0 || square < 0) return true; // closed what was never opened
+  }
+  if (paren !== 0 || square !== 0) return true;
+  const tail = s.trim();
+  // A trailing operator or clause keyword means the next operand is still
+  // on its way.
+  if (/[+\-*/%,<>=!|&~^]$/.test(tail)) return true;
+  if (/\b(and|or|not|case|when|then|else|like|between|in|is|as|cast)$/i.test(tail))
+    return true;
+  if (/\bcase\b/i.test(s) && !/\bend\b/i.test(s)) return true;
+  return false;
+}
+
 function staleExprs(
   area: string,
   exprs: string[],
@@ -198,6 +266,7 @@ function staleExprs(
   const stale: string[] = [];
   const seen = new Set<string>();
   for (const e of exprs) {
+    if (looksIncompleteExpr(e)) continue;
     for (const ref of exprColumnRefs(e)) {
       const m = missing(ref, live);
       if (m && !seen.has(m.toLowerCase())) {
@@ -274,7 +343,14 @@ export function clearStaleNodeflowColumnRefs(
 
   switch (nodeType) {
     case "filter":
-      if (exprColumnRefs(cfg.condition || "").some((r) => isDead(r, dead))) {
+      // Only a delimited ref justifies destroying the user's text. A bare
+      // word that merely looks dead may be a function name or an identifier
+      // still being typed, and blanking the whole condition over one is how
+      // hand-written expressions used to vanish.
+      if (
+        !looksIncompleteExpr(cfg.condition || "") &&
+        delimitedExprColumnRefs(cfg.condition || "").some((r) => isDead(r, dead))
+      ) {
         cfg.condition = "";
         changed = true;
       }
@@ -284,8 +360,10 @@ export function clearStaleNodeflowColumnRefs(
       break;
     case "formula":
       cfg.formulas = (cfg.formulas || []).map((f: any) => {
-        if (!f?.expr) return f;
-        if (!exprColumnRefs(f.expr).some((r) => isDead(r, dead))) return f;
+        if (!f?.expr || looksIncompleteExpr(f.expr)) return f;
+        // Delimited refs only — see the filter case above. Bare-word matching
+        // here is what erased formulas the user had just typed.
+        if (!delimitedExprColumnRefs(f.expr).some((r) => isDead(r, dead))) return f;
         changed = true;
         return { ...f, expr: "" };
       });
@@ -533,14 +611,23 @@ export function staleNodeflowColumnRefs(
       staleExprs("condition", [cfg.condition], inLive, out);
       pushStale(out, "field", missingMany([cfg.field].filter(Boolean), inLive));
       break;
-    case "formula":
+    case "formula": {
+      // A formula may reference a column an earlier formula in the same node
+      // creates, so this node's own outputs are live too — otherwise every
+      // chained formula reports its own input as missing.
+      const fxLive = new Set(inLive);
+      for (const f of cfg.formulas || []) {
+        const name = String(f?.name || "").trim();
+        if (name) fxLive.add(name.toLowerCase());
+      }
       staleExprs(
         "formula",
         (cfg.formulas || []).map((f: any) => f.expr).filter(Boolean),
-        inLive,
+        fxLive,
         out,
       );
       break;
+    }
     case "summarize":
       pushStale(out, "group by", missingMany(cfg.group_by || [], inLive));
       pushStale(

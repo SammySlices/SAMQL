@@ -3332,7 +3332,12 @@ class Api:
     # ---- SQL helpers -----------------------------------------------
     @staticmethod
     def sql_format(s, m, body, ctx):
-        return s.format_sql((body or {}).get("sql", ""))
+        b = body or {}
+        return s.format_sql(
+            b.get("sql", ""),
+            dialect=b.get("dialect"),
+            target=b.get("target"),
+        )
 
     @staticmethod
     def sql_statement_at(s, m, body, ctx):
@@ -5559,7 +5564,7 @@ def main(argv=None):
                             SetCurrentProcessExplicitAppUserModelID
                         _fn.argtypes = [_ct.c_wchar_p]
                         _fn.restype = _ct.HRESULT
-                        _hr = int(_fn("SamQL.App.2"))  # .532: lockstep
+                        _hr = int(_fn("SamQL.App.3"))  # taskbar cache lockstep
                         # with launcher_app.APP_AUMID -- the old
                         # identities carry an Edge-poisoned icon cache
                         if _hr != 0:
@@ -5582,7 +5587,7 @@ def main(argv=None):
                             return c
                     return None
 
-                def _srv_set_window_aumid(hwnd, aumid="SamQL.App.2"):
+                def _srv_set_window_aumid(hwnd, aumid="SamQL.App.3"):
                     """.550: window-level AUMID on the Form HWND so the
                     taskbar identity cannot drift to a foreign window."""
                     if os.name != "nt" or not hwnd:

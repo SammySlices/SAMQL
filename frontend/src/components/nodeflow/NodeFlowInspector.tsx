@@ -54,6 +54,7 @@ import {
 import { clearStaleNodeflowColumnRefs } from "../../lib/staleNodeflowColumnRefs";
 import { reconcilePivotFields } from "../../lib/pivotFields";
 import { pruneNodeConfigMissingRefs } from "../../lib/pruneNodeflowMissingAfterRun";
+import { parseCreateTablePaste } from "../../lib/createTablePaste";
 
 /** Empty-upstream note vs in-flight column probe (never show “Connect…” while probing). */
 function InspColsHint({
@@ -1344,8 +1345,14 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   </InspColsHint>
                   {(sel.config.formulas || []).map((f: any, i: number) => {
                     const cols = inspCols.in || [];
+                    // Infer "new column" from a name that is absent upstream
+                    // only once the upstream schema is actually known. While
+                    // it is still loading cols is empty, so every overwrite
+                    // target looked new — and touching the field then wrote
+                    // mode:"new" for good, silently losing the overwrite.
                     const newMode =
-                      f.mode === "new" || (!!f.name && !cols.includes(f.name));
+                      f.mode === "new" ||
+                      (cols.length > 0 && !!f.name && !cols.includes(f.name));
                     const selVal =
                       !newMode && f.name && cols.includes(f.name)
                         ? f.name
@@ -5151,24 +5158,20 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     </button>
                   </div>
 
-                  <label className="nb2-lbl">Paste data (tab-separated, first row = headers)</label>
+                  <label className="nb2-lbl">
+                    Paste data (tab- or comma-separated, first row = headers)
+                  </label>
                   <textarea
                     className="nb2-in nb2-ct-paste"
                     rows={3}
-                    placeholder={"id\tname\n1\tAlice\n2\tBob"}
+                    placeholder={"id,name\n1,Alice\n2,Bob"}
                     onPaste={(e) => {
                       const text = e.clipboardData.getData("text");
-                      if (!text || text.indexOf("\t") < 0) return; // let normal paste happen for single cells
+                      const pasted = parseCreateTablePaste(text);
+                      // Let the browser handle ordinary single-cell text.
+                      if (!pasted) return;
                       e.preventDefault();
-                      const lines = text
-                        .replace(/\r/g, "")
-                        .split("\n")
-                        .filter((l) => l.length);
-                      if (!lines.length) return;
-                      const columns = lines[0].split("\t").map((s) => s.trim());
-                      const rows = lines
-                        .slice(1)
-                        .map((l) => l.split("\t"));
+                      const { columns, rows } = pasted;
                       patch(sel.id, {
                         columns: columns.length ? columns : sel.config.columns,
                         rows: rows.length

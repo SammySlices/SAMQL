@@ -1,4 +1,7 @@
 import React from "react";
+import { readFileSync } from "fs";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
@@ -8,6 +11,16 @@ import {
   groupRelationalFamilies,
 } from "../lib/notebook";
 import type { TableInfo } from "../lib/types";
+
+const STYLES_CSS = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../styles.css"),
+  "utf8",
+);
+
+function cssRule(selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return STYLES_CSS.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] || "";
+}
 
 vi.mock("../lib/api", () => ({
   api: {
@@ -154,6 +167,34 @@ describe("Sidebar Tables pin button", () => {
     fireEvent.click(screen.getByTestId("tables-panel-pin-tab"));
     expect(onToggleTablesPin).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the pin contained when the Tables panel reaches its narrow width", () => {
+    render(<Sidebar {...stableProps} tablesPinned />);
+
+    const pin = screen.getByTestId("tables-panel-pin-tab");
+    expect(pin.querySelector(".side-tabs-pin-label")).toHaveTextContent("Pinned");
+
+    // The tabs are allowed to truncate, and the pin can shrink down to its
+    // icon. The enclosing header and sidebar clip any remaining inline
+    // overflow, so the control cannot escape the 180px drawer.
+    expect(cssRule(".side-tabs")).toMatch(/overflow:\s*hidden/);
+    expect(cssRule(".side-tab")).toMatch(/min-width:\s*0/);
+    expect(cssRule(".side-tabs-pin")).toMatch(/flex:\s*0\s+1\s+78px/);
+    expect(cssRule(".side-tabs-pin")).toMatch(/min-width:\s*30px/);
+    expect(cssRule(".side-tabs-pin")).toMatch(/overflow:\s*hidden/);
+  });
+
+  it("keeps the pinned-mode node inspector above the Tables drawer", () => {
+    const drawerZ = Number(
+      cssRule(".tables-sidebar-drawer").match(/z-index:\s*(\d+)/)?.[1],
+    );
+    const inspectorZ = Number(
+      cssRule(".nodeflow.inspector-over-tables .nb2-inspector:not(.docked)")
+        .match(/z-index:\s*(\d+)/)?.[1],
+    );
+    expect(drawerZ).toBeGreaterThan(0);
+    expect(inspectorZ).toBeGreaterThan(drawerZ);
+  });
 });
 
 describe("Sidebar loaded-tables drag reorder", () => {
@@ -282,6 +323,29 @@ describe("Sidebar loaded-tables drag reorder", () => {
       expect(popped).toBeTruthy();
       expect(popped?.textContent).toContain("alpha");
     });
+  });
+});
+
+describe("Sidebar JSON shred", () => {
+  it("offers Shred JSON from a loaded JSON table's right-click menu", () => {
+    const onShredJsonTable = vi.fn();
+    renderSidebar(
+      [tbl("orders_json", { source: "C:/data/orders.json" })],
+      vi.fn(),
+      { onShredJsonTable },
+    );
+
+    fireEvent.contextMenu(screen.getByText("orders_json"));
+    fireEvent.click(screen.getByTestId("sidebar-shred-json"));
+    expect(onShredJsonTable).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "orders_json" }),
+    );
+  });
+
+  it("does not offer Shred JSON for a non-JSON table", () => {
+    renderSidebar([tbl("orders_csv")]);
+    fireEvent.contextMenu(screen.getByText("orders_csv"));
+    expect(screen.queryByTestId("sidebar-shred-json")).toBeNull();
   });
 });
 

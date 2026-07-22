@@ -48,6 +48,8 @@ export const NodeFlow: React.FC<{
   // (which replaces the tables list) instead of floating over the canvas
   showTables?: boolean;
   inspectorHost?: HTMLElement | null;
+  /** Lift the floating inspector above a pinned Tables drawer. */
+  inspectorOverTables?: boolean;
   onSelectionChange?: (hasSelection: boolean) => void;
   showNodeSearch?: boolean;
   // a one-shot request from the sidebar to open a saved (kind=node) workflow
@@ -72,6 +74,7 @@ export const NodeFlow: React.FC<{
   toolsTablesOpen?: boolean;
   onToolsTablesOpenChange?: (open: boolean) => void;
   onOpenLoad?: () => void;
+  onShredJsonTable?: (table: TableInfo) => void;
   /** Dense NodeFlow layout (owned by App Settings so Scene memo sees toggles). */
   denseMode?: boolean;
   /** Icon-sphere chrome (owned by App Settings → Visual). Default ON. */
@@ -87,6 +90,7 @@ export const NodeFlow: React.FC<{
   onTablesChanged,
   showTables,
   inspectorHost,
+  inspectorOverTables = false,
   onSelectionChange,
   showNodeSearch,
   loadRequest,
@@ -97,6 +101,7 @@ export const NodeFlow: React.FC<{
   toolsTablesOpen,
   onToolsTablesOpenChange,
   onOpenLoad,
+  onShredJsonTable,
   denseMode = false,
   sphereMode = true,
   snap = false,
@@ -538,7 +543,13 @@ export const NodeFlow: React.FC<{
 
   // ---- render --------------------------------------------------------------
   return (
-    <div className="nodeflow" data-testid="nodeflow-view" data-active-tab={activeTabId}>
+    <div
+      className={
+        "nodeflow" + (inspectorOverTables ? " inspector-over-tables" : "")
+      }
+      data-testid="nodeflow-view"
+      data-active-tab={activeTabId}
+    >
       {nodeFileModal && (
         <FileBrowser
           saveMode={nodeFileModal.mode === "save"}
@@ -584,6 +595,7 @@ export const NodeFlow: React.FC<{
         tables={tables}
         onRefreshTables={onTablesChanged}
         onOpenLoad={onOpenLoad}
+        onShredJsonTable={onShredJsonTable}
         palette={paletteModel}
       />
 

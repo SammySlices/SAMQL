@@ -147,6 +147,46 @@ describe("NodeFlowInspector", () => {
     expect(doPreview).toHaveBeenCalledWith(node, "out", "input · output");
   });
 
+  it("imports comma-separated pasted data in a Create Table node", () => {
+    const node: NbNode = {
+      id: "create-1",
+      type: "createtable",
+      x: 0,
+      y: 0,
+      config: {
+        label: "new_table",
+        columns: ["col1", "col2"],
+        rows: [["", ""]],
+        dest: "duckdb",
+      },
+    };
+    const patch = vi.fn();
+    const onToast = vi.fn();
+    const { container } = render(
+      <NodeFlowInspector context={context(node, { patch, onToast })} />,
+    );
+    const pasteArea = container.querySelector("textarea.nb2-ct-paste");
+    expect(pasteArea).not.toBeNull();
+    fireEvent.paste(pasteArea as HTMLTextAreaElement, {
+      clipboardData: {
+        getData: () => 'id,name\n1,"Smith, Alice"\n2,Bob',
+      },
+    });
+
+    expect(patch).toHaveBeenCalledWith("create-1", {
+      columns: ["id", "name"],
+      rows: [
+        ["1", "Smith, Alice"],
+        ["2", "Bob"],
+      ],
+    });
+    expect(onToast).toHaveBeenCalledWith(
+      "ok",
+      "Pasted",
+      expect.stringMatching(/2 columns.*2 rows/),
+    );
+  });
+
   it("opens SQL IDE on select and Preview uses out", async () => {
     const orders: NbNode = {
       id: "in-orders",

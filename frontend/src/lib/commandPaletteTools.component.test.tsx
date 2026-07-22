@@ -191,6 +191,32 @@ describe("ToolsTablesPanel", () => {
     fireEvent.click(screen.getByTestId("tools-tables-close"));
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("offers JSON shredding from a loaded JSON table's context menu", () => {
+    const onShredJsonTable = vi.fn();
+    render(
+      <ToolsTablesPanel
+        open
+        onClose={vi.fn()}
+        onShredJsonTable={onShredJsonTable}
+        tables={[
+          {
+            engine: "duckdb",
+            name: "orders_json",
+            source: "C:/data/orders.json",
+            row_count: 2,
+            columns: [{ name: "id", type: "VARCHAR" }],
+          },
+        ]}
+        palette={palette as any}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByText("orders_json"));
+    fireEvent.click(screen.getByTestId("tools-tables-shred-json"));
+    expect(onShredJsonTable).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "orders_json" }),
+    );
+  });
 });
 
 describe("AboutModal packages", () => {

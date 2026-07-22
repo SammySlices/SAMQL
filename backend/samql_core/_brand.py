@@ -350,12 +350,9 @@ def app_icon_png():
     return _ICON_CACHE
 
 
-# .461: the same mark as a real multi-size Windows ICO (16/32/48/256,
-# PNG payloads -- accepted since Vista). Served at /favicon.ico, written
-# to backend/samql.ico by the PyInstaller spec when the file is absent,
-# and stamped onto the Edge --app window by the launcher so the TASKBAR
-# shows SamQL, not the browser. Generated from the "SQ" pixel mark;
-# stored as base64 so the text-only source transfer still carries it.
+# Historical pre-rendered ICO payload retained for source compatibility.
+# ``app_ico`` now builds the Windows frames from APP_ICON_PNG_B64 so the
+# transparent canonical PNG cannot drift from the taskbar asset again.
 APP_ICO_B64 = """
 AAABAAcAEBAAAAAAIAAfAwAAdgAAABgYAAAAACAAFAUAAJUDAAAgIAAAAAAgANIGAACpCAAAMDAA
 AAAAIAA5CwAAew8AAEBAAAAAACAAnA8AALQaAACAgAAAAAAgAN4gAABQKgAAAAAAAAAAIADlRwAA
@@ -1023,11 +1020,35 @@ CKXeGYf2JN88/x/O/Vk/myaZWgAAAABJRU5ErkJggg==
 _ICO_CACHE = None
 
 
+def ico_from_png(source):
+    """Build a transparent multi-size Windows ICO from square PNG bytes."""
+    import struct as _ico_struct
+    sizes = (16, 24, 32, 48, 64, 128, 256)
+    frames = []
+    for size in sizes:
+        frame = logo_resize(source, size)
+        w, h, _rows = png_decode(frame)
+        if (w, h) != (size, size):
+            raise ValueError("brand icon source must be a square PNG")
+        frames.append((size, frame))
+    header_len = 6 + 16 * len(frames)
+    offset = header_len
+    directory = bytearray(_ico_struct.pack("<HHH", 0, 1, len(frames)))
+    payload = bytearray()
+    for size, frame in frames:
+        wh = 0 if size == 256 else size
+        directory += _ico_struct.pack(
+            "<BBBBHHII", wh, wh, 0, 0, 1, 32, len(frame), offset)
+        payload += frame
+        offset += len(frame)
+    return bytes(directory + payload)
+
+
 def app_ico():
-    """Return the decoded multi-size .ico bytes (decoded once, cached)."""
+    """Return an ICO generated from the canonical embedded app PNG."""
     global _ICO_CACHE
     if _ICO_CACHE is None:
-        _ICO_CACHE = base64.b64decode("".join(APP_ICO_B64.split()))
+        _ICO_CACHE = ico_from_png(app_icon_png())
     return _ICO_CACHE
 
 
@@ -1364,6 +1385,16 @@ def _brand_cli(argv):
     if len(argv) >= 2 and argv[0] == "ensure-public":
         print(_json.dumps(ensure_public_brand_pngs(argv[1]), indent=2))
         return 0
+    if len(argv) >= 2 and argv[0] == "write-ico":
+        source = app_icon_png()
+        if len(argv) >= 3:
+            with open(argv[2], "rb") as fh:
+                source = fh.read()
+        ico = ico_from_png(source)
+        with open(argv[1], "wb") as fh:
+            fh.write(ico)
+        print("wrote %s (%d bytes)" % (argv[1], len(ico)))
+        return 0
     if len(argv) >= 2 and argv[0] == "fix-public":
         # build.ps1 / build.sh: strip opaque mattes from public brand PNGs
         # before the frontend (and therefore the frozen splash) is packaged.
@@ -1404,6 +1435,7 @@ def _brand_cli(argv):
         print("wrote %s -- %s" % (argv[2], _json.dumps(logo_inspect(data))))
         return 0
     print("usage: python -m samql_core._brand inspect LOGO.png\n"
+          "       python -m samql_core._brand write-ico OUT.ico [SOURCE.png]\n"
           "       python -m samql_core._brand fix LOGO.png OUT.png "
           "[--tol N] [--color RRGGBB[,RRGGBB]] [--flatten RRGGBB] "
           "[--resize N]\n"

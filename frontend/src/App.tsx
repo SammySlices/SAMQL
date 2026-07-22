@@ -51,6 +51,7 @@ import { Profiler } from "./components/Profiler";
 import { ChartPanel } from "./components/ChartPanel";
 import { PivotPanel } from "./components/PivotPanel";
 import { LoadDataModal, FileBrowser, RootIdPicker } from "./components/LoadDataModal";
+import { FlattenUidModal } from "./components/FlattenUidModal";
 import {
   readTablesPanelPinned,
   writeTablesPanelPinned,
@@ -465,6 +466,10 @@ export default function App() {
   // Tools & Tables is NodeFlow-only; open flag lives here so Ctrl+K can open it
   // and it reappears when returning to NodeFlow (hidden in IDE/Journal).
   const [toolsTablesOpen, setToolsTablesOpen] = useState(false);
+  // A JSON table's context-menu shred starts only after its root identifier is
+  // chosen. The backend performs the same relational flatten pipeline used by
+  // the Field Explorer, preserving the original loaded table.
+  const [jsonShredTarget, setJsonShredTarget] = useState<TableInfo | null>(null);
   const [errorLogOpen, setErrorLogOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const [lineageOpen, setLineageOpen] =
@@ -1795,7 +1800,10 @@ export default function App() {
   // ---- format ----
   const doFormat = async () => {
     try {
-      const res = await api.formatSql(activeTab.sql);
+      // Format in the language currently selected by the IDE. Native SQL
+      // follows the selected execution engine (DuckDB by default); Spark SQL
+      // stays Spark rather than being silently rewritten as another dialect.
+      const res = await api.formatSql(activeTab.sql, dialect, target);
       if (res.ok) {
         setSql(res.result);
         fireFmtShimmer();
@@ -3536,6 +3544,7 @@ export default function App() {
               onRefresh={refreshTables}
               onClearHistory={onClearHistory}
               onOpenLoad={() => setLoadOpen(true)}
+              onShredJsonTable={setJsonShredTarget}
               activeTab={tablesSideTab}
               onActiveTabChange={setTablesSideTab}
               onSideTabClick={() => setTablesPanelOpen(true)}
@@ -3584,6 +3593,19 @@ export default function App() {
             onShred={onShredColumn}
             onFlatten={onFlattenColumn}
           />
+          {jsonShredTarget && (
+            <FlattenUidModal
+              open
+              engine={jsonShredTarget.engine}
+              table={jsonShredTarget.name}
+              onCancel={() => setJsonShredTarget(null)}
+              onConfirm={(rootId) => {
+                const target = jsonShredTarget;
+                setJsonShredTarget(null);
+                void onFlattenColumn(target.engine, target.name, rootId);
+              }}
+            />
+          )}
           <CommandPalette
             open={commandPaletteOpen}
             onClose={() => setCommandPaletteOpen(false)}
@@ -3637,9 +3659,13 @@ export default function App() {
                     {t.title}
                   </span>
                 )}
-                {runsNow()[t.id] ? (
-                  <span className="tab-pulse" title="Running" />
-                ) : null}
+                <span
+                  className={
+                    "tab-pulse" + (runsNow()[t.id] ? " is-running" : "")
+                  }
+                  title={runsNow()[t.id] ? "Running" : undefined}
+                  aria-hidden="true"
+                />
                 <span
                   className="close"
                   onClick={(e) => {
@@ -3669,10 +3695,10 @@ export default function App() {
           </div>
 
           {/* toolbar */}
-          <div className="toolbar">
+          <div className="toolbar ide-toolbar">
             {running ? (
               <button
-                className="btn sm danger"
+                className="btn sm danger ide-run-button"
                 data-testid="stop-query"
                 onClick={cancelRunning}
                 title="Stop the running query"
@@ -3681,7 +3707,10 @@ export default function App() {
               </button>
             ) : (
               <button
-                className={"btn primary sm" + (runFlash ? " flash-ok" : "")}
+                className={
+                  "btn primary sm ide-run-button" +
+                  (runFlash ? " flash-ok" : "")
+                }
                 data-testid="run-query"
                 onClick={() => {
                   const sel = selectedSql();
@@ -3727,32 +3756,39 @@ export default function App() {
             <button className="btn sm" onClick={doFormat} title="Format SQL">
               <Icon.Format size={14} /> Format
             </button>
-            {running && (
-              <div
-                className="run-progress"
-                title={
-                  runProg.value != null
-                    ? Math.round(runProg.value * 100) +
-                      "% complete — click Stop to cancel"
-                    : "Query running… click Stop to cancel"
-                }
-              >
-                <ProgressBar
-                  value={runProg.value}
-                  rows={runProg.rows}
-                  unit={runProg.unit}
-                  done={runProg.done}
-                  total={runProg.total}
-                />
-                <span className="run-elapsed">
-                  <RunTimer
-                    startedAt={
-                      runs[activeTab?.id ?? ""]?.startedAt ?? Date.now()
-                    }
+            <div
+              className="ide-run-progress-slot"
+              data-testid="ide-run-progress-slot"
+              data-active={running ? "1" : "0"}
+              aria-hidden={running ? undefined : "true"}
+            >
+              {running && (
+                <div
+                  className="run-progress"
+                  title={
+                    runProg.value != null
+                      ? Math.round(runProg.value * 100) +
+                        "% complete — click Stop to cancel"
+                      : "Query running… click Stop to cancel"
+                  }
+                >
+                  <ProgressBar
+                    value={runProg.value}
+                    rows={runProg.rows}
+                    unit={runProg.unit}
+                    done={runProg.done}
+                    total={runProg.total}
                   />
-                </span>
-              </div>
-            )}
+                  <span className="run-elapsed">
+                    <RunTimer
+                      startedAt={
+                        runs[activeTab?.id ?? ""]?.startedAt ?? Date.now()
+                      }
+                    />
+                  </span>
+                </div>
+              )}
+            </div>
             <div className="sep" />
             <label className="dim" style={{ fontSize: 12 }}>
               Engine
@@ -4735,8 +4771,13 @@ export default function App() {
                   onToast={toast}
                   features={feats || null}
                   onTablesChanged={refreshTables}
-                  showTables={showTables}
+                  // A pinned Tables drawer keeps its own contents. In that
+                  // state the node inspector floats above it instead of
+                  // waiting for the dock host that intentionally is not
+                  // mounted.
+                  showTables={showTables && !tablesPanelPinned}
                   inspectorHost={nbHostEl}
+                  inspectorOverTables={tablesPanelPinned}
                   onSelectionChange={setNbSel}
                   showNodeSearch={showNodeSearch}
                   loadRequest={nodeLoad}
@@ -4747,6 +4788,7 @@ export default function App() {
                   toolsTablesOpen={toolsTablesOpen}
                   onToolsTablesOpenChange={setToolsTablesOpen}
                   onOpenLoad={() => setLoadOpen(true)}
+                  onShredJsonTable={setJsonShredTarget}
                   denseMode={nodeFlowDense}
                   sphereMode={nodeSphere}
                   snap={nodeSnap}

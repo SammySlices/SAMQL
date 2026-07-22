@@ -2,12 +2,112 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-20.675
+Current build:   2026-07-22.682
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-22.682  (v2.16.4)
+
+NODEFLOW JOIN FIX: keep distinct-named right-side join keys.
+
+The join and multi-join column projection excluded every right-side join key
+to avoid emitting two columns with one name. That is correct for a same-named
+join (id = id, where the right copy is redundant), but it also silently dropped
+distinct-named right keys: joining COLUMN_NAME = source_field returned
+column_name yet not source_field. Now only same-named keys are dropped as
+redundant; a distinct right key survives with its own name and takes the r_
+prefix only when it would otherwise collide with a left column.
+
+----------------------------------------------------------------------
+build 2026-07-22.681  (v2.16.4)
+
+NODEFLOW TIMEZONE FIX: pin the DuckDB session TimeZone to UTC.
+
+DuckDB otherwise adopts the machine's local zone (e.g. America/New_York) as
+its default session TimeZone, and its native row-fetch path materializes
+TIMESTAMPTZ / NOW() / current_timestamp as pytz-aware datetimes. In a frozen
+build (or any environment where pytz's zoneinfo is not resolvable) that raised
+"unknown timezone 'America/New_York'" whenever a NodeFlow workflow result fell
+off the Arrow fast-path onto the native fetch -- most visibly the filter node,
+whose SELECT * always drags a tz-aware column through the fetch. The engine now
+pins SET TimeZone='UTC' on every DuckDB connection, matching what the Arrow
+fast-path already presented and removing the dependency on a Python tz database.
+
+----------------------------------------------------------------------
+build 2026-07-21.678  (v2.16.4)
+
+MASTER APPWINDOW: NODEFLOW RESILIENCE + UI POLISH + CSV PASTE.
+NodeFlow now keeps successful upstream previews available when a downstream
+node fails, including the Select -> Formula failure path. Missing-column
+warnings use a lighter, higher-contrast surface; node captions render on a
+white bordered backing; pinned Tables chrome stays contained at narrow widths
+and selected-node configuration floats above the pinned drawer. Input and
+output connector marks now sit consistently at the broad base of each arrow.
+
+The IDE no longer shifts its toolbar or tab widths during an instant rerun:
+Run/Stop share one footprint, progress space stays reserved, and running dots
+overlay rather than reflow tabs. Create Table paste accepts comma-delimited
+CSV as well as tabs, with quoted commas, escaped quotes, and multiline fields.
+
+Windows AppWindow branding now supplies the multi-size SamQL icon through the
+launcher and taskbar paths instead of falling back to a blank document icon.
+The production icon assets were regenerated and launcher behavior is covered
+by backend tests.
+
+----------------------------------------------------------------------
+build 2026-07-21.677  (v2.16.4)
+
+MASTER NODEFLOW: NO MISSING-COLUMN WARNING ON A HALF-WRITTEN EXPRESSION.
+.676 debounced the Filter/Formula missing-column banner, which only delayed
+it: pausing partway through a function still raised the warning against the
+half-typed operand. Suppression is now structural rather than timed. A new
+looksIncompleteExpr gates both the banner and the prune, and reports an
+expression as unfinished when it has an unclosed ( [ ' or ", a closing bracket
+that was never opened, a trailing operator or clause keyword (+ - * / , < > =
+AND OR WHEN THEN ELSE LIKE IN IS AS CAST), or a CASE with no END. So
+LTRIM([Name] , UPPER(sco , REPLACE([a], 'x , [score] + and CASE WHEN [score] >
+5 THEN 'hi' all stay quiet while being written, and a half-written expression
+can no longer be pruned either.
+
+A finished expression is still judged normally: UPPER([gone]) against an
+upstream without "gone" reports the missing column as before. A bare word that
+parses on its own (plain "sco", no brackets, parens or pending operator) also
+still warns -- at that point it is a valid expression naming a column that does
+not exist, which is exactly the renamed-upstream case the warning is for.
+
+----------------------------------------------------------------------
+build 2026-07-21.676  (v2.16.4)
+
+MASTER NODEFLOW: BRANCH ERROR ISOLATION + FORMULA REF FIXES.
+Run all no longer loses every branch when one node fails. The batch
+materialiser built all terminals in a single try, so the first node that
+raised aborted the pass before any result was read, returned a run-level
+error with no results array, and dropped the temp tables of branches that had
+already finished. A failure now rebuilds the graph's independent target groups
+separately (they share no upstream work, so nothing is recomputed twice) and
+each failed terminal reports its own error inside results; a group with
+several terminals retries them one at a time so a branch that never reaches
+the broken node still returns rows. Every-branch-failed and single-target runs
+keep the old run-level envelope with the culprit node attributed, and a clean
+run is untouched. Each group builds into its own temp list -- sharing one list
+let an unfused rebuild drop a finished group's tables out from under it.
+
+Formula/filter column references: bare words in an expression were all treated
+as column refs against a 47-word SQL list, so most of the function palette
+(LTRIM, regexp_replace, strftime, …) and every half-typed identifier were
+reported missing. Worse, the post-run prune blanked the WHOLE expression on
+one such token and autosave persisted it -- the formula did not survive
+exiting the inspector. Identifiers followed by "(" are now read as calls,
+{{var}}/${var} placeholders and a trailing unclosed "[Amoun" are skipped,
+destroying user text requires a delimited [name]/"name" ref, and a formula's
+own new columns count as live for later formulas in the same node. The warning
+is debounced for freeform filter/formula so it no longer fires mid-keystroke.
+Formula target no longer flips from overwrite to "new column" when the
+inspector opens before the upstream schema has loaded.
 
 ----------------------------------------------------------------------
 build 2026-07-20.675  (v2.16.4)

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clearStaleNodeflowColumnRefs,
   exprColumnRefs,
+  looksIncompleteExpr,
   NO_AUTO_PRUNE_STALE_TYPES,
   STALE_REF_NODE_TYPES,
   staleNodeflowColumnRefs,
@@ -232,6 +233,131 @@ describe("clearStaleNodeflowColumnRefs", () => {
         "sort",
         { sorts: [{ col: "a", dir: "asc" }] },
         [],
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("free-form expressions (filter / formula)", () => {
+  it("does not read a function call as a column reference", () => {
+    expect(exprColumnRefs("LTRIM([Name])")).toEqual(["Name"]);
+    expect(exprColumnRefs("regexp_replace([a], 'x', 'y')")).toEqual(["a"]);
+    expect(
+      staleNodeflowColumnRefs(
+        "formula",
+        { formulas: [{ name: "clean", expr: "LTRIM(RTRIM([Name]))" }] },
+        { in: ["Name"] },
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not read a workflow variable as a column reference", () => {
+    expect(exprColumnRefs("[a] = {{run_date}}")).toEqual(["a"]);
+    expect(exprColumnRefs("[a] = ${env_name}")).toEqual(["a"]);
+  });
+
+  it("does not flag a reference still being typed", () => {
+    expect(exprColumnRefs("[Amoun")).toEqual([]);
+    expect(
+      staleNodeflowColumnRefs("filter", { condition: "[Amoun" }, { in: ["Amount"] }),
+    ).toEqual([]);
+  });
+
+  it("treats a formula's own new columns as live for later formulas", () => {
+    expect(
+      staleNodeflowColumnRefs(
+        "formula",
+        {
+          formulas: [
+            { name: "gross", expr: "[qty] * [price]", mode: "new" },
+            { name: "net", expr: "[gross] * 0.9", mode: "new" },
+          ],
+        },
+        { in: ["qty", "price"] },
+      ),
+    ).toEqual([]);
+  });
+
+  it("never destroys a formula over an undelimited word", () => {
+    expect(
+      clearStaleNodeflowColumnRefs(
+        "formula",
+        { formulas: [{ name: "Sales", expr: "amount * 2" }] },
+        [{ area: "formula", columns: ["amount"] }],
+      ),
+    ).toBeNull();
+  });
+
+  it("still clears a formula whose bracketed column really went away", () => {
+    expect(
+      clearStaleNodeflowColumnRefs(
+        "formula",
+        { formulas: [{ name: "Sales", expr: "[amount] * 2" }] },
+        [{ area: "formula", columns: ["amount"] }],
+      ),
+    ).toEqual({ formulas: [{ name: "Sales", expr: "" }] });
+  });
+
+  it.each([
+    ["unclosed call", "LTRIM([Name]"],
+    ["call still being filled in", "UPPER(sco"],
+    ["unclosed bracket", "IF([sco"],
+    ["trailing operator", "[score] +"],
+    ["trailing keyword", "[score] > 5 AND"],
+    ["CASE with no END", "CASE WHEN [score] > 5 THEN 'hi'"],
+    ["unclosed string literal", "REPLACE([a], 'x"],
+    ["stray closing paren", "[score]) * 2"],
+  ])("treats a half-written expression as incomplete: %s", (_label, expr) => {
+    expect(looksIncompleteExpr(expr)).toBe(true);
+  });
+
+  it.each([
+    ["plain reference", "[score] * 2"],
+    ["nested calls", "LTRIM(RTRIM([Name]))"],
+    ["finished CASE", "CASE WHEN [score] > 5 THEN 'hi' ELSE 'lo' END"],
+    ["string literal", "REPLACE([a], 'x', 'y')"],
+  ])("treats a finished expression as complete: %s", (_label, expr) => {
+    expect(looksIncompleteExpr(expr)).toBe(false);
+  });
+
+  it("stays quiet while a malformed formula is being written", () => {
+    for (const expr of ["UPPER(sco", "LTRIM([Name]", "[score] +", "CASE WHEN sc"]) {
+      expect(
+        staleNodeflowColumnRefs(
+          "formula",
+          { formulas: [{ name: "out", expr }] },
+          { in: ["score", "Name"] },
+        ),
+      ).toEqual([]);
+    }
+  });
+
+  it("still reports a genuinely missing column once the formula is finished", () => {
+    expect(
+      staleNodeflowColumnRefs(
+        "formula",
+        { formulas: [{ name: "out", expr: "UPPER([gone])" }] },
+        { in: ["score"] },
+      ),
+    ).toEqual([{ area: "formula", columns: ["gone"] }]);
+  });
+
+  it("never destroys a half-written formula on prune", () => {
+    expect(
+      clearStaleNodeflowColumnRefs(
+        "formula",
+        { formulas: [{ name: "Sales", expr: "UPPER([amount]" }] },
+        [{ area: "formula", columns: ["amount"] }],
+      ),
+    ).toBeNull();
+  });
+
+  it("never destroys a filter condition over an undelimited word", () => {
+    expect(
+      clearStaleNodeflowColumnRefs(
+        "filter",
+        { condition: "amount > 2" },
+        [{ area: "condition", columns: ["amount"] }],
       ),
     ).toBeNull();
   });

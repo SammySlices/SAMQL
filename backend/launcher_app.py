@@ -31,6 +31,11 @@ import threading
 import tempfile
 import time
 
+# API nodes may target services on a private/LAN address.  This environment
+# override is inherited by the server launched below; cloud-metadata blocking
+# remains controlled separately by SAMQL_ALLOW_METADATA_FETCH.
+os.environ.setdefault("SAMQL_ALLOW_PRIVATE_FETCH", "1")
+
 # Boot wait for a server WE spawned: idle timeout + absolute ceiling.
 # .490/.500/.623/.624: wall-clock alone was raised 60 -> 300 s for OneDrive/AV
 # cold starts, but a dead child still burned the whole budget, and a hung-but-
@@ -56,15 +61,13 @@ CHROME_BG = "#16181d"
 # ---------------------------------------------------------------- log
 
 # .532: the app's shell identity -- VERSIONED ON PURPOSE. The Windows
-# taskbar caches a group's icon PER AUMID, and both earlier identities
-# were stamped onto EDGE --app windows in the early builds (APP_AUMID
-# by this launcher, "SamQL.App" by the PS1 flow) -- so the shell cached
-# EDGE'S art for them, and that cache outlives every window stamp, pin
-# cleanup and registry check. A fresh identity starts with a clean cache
-# row. Bump the suffix if the art must ever divorce a poisoned cache
-# again.
-APP_AUMID = "SamQL.App.2"
-_LEGACY_AUMIDS = ("SamQL.SamQL", "SamQL.App")
+# taskbar caches a group's icon PER AUMID. Earlier identities were stamped
+# with browser or malformed opaque art, and that cache outlives every window
+# stamp, pin cleanup and registry check. A fresh identity starts with a clean
+# cache row. Bump the suffix whenever corrected art must divorce a poisoned
+# cache again.
+APP_AUMID = "SamQL.App.3"
+_LEGACY_AUMIDS = ("SamQL.SamQL", "SamQL.App", "SamQL.App.2")
 _AUMID_SET = []   # filled when SetCurrentProcessExplicitAppUserModelID succeeds
 # .534: one SamQL at a time -- a named mutex closes the double-click
 # race, and a window scan surfaces an already-open SamQL instead of

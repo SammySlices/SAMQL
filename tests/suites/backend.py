@@ -913,6 +913,17 @@ def backend_tests(datadir, csv_path, json_path):
                 need("SELECT" in out["result"].upper(), "not formatted")
             else:
                 skip("sqlglot not installed (format degrades gracefully)")
+            # The formatter must preserve the selected dialect instead of
+            # falling through to sqlglot's generic/default rendering.
+            native = s.format_sql("select * exclude (x) from t", "native", "__duckdb__")
+            spark = s.format_sql(
+                "select * from t distribute by a", "spark", "__duckdb__",
+            )
+            if feats["sqlglot"]:
+                need(native["ok"] and "EXCLUDE" in native["result"].upper(),
+                     "native formatter did not retain DuckDB dialect")
+                need(spark["ok"] and "DISTRIBUTE BY" in spark["result"].upper(),
+                     "spark formatter did not retain Spark dialect")
         finally:
             s.shutdown()
 
@@ -11138,11 +11149,13 @@ def backend_tests(datadir, csv_path, json_path):
         # FRESH identity, kept in lockstep everywhere.
         la = open(os.path.join(BACKEND, "launcher_app.py"),
                   encoding="utf-8").read()
-        need('APP_AUMID = "SamQL.App.2"' in la
-             and '_LEGACY_AUMIDS = ("SamQL.SamQL", "SamQL.App")' in la,
+        need('APP_AUMID = "SamQL.App.3"' in la
+             and '_LEGACY_AUMIDS = ("SamQL.SamQL", "SamQL.App", '
+                 '"SamQL.App.2")' in la,
              "the rotated identity + legacy list are declared once")
         need('"SamQL.SamQL"' not in la.replace(
-                '_LEGACY_AUMIDS = ("SamQL.SamQL", "SamQL.App")', ""),
+                '_LEGACY_AUMIDS = ("SamQL.SamQL", "SamQL.App", '
+                '"SamQL.App.2")', ""),
              "no code literal still uses the poisoned identity")
         need(la.count("APP_AUMID") >= 7,
              "process, window prop, lnk, log and diagnosis all use the "
@@ -11150,13 +11163,13 @@ def backend_tests(datadir, csv_path, json_path):
         srv = open(os.path.join(BACKEND, "server.py"),
                    encoding="utf-8").read()
         need('SetCurrentProcessExplicitAppUserModelID' in srv
-             and '"SamQL.App.2"' in srv
+             and '"SamQL.App.3"' in srv
              and "_srv_set_window_aumid" in srv,
              "the server --window path sets process + window AUMID "
-             "(SamQL.App.2)")
+             "(SamQL.App.3)")
         ps1 = open(_root_script("Start-SamQL-AppWindow.ps1"),
                    encoding="utf-8").read()
-        need("'SamQL.App.2'" in ps1 and "'SamQL.App'" not in ps1,
+        need("'SamQL.App.3'" in ps1 and "'SamQL.App.2'" not in ps1,
              "the PS1 flow rotated too")
 
     
@@ -15449,6 +15462,13 @@ def backend_tests(datadir, csv_path, json_path):
             need(planes in (0, 1) and bpp == 32
                  and off + length <= len(ico),
                  "entry %d header sane, payload in bounds" % w)
+            _fw, _fh, _rows = _brand.png_decode(ico[off:off + length])
+            _alphas = [row[x] for row in _rows
+                       for x in range(3, len(row), 4)]
+            need(any(a == 0 for a in _alphas)
+                 and any(a > 0 for a in _alphas),
+                 "entry %d preserves transparent background + visible mark"
+                 % w)
             sizes.add(w)
         need({16, 32, 48, 256} <= sizes,
              "the key taskbar sizes are present (%r)" % sorted(sizes))
@@ -18949,11 +18969,10 @@ def backend_tests(datadir, csv_path, json_path):
              and "setVpos(null);" in dg),
             ("inspector head is the drag handle",
              "Drag to move; resize from the corner" in dg),
-            ("editor tabs pulse while running (ternary: the runs map "
-             "holds OBJECTS, and object && JSX is not a ReactNode -- "
-             "the on-box 2026-07-03 tsc failure)",
-             'className="tab-pulse"' in app
-             and "runsNow()[t.id] ? (" in app
+            ("editor tabs pulse while running without changing tab layout",
+             '"tab-pulse"' in app
+             and 'runsNow()[t.id] ? " is-running" : ""' in app
+             and 'aria-hidden="true"' in app
              and "runsNow()[t.id] && (" not in app),
             ("result tabs pulse through their origin",
              'data-pulse={' in app and "originTabId" in app),
@@ -28404,6 +28423,41 @@ def backend_tests(datadir, csv_path, json_path):
             eq(lc.count("id"), 1,
                "only the left key column survives once: %s" % r2["columns"])
             eq(r2["total_rows"], 1, "case-insensitive key still joins the row")
+
+            # (ii-b) DISTINCT-named keys must both survive: a join on
+            # column_name = source_field keeps BOTH keys (they are different
+            # columns the user asked to join on). A distinct right-key name
+            # passes through as-is (no r_ prefix -- that is only added on a
+            # name collision). Only same-named keys are dropped as redundant.
+            g2b = {"nodes": [
+                {"id": "L", "type": "sql", "config": {
+                    "sql": "SELECT 'a' AS column_name, 'x' AS lval",
+                    "label": "L"}},
+                {"id": "R", "type": "sql", "config": {
+                    "sql": "SELECT 'a' AS source_field, 'y' AS rval",
+                    "label": "R"}},
+                {"id": "J", "type": "join", "config": {
+                    "label": "join",
+                    "keys": [{"left": "column_name",
+                              "right": "source_field"}]}}],
+                "edges": [
+                    {"from": {"node": "L", "port": "out"},
+                     "to": {"node": "J", "port": "left"}},
+                    {"from": {"node": "R", "port": "out"},
+                     "to": {"node": "J", "port": "right"}}]}
+            r2b = s.run_nodeflow(g2b, "J", "inner")
+            need(not r2b.get("error"),
+                 "distinct-key join runs: %s" % r2b.get("error"))
+            lc2b = [c.lower() for c in r2b["columns"]]
+            need("source_field" in lc2b,
+                 "a distinct right key survives with its own name (no r_ "
+                 "prefix without a collision): %s" % r2b["columns"])
+            need("r_source_field" not in lc2b,
+                 "a unique right-key name is NOT prefixed r_: %s"
+                 % r2b["columns"])
+            need("column_name" in lc2b,
+                 "the left key still survives: %s" % r2b["columns"])
+            eq(r2b["total_rows"], 1, "distinct-named keys still join the row")
 
             # crossjoin de-dups too (no keys): right `a` collides with left
             # `a` and the existing `r_a`, so it becomes `r_a_2`.
@@ -40856,8 +40910,8 @@ def backend_tests(datadir, csv_path, json_path):
         (".533: version/date in UI + journal, cancellable export cards "
          "everywhere, gated tab/cell deletes, window.confirm eradicated",
          t_ux_confirm_export_533),
-        (".532: fresh shell identity (SamQL.App.2) -- the per-AUMID "
-         "icon cache was Edge-poisoned; everything rotated in lockstep",
+        ("taskbar: fresh shell identity (SamQL.App.3) after repairing "
+         "the opaque ICO; everything rotated in lockstep",
          t_aumid_rotation_532),
         (".550: AUMID branding never stamps a foreign HWND (Teams/"
          "Explorer title collision) -- pid/exe-gated wait + refuse",

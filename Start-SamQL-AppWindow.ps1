@@ -38,6 +38,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# API nodes may target services on a private/LAN address.  Keep this override
+# scoped to SamQL's process tree; cloud-metadata protection remains separate.
+$env:SAMQL_ALLOW_PRIVATE_FETCH = "1"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $self = $MyInvocation.MyCommand.Path
 $url = "http://127.0.0.1:$Port"
@@ -519,7 +522,7 @@ namespace SamQLBrand {
 }
 '@
         $okIco = [SamQLBrand.Native]::SetIcon($hwnd, $icoPath)
-        $okId  = [SamQLBrand.Native]::SetAumid($hwnd, 'SamQL.App.2')
+        $okId  = [SamQLBrand.Native]::SetAumid($hwnd, 'SamQL.App.3')
         $okRe  = [SamQLBrand.Native]::SetRelaunchIcon($hwnd, $icoPath)
         Write-LauncherLog ("INFO window stamp: icon=$okIco aumid=$okId " +
                            "relaunchIcon=$okRe")
@@ -531,7 +534,7 @@ namespace SamQLBrand {
         foreach ($delay in 2, 3, 5, 8, 15, 30, 60) {
             Start-Sleep -Seconds $delay
             [SamQLBrand.Native]::SetIcon($hwnd, $icoPath) | Out-Null
-            [SamQLBrand.Native]::SetAumid($hwnd, 'SamQL.App.2') | Out-Null
+            [SamQLBrand.Native]::SetAumid($hwnd, 'SamQL.App.3') | Out-Null
             [SamQLBrand.Native]::SetRelaunchIcon($hwnd, $icoPath) |
                 Out-Null
         }

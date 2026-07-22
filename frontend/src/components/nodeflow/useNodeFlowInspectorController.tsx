@@ -453,10 +453,44 @@ export function useNodeFlowInspectorController({
   // Missing refs stay until the user edits them or a successful rerun prunes
   // via pruneNodeflowMissingAfterRun.
 
+  // Filter / formula text commits on every keystroke, so scanning it live
+  // reports each half-typed identifier as a missing column while the user is
+  // still writing. Track just that text (as a value, so unrelated re-renders
+  // do not re-arm the timer) and hold the warning until typing stops. Every
+  // other node type is structured — pickers, not prose — and stays immediate.
+  const fxText = useMemo(() => {
+    if (!sel || (sel.type !== "filter" && sel.type !== "formula")) return null;
+    const cfg = sel.config || {};
+    return JSON.stringify([
+      cfg.condition || "",
+      (cfg.formulas || []).map((f: any) => f?.expr || ""),
+    ]);
+  }, [sel]);
+  const fxNodeRef = useRef<string | null>(null);
+  const [fxSettled, setFxSettled] = useState(true);
+  useEffect(() => {
+    const id = selId ?? null;
+    if (fxText === null) {
+      fxNodeRef.current = id;
+      setFxSettled(true);
+      return;
+    }
+    // A newly selected node shows its saved text at once; only edits to the
+    // node already open are debounced.
+    if (fxNodeRef.current !== id) {
+      fxNodeRef.current = id;
+      setFxSettled(true);
+      return;
+    }
+    setFxSettled(false);
+    const t = window.setTimeout(() => setFxSettled(true), 700);
+    return () => window.clearTimeout(t);
+  }, [fxText, selId]);
+
   const staleColRefs = useMemo(() => {
-    if (!sel) return [];
+    if (!sel || !fxSettled) return [];
     return staleNodeflowColumnRefs(sel.type, sel.config || {}, inspCols);
-  }, [sel, inspCols]);
+  }, [sel, fxSettled, inspCols]);
 
   // Schema refresh / inspCols settle must NOT auto-wipe column refs.
   // Missing refs stay visible (banner + strikethrough); Clear is user-only;

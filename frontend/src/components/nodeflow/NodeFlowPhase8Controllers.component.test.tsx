@@ -1416,6 +1416,140 @@ describe("Phase 8 NodeFlow controllers", () => {
     expect(runBatch).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps passing upstream previews when a downstream Formula fails", async () => {
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      error: 'Formula node "Formula" failed: bad expression',
+      node: "formula",
+    } as any);
+    const runBatch = vi.spyOn(api, "nodeflowRunBatch").mockResolvedValue({
+      ok: true,
+      results: [
+        {
+          node: "orders",
+          port: "out",
+          columns: ["order_id", "amount"],
+          rows: [[101, 25]],
+          total_rows: 1,
+        },
+        {
+          node: "select",
+          port: "out",
+          columns: ["order_id", "amount"],
+          rows: [[101, 25]],
+          total_rows: 1,
+        },
+        {
+          node: "formula",
+          port: "out",
+          error: 'Formula node "Formula" failed: bad expression',
+          error_node: "formula",
+        },
+      ],
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+
+    const orders: NbNode = {
+      id: "orders",
+      type: "input",
+      x: 0,
+      y: 0,
+      config: { label: "Demo orders", table: "demo_orders" },
+    };
+    const select: NbNode = {
+      id: "select",
+      type: "select",
+      x: 120,
+      y: 0,
+      config: {
+        label: "Select",
+        fields: [
+          { name: "order_id", keep: true },
+          { name: "amount", keep: true },
+        ],
+      },
+    };
+    const formula: NbNode = {
+      id: "formula",
+      type: "formula",
+      x: 240,
+      y: 0,
+      config: { label: "Formula", name: "broken", expr: "missing + 1" },
+    };
+    const edges: NbEdge[] = [
+      {
+        id: "e1",
+        from: { node: "orders", port: "out" },
+        to: { node: "select", port: "in" },
+      },
+      {
+        id: "e2",
+        from: { node: "select", port: "out" },
+        to: { node: "formula", port: "in" },
+      },
+    ];
+    const nodes = [orders, select, formula];
+    const liveRef: React.MutableRefObject<{ nodes: NbNode[]; edges: NbEdge[] }> = {
+      current: { nodes, edges },
+    };
+    const { result } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-failed-formula",
+        nodes,
+        edges,
+        liveRef,
+        graphSig: "graph-failed-formula",
+        dataEpoch: 1,
+        graphForApi: () => ({ nodes, edges }),
+        graphForRun: () => ({ nodes, edges }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: vi.fn(),
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.runAll();
+    });
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(runBatch).toHaveBeenCalledTimes(1);
+    expect(runBatch.mock.calls[0][1]).toEqual(
+      expect.arrayContaining([
+        { node: "orders", port: "out" },
+        { node: "select", port: "out" },
+        { node: "formula", port: "out" },
+      ]),
+    );
+
+    for (const passing of [orders, select]) {
+      await act(async () => {
+        await result.current.doPreview(
+          passing,
+          "out",
+          `${passing.config.label} · out`,
+        );
+      });
+      expect(result.current.preview).toEqual(
+        expect.objectContaining({
+          kind: "table",
+          rows: [[101, 25]],
+          sourceNodeId: passing.id,
+        }),
+      );
+      expect(result.current.status.text).toMatch(/cached/i);
+    }
+    // Clicking either passing node reused the partial last-run seed; it did
+    // not execute the failed Formula pipeline again.
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
   it("clears last-run cache on dataEpoch bump so Select preview does not re-run", async () => {
     // Select stays cache-only after epoch wipe. Sources / Join / Filter may
     // preview-execute on miss (separate tests).

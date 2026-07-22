@@ -1,4 +1,7 @@
 import React from "react";
+import { readFileSync } from "fs";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import {
@@ -10,6 +13,16 @@ import {
 } from "../../lib/nodeFlowModel";
 import { NodeFlowCanvasCard } from "./NodeFlowCanvasCard";
 import type { NodeFlowCanvasCardActions } from "./NodeFlowCanvasCard";
+
+const STYLES_CSS = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../../styles.css"),
+  "utf8",
+);
+
+function cssRule(selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return STYLES_CSS.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] || "";
+}
 
 function makeActions(): NodeFlowCanvasCardActions {
   return {
@@ -307,6 +320,35 @@ describe("NodeFlowCanvasCard Filter / Formula captions", () => {
       ?.textContent).toBe("L");
     expect(container.querySelector(".nb2-port.in.port-right .nb2-dot-mark")
       ?.textContent).toBe("R");
+  });
+
+  it("keeps all input and output lettering on the arrow's left/base side", () => {
+    const { container } = renderCard(
+      {
+        id: "j-output-lettering",
+        type: "join",
+        x: 0,
+        y: 0,
+        config: { label: "join" },
+      },
+      false,
+      2,
+    );
+    const leftOnly = container.querySelector(".nb2-port.out.left_only");
+    expect(leftOnly).not.toBeNull();
+
+    // Semantic captions precede the arrow in DOM/flex order.
+    expect(leftOnly?.children[0]).toHaveClass("nb2-port-lbl", "out");
+    expect(leftOnly?.children[1]).toHaveClass("nb2-dot");
+
+    // Embedded T/F/L/R marks sit at the broad base, not toward the tip.
+    const outputMarkRule = cssRule(".nb2-port.out .nb2-dot-mark");
+    expect(outputMarkRule).toMatch(/justify-content:\s*flex-start/);
+    expect(outputMarkRule).toMatch(/padding:\s*0\s+0\s+0\s+1px/);
+
+    const inputMarkRule = cssRule(".nb2-port.in .nb2-dot-mark");
+    expect(inputMarkRule).toMatch(/justify-content:\s*flex-start/);
+    expect(inputMarkRule).toMatch(/padding:\s*0\s+0\s+0\s+1px/);
   });
 
   it("Cross Join: L/R inputs, green single out (never red)", () => {

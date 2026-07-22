@@ -112,6 +112,8 @@ interface Props {
   onRefresh: () => void;
   onClearHistory: () => void;
   onOpenLoad: () => void;
+  /** Starts relational JSON shred after the App collects a root identifier. */
+  onShredJsonTable?: (table: TableInfo) => void;
   /** Controlled tab (drawer chrome). Uncontrolled when omitted. */
   activeTab?: Tab;
   onActiveTabChange?: (tab: Tab) => void;
@@ -124,6 +126,11 @@ interface Props {
 
 const engineClass = (e: EngineKind) =>
   e === "duckdb" ? "duckdb" : e === "remote" ? "remote" : "sqlite";
+
+const isShreddableJsonTable = (table: TableInfo) =>
+  table.engine === "duckdb" &&
+  !table.remote &&
+  /\.(?:json|ndjson|jsonl)(?:$|[?#])/i.test(table.source || "");
 
 const SidebarImpl: React.FC<Props> = (props) => {
   useRenderCount("Sidebar");
@@ -197,7 +204,9 @@ const SidebarImpl: React.FC<Props> = (props) => {
               size={13}
               className={props.tablesPinned ? "pin-on" : undefined}
             />
-            {props.tablesPinned ? "Pinned" : "Pin"}
+            <span className="side-tabs-pin-label">
+              {props.tablesPinned ? "Pinned" : "Pin"}
+            </span>
           </button>
         )}
       </div>
@@ -233,6 +242,7 @@ const TablesTree: React.FC<
   onDisconnect,
   onRefresh,
   onOpenLoad,
+  onShredJsonTable,
 }) => {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   // Remote (catalog) columns are not in the tables payload; fetch them the
@@ -1262,6 +1272,18 @@ const TablesTree: React.FC<
             >
               Properties
             </button>
+            {isShreddableJsonTable(menu.t) && onShredJsonTable && (
+              <button
+                data-testid="sidebar-shred-json"
+                onClick={() => {
+                  onShredJsonTable(menu.t);
+                  setMenu(null);
+                }}
+                title="Choose a unique identifier, then create relational JSON tables"
+              >
+                Shred JSON…
+              </button>
+            )}
             {!menu.t.remote && onReloadTable && (
               <>
                 <button
