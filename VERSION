@@ -2,12 +2,27 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-21.678
+Current build:   2026-07-22.681
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-22.681  (v2.16.4)
+
+NODEFLOW TIMEZONE FIX: pin the DuckDB session TimeZone to UTC.
+
+DuckDB otherwise adopts the machine's local zone (e.g. America/New_York) as
+its default session TimeZone, and its native row-fetch path materializes
+TIMESTAMPTZ / NOW() / current_timestamp as pytz-aware datetimes. In a frozen
+build (or any environment where pytz's zoneinfo is not resolvable) that raised
+"unknown timezone 'America/New_York'" whenever a NodeFlow workflow result fell
+off the Arrow fast-path onto the native fetch -- most visibly the filter node,
+whose SELECT * always drags a tz-aware column through the fetch. The engine now
+pins SET TimeZone='UTC' on every DuckDB connection, matching what the Arrow
+fast-path already presented and removing the dependency on a Python tz database.
 
 ----------------------------------------------------------------------
 build 2026-07-21.678  (v2.16.4)

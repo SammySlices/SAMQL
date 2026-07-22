@@ -2274,6 +2274,20 @@ class DuckDBManager:
         _try(f"SET threads TO {self._thread_count(low_memory)}")
         _try("SET enable_object_cache = true")
         _try("SET preserve_insertion_order = false")
+        # Pin the session TimeZone to UTC. DuckDB otherwise adopts the OS
+        # local zone (e.g. 'America/New_York') as its default, and its NATIVE
+        # fetch path materializes TIMESTAMPTZ / NOW() / current_timestamp as
+        # pytz-aware Python datetimes -- pytz.timezone('America/New_York').
+        # In a frozen build (or any env where pytz's zoneinfo isn't resolvable)
+        # that raises UnknownTimeZoneError: 'America/New_York', which surfaced
+        # as "unknown timezone 'America/New_York'" whenever a NodeFlow workflow
+        # result fell off the Arrow fast-path onto spill_rows()/fetchmany().
+        # The Arrow fast-path already strips tz and returns naive UTC instants
+        # (_arrow_batch_tuples), so the UI ALREADY presents timestamptz as UTC;
+        # pinning UTC here just makes the native path agree -- pytz.utc is a
+        # built-in singleton that never touches the zoneinfo files, so the
+        # error class is impossible regardless of tz-database availability.
+        _try("SET TimeZone='UTC'")
 
     @property
     def conn(self):
