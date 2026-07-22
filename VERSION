@@ -2,12 +2,22 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-22.682
+Current build:   2026-07-22.683
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-22.683  (v2.16.4)
+
+NODEFLOW CANCEL FIX: clear a sticky engine cancel before a run.
+
+A prior cancellation could leave the engine's cancel flag set, so the next
+NodeFlow run (most visibly the unique node) auto-cancelled itself before doing
+any work. The engine now clears the sticky cancel state at the start of a run.
+This build also folds in the kept-distinct-right-keys join fix from 2026-07-22.682.
 
 ----------------------------------------------------------------------
 build 2026-07-22.682  (v2.16.4)
