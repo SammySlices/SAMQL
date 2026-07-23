@@ -2,12 +2,41 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-22.683
+Current build:   2026-07-23.684
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-23.684  (v2.16.4)
+
+VARIABLE-NODE EXPRESSIONS + SQL SERVER VARIABLES + RELIABILITY SWEEP.
+
+Two feature additions plus a large Stop/cancel + data-freshness +
+NodeFlow-SQL-correctness sweep (the latter authored by the Kimi assistant).
+Both land together; the full backend and frontend suites pass.
+
+Features:
+- Variable node values can be SQL expressions (fx), evaluated once per run and
+  substituted as a literal. Friendly aliases DATE_TIME_NOW()/TODAY()/NOW() map
+  to engine SQL. A date defined once reaches every downstream node as a literal.
+- The SQL Server node resolves ${name}/{{name}} in its query, including on the
+  interactive Fetch (it previously did not) -- so a WHERE clause can filter on
+  a variable such as OrderDate >= '${as_of}'.
+- A fetched SQL Server / API / SharePoint / web-scrape node is previewable
+  again, so freshly fetched results no longer appear and then vanish.
+
+Reliability (Kimi assistant):
+- Stop interrupts Python-node loops, SharePoint/web-scrape fetches, catalog
+  imports, grid create, exports (partial files cleaned), reconcile/profile.
+- Latest-data-wins: grids/dashboards/reconcile/NodeFlow badge or refresh on a
+  data change; the preview cache is pruned by data epoch.
+- NodeFlow SQL correctness: projection-pushdown liveness, safer SQL-join table
+  detection, multijoin validation, node-name collisions. (SQLite date-diff now
+  errors on an unusual unit instead of silently computing days.)
+- Launcher reaps a spawned server on exit; boot sweeps moved off the hot path.
 
 ----------------------------------------------------------------------
 build 2026-07-22.683  (v2.16.4)
