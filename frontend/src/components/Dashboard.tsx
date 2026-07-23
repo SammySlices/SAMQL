@@ -131,8 +131,10 @@ type WidgetResult =
       page: ResultPage;
       sortCol: string | null;
       descending: boolean;
+      // data epoch captured when the run started -- a bump since means stale.
+      ranEpoch?: number;
     }
-  | { kind: "chart"; data: ChartData }
+  | { kind: "chart"; data: ChartData; ranEpoch?: number }
   | {
       kind: "reconcile";
       data: {
@@ -145,6 +147,7 @@ type WidgetResult =
           b_only: number;
         }[];
       };
+      ranEpoch?: number;
     }
   | { kind: "error"; message: string }
   | { kind: "loading" };
@@ -425,6 +428,8 @@ export const Dashboard: React.FC<{
   onWorkflowsChanged?: () => void;
   inspectorHost?: HTMLElement | null;
   onSelectionChange?: (hasSelection: boolean) => void;
+  /** Catalog data epoch -- a bump badges widgets whose data predates it. */
+  dataEpoch?: number;
   /** When false, Dashboard is hidden but kept mounted — pause global shortcuts. */
   active?: boolean;
 }> = ({
@@ -436,9 +441,12 @@ export const Dashboard: React.FC<{
   onWorkflowsChanged,
   inspectorHost: _inspectorHost,
   onSelectionChange,
+  dataEpoch,
   active = true,
 }) => {
   void _inspectorHost;
+  const dataEpochRef = useRef(dataEpoch);
+  dataEpochRef.current = dataEpoch;
   const [workspace, setWorkspace] = useState<DashboardWorkspace>(() =>
     loadDashboardWorkspace(),
   );
@@ -908,6 +916,9 @@ export const Dashboard: React.FC<{
     const ctrl = new AbortController();
     runRef.current = { queryId, ctrl };
     registerRun(queryId, ctrl);
+    // Stamp each widget with the epoch at run START: a mutation landing
+    // mid-run advances dataEpoch past it and the widget badges stale.
+    const epochAtStart = dataEpochRef.current;
     const startedAt = performance.now();
     let cancelled = false;
     try {
@@ -924,7 +935,13 @@ export const Dashboard: React.FC<{
             cancelled = true;
             break;
           }
-          setResults((prev) => ({ ...prev, [widget.id]: result }));
+          setResults((prev) => ({
+            ...prev,
+            [widget.id]:
+              result.kind === "error"
+                ? result
+                : { ...result, ranEpoch: epochAtStart },
+          }));
           pulse(widget.id, "dash-anim-reload", 480);
           if (result.kind === "error") {
             onToast("error", widget.workflowName || "Widget", result.message);
@@ -2157,6 +2174,25 @@ export const Dashboard: React.FC<{
       >
         {doc.widgets.map((widget) => {
           const result = results[widget.id];
+          // Latest-data wins: keep the old payload visible but badged once the
+          // catalog epoch has moved past the epoch this widget ran at.
+          const widgetStale =
+            dataEpoch != null &&
+            !!result &&
+            result.kind !== "loading" &&
+            result.kind !== "error" &&
+            result.ranEpoch != null &&
+            result.ranEpoch !== dataEpoch;
+          const staleChip = widgetStale ? (
+            <span
+              className="chip"
+              data-testid={`dashboard-widget-stale-${widget.id}`}
+              title="Loaded tables changed since this widget ran. Re-run to refresh."
+              style={{ color: "#c98a2b" }}
+            >
+              Data changed — re-run
+            </span>
+          ) : null;
           const headerOn = widget.showHeader !== false;
           const headerH = headerOn
             ? widget.headerHeight ?? DASH_HEADER_DEFAULT
@@ -2260,6 +2296,7 @@ export const Dashboard: React.FC<{
                       widget.workflowName ||
                       (isText ? "Text" : "Empty Widget")}
                   </span>
+                  {staleChip}
                   <div className="dash-widget-actions">
                     <button
                       type="button"
@@ -2301,6 +2338,7 @@ export const Dashboard: React.FC<{
               ) : null}
               {!headerOn ? (
                 <div className="dash-widget-actions dash-widget-actions-float">
+                  {staleChip}
                   <button
                     type="button"
                     className="btn sm ghost"
@@ -2426,6 +2464,21 @@ export const Dashboard: React.FC<{
                     >
                       <Icon.Maximize2 size={14} />
                       <span className="dash-expand-title">{title}</span>
+                      {dataEpoch != null &&
+                      result &&
+                      result.kind !== "loading" &&
+                      result.kind !== "error" &&
+                      result.ranEpoch != null &&
+                      result.ranEpoch !== dataEpoch ? (
+                        <span
+                          className="chip"
+                          data-testid={`dashboard-widget-stale-${widget.id}`}
+                          title="Loaded tables changed since this widget ran. Re-run to refresh."
+                          style={{ color: "#c98a2b" }}
+                        >
+                          Data changed — re-run
+                        </span>
+                      ) : null}
                       <span className="spacer" />
                       <button
                         type="button"

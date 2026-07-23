@@ -323,6 +323,11 @@ export const Notebook: React.FC<Props> = ({
   const aborts = useRef<Map<string, { ctrl: AbortController; queryId: string }>>(
     new Map(),
   );
+  // Per-cell controller for recon drill-down / profile fetches, so a re-click
+  // supersedes the prior fetch (same pattern as runCell's aborts map).
+  const reconDetailAborts = useRef<
+    Map<string, { ctrl: AbortController; queryId: string }>
+  >(new Map());
   // whether a "Run all" sweep is in progress (drives the Run all / Stop toggle)
   // and a flag the sweep checks between cells so Stop halts it immediately.
   const [runningAll, setRunningAll] = useState(false);
@@ -1393,14 +1398,22 @@ export const Notebook: React.FC<Props> = ({
     patch(id, {
       reconDetail: { kind: "drill", title, loading: true, page: null },
     });
+    // supersede any in-flight drill/profile fetch of this cell
+    const prev = reconDetailAborts.current.get(id);
+    if (prev) cancelOne(prev.queryId, prev.ctrl);
     const ctrl = new AbortController();
     const queryId = "recon-d-" + uid();
+    reconDetailAborts.current.set(id, { ctrl, queryId });
     registerRun(queryId, ctrl);
+    // ownership guard (same as runCell): a superseded fetch must not patch
+    // over the newer fetch's state.
+    const owns = () => reconDetailAborts.current.get(id)?.queryId === queryId;
     try {
       const d = await api.reconcileDrilldown(
         buildReconcileRequest(spec, bucket, field, queryId),
         ctrl.signal,
       );
+      if (!owns()) return;
       if (d.cancelled || ctrl.signal.aborted) {
         patch(id, { reconDetail: null });
         return;
@@ -1423,6 +1436,7 @@ export const Notebook: React.FC<Props> = ({
         { offset: 0, limit: LAZY_CHUNK, query_id: queryId },
         ctrl.signal,
       );
+      if (!owns()) return;
       if (ctrl.signal.aborted) {
         patch(id, { reconDetail: null });
         return;
@@ -1431,6 +1445,7 @@ export const Notebook: React.FC<Props> = ({
         reconDetail: { kind: "drill", title, loading: false, page: pg },
       });
     } catch (e: any) {
+      if (!owns()) return;
       if (isCancelledError(e, queryId)) {
         patch(id, { reconDetail: null });
         return;
@@ -1439,6 +1454,8 @@ export const Notebook: React.FC<Props> = ({
       onToast("error", "Drill-down failed", e?.message);
     } finally {
       unregisterRun(queryId, ctrl);
+      const cur = reconDetailAborts.current.get(id);
+      if (cur && cur.queryId === queryId) reconDetailAborts.current.delete(id);
     }
   };
 
@@ -1453,14 +1470,22 @@ export const Notebook: React.FC<Props> = ({
     patch(id, {
       reconDetail: { kind: "profile", title, loading: true, profile: null },
     });
+    // supersede any in-flight drill/profile fetch of this cell
+    const prev = reconDetailAborts.current.get(id);
+    if (prev) cancelOne(prev.queryId, prev.ctrl);
     const ctrl = new AbortController();
     const queryId = "recon-pf-" + uid();
+    reconDetailAborts.current.set(id, { ctrl, queryId });
     registerRun(queryId, ctrl);
+    // ownership guard (same as runCell): a superseded fetch must not patch
+    // over the newer fetch's state.
+    const owns = () => reconDetailAborts.current.get(id)?.queryId === queryId;
     try {
       const pr = await api.reconcileProfile(
         buildReconcileRequest(spec, bucket, field, queryId),
         ctrl.signal,
       );
+      if (!owns()) return;
       if ((pr as { cancelled?: boolean }).cancelled || ctrl.signal.aborted) {
         patch(id, { reconDetail: null });
         return;
@@ -1479,6 +1504,7 @@ export const Notebook: React.FC<Props> = ({
         reconDetail: { kind: "profile", title, loading: false, profile: pr },
       });
     } catch (e: any) {
+      if (!owns()) return;
       if (isCancelledError(e, queryId)) {
         patch(id, { reconDetail: null });
         return;
@@ -1487,6 +1513,8 @@ export const Notebook: React.FC<Props> = ({
       onToast("error", "Profile failed", e?.message);
     } finally {
       unregisterRun(queryId, ctrl);
+      const cur = reconDetailAborts.current.get(id);
+      if (cur && cur.queryId === queryId) reconDetailAborts.current.delete(id);
     }
   };
 

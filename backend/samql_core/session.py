@@ -576,8 +576,10 @@ def _is_interrupt(exc):
     s = str(exc).lower()
     # DuckDB sometimes surfaces a Stop as OperationalError("not an error")
     # after interrupt(); treat that as a cancel so journal/IDE runs report
-    # cancelled instead of a spurious failure.
-    return ("interrupt" in name or "interrupt" in s or "cancel" in s
+    # cancelled instead of a spurious failure. Class-name matching covers
+    # bare exceptions with an empty message (e.g. a plain LoadCancelled()).
+    return ("interrupt" in name or "cancel" in name
+            or "interrupt" in s or "cancel" in s
             or s.strip() == "not an error"
             or s.endswith(": not an error"))
 
@@ -911,6 +913,10 @@ class Session:
         self._flow_cache_stats = self._flow_cache_registry.stats
         self._flow_cache_lock = self._flow_cache_registry.lock
         self._data_epoch = 0
+        # Serializes the epoch's read-modify-write: two concurrent mutations
+        # (origin-watcher thread + a user write) must not lose an increment
+        # and leave a pre-mutation snapshot comparing epoch-equal.
+        self._epoch_lock = threading.Lock()
         # Input table names observed while populating the volatile flow cache.
         # Scoped count clears only bump/clear flow when they intersect this set.
         self._flow_source_tables = set()
@@ -2271,6 +2277,15 @@ class Session:
             if rows is not None:
                 self._prime_count(eng, nm, rows)
 
+    def _bump_data_epoch(self):
+        """Advance the single freshness signal, serialized. Two concurrent
+        mutations (the origin-watcher thread plus a user write) must not lose
+        an increment and leave a pre-mutation snapshot comparing epoch-equal
+        to the post-mutation epoch."""
+        with self._epoch_lock:
+            self._data_epoch = int(getattr(self, "_data_epoch", 0) or 0) + 1
+        return self._data_epoch
+
     def _invalidate_counts(self, keys=None, keep_results=None):
         """Drop sidebar COUNT(*) cache entries after a mutation.
 
@@ -2308,7 +2323,7 @@ class Session:
             content_changed = bool(touched)
         self._mark_catalog_dirty()
         if content_changed:
-            self._data_epoch += 1
+            self._bump_data_epoch()
             if hasattr(self, "_flow_cache"):
                 self._flow_cache_clear()
             keep = set()
@@ -2583,7 +2598,20 @@ class Session:
 
     def _flow_cache_drop_table(self, engine_target, name):
         try:
-            eng, _k = self._engine_obj(engine_target)
+            # Never materialise an engine just to drop dead temp names: after
+            # a reset (duckdb is None) the orphaned engine already took its
+            # temp tables with it, so resolving through _engine_obj would
+            # build a brand-new manager purely for a no-op DROP.
+            if engine_target == DUCKDB_TARGET:
+                eng = self.duckdb
+                if eng is None:
+                    return
+            elif engine_target == LOCAL_TARGET:
+                eng = self.db
+                if eng is None:
+                    return
+            else:
+                eng, _k = self._engine_obj(engine_target)
             try:
                 eng.execute('DROP VIEW IF EXISTS "%s"' % name)
             except Exception:
@@ -2609,7 +2637,7 @@ class Session:
         catalog tables (inputs stay; contents may be refreshed separately).
         """
         try:
-            self._data_epoch = int(getattr(self, "_data_epoch", 0) or 0) + 1
+            self._bump_data_epoch()
         except Exception:
             self._data_epoch = 1
         try:
@@ -3144,19 +3172,40 @@ class Session:
         except Exception:
             # Metadata uncertainty must not make a persistent result less safe.
             return False
-        for node in (graph.get("nodes") or []):
-            typ = str(node.get("type") or "").lower()
-            cfg = node.get("config") or {}
-            if typ == "sample" and str(cfg.get("mode") or "head").lower() == "random":
-                return False
-            for text in self._persistent_graph_strings(cfg):
-                if temporal.search(text):
+
+        def _walk(nodes):
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                typ = str(node.get("type") or "").lower()
+                cfg = node.get("config") or {}
+                if typ == "python":
+                    # The sandbox explicitly allows random/datetime/uuid,
+                    # whose calls lex to names DuckDB doesn't flag unstable.
                     return False
-                for match in call_re.finditer(text):
-                    name = match.group(1).split(".")[-1].lower()
-                    if name in unstable:
+                if typ == "sample" and str(cfg.get("mode") or "head").lower() == "random":
+                    return False
+                for text in self._persistent_graph_strings(cfg):
+                    if temporal.search(text):
                         return False
-        return True
+                    for match in call_re.finditer(text):
+                        name = match.group(1).split(".")[-1].lower()
+                        if name in unstable:
+                            return False
+                # Screening must recurse into group/iterator children and
+                # usernode sub-graphs -- a nested random sample is exactly
+                # what the persistent cache must not freeze across restarts.
+                if typ in ("group", "iterator"):
+                    if not _walk(cfg.get("children")):
+                        return False
+                elif typ == "usernode":
+                    inner = cfg.get("graph") or {}
+                    if isinstance(inner, dict) and not _walk(
+                            inner.get("nodes")):
+                        return False
+            return True
+
+        return _walk(graph.get("nodes"))
 
     def _graph_has_nondeterministic_ops(self, graph, eng=None):
         """True when the session flow cache must not freeze this graph.
@@ -3239,39 +3288,57 @@ class Session:
             return skip()
         volatile = {"apinode", "sqlserver", "sharepoint", "webscrape",
                     "sql", "sqljoin", "iterator", "while", "filebrowser",
-                    "directory", "appendfolder", "shred", "write"}
+                    "directory", "appendfolder", "shred", "write", "python"}
         sources = []
         eng, _kind = self._engine_obj(engine_target)
         if not self._persistent_graph_is_deterministic(graph, eng):
             return skip()
         table_sources = getattr(eng, "table_sources", {}) or {}
-        for node in (graph.get("nodes") or []):
-            typ = str(node.get("type") or "").lower()
-            if typ in volatile:
+        # Type screening and input-source gathering must recurse into
+        # group/iterator children and usernode sub-graphs (mirroring the
+        # volatile cache's walkers): a nested remote source, write node, or
+        # python node must keep the whole graph out of the restart cache.
+        if self._graph_has_types(graph, volatile):
+            return skip()
+        input_tables = []
+        has_createtable = False
+
+        def _walk(nodes):
+            nonlocal has_createtable
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                typ = str(node.get("type") or "").lower()
+                cfg = node.get("config") or {}
+                if typ == "input" and cfg.get("table"):
+                    input_tables.append(cfg.get("table"))
+                elif typ == "inputs":
+                    input_tables.extend(cfg.get("tables") or [])
+                elif typ == "createtable":
+                    has_createtable = True
+                if typ in ("group", "iterator"):
+                    _walk(cfg.get("children"))
+                elif typ == "usernode":
+                    inner = cfg.get("graph") or {}
+                    if isinstance(inner, dict):
+                        _walk(inner.get("nodes"))
+
+        _walk(graph.get("nodes"))
+        for table in dict.fromkeys(input_tables):
+            source = table_sources.get(table)
+            sig = self._stable_path_signature(source) if source else None
+            if sig is None:
                 return skip()
-            cfg = node.get("config") or {}
-            tables = []
-            if typ == "input" and cfg.get("table"):
-                tables.append(cfg.get("table"))
-            elif typ == "inputs":
-                tables.extend(cfg.get("tables") or [])
-            for table in tables:
-                source = table_sources.get(table)
-                sig = self._stable_path_signature(source) if source else None
-                if sig is None:
-                    return skip()
-                try:
-                    types = eng.column_types(table) or {}
-                    columns = list((getattr(eng, "table_columns", {}) or {})
-                                   .get(table) or types.keys())
-                    schema = [[str(col), str(types.get(col) or "")]
-                              for col in columns]
-                except Exception:
-                    return skip()
-                sources.append([str(table), sig, schema])
-        if not sources and not any(
-                str(n.get("type") or "").lower() == "createtable"
-                for n in (graph.get("nodes") or [])):
+            try:
+                types = eng.column_types(table) or {}
+                columns = list((getattr(eng, "table_columns", {}) or {})
+                               .get(table) or types.keys())
+                schema = [[str(col), str(types.get(col) or "")]
+                          for col in columns]
+            except Exception:
+                return skip()
+            sources.append([str(table), sig, schema])
+        if not sources and not has_createtable:
             return skip()
         # Include product semantics in the salt. A deterministic graph can
         # produce different SQL after an upgrade even when its user config is
@@ -4417,7 +4484,8 @@ class Session:
         single zero-row probe cache across the whole batch -- so the inspector
         for a multi-input node (join / multijoin) makes one round-trip instead
         of one per port, and shared upstream subtrees are probed once."""
-        graph = applyvars.resolve_graph(graph)
+        graph = applyvars.resolve_graph(
+            graph, evaluate=self._variable_expr_evaluator(lenient=True))
         from . import nodeflow
         out = []
         eng_name = ("duckdb"
@@ -4531,7 +4599,11 @@ class Session:
         try:
             out = profile_table(eng, "flow", source='"%s"' % tmp)
         except Exception as e:
-            out = {"error": err_str(e)}
+            # An interrupted post-build profile is a cancel, not a failure.
+            if _is_interrupt(e):
+                out = {"error": "cancelled", "cancelled": True}
+            else:
+                out = {"error": err_str(e)}
         self._flow_cleanup(query_id, et, created)
         return out
 
@@ -4612,7 +4684,11 @@ class Session:
             out["ok"] = (all(r["pass"] for r in out["results"])
                          if out["results"] else True)
         except Exception as e:
-            out = {"error": err_str(e)}
+            # An interrupted scalar check is a cancel, not a failure string.
+            if _is_interrupt(e):
+                out = {"error": "cancelled", "cancelled": True}
+            else:
+                out = {"error": err_str(e)}
         self._flow_cleanup(query_id, et, created)
         return out
 
@@ -4686,6 +4762,10 @@ class Session:
                 "keys": list(keys),
                 "compare": list(compare or []),
                 "balance": balance,
+                # Forward the outer run id: otherwise reconcile() registers a
+                # fresh recon-* id and the outer Stop never reaches its
+                # milestone gates (and a propagating interrupt becomes a 500).
+                "query_id": query_id,
             })
         finally:
             eng.table_columns.pop(ltmp, None)
@@ -4940,8 +5020,11 @@ class Session:
             if parallel is not None:
                 return parallel
         # resolve ${name} workflow-variable tokens once, up front: everything
-        # below compiles a graph whose tokens are already filled in
-        graph = applyvars.resolve_graph(graph)
+        # below compiles a graph whose tokens are already filled in. Expression
+        # variables (kind="expr") are evaluated here, so a date defined as
+        # DATE_TIME_NOW() reaches the SQL Server node as a plain literal.
+        graph = applyvars.resolve_graph(
+            graph, evaluate=self._variable_expr_evaluator())
         from . import nodeflow
         # Input file-origin recheck (mtime/size/ctime/inode + content digest).
         # Directory/appendfolder keep their own signature recheck on fetch.
@@ -4967,6 +5050,13 @@ class Session:
             graph, [nid for nid, _port in targets], query_id=query_id)
         # SHRED nodes create their relational tables before anything composes
         self._shred_flow_prepass(graph, targets)
+        # All designed pre-build refreshes are done (file-origin rechecks,
+        # remote source fetches, shred prepass). A run stamps its results
+        # with the epoch observed HERE: after those refreshes (so reloaded
+        # data pages as live), but before any build statement reads a table
+        # (so a mutation landing mid-build expires the snapshot instead of
+        # it pinning to the finish-time epoch).
+        self._flow_build_epoch0 = int(getattr(self, "_data_epoch", 0) or 0)
         import re as _re
         import secrets as _secrets
         eng, _kind = self._engine_obj(engine_target)
@@ -5118,7 +5208,14 @@ class Session:
                             in_rel=in_rel,
                             code=cfg.get("code") or "",
                             timeout_s=cfg.get("timeout_s") or 30,
+                            should_cancel=(lambda: self._run_is_cancelled(
+                                query_id)) if query_id else None,
                         )
+                    except _pynode.PythonNodeCancelled:
+                        # Stop landed inside the user script -- keep the
+                        # cancel identity ("cancelled" matches _is_interrupt),
+                        # don't wrap it as a node failure.
+                        raise
                     except _pynode.PythonNodeError as e:
                         raise nodeflow.NodeRunError(
                             str(e), node_id=nid, node_type="python") from e
@@ -5695,6 +5792,43 @@ class Session:
         return "SELECT %s FROM (%s) AS _piv ORDER BY %s" % (
             ", ".join(msel), inner, ", ".join(order_terms))
 
+    def _variable_expr_evaluator(self, lenient=False):
+        """Callable that evaluates a variable node's expression to a scalar.
+
+        Expression variables are computed locally by DuckDB (the same engine
+        the formula node's expressions run on), then substituted downstream as
+        a plain literal. That is deliberate: a remote dialect (SQL Server) can
+        then filter on ``${as_of}`` without ever needing to understand
+        ``DATE_TIME_NOW()``.
+
+        Raises ``nodeflow.NodeflowError`` naming the variable when the
+        expression is invalid, so the author sees which row is wrong instead of
+        a raw engine error. ``lenient=True`` instead falls back to the raw
+        expression text -- used by schema probes, which run while the author is
+        still typing and must not raise on a half-written expression.
+        """
+        from . import nodeflow
+
+        def _eval(expr, name=""):
+            expr = (expr or "").strip()
+            if not expr:
+                return ""
+            try:
+                _cols, rows = self.get_duckdb().execute(
+                    "SELECT (%s) AS _v" % expr)
+            except Exception as e:
+                if lenient:
+                    return expr
+                raise nodeflow.NodeflowError(
+                    'Variable "%s" could not be evaluated: %s  '
+                    "(the value is an expression -- switch the row to Text if "
+                    "you meant a literal value.)" % (name or "?", e))
+            if not rows or not rows[0]:
+                return ""
+            return rows[0][0]
+
+        return _eval
+
     def _flow_brace_misuse(self, graph, node_id):
         """Up-front {{name}} misuse check for a run/preview of (node_id). Scans
         the target node and everything feeding it transitively -- so a stray,
@@ -5846,6 +5980,11 @@ class Session:
         msg = str(e)
         if graph is not None:
             msg = _iter_missing_accum_hint(msg, graph)
+        # A source-fetch / prepass cancel raises NodeflowError("cancelled") --
+        # keep the boolean marker so batch results mark the terminal cancelled
+        # rather than failed (the frontend checks r.cancelled).
+        if _is_interrupt(e):
+            return {"error": "cancelled", "cancelled": True}
         # A NodeRunError already carries the raw engine text (e.g. a DuckDB
         # OutOfMemoryException from a node's CREATE ... AS): enrich it with the
         # same failed-alloc/limit + shred/flatten/filter-first guidance the
@@ -5891,9 +6030,15 @@ class Session:
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
+            # Freshness is captured inside the build, after its pre-build
+            # refreshes and before any build statement (see _materialize_flows):
+            # a mutation landing mid-build must expire the result, while a
+            # reload-then-run refresh must NOT self-expire it.
+            self._flow_build_epoch0 = None
             tmp = self._materialize_flow(
                 graph, node_id, port, et, created,
                 row_limit=preview_limit, query_id=query_id)
+            epoch0 = getattr(self, "_flow_build_epoch0", None)
         except nodeflow.NodeflowError as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_err(e, graph)
@@ -5905,7 +6050,7 @@ class Session:
                 _iter_missing_accum_hint(err_str(e), graph),
                 getattr(self, "duckdb", None))}
         res = self.run_query('SELECT * FROM "%s"' % tmp, target=et,
-                             query_id=query_id)
+                             query_id=query_id, epoch0=epoch0)
         if preview_limit and not res.get("error"):
             res.update({"preview": True,
                         "preview_limit": preview_limit,
@@ -5968,6 +6113,10 @@ class Session:
             self._register_run(
                 query_id, eng, surface="node",
                 label="NodeFlow batch (%d branches)" % len(norm))
+            # Freshness is captured inside the build, after its pre-build
+            # refreshes and before any build statement (same guard as
+            # run_nodeflow).
+            self._flow_build_epoch0 = None
             flow_errors = {}
             try:
                 built = self._materialize_flows(
@@ -5988,6 +6137,7 @@ class Session:
                     query_id=query_id)
                 if not built:
                     raise
+            epoch0 = getattr(self, "_flow_build_epoch0", None)
             results = []
             for nid, port in norm:
                 if self._run_is_cancelled(query_id):
@@ -6007,7 +6157,7 @@ class Session:
                     continue
                 res = self.run_query(
                     'SELECT * FROM "%s"' % built[(nid, port)],
-                    target=et, query_id=query_id)
+                    target=et, query_id=query_id, epoch0=epoch0)
                 res["node"] = nid
                 res["port"] = port
                 if preview_limit and not res.get("error"):
@@ -6223,6 +6373,13 @@ class Session:
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             if _is_interrupt(e):
+                # Don't leave a half-written file behind on cancel (the
+                # result-export path unlinks its partials too).
+                try:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                except Exception:
+                    pass
                 return {"error": "cancelled", "cancelled": True}
             return {"error": err_str(e)}
         self._flow_cleanup(query_id, et, created)
@@ -6302,6 +6459,12 @@ class Session:
             except Exception as e:
                 if _is_interrupt(e):
                     self._flow_cleanup(query_id, et, created)
+                    # Don't leave a half-written file behind on cancel.
+                    try:
+                        if os.path.exists(path):
+                            os.unlink(path)
+                    except Exception:
+                        pass
                     return {"error": "cancelled", "cancelled": True}
                 results.append({"node_id": it["node_id"],
                                 "error": err_str(e)})
@@ -7065,6 +7228,9 @@ class Session:
                             "err_table": fr.get("err_table")})
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
+                    # Give Stop statement-level reach into this pass's build
+                    # (the run was registered with engine=None above).
+                    self._rebind_run_engine(query_id, eng)
                     tmp = self._materialize_flow(rg, bn, bp, et, created,
                                                  query_id=query_id)
                     mode = "overwrite" if (first and reset_first) else "append"
@@ -7339,6 +7505,9 @@ class Session:
                                              query_id)
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
+                    # Give Stop statement-level reach into this pass's build
+                    # (the run was registered with engine=None above).
+                    self._rebind_run_engine(query_id, eng)
                     tmp = self._materialize_flow(
                         rg, "__iter_body", "out", et, created,
                         query_id=query_id)
@@ -7471,6 +7640,9 @@ class Session:
                             "err_table": fr.get("err_table")})
                     et = self._flow_engine_target(rg)
                     eng, _kind = self._engine_obj(et)
+                    # Give Stop statement-level reach into this pass's build
+                    # (the run was registered with engine=None above).
+                    self._rebind_run_engine(query_id, eng)
                     tmp = self._materialize_flow(rg, bn, bp, et, created,
                                                  query_id=query_id)
                     mode = "overwrite" if (first and reset_first) else "append"
@@ -8017,7 +8189,7 @@ class Session:
 
     def run_query(self, sql, target="auto", read_only=False, query_id=None,
                   dialect=None, reuse=None, surface=None, label=None,
-                  preview_limit=None):
+                  preview_limit=None, epoch0=None):
         """Meta wrapper: a run that arrives WITH a surface (ide / journal)
         registers itself so the stat modal lists it live, grouped and
         labelled; flow-internal calls pass no surface and register at the
@@ -8036,14 +8208,16 @@ class Session:
             try:
                 return self._run_query_inner(sql, target, read_only,
                                              query_id, dialect, reuse,
-                                             preview_limit=preview_limit)
+                                             preview_limit=preview_limit,
+                                             epoch0=epoch0)
             finally:
                 # Keep the cancelled flag through mid-send abort (_REQ_LOCAL).
                 self._end_run_keep_cancel(query_id)
         self._clear_stale_engine_cancel(except_qid=query_id)
         return self._run_query_inner(sql, target, read_only, query_id,
                                      dialect, reuse,
-                                     preview_limit=preview_limit)
+                                     preview_limit=preview_limit,
+                                     epoch0=epoch0)
 
     _TXN_RE = re.compile(r"^\s*(BEGIN|COMMIT|ROLLBACK|END)\b", re.I)
 
@@ -8139,13 +8313,20 @@ class Session:
 
     def _run_query_inner(self, sql, target="auto", read_only=False,
                          query_id=None, dialect=None, reuse=None,
-                         preview_limit=None):
+                         preview_limit=None, epoch0=None):
         """Run SQL and cache the result. Returns a dict with the first
         page of rows plus metadata. ``target`` may be 'auto',
-        '__local__', '__duckdb__', or a remote connection name."""
+        '__local__', '__duckdb__', or a remote connection name.
+        ``epoch0`` lets an outer multi-stage op (a NodeFlow run, whose
+        materialisation reads tables before this query starts) stamp the
+        snapshot with the epoch observed at the OP's start, never later."""
         sql = (sql or "").strip()
         if not sql:
             return {"error": "Nothing to run."}
+        # Entry gate: a Stop that landed before this statement registered must
+        # not let it run to completion (bind-time delivery only covers DuckDB).
+        if query_id and self._run_is_cancelled(query_id):
+            return {"error": "cancelled", "cancelled": True}
         # The JSON layer may send target as null or "" -> treat as auto.
         if target in (None, "", "auto"):
             target = "auto"
@@ -8165,7 +8346,10 @@ class Session:
 
         # Capture freshness before materialization. Concurrent mutations that
         # bump `_data_epoch` while this query runs must expire the snapshot.
-        epoch0 = int(getattr(self, "_data_epoch", 0) or 0)
+        # An outer op may supply an earlier observation (see the docstring) --
+        # never move the stamp forward past it.
+        epoch_now = int(getattr(self, "_data_epoch", 0) or 0)
+        epoch0 = epoch_now if epoch0 is None else min(int(epoch0), epoch_now)
 
         # A query that references a remote catalog table runs on that SQL
         # Server connection (passthrough); the result is cached like any
@@ -11874,6 +12058,21 @@ class Session:
                 cache = getattr(eng, "_types_cache", None)
                 if isinstance(cache, dict):
                     cache.pop(name, None)
+            # A same-name replace severs the old file origin: the content no
+            # longer comes from that file, so its source signature and origin
+            # watch must go (else the persistent-cache salt reads the old file
+            # and the watcher could restore it over this table).
+            for reg_name in ("table_sources", "table_origins"):
+                reg = getattr(eng, reg_name, None)
+                if isinstance(reg, dict):
+                    reg.pop(name, None)
+            ow = getattr(self, "_origin_watch", None)
+            if ow is not None:
+                for eng_label in ("duckdb", "sqlite"):
+                    try:
+                        ow.unregister(eng_label, name)
+                    except Exception:
+                        pass
             # register the new table in the in-memory catalog so the reconcile
             # engine (and /api/tables) can see it
             eng.sync_catalog()
@@ -13211,6 +13410,29 @@ class Session:
             except Exception:
                 pass
 
+    def _rebind_run_engine(self, query_id, engine):
+        """Point an already-registered run at the engine its current phase
+        executes on. Iterator / while loops resolve the flow engine per pass,
+        so the run is registered with engine=None and cancel_query's
+        `_interrupt_entry` would be a no-op mid-pass (Stop only lands at the
+        next loop-top check). Rebinding per pass gives Stop the same
+        statement-level reach it has everywhere else."""
+        if not query_id:
+            return
+        # A stale engine cancel from an unrelated earlier Stop must not
+        # abort this pass; the fresh run owns the engine now.
+        self._clear_stale_engine_cancel(engine, except_qid=query_id)
+        with self._running_lock:
+            entry = self._running.get(query_id)
+            if entry is None:
+                if engine is not None:
+                    self._running[query_id] = {
+                        "engine": engine,
+                        "tid": threading.get_ident(),
+                    }
+            else:
+                entry["engine"] = engine
+
     def _end_run_keep_cancel(self, query_id):
         """Drop the in-flight binding but keep the cancelled flag.
 
@@ -14396,6 +14618,13 @@ class Session:
                                                spec.get("right")))
         try:
             return self._reconcile_inner(spec)
+        except Exception as e:
+            # Milestone gates outside the inner try raise a bare
+            # RuntimeError("interrupted") -- surface the cancelled sentinel
+            # (same as the inner handler) instead of propagating a 500.
+            if _is_interrupt(e) or self._run_is_cancelled(qid):
+                return {"error": "cancelled", "cancelled": True}
+            raise
         finally:
             self._end_run_keep_cancel(qid)
 
@@ -14498,6 +14727,11 @@ class Session:
             try:
                 _c, rows = _rd(sql)
             except Exception as e:
+                # An interrupt must keep its identity -- wrapping it in a
+                # RuntimeError would misroute the outer handler to a plain
+                # error instead of a cancel.
+                if _is_interrupt(e):
+                    raise
                 raise RuntimeError(str(e))
             if rows and rows[0] and rows[0][0] is not None:
                 return int(rows[0][0])
@@ -14622,7 +14856,14 @@ class Session:
                         and sqlite3.sqlite_version_info >= (3, 39))):
                 try:
                     got = _one_pass_counts()
-                except Exception:
+                except Exception as e:
+                    # A cancel must not "fall back" into three more full
+                    # scans: re-raise instead of re-running the legacy
+                    # statements (each only abortable via sticky-cancel
+                    # nudges). Genuine surprises still get the fallback.
+                    if _is_interrupt(e) or (
+                            _rq_id and self._run_is_cancelled(_rq_id)):
+                        raise
                     got = None   # any surprise -> the legacy statements
             if got is None:
                 got = _legacy_counts()
@@ -14652,6 +14893,11 @@ class Session:
                         "sum_non_matching_balance": nmb,
                     })
         except Exception as e:
+            # A Stop surfaces as the cancelled sentinel like every sibling op
+            # (pivot/chart/profile), not a plain error string.
+            if _is_interrupt(e) or "interrupted" in str(e).lower() or (
+                    _rq_id and self._run_is_cancelled(_rq_id)):
+                return {"error": "cancelled", "cancelled": True}
             return {"error": str(e)}
 
         row_match = matched - row_nonmatch
@@ -14683,6 +14929,10 @@ class Session:
     def reconcile_drilldown(self, spec):
         qid = (spec.get("query_id")
                or ("recon-dd-%s" % uuid.uuid4().hex[:10]))
+        # The qid must ride INTO the inner body (see reconcile above) so the
+        # bucket COPY registers against it and Stop reaches the cursor.
+        spec = dict(spec)
+        spec["query_id"] = qid
         eng0 = None
         try:
             # .471: register the MANAGER (see reconcile above) -- a
@@ -14726,9 +14976,26 @@ class Session:
             sql = self._recon_bucket_sql(left, right, keys, bucket,
                                          field, balance,
                                          cma=colmap_a, cmb=colmap_b)
-            cols, store, total, kind = self._exec_target(sql, target)
+            # The qid must ride along or the COPY runs on an unregistered
+            # cursor -- Stop would hit the wrong connection and the result
+            # would return as success after cancel.
+            cols, store, total, kind = self._exec_target(
+                sql, target, query_id=spec.get("query_id"))
         except Exception as e:
+            if _is_interrupt(e) or (
+                    spec.get("query_id")
+                    and self._run_is_cancelled(spec.get("query_id"))):
+                return {"error": "cancelled", "cancelled": True}
             return {"error": str(e)}
+        if spec.get("query_id") and self._run_is_cancelled(
+                spec.get("query_id")):
+            closer = getattr(store, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:
+                    pass
+            return {"error": "cancelled", "cancelled": True}
         if cols is None:
             return {"result_id": None, "columns": [], "count": 0}
         if int(total) <= 0:
@@ -14831,7 +15098,11 @@ class Session:
             if query_id and self._run_is_cancelled(query_id):
                 return {"cancelled": True}
             try:
-                cols, store, total, kind = self._exec_target(sql, target)
+                # qid rides along so the union statement registers against
+                # the run -- without it Stop hits the wrong connection and
+                # only the post-check (below) saves the cancel, slowly.
+                cols, store, total, kind = self._exec_target(
+                    sql, target, query_id=query_id)
             except Exception as e:
                 from .engines import _is_interrupt as _isi
                 if _isi(e) or (query_id
@@ -15476,14 +15747,38 @@ class Session:
             "rows": n,
         }
 
-    def fetch_sqlserver_node(self, node_id, config, query_id=None):
+    def fetch_sqlserver_node(self, node_id, config, graph=None, query_id=None):
         """Connect via a saved mssql profile, inline node fields, or an active
         connection name and import the node's query into a hidden table.
 
         Password resolution matches Load Data: one-shot ``pwd`` in the fetch
         body, else DPAPI secret under ``secret_key`` / ``profile_key``.
+
+        ``${name}`` / ``{{name}}`` workflow variables are resolved against the
+        graph's variable nodes first (matching the API node), so an interactive
+        Fetch filters on the same values a full run would. Expression variables
+        are evaluated here too -- that is what lets a WHERE clause read
+        ``d >= '${as_of}'`` where ``as_of`` is ``DATE_TIME_NOW()``.
         """
+        from . import applyvars
+        from . import nodeflow
         cfg = dict(config or {})
+        # Only when a token is actually present: a run has already resolved the
+        # graph before calling here, so this is a no-op on that path (and never
+        # re-evaluates the expressions a second time).
+        _templated = [k for k in ("query", "database")
+                      if isinstance(cfg.get(k), str)
+                      and ("${" in cfg[k] or "{{" in cfg[k])]
+        if graph and _templated:
+            try:
+                ctx = applyvars.collect_vars(
+                    graph, evaluate=self._variable_expr_evaluator())
+            except nodeflow.NodeflowError as e:
+                return {"error": str(e)}
+            except Exception:
+                ctx = {}
+            for key in _templated:
+                cfg[key] = applyvars.substitute_text(cfg[key], ctx)
         query = (cfg.get("query") or "").strip()
         if not query:
             return {"error": "Enter a SQL query for the SQL Server node."}
@@ -15657,19 +15952,28 @@ class Session:
         own_run = bool(query_id) and query_id not in self._running
         if own_run:
             self._register_run(query_id, None, kind="fetch", target="sharepoint")
+        _sc = ((lambda: self._run_is_cancelled(query_id))
+               if query_id else None)
         try:
             if query_id and self._run_is_cancelled(query_id):
                 return {"cancelled": True}
             if mode == "drive":
                 records, meta = _sp.browse_drive(
-                    site, folder, token, auth_mode=auth_mode)
+                    site, folder, token, auth_mode=auth_mode,
+                    should_cancel=_sc)
                 label = folder or "/"
             else:
                 records, meta = _sp.fetch_sharepoint_items(
-                    site, lst, token, auth_mode=auth_mode)
+                    site, lst, token, auth_mode=auth_mode,
+                    should_cancel=_sc)
                 label = lst
+            if query_id and self._run_is_cancelled(query_id):
+                return {"cancelled": True}
             cols, rows, _ = _sp.records_to_columns_rows(records)
         except Exception as e:
+            if _is_interrupt(e) or (
+                    query_id and self._run_is_cancelled(query_id)):
+                return {"cancelled": True}
             return {"error": str(e)}
         finally:
             if own_run:
@@ -15729,13 +16033,18 @@ class Session:
                 return {"cancelled": True}
             nbytes, filename, meta = _sp.download_drive_item(
                 site, item_id, token, download_url=download_url,
-                dest_path=path, auth_mode=auth_mode)
+                dest_path=path, auth_mode=auth_mode,
+                should_cancel=((lambda: self._run_is_cancelled(query_id))
+                               if query_id else None))
         except Exception as e:
             try:
                 if os.path.exists(path):
                     os.unlink(path)
             except Exception:
                 pass
+            if _is_interrupt(e) or (
+                    own_run and self._run_is_cancelled(query_id)):
+                return {"cancelled": True}
             return {"error": str(e)}
         finally:
             if own_run:
@@ -15822,8 +16131,13 @@ class Session:
                 mode=mode,
                 table_index=cfg.get("table_index") or 0,
                 json_path=json_path,
+                should_cancel=((lambda: self._run_is_cancelled(query_id))
+                               if query_id else None),
             )
         except Exception as e:
+            if _is_interrupt(e) or (
+                    query_id and self._run_is_cancelled(query_id)):
+                return {"cancelled": True}
             return {"error": str(e)}
         finally:
             if own_run:
@@ -15843,7 +16157,8 @@ class Session:
             return self.fetch_api_node(node_id, config, graph=graph,
                                        query_id=query_id)
         if typ == "sqlserver":
-            return self.fetch_sqlserver_node(node_id, config, query_id=query_id)
+            return self.fetch_sqlserver_node(node_id, config, graph=graph,
+                                             query_id=query_id)
         if typ == "sharepoint":
             return self.fetch_sharepoint_node(node_id, config, query_id=query_id)
         if typ == "webscrape":
@@ -16064,13 +16379,14 @@ class Session:
             except Exception:
                 pass
 
-    def create_table_from_grid(self, name, columns, rows, destination="auto"):
+    def create_table_from_grid(self, name, columns, rows, destination="auto",
+                               query_id=None):
         """Create a local table from manually-entered / pasted grid data so it
         shows in the loaded-tables list. ``columns`` is a list of names;
         ``rows`` is a list of row-lists (strings). Empty cells become NULL; a
         cell that looks like an integer or float is stored as a number.
-        DuckDB-first with a SQLite fallback. Returns a LoadResult-shaped dict
-        (so the UI counts it) or {error}."""
+        DuckDB-first with a SQLite fallback. Cancellable via ``query_id``.
+        Returns a LoadResult-shaped dict (so the UI counts it) or {error}."""
         cols = [str(c).strip() for c in (columns or []) if str(c).strip()]
         if not cols:
             return {"error": "Add at least one column."}
@@ -16113,18 +16429,46 @@ class Session:
         bn = sanitize_ident(name, "table")
         src = "manual"
         tname = n = engine = None
+        # Register the run against whichever engine ingests so Stop's engine
+        # interrupt lands on the streaming insert's own per-chunk cancel poll
+        # (add_table_streaming drops the partial table on abort).
+        eng_for_cancel = None
         if destination in ("duckdb", "auto") and HAS_DUCKDB:
             try:
-                duck = self.get_duckdb()
-                tname, n = duck.add_table_streaming(bn, cols, iter(body),
-                                                    source=src)
-                engine = "duckdb"
+                eng_for_cancel = self.get_duckdb()
             except Exception:
-                tname = engine = None
-        if engine is None:
-            tname, n = self.db.add_table_streaming(bn, cols, iter(body),
-                                                   source=src)
-            engine = "sqlite"
+                eng_for_cancel = None
+        if eng_for_cancel is None:
+            eng_for_cancel = self.db
+        self._clear_stale_engine_cancel(eng_for_cancel, except_qid=query_id)
+        self._register_run(query_id, eng_for_cancel, surface="node",
+                           label="Create table from grid")
+        if query_id and self._run_is_cancelled(query_id):
+            self._unregister_run(query_id)
+            return {"error": "cancelled", "cancelled": True}
+        try:
+            if destination in ("duckdb", "auto") and HAS_DUCKDB:
+                try:
+                    duck = self.get_duckdb()
+                    tname, n = duck.add_table_streaming(bn, cols, iter(body),
+                                                        source=src)
+                    engine = "duckdb"
+                except Exception as e:
+                    if _is_interrupt(e) or (
+                            query_id and self._run_is_cancelled(query_id)):
+                        return {"error": "cancelled", "cancelled": True}
+                    tname = engine = None
+            if engine is None:
+                tname, n = self.db.add_table_streaming(bn, cols, iter(body),
+                                                       source=src)
+                engine = "sqlite"
+        except Exception as e:
+            if _is_interrupt(e) or (
+                    query_id and self._run_is_cancelled(query_id)):
+                return {"error": "cancelled", "cancelled": True}
+            raise
+        finally:
+            self._unregister_run(query_id)
         self._invalidate_profiles()
         self._refresh_scoped_counts([{
             "engine": engine, "name": tname, "rows": n,
@@ -16207,11 +16551,13 @@ class Session:
         return {"columns": info.get("columns", []),
                 "qualified": info.get("qualified", name)}
 
-    def import_catalog_table(self, name):
+    def import_catalog_table(self, name, query_id=None):
         """Pull a SQL Server catalog table's data into a local table (DuckDB
         first, SQLite fallback) so it shows in the loaded-tables list and can
         be queried / joined locally. Streams to disk, so large tables stay
-        memory-bounded. Returns a LoadResult-shaped dict or {error}."""
+        memory-bounded. Cancellable via ``query_id`` (the underlying
+        import_from_connection registers the remote connection and checks the
+        flag between phases). Returns a LoadResult-shaped dict or {error}."""
         info = self.catalog_tables.get(name)
         if info is None:
             return {"error": 'Unknown catalog table "%s".' % name}
@@ -16223,7 +16569,7 @@ class Session:
         base = info.get("table") or name
         res = self.import_from_connection(
             conn, "SELECT * FROM %s" % qualified, base_name=base,
-            destination="duckdb")
+            destination="duckdb", query_id=query_id)
         return res
 
     def flatten_json_to_csv_dir(self, json_path, out_dir, base_name=None,

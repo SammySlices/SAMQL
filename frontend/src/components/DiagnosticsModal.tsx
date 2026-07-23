@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api, saveToDownloads } from "../lib/api";
 import type { DiagnosticMeta, TableInfo } from "../lib/types";
 
@@ -559,6 +559,10 @@ export const DiagnosticsPanel: React.FC<{
   const [result, setResult] = useState<Record<string, any> | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  // In-flight Run's controller: aborted on unmount (modal close) and on a
+  // re-click (the new run supersedes the old fetch).
+  const runAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => runAbortRef.current?.abort(), []);
 
   const applyDefaults = (m?: DiagnosticMeta) => {
     const init: Record<string, string> = {};
@@ -597,6 +601,9 @@ export const DiagnosticsPanel: React.FC<{
   };
 
   const run = () => {
+    runAbortRef.current?.abort(); // supersede a prior in-flight run
+    const ctrl = new AbortController();
+    runAbortRef.current = ctrl;
     setRunning(true);
     setErr(null);
     setResult(null);
@@ -607,13 +614,21 @@ export const DiagnosticsPanel: React.FC<{
       payload[p.name] = p.type === "int" ? Number(v) : v;
     }
     api
-      .runDiagnostic(selected, payload)
+      .runDiagnostic(selected, payload, ctrl.signal)
       .then((r) => {
+        if (ctrl.signal.aborted) return;
         if (r.ok) setResult((r.result as Record<string, any>) || {});
         else setErr(r.error || "Diagnostic failed");
       })
-      .catch((e) => setErr(String(e?.message || e)))
-      .finally(() => setRunning(false));
+      .catch((e) => {
+        if (ctrl.signal.aborted) return;
+        setErr(String(e?.message || e));
+      })
+      .finally(() => {
+        if (runAbortRef.current !== ctrl) return; // superseded: new run owns state
+        runAbortRef.current = null;
+        setRunning(false);
+      });
   };
 
   const exportResult = () => {

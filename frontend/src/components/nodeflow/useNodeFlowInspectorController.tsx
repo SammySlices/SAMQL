@@ -374,20 +374,50 @@ export function useNodeFlowInspectorController({
           q.upstreamNode &&
           q.upstreamPort,
       );
+      // Read through the inspector columns cache (same key scheme as the
+      // per-node probe) so this pass doesn't duplicate network work the
+      // inspector already did on selection — graphSig/schemaSig keys mean a
+      // structural or schema change still misses and refetches.
+      const missing: typeof batchReqs = [];
+      const keyOf = new Map<(typeof batchReqs)[number], string>();
+      for (const q of batchReqs) {
+        if (q.kind !== "canvas") {
+          missing.push(q);
+          continue;
+        }
+        const key = nodeflowColsCacheKey(
+          graphSig,
+          q.selectId,
+          "canvas",
+          fingerprintColumnReqs([
+            { port: "in", node: q.upstreamNode!, fromPort: q.upstreamPort! },
+          ]),
+          schemaSig,
+        );
+        const hit = getNodeflowColsCache(key);
+        if (hit && hit.in) columnsBySelectId[q.selectId] = hit.in;
+        else {
+          missing.push(q);
+          keyOf.set(q, key);
+        }
+      }
       try {
         await Promise.all([
           (async () => {
-            if (!batchReqs.length) return;
+            if (!missing.length) return;
             const r = await api.nodeflowColumnsBatch(
               graphForApi(),
-              batchReqs.map((q) => ({
+              missing.map((q) => ({
                 node: q.upstreamNode!,
                 port: q.upstreamPort!,
               })),
             );
             (r.results || []).forEach((res, i) => {
-              if (res?.columns && batchReqs[i])
-                columnsBySelectId[batchReqs[i].selectId] = res.columns;
+              if (res?.columns && missing[i]) {
+                columnsBySelectId[missing[i].selectId] = res.columns;
+                const key = keyOf.get(missing[i]);
+                if (key) setNodeflowColsCache(key, { in: res.columns });
+              }
             });
           })(),
           ...reqs

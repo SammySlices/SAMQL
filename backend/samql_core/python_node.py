@@ -19,6 +19,7 @@ Accepted ``out`` shapes:
 from __future__ import annotations
 
 import re
+import sys
 import threading
 import time
 from typing import Any
@@ -46,6 +47,11 @@ _SAFE_BUILTIN_NAMES = (
 
 class PythonNodeError(Exception):
     """User-facing failure from a Python node."""
+
+
+class PythonNodeCancelled(PythonNodeError):
+    """The run's Stop landed while user code executed. Not a script bug, so
+    callers can map it to the cancelled envelope instead of an error."""
 
 
 def pandas_available() -> bool:
@@ -280,8 +286,15 @@ def run_script(
     columns=None,
     rows=None,
     timeout_s: float = 30.0,
+    should_cancel=None,
 ) -> tuple[list[str], list[tuple]]:
-    """Execute ``code`` and return ``(out_columns, out_rows)``."""
+    """Execute ``code`` and return ``(out_columns, out_rows)``.
+
+    ``should_cancel`` (optional zero-arg callable) is polled from the main
+    thread and enforced inside the worker via a per-line trace hook, so a
+    Stop interrupts Python-level loops promptly instead of waiting out the
+    timeout. (A script blocked inside one long C-level call is still only
+    bounded by ``timeout_s`` -- same limit as before.)"""
     src = (code or "").strip()
     if not src:
         raise PythonNodeError("Write a Python script in the Python node.")
@@ -305,22 +318,44 @@ def run_script(
     box: dict[str, Any] = {"exc": None}
 
     def _target():
+        if should_cancel is not None:
+            def _trace(frame, event, arg):
+                if should_cancel():
+                    raise PythonNodeCancelled("cancelled")
+                return _trace
+            sys.settrace(_trace)
         try:
             compiled = compile(src, "<python-node>", "exec")
             exec(compiled, ns, ns)  # noqa: S102 — intentional user script
         except Exception as exc:
             box["exc"] = exc
+        finally:
+            if should_cancel is not None:
+                sys.settrace(None)
 
     th = threading.Thread(target=_target, name="samql-python-node", daemon=True)
     t0 = time.monotonic()
     th.start()
-    th.join(timeout_s)
+    deadline = t0 + timeout_s
+    while True:
+        th.join(0.2)
+        if not th.is_alive():
+            break
+        if should_cancel is not None and should_cancel():
+            # The trace hook normally kills the worker within a line or two;
+            # give it that moment before declaring the cancel ourselves.
+            th.join(0.5)
+            raise PythonNodeCancelled("cancelled")
+        if time.monotonic() >= deadline:
+            break
     if th.is_alive():
         raise PythonNodeError(
             "Python node timed out after %.0f s." % timeout_s
         )
     if box["exc"] is not None:
         exc = box["exc"]
+        if isinstance(exc, PythonNodeCancelled):
+            raise exc
         raise PythonNodeError(
             "%s: %s" % (type(exc).__name__, exc)
         ) from exc
@@ -340,11 +375,13 @@ def run_into_table(
     in_rel: str | None,
     code: str,
     timeout_s: float = 30.0,
+    should_cancel=None,
 ) -> list[str]:
     """Fetch optional input, run script, write ``CREATE TEMP TABLE`` result."""
     columns, rows = _fetch_input(eng, in_rel)
     out_cols, out_rows = run_script(
-        code, columns=columns, rows=rows, timeout_s=timeout_s
+        code, columns=columns, rows=rows, timeout_s=timeout_s,
+        should_cancel=should_cancel,
     )
     if len(out_rows) > _MAX_INPUT_ROWS:
         raise PythonNodeError(

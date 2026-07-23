@@ -7845,6 +7845,22 @@ html[data-theme="light"] .nb2-statusbar.error .nb2-status-text {
   flex: 0 0 auto;
   color: var(--text-dim);
 }
+/* expression rows are taller: align the name/fx/× to the top of the box
+   rather than centring them against a two-line textarea */
+.nb2-var-row-expr {
+  align-items: flex-start;
+}
+.nb2-var-row-expr .nb2-var-name,
+.nb2-var-row-expr .nb2-var-eq {
+  margin-top: 6px;
+}
+/* mono expression box, matching the formula node's fx area */
+.nb2-var-expr {
+  font-family: var(--mono);
+  min-height: 46px;
+  line-height: 1.45;
+  resize: vertical;
+}
 /* variable node: on-canvas body chips */
 .nb2-var-body {
   padding: 5px 8px;
@@ -7866,6 +7882,19 @@ html[data-theme="light"] .nb2-statusbar.error .nb2-status-text {
   font-weight: 600;
   flex: 0 0 auto;
   overflow-wrap: anywhere;
+}
+/* marks a variable whose value is an evaluated expression, not literal text */
+.nb2-var-chip-fx {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 3px;
+  border-radius: 3px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  opacity: 0.75;
 }
 .nb2-var-chip-v {
   color: var(--text-dim);

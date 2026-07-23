@@ -324,8 +324,8 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   },
   variable: {
     title: "Variables",
-    what: "Defines ${name} = value pairs other nodes can reference.",
-    use: "Use the names in expressions, table names, file globs, or API URLs anywhere downstream.",
+    what: "Defines ${name} = value pairs other nodes can reference. A value can be literal text or an fx expression (DATE_TIME_NOW(), TODAY()) evaluated once per run.",
+    use: "Use the names in expressions, table names, file globs, API URLs, or a SQL Server WHERE clause anywhere downstream.",
   },
   text: {
     title: "Note",

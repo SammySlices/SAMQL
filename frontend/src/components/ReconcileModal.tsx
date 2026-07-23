@@ -31,9 +31,11 @@ export interface ReconSpec {
 interface Props {
   tables: TableInfo[];
   onClose: () => void;
-  onRun: (report: ReconcileResult, spec: ReconSpec) => void;
+  onRun: (report: ReconcileResult, spec: ReconSpec, startEpoch?: number) => void;
   onToast: (kind: "ok" | "error" | "warn", title: string, msg?: string) => void;
   initialLeft?: string;
+  /** Catalog data epoch -- captured at run start so a mid-run mutation badges the report stale. */
+  dataEpoch?: number;
 }
 
 export const ReconcileModal: React.FC<Props> = ({
@@ -42,7 +44,10 @@ export const ReconcileModal: React.FC<Props> = ({
   onRun,
   onToast,
   initialLeft,
+  dataEpoch,
 }) => {
+  const dataEpochRef = useRef(dataEpoch);
+  dataEpochRef.current = dataEpoch;
   const names = useMemo(() => tables.map((t) => t.name), [tables]);
   const [left, setLeft] = useState(
     (initialLeft && names.includes(initialLeft) ? initialLeft : names[0]) || "",
@@ -192,6 +197,8 @@ export const ReconcileModal: React.FC<Props> = ({
     runCtrl.current = ctrl;
     registerRun(qid, ctrl);
     startPoll(qid);
+    // epoch at run START: a mutation landing mid-run badges the report stale.
+    const epochAtStart = dataEpochRef.current;
     const used = fields.filter(
       (f) =>
         keys.includes(f.value) ||
@@ -222,7 +229,7 @@ export const ReconcileModal: React.FC<Props> = ({
         setRunning(false);
         return;
       }
-      onRun(report, spec);
+      onRun(report, spec, epochAtStart);
     } catch (e: any) {
       stopPoll();
       runQid.current = null;
@@ -239,10 +246,17 @@ export const ReconcileModal: React.FC<Props> = ({
     }
   };
 
+  // Closing the modal mid-run cancels first -- same end-to-end path as the
+  // footer's "■ Cancel" (abort the fetch + interrupt the backend run).
+  const closeCancelling = () => {
+    if (runQid.current) cancelOne(runQid.current, runCtrl.current);
+    onClose();
+  };
+
   return (
     <Modal
       title="Reconcile / compare tables"
-      onClose={onClose}
+      onClose={closeCancelling}
       wide
       footer={
         <div className="rc-foot">

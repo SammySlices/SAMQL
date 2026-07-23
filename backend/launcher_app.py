@@ -23,6 +23,7 @@ backend's no-new-dependencies rule holds.
 """
 
 import argparse
+import atexit
 import os
 import socket
 import subprocess
@@ -418,6 +419,41 @@ def clean_child_env(env=None):
 
 
 _SERVER_PROC = None   # .512: the Popen of a server WE spawned (else None)
+_BOOT_PORT = [None]             # port of the server WE spawned (exit reaper)
+_LEAVE_SERVER_RUNNING = [False]  # intentional keeps (see below)
+
+
+def _reap_spawned_server_on_exit():
+    """Backstop for exit paths that never reach stop_server (a boot failure
+    -- hung child, or a child that silently port-hopped off the one we
+    probe -- or a browser-spawn failure). A server WE spawned must not
+    outlive the launcher as an orphan: Task Manager would keep it, and the
+    next launch would spawn a SECOND server beside it (possibly on a port
+    no launcher ever probes). Intentional leaves (keep-on-close, browser
+    --app window, default-browser tab) set _LEAVE_SERVER_RUNNING first.
+    Note sys.exit paths run this; os._exit paths are all intentional."""
+    try:
+        if _LEAVE_SERVER_RUNNING[0]:
+            return
+        with _SERVER_LOCK:
+            proc = globals().get("_SERVER_PROC")
+        if proc is None or proc.poll() is not None:
+            return
+        port = _BOOT_PORT[0]
+        write_log("INFO launcher exiting with our spawned server still "
+                  "alive -- stopping it (no orphan in Task Manager)")
+        if port:
+            try:
+                stop_server(port)
+                return
+            except Exception:
+                pass
+        _kill_process_tree(getattr(proc, "pid", None))
+    except Exception:
+        pass
+
+
+atexit.register(_reap_spawned_server_on_exit)
 
 
 def start_server(port, splash):
@@ -587,6 +623,7 @@ def _supervisor_loop():
     the user intentionally stopped the server and closed the window.
     """
     consecutive = 0
+    backoffs = 0
     while _SUPERVISE["on"]:
         try:
             port = _SUPERVISE["port"]
@@ -616,6 +653,18 @@ def _supervisor_loop():
                 if not _server_alive_now(port):
                     consecutive += 1
                     if consecutive > 5:
+                        backoffs += 1
+                        if backoffs > 3:
+                            # Bounded churn, then hand off exactly like the
+                            # docstring promises: the window's banner +
+                            # manual Reconnect take over. An unbounded loop
+                            # just respawned into whatever holds the port.
+                            write_log(
+                                "WARN supervisor: server still won't stay "
+                                "up after repeated respawns -- giving up "
+                                "(use Reconnect in the window to retry)")
+                            _SUPERVISE["on"] = False
+                            break
                         write_log("WARN supervisor: server keeps dying; "
                                   "backing off (use Reconnect in the "
                                   "window)")
@@ -2574,6 +2623,12 @@ def main(argv=None):
                       if server_preexisting else False)
         window_grace = t0 + _MUTEX_WAIT_S
         boot_grace = t0 + _MUTEX_BOOT_WAIT_S
+        # A held mutex with NO server and NO live peer launcher is a dead
+        # holder (zombie), not a boot-in-progress: break early instead of
+        # burning the whole boot budget. Frozen-only: a source-run peer
+        # shares the python image name with everything, so the probe would
+        # false-negative -- the full boot budget stays the dev behavior.
+        peer_check_at = t0 + 5.0
         while True:
             h = find_samql_window()
             if h and focus_window(h):
@@ -2611,6 +2666,15 @@ def main(argv=None):
                           "may not have exited cleanly) and continuing"
                           % _MUTEX_BOOT_WAIT_S)
                 break
+            if not saw_server and getattr(sys, "frozen", False) \
+                    and now >= peer_check_at:
+                peer_check_at = now + 5.0
+                if not _peer_appwindow_process_alive():
+                    write_log("WARN the launch mutex is held but no peer "
+                              "launcher process is alive and no server "
+                              "answers -- treating it as stale early "
+                              "(dead mutex holder) and continuing")
+                    break
             if not saw_server and now >= t0 + _MUTEX_WAIT_S:
                 splash.set_text("SamQL is starting -- waiting for its "
                                 "server...")
@@ -2638,6 +2702,7 @@ def main(argv=None):
             fail_visibly(splash, "Nothing to start: no SamQL exe or "
                          "python backend found beside the launcher.")
         we_started_server = True
+        _BOOT_PORT[0] = args.port
         # Heartbeat wait for /api/health (not TCP alone, not a single
         # wall-clock). Child exit fails immediately; process-alive +
         # TCP/stage progress reset idle; absolute ceiling still applies.
@@ -2686,6 +2751,7 @@ def main(argv=None):
         # cannot outlive the window after Exit & stop.
         if we_started_server:
             if _keep_server_requested(args.port):
+                _LEAVE_SERVER_RUNNING[0] = True
                 write_log("INFO window closed; leaving the server on "
                           "port %d running (Exit → keep server) -- "
                           "reopen AppWindow to reconnect" % args.port)
@@ -2709,6 +2775,9 @@ def main(argv=None):
                   "browser tab instead")
         import webbrowser
         webbrowser.open(url)
+        # The tab talks to the server we started -- leaving it running is
+        # intentional here, so the exit reaper must skip it.
+        _LEAVE_SERVER_RUNNING[0] = True
         splash.close()
         return 0
 
@@ -2776,6 +2845,10 @@ def main(argv=None):
                     except Exception:
                         return
             threading.Thread(target=_restamp, daemon=True).start()
+    # The browser --app window talks to the server we started; the launcher
+    # exits now and deliberately leaves it up (the in-app Exit → Stop owns
+    # shutdown in this mode), so the exit reaper must skip it.
+    _LEAVE_SERVER_RUNNING[0] = True
     splash.close()
     write_log("INFO launcher done")
     return 0

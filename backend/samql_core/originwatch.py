@@ -293,8 +293,10 @@ class OriginWatch:
 
         Debounced unless ``force``. Missing files count as changed.
         Cheap-stat first: when size/mtime/ctime/ino match the baseline, skip
-        content digest entirely. Cheap mismatch alone marks ``changed``
-        (digest is reserved for register / mark_current / file_token).
+        content digest entirely. A cheap mismatch with an UNCHANGED size is
+        confirmed against the content digest (bounded per tick) so a pure
+        touch doesn't force a reload; a size change or digest mismatch marks
+        ``changed`` outright.
         ``priority_names`` only orders the walk (in-use first).
         Single-flight: overlapping polls return [] (caller already has
         latest-wins / deferred sync). Returns the list of ``(engine, name)``
@@ -318,6 +320,7 @@ class OriginWatch:
                 items.sort(key=lambda kv: (0 if kv[0][1] in pri else 1))
             dirty = []
             newly_changed = []
+            token_updates = {}
             for key, ent in items:
                 path = ent.get("path")
                 prior = ent.get("token")
@@ -333,16 +336,40 @@ class OriginWatch:
                     # Cheap match → unchanged; no content digest.
                     changed = False
                 else:
-                    # Cheap mismatch (or no baseline) → changed without digest.
+                    # Cheap mismatch (or no baseline). A pure touch -- mtime/
+                    # ctime/ino moved but size identical and the content
+                    # digest still matches -- is NOT a content change, so
+                    # confirm with a bounded digest before forcing a full
+                    # reload + epoch bump + cross-surface cache clears.
                     changed = True
+                    if (
+                        prior is not None
+                        and isinstance(prior, (tuple, list))
+                        and len(prior) >= 5
+                        and int(prior[1] or 0) == int(cheap[1])
+                        and prior[4]
+                        and self._last_poll_digests < MAX_DIGESTS_PER_POLL
+                    ):
+                        self._last_poll_digests += 1
+                        if _digest_for(path, cheap[1]) == prior[4]:
+                            changed = False
+                            # Adopt the new cheap stat so later polls
+                            # short-circuit without another digest.
+                            token_updates[key] = (
+                                cheap[0], cheap[1], cheap[2], cheap[3],
+                                prior[4])
                 was = bool(ent.get("changed"))
                 if was != changed:
                     dirty.append((key, changed))
                     if changed and not was:
                         newly_changed.append(key)
-            if not dirty:
+            if not dirty and not token_updates:
                 return []
             with self._lock:
+                for key, tok in token_updates.items():
+                    ent = self._entries.get(key)
+                    if ent is not None:
+                        ent["token"] = tok
                 for key, changed in dirty:
                     ent = self._entries.get(key)
                     if ent is not None:

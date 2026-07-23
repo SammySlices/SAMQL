@@ -6,6 +6,7 @@ import { PORTS, type NbEdge, type NbNode } from "../../lib/nodeFlowModel";
 import { useNodeFlowDocumentController } from "./useNodeFlowDocumentController";
 import {
   clearLastRunPreviewCacheForTests,
+  connectorMayPeek,
   descendantNodeIds,
   isFilterPreviewPort,
   isJoinSidePreviewPort,
@@ -686,6 +687,37 @@ describe("Phase 8 NodeFlow controllers", () => {
         { node: "flt-1", port: "true" },
         { node: "flt-1", port: "false" },
       ]),
+    );
+  });
+
+  it("connectorMayPeek: a fetched connector is peekable, an unfetched one is not", () => {
+    // Regression: a fetched SQL Server node was a dead end -- the fetch's own
+    // result patch invalidated its preview, the drawer refused to peek
+    // ("No cached results -- use Run all"), and Run all skips connectors too,
+    // so freshly fetched rows appeared and then vanished unrecoverably.
+    expect(
+      connectorMayPeek({ type: "sqlserver", config: { table: "__nbsql_abc" } }),
+    ).toBe(true);
+    expect(connectorMayPeek({ type: "sqlserver", config: { table: "" } })).toBe(
+      false,
+    );
+    expect(connectorMayPeek({ type: "sqlserver", config: {} })).toBe(false);
+    expect(connectorMayPeek({ type: "sqlserver", config: null })).toBe(false);
+    // whitespace-only table is not a materialised table
+    expect(
+      connectorMayPeek({ type: "sqlserver", config: { table: "   " } }),
+    ).toBe(false);
+    // the other connectors behave the same way
+    for (const t of ["apinode", "sharepoint", "webscrape"]) {
+      expect(connectorMayPeek({ type: t, config: { table: "t" } })).toBe(true);
+      expect(connectorMayPeek({ type: t, config: {} })).toBe(false);
+    }
+    // non-connectors are never routed through this gate
+    expect(connectorMayPeek({ type: "filter", config: { table: "t" } })).toBe(
+      false,
+    );
+    expect(connectorMayPeek({ type: "input", config: { table: "t" } })).toBe(
+      false,
     );
   });
 

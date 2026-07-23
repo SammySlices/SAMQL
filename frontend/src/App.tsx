@@ -1372,7 +1372,10 @@ export default function App() {
   };
 
   const reallyCloseTab = (id: string) => {
-
+    // A tab closed mid-run cancels its query first (same end-to-end path as
+    // the Stop button: abort the fetch + interrupt the backend).
+    const run = runsNow()[id];
+    if (run) cancelOne(run.queryId, run.ctrl);
     setEdTabs((tabs) => {
       const idx = tabs.findIndex((t) => t.id === id);
       const next = tabs.filter((t) => t.id !== id);
@@ -2260,6 +2263,9 @@ export default function App() {
 
   // ---- table ops ----
   const onProfile = async (table: string, engine: EngineKind) => {
+    // Stamp the run with the epoch at START: a mutation landing mid-run
+    // advances dataEpoch past it, so the fresh result still badges stale.
+    const epochAtStart = dataEpochRef.current;
     // reuse an existing profile tab for the same table, else open one
     const existing = resTabsRef.current.find(
       (r) => r.kind === "profile" && r.profileTable === table,
@@ -2316,7 +2322,7 @@ export default function App() {
                 profile: p,
                 profileLoading: false,
                 profileQueryId: undefined,
-                ranDataEpoch: dataEpoch,
+                ranDataEpoch: epochAtStart,
                 dataStale: false,
               }
             : r,
@@ -2348,6 +2354,7 @@ export default function App() {
     const rt = resTabsRef.current.find((r) => r.id === activeResId);
     if (!rt || rt.kind !== "result") return;
     const engine = (rt.page?.engine || "sqlite") as EngineKind;
+    const epochAtStart = dataEpochRef.current;
     const id = uid();
     setResTabs((rs) => [
       ...rs,
@@ -2394,7 +2401,7 @@ export default function App() {
                 profile: p,
                 profileLoading: false,
                 profileQueryId: undefined,
-                ranDataEpoch: dataEpoch,
+                ranDataEpoch: epochAtStart,
                 dataStale: false,
               }
             : r,
@@ -2566,7 +2573,13 @@ export default function App() {
   };
 
   // Reconcile: a run drops a pinned "recon" result tab holding the report.
-  const onRunReconcile = (report: ReconcileResult, spec: ReconSpec) => {
+  // startEpoch is the catalog epoch when the modal's run STARTED (a mutation
+  // landing mid-run then badges the report stale); fall back to now.
+  const onRunReconcile = (
+    report: ReconcileResult,
+    spec: ReconSpec,
+    startEpoch?: number,
+  ) => {
     const id = uid();
     setResTabs((rs) => [
       ...rs,
@@ -2577,7 +2590,7 @@ export default function App() {
         recon: report,
         reconSpec: spec,
         pinned: true,
-        ranDataEpoch: dataEpoch,
+        ranDataEpoch: startEpoch ?? dataEpoch,
         dataStale: false,
       },
     ]);
@@ -2616,6 +2629,7 @@ export default function App() {
       ...m,
       [key]: { ctrl, queryId, startedAt: Date.now() },
     }));
+    registerRun(queryId, ctrl); // .519: Activity Stop can abort this fetch
     let freshResultId: string | null = null;
     try {
       const res = await api.query(
@@ -2664,6 +2678,7 @@ export default function App() {
     } catch {
       /* ignore refresh errors (incl. abort when superseded) */
     } finally {
+      unregisterRun(queryId);
       endRun(key, ctrl);
     }
     return freshResultId;
@@ -2797,9 +2812,16 @@ export default function App() {
 
 
   const onImport = async (name: string) => {
+    // Background-op wiring (query_id + signal + run registry) so the import
+    // shows in Activity and Stop interrupts it, like SqlServerLoadTab.doImport.
+    const { queryId, ctrl } = startBgOp();
     toast("ok", "Importing", `${name} — pulling from SQL Server…`);
     try {
-      const r = await api.catalogImport(name);
+      const r = await api.catalogImport(name, queryId, ctrl.signal);
+      if (r.cancelled) {
+        toast("warn", "Import cancelled", name);
+        return;
+      }
       if (r.error) {
         toast("error", "Import failed", r.error);
         return;
@@ -2811,7 +2833,13 @@ export default function App() {
       );
       refreshTables();
     } catch (e: any) {
+      if (isCancelledError(e, queryId)) {
+        toast("warn", "Import cancelled", name);
+        return;
+      }
       toast("error", "Import failed", e.message);
+    } finally {
+      endBgOp(queryId);
     }
   };
 
@@ -4817,6 +4845,7 @@ export default function App() {
                   onWorkflowsChanged={refreshWorkflows}
                   inspectorHost={dashHostEl}
                   onSelectionChange={setDashSel}
+                  dataEpoch={dataEpoch}
                   active={view === "dashboard"}
                 />
               </Suspense>
@@ -5201,6 +5230,7 @@ export default function App() {
           onClose={() => setReconcileOpen(false)}
           onRun={onRunReconcile}
           onToast={toast}
+          dataEpoch={dataEpoch}
         />
       )}
 

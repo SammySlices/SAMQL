@@ -58,6 +58,34 @@ export const NODEFLOW_SOURCE_TYPES = new Set([
 ]);
 
 /**
+ * Connector sources. They materialize via Fetch, so they are NOT bare Run-all
+ * leaves. But once a Fetch has set ``config.table`` they are peekable: compile
+ * resolves them to their materialized table, and the backend re-fetches
+ * SQL Server / SharePoint / Web scrape on every run (latest-data-wins), so a
+ * peek returns CURRENT data rather than a retained result.
+ *
+ * Without this, a fetched connector was a dead end: the fetch's own result
+ * patch invalidated its preview, the drawer refused to peek ("No cached
+ * results — use Run all"), and Run all skipped it too — so freshly fetched
+ * rows appeared and then vanished with no way to get them back.
+ */
+export const NODEFLOW_CONNECTOR_TYPES = new Set([
+  "apinode",
+  "sqlserver",
+  "sharepoint",
+  "webscrape",
+]);
+
+/** A connector that has already materialized a table is safe to preview-run. */
+export function connectorMayPeek(node: {
+  type: string;
+  config?: Record<string, any> | null;
+}): boolean {
+  if (!NODEFLOW_CONNECTOR_TYPES.has(node.type)) return false;
+  return !!String((node.config || {}).table || "").trim();
+}
+
+/**
  * Output port to request when a node is a Run-all leaf (no Output/Write).
  * Most nodes expose ``out``; Filter only has ``true``/``false``. Hardcoding
  * ``out`` for Filter yields backend ``Unknown filter output: out`` and empty
@@ -584,7 +612,15 @@ export function useNodeFlowExecutionController({
     if (previewEpochRef.current === dataEpoch) return;
     previewEpochRef.current = dataEpoch;
     abortAuxRequests();
-    previewCache.current.clear();
+    // Keys are epoch-salted (tab::epoch::node::port), so an old-epoch hit can
+    // never land anyway — a wholesale clear() is only memory hygiene. Prune
+    // just the old-epoch entries: seeds stamped with the just-arrived epoch
+    // (a Run all whose own write node triggered this bump) stay usable.
+    for (const key of [...previewCache.current.keys()]) {
+      if (key.split("::")[1] !== String(dataEpoch)) {
+        previewCache.current.delete(key);
+      }
+    }
     setPreview(null);
   }, [dataEpoch]);
 
@@ -919,6 +955,7 @@ export function useNodeFlowExecutionController({
     // the no-peek branch ("use Run all") rather than show wrong rows.
     const mayPeek =
       NODEFLOW_SOURCE_TYPES.has(node.type) ||
+      connectorMayPeek(node) ||
       (!cctx &&
         ((node.type === "join" && isJoinSidePreviewPort(port)) ||
           (node.type === "filter" && isFilterPreviewPort(port))));
@@ -937,7 +974,11 @@ export function useNodeFlowExecutionController({
       });
       setStatus({
         kind: "idle",
-        text: "No cached results — use Run all",
+        // An un-fetched connector is not a Run-all leaf, so "use Run all"
+        // would send the user nowhere -- point them at Fetch instead.
+        text: NODEFLOW_CONNECTOR_TYPES.has(node.type)
+          ? "No results yet — press Fetch on this node"
+          : "No cached results — use Run all",
       });
       return;
     }
@@ -2440,6 +2481,7 @@ export function useNodeFlowExecutionController({
         rows,
         node.config.dest || "duckdb",
         ctrl.signal,
+        id, // query_id: lets the backend interrupt the insert on Stop
       );
       if (!isRunCurrent(id)) return;
       if (r.error || !r.ok) {

@@ -346,6 +346,24 @@ def mei_root():
     return tempfile.gettempdir()
 
 
+def _kept_mei_names(root):
+    """Basenames a live server published as protected via `.samql_keep_mei`
+    under the temp root (one per line) -- a second, still-running server's
+    extraction must never be swept even when it is older than the age
+    threshold."""
+    out = set()
+    try:
+        with open(os.path.join(root, ".samql_keep_mei"),
+                  encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                name = line.strip()
+                if name.startswith("_MEI"):
+                    out.add(name)
+    except Exception:
+        pass
+    return out
+
+
 def sweep_mei_orphans(min_age_sec=3600):
     """Remove orphaned PyInstaller onefile extractions.
 
@@ -353,11 +371,13 @@ def sweep_mei_orphans(min_age_sec=3600):
     launch; a kill / crash / Citrix reset leaves that directory behind
     forever, and nothing else ever cleans it -- the classic 'my disk keeps
     shrinking' culprit. Sweeps every _MEI* sibling except the one THIS
-    process is running from and any younger than ``min_age_sec`` (another
+    process is running from, any published as protected by a live server
+    (`.samql_keep_mei`), and any younger than ``min_age_sec`` (another
     instance may be mid-launch). Locked dirs are skipped silently.
     Returns (removed_count, freed_bytes)."""
     root = mei_root()
     current = os.path.basename(getattr(sys, "_MEIPASS", "") or "")
+    kept = _kept_mei_names(root)
     removed, freed = 0, 0
     now = time.time()
     try:
@@ -365,7 +385,7 @@ def sweep_mei_orphans(min_age_sec=3600):
     except OSError:
         return 0, 0
     for name in entries:
-        if not name.startswith("_MEI") or name == current:
+        if not name.startswith("_MEI") or name == current or name in kept:
             continue
         path = os.path.join(root, name)
         try:

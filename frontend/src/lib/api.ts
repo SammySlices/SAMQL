@@ -477,11 +477,16 @@ export const api = {
     jsonFetch<DiagnosticsList>("/api/diagnostics", { timeoutMs: 15000 }),
   // Run one diagnostic by name with params; never rejects on a diagnostic
   // failure (the failure is in the result payload).
-  runDiagnostic: (name: string, params: Record<string, unknown>) =>
+  runDiagnostic: (
+    name: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) =>
     jsonFetch<DiagnosticRun>("/api/diagnostics/run", {
       method: "POST",
       body: JSON.stringify({ name, params }),
       timeoutMs: 300000,
+      signal,
     }),
 
   tables: () =>
@@ -2205,15 +2210,17 @@ export const api = {
       qualified?: string;
       error?: string;
     }>("/api/catalog/columns?name=" + encodeURIComponent(name)),
-  catalogImport: (name: string) =>
+  catalogImport: (name: string, queryId?: string, signal?: AbortSignal) =>
     jsonFetch<{
       ok?: boolean;
       table?: string;
       engine?: string;
       error?: string;
+      cancelled?: boolean;
     }>("/api/catalog/import", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, query_id: queryId }),
+      signal,
     }),
   tableCreate: (
     name: string,
@@ -2221,6 +2228,7 @@ export const api = {
     rows: string[][],
     destination = "auto",
     signal?: AbortSignal,
+    queryId?: string,
   ) =>
     jsonFetch<{
       ok?: boolean;
@@ -2230,7 +2238,7 @@ export const api = {
     }>("/api/table/create", {
       signal,
       method: "POST",
-      body: JSON.stringify({ name, columns, rows, destination }),
+      body: JSON.stringify({ name, columns, rows, destination, query_id: queryId }),
     }),
   nodeflowToTable: (
     graph: unknown,

@@ -694,6 +694,14 @@ function NodeFlowCanvasCardImpl({
                     .map((value: any, index: number) => (
                       <div key={index} className="nb2-var-chip">
                         <span className="nb2-var-chip-k">{value.name}</span>
+                        {(value.kind || "text") === "expr" && (
+                          <span
+                            className="nb2-var-chip-fx"
+                            title="Expression — evaluated each run"
+                          >
+                            fx
+                          </span>
+                        )}
                         <span className="nb2-var-chip-v">
                           {value.value || "∅"}
                         </span>

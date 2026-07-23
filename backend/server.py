@@ -4190,14 +4190,16 @@ class Api:
     @staticmethod
     def catalog_import(s, m, body, ctx):
         b = body or {}
-        return s.import_catalog_table(b.get("name"))
+        return s.import_catalog_table(b.get("name"),
+                                      query_id=b.get("query_id"))
 
     @staticmethod
     def table_create(s, m, body, ctx):
         b = body or {}
         return s.create_table_from_grid(
             b.get("name", "table"), b.get("columns", []), b.get("rows", []),
-            destination=b.get("destination", "auto"))
+            destination=b.get("destination", "auto"),
+            query_id=b.get("query_id"))
 
     @staticmethod
     def directory_read(s, m, body, ctx):
@@ -5407,8 +5409,17 @@ def main(argv=None):
         if _mp and _here.startswith(_troot):
             keep = os.path.join(tempfile.gettempdir(),
                                 ".samql_keep_mei")
-            with open(keep, "w", encoding="utf-8") as _fh:
-                _fh.write(os.path.basename(_mp) + "\n")
+            # Append-if-absent: a second live server must not clobber the
+            # FIRST server's protection (the file is multi-line).
+            existing = set()
+            try:
+                with open(keep, encoding="utf-8", errors="replace") as _fh:
+                    existing = {ln.strip() for ln in _fh if ln.strip()}
+            except Exception:
+                existing = set()
+            if os.path.basename(_mp) not in existing:
+                with open(keep, "a", encoding="utf-8") as _fh:
+                    _fh.write(os.path.basename(_mp) + "\n")
     except Exception:
         pass
 
@@ -5425,35 +5436,49 @@ def main(argv=None):
     # Clean up after any previous instance that didn't exit cleanly
     # (e.g. the terminal was closed before the server was stopped). First wipe
     # our OWN instance dir to a clean slate (guards the rare PID-reuse case
-    # where a dead same-PID instance left files sweep_stale won't touch), then
-    # sweep the directories of other instances whose process has exited. Runs
-    # before the engine warms, so no live temp is at risk.
+    # where a dead same-PID instance left files sweep_stale won't touch).
     try:
         tmputil.reset_instance()
     except Exception:
         pass
+    tmputil.touch_alive()
+
+    # .544: past sessions clean on EVERY start (a crash never reaches the
+    # exit sweep). The heavy reclaim now runs OFF the boot critical path --
+    # dead-instance rmtrees, _MEI orphans and cache prunes made cold start
+    # O(temp size) on AV-heavy boxes and could burn the launcher's boot
+    # budget. tmputil.sweep_stale() and the rest still run on every start,
+    # just asynchronously, after the port serves (they only touch dead-pid
+    # dirs, so a live session's temp is never at risk).
+    def _deferred_boot_sweeps():
+        try:
+            tmputil.sweep_stale()
+        except Exception:
+            pass
+        try:
+            # persistent conversion cache: reclaim abandoned temps, aged
+            # entries, and least-recently-used overflow past the budget
+            from samql_core import filecache
+            filecache.sweep()
+        except Exception:
+            pass
+        try:
+            tmputil.sweep_zombie_instances()
+        except Exception:
+            pass
+        try:
+            # onefile launch leftovers: a kill/crash strands a few hundred
+            # MB of _MEI* extraction in the temp EVERY time -- reclaim them
+            tmputil.sweep_mei_orphans()
+        except Exception:
+            pass
+        try:
+            # One-shot flatten/shred staging under system temp (not per-pid)
+            tmputil.sweep_op_caches()
+        except Exception:
+            pass
+
     try:
-        n = tmputil.sweep_stale()
-    except Exception:
-        n = 0
-    try:
-        # persistent conversion cache: reclaim abandoned temps, aged entries,
-        # and least-recently-used overflow past the budget
-        from samql_core import filecache
-        filecache.sweep()
-        tmputil.touch_alive()
-        # .544: past sessions clean on EVERY start. A crash never reaches
-        # the exit sweep, so dead-pid instance dirs (spill stores, family
-        # dbs) used to wait for the NEXT clean exit or a manual Storage
-        # clean; now startup reclaims them too.
-        tmputil.sweep_stale()
-        tmputil.sweep_zombie_instances()
-        # onefile launch leftovers: a kill/crash strands a few hundred MB of
-        # _MEI* extraction in the system temp EVERY time -- reclaim them
-        tmputil.sweep_mei_orphans()
-        # One-shot flatten/shred staging under system temp (not per-pid):
-        # wipe leftovers from crashed mid-op sessions.
-        tmputil.sweep_op_caches()
         from samql_core import watchdog as _wd
         _wd.set_reinterrupt(
             lambda qid: get_session().reinterrupt_if_cancelled(qid))
@@ -5475,6 +5500,8 @@ def main(argv=None):
     # SESSION_LOCK makes concurrent first-request construction safe.
     server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     server_thread.start()
+    threading.Thread(target=_deferred_boot_sweeps, daemon=True,
+                     name="samql-boot-sweeps").start()
 
     bar.set("warming up data engine")
     get_session()  # warm the session so the first query is snappy

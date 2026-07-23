@@ -14937,7 +14937,11 @@ def backend_tests(datadir, csv_path, json_path):
         sess.cancel_query("rc471")
         t.join(60)
         err = (hold["r"] or {}).get("error") or ""
-        need("interrupt" in err.lower() and hold["dt"] < 6,
+        # The reconcile family reports the cancelled sentinel (matching the
+        # pivot/chart/profile siblings) -- accept it or the legacy text.
+        need(((hold["r"] or {}).get("cancelled") is True
+              or "interrupt" in err.lower() or "cancel" in err.lower())
+             and hold["dt"] < 6,
              "a running reconcile cancels promptly (%.1fs, %r)"
              % (hold.get("dt", -1), err[:40]))
 
@@ -29927,28 +29931,39 @@ def backend_tests(datadir, csv_path, json_path):
         # path) must enforce the private/metadata SSRF policy.
         from samql_core import apiload
         import tempfile, os
-        for bad in ("file:///etc/passwd", "ftp://host/x", "/local/path",
-                    "gopher://x"):
-            st, ct, data, text, err = apiload.fetch_json(bad)
-            need(data is None and err and "http" in err.lower(),
-                 "rejects non-http(s) URL: %r -> %r" % (bad, err))
-        for bad in ("http://127.0.0.1/secret", "http://169.254.169.254/latest",
-                    "http://10.0.0.1/x"):
-            st, ct, data, text, err = apiload.fetch_json(bad)
-            need(data is None and err and "refus" in err.lower(),
-                 "rejects private/metadata URL: %r -> %r" % (bad, err))
-            fd, path = tempfile.mkstemp(suffix=".json")
-            os.close(fd)
-            try:
-                st2, ct2, err2, nbytes = apiload.fetch_to_file(bad, path)
-                need(err2 and "refus" in err2.lower() and nbytes == 0,
-                     "fetch_to_file rejects private URL: %r -> %r"
-                     % (bad, err2))
-            finally:
+        # Hermetic: this test asserts the DEFAULT deny-private policy, but
+        # importing launcher_app (which other tests do) sets
+        # SAMQL_ALLOW_PRIVATE_FETCH=1 process-wide via os.environ.setdefault.
+        # Clear it for the duration so an ambient opt-in from another module
+        # can't make 10.0.0.1 connect (and time out) instead of being refused.
+        _saved_allow = os.environ.pop("SAMQL_ALLOW_PRIVATE_FETCH", None)
+        try:
+            for bad in ("file:///etc/passwd", "ftp://host/x", "/local/path",
+                        "gopher://x"):
+                st, ct, data, text, err = apiload.fetch_json(bad)
+                need(data is None and err and "http" in err.lower(),
+                     "rejects non-http(s) URL: %r -> %r" % (bad, err))
+            for bad in ("http://127.0.0.1/secret",
+                        "http://169.254.169.254/latest",
+                        "http://10.0.0.1/x"):
+                st, ct, data, text, err = apiload.fetch_json(bad)
+                need(data is None and err and "refus" in err.lower(),
+                     "rejects private/metadata URL: %r -> %r" % (bad, err))
+                fd, path = tempfile.mkstemp(suffix=".json")
+                os.close(fd)
                 try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+                    st2, ct2, err2, nbytes = apiload.fetch_to_file(bad, path)
+                    need(err2 and "refus" in err2.lower() and nbytes == 0,
+                         "fetch_to_file rejects private URL: %r -> %r"
+                         % (bad, err2))
+                finally:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+        finally:
+            if _saved_allow is not None:
+                os.environ["SAMQL_ALLOW_PRIVATE_FETCH"] = _saved_allow
         # a well-formed https URL is accepted past the scheme check (it will
         # then fail to connect in the sandbox, which is fine -- not a scheme
         # error).
@@ -31998,6 +32013,122 @@ def backend_tests(datadir, csv_path, json_path):
             eq(row[0], "2026-01-15", "string var resolved into the SQL result")
             eq(int(row[1]), 2, "bare numeric var resolved")
             eq(row[2], "${nope}", "undefined token passed through verbatim")
+        finally:
+            s.shutdown()
+
+    def t_flow_variable_expressions():
+        # A variable row marked kind="expr" holds a SQL expression evaluated
+        # once per run (like a formula), and the resulting scalar is what gets
+        # substituted. That is what lets a date defined as DATE_TIME_NOW()
+        # reach a SQL Server WHERE clause as a plain literal.
+        import datetime as _dtv
+        from samql_core import applyvars as A
+
+        # friendly zero-arg aliases expand; everything else is left alone
+        eq(A.expand_var_functions("DATE_TIME_NOW()"), "current_timestamp",
+           "DATE_TIME_NOW() maps to the engine's current_timestamp")
+        eq(A.expand_var_functions("today()"), "current_date",
+           "TODAY() maps to current_date (case-insensitive)")
+        eq(A.expand_var_functions("UPPER(x)"), "UPPER(x)",
+           "a call WITH arguments is never rewritten")
+        eq(A.expand_var_functions("my_fn()"), "my_fn()",
+           "an unknown zero-arg call is left for the engine")
+
+        # scalars render as clean, dialect-portable literals
+        eq(A.render_scalar(_dtv.datetime(2026, 7, 22, 19, 55, 41, 123456)),
+           "2026-07-22 19:55:41",
+           "a timestamp drops microseconds/'+00' so it drops into a literal")
+        eq(A.render_scalar(_dtv.date(2026, 7, 22)), "2026-07-22",
+           "a date renders ISO")
+        eq(A.render_scalar(None), "", "NULL renders as empty text")
+
+        # a row with no kind stays literal text (saved workflows keep meaning)
+        legacy = {"nodes": [{"id": "v", "type": "variable", "config": {
+            "vars": [{"name": "a", "value": "TODAY()"}]}}]}
+        s = Session()
+        try:
+            ev = s._variable_expr_evaluator()
+            eq(A.collect_vars(legacy, evaluate=ev), {"a": "TODAY()"},
+               "a row without kind='expr' is NOT evaluated (back-compat)")
+
+            g = {"nodes": [
+                {"id": "v", "type": "variable", "config": {"vars": [
+                    {"name": "today", "value": "TODAY()", "kind": "expr"},
+                    {"name": "n", "value": "40 + 2", "kind": "expr"},
+                    {"name": "plain", "value": "literal", "kind": "text"}]}},
+                {"id": "q", "type": "sql", "config": {
+                    "sql": "SELECT '${today}' AS d, ${n} AS n, "
+                           "'${plain}' AS p"}},
+            ], "edges": []}
+            ctx = A.collect_vars(g, evaluate=ev)
+            eq(ctx["n"], "42", "an arithmetic expression evaluates to a scalar")
+            eq(ctx["plain"], "literal", "a text row is not evaluated")
+            eq(ctx["today"], _dtv.date.today().isoformat(),
+               "TODAY() evaluates to the current date")
+
+            r = s.run_nodeflow(g, "q", "out")
+            need(not r.get("error"),
+                 "expression-variable flow runs: %s" % r.get("error"))
+            row = list(r["rows"][0])
+            eq(row[0], _dtv.date.today().isoformat(),
+               "the evaluated date landed in the SQL result")
+            eq(int(row[1]), 42, "the evaluated number landed as a bare number")
+            eq(row[2], "literal", "the text row is unchanged")
+
+            # a broken expression names the offending variable
+            bad = {"nodes": [{"id": "v", "type": "variable", "config": {
+                "vars": [{"name": "oops", "value": "NOT_A_FUNC(",
+                          "kind": "expr"}]}}]}
+            try:
+                A.collect_vars(bad, evaluate=ev)
+                need(False, "a broken expression must raise")
+            except Exception as e:
+                need("oops" in str(e),
+                     "the error names the offending variable: %s" % e)
+            # the lenient (schema-probe) evaluator never raises while typing
+            lax = A.collect_vars(
+                bad, evaluate=s._variable_expr_evaluator(lenient=True))
+            eq(lax, {"oops": "NOT_A_FUNC("},
+               "a probe keeps the raw text instead of raising")
+        finally:
+            s.shutdown()
+
+    def t_sqlserver_node_resolves_variables():
+        # The SQL Server node's interactive Fetch must resolve ${name} the same
+        # way a full run does -- fetch_source_node used to drop `graph` for
+        # sqlserver (only apinode got it), so a WHERE clause kept a literal
+        # "${as_of}" and the remote query filtered on nonsense.
+        import inspect as _insp
+        from samql_core.session import Session as _S
+        src = _insp.getsource(_S.fetch_source_node)
+        need("graph=graph" in src.split('"sqlserver"')[1].split("if ")[0],
+             "fetch_source_node passes the graph to the SQL Server fetch")
+        sig = _insp.signature(_S.fetch_sqlserver_node)
+        need("graph" in sig.parameters,
+             "fetch_sqlserver_node accepts a graph for variable resolution")
+
+        # the query template resolves against a variable node, expression rows
+        # included, and lands as a plain literal the remote dialect can parse
+        from samql_core import applyvars as A
+        s = Session()
+        try:
+            g = {"nodes": [
+                {"id": "v", "type": "variable", "config": {"vars": [
+                    {"name": "as_of", "value": "TODAY()", "kind": "expr"},
+                    {"name": "region", "value": "EMEA"}]}},
+                {"id": "ss", "type": "sqlserver", "config": {
+                    "query": "SELECT * FROM Orders WHERE OrderDate >= "
+                             "'${as_of}' AND Region = {{region}}"}},
+            ], "edges": []}
+            rg = A.resolve_graph(g, evaluate=s._variable_expr_evaluator())
+            q = rg["nodes"][1]["config"]["query"]
+            import datetime as _d
+            need(_d.date.today().isoformat() in q,
+                 "the expression variable resolved into the query: %s" % q)
+            need("'EMEA'" in q,
+                 "{{name}} auto-quoted the text value: %s" % q)
+            need("${" not in q and "{{" not in q,
+                 "no unresolved tokens remain: %s" % q)
         finally:
             s.shutdown()
 
@@ -34217,6 +34348,380 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_pushdown_derived_columns():
+        # Nodes whose SQL ALWAYS builds a derived expression (coalesce, rank,
+        # perioddelta, unpivot keeps, formula siblings) must declare those
+        # expression inputs to liveness even when a downstream select drops
+        # the derived column itself -- otherwise pushdown prunes the source
+        # and the run breaks (binder error on DuckDB, garbage on SQLite).
+        from samql_core import nodeflow as nf
+        s = Session()
+        try:
+            eng, _ = s._engine_obj(
+                s._flow_engine_target({"nodes": [], "edges": []}))
+            eng.execute("CREATE TABLE der (id, a, b, score, q1, q2, amt, d)")
+            eng.execute("INSERT INTO der VALUES "
+                        "(1, NULL, 10, 100, 1, 2, 50, '2024-01-01 23:00'),"
+                        "(2, 5, 20, 200, 3, 4, 60, '2024-01-02 09:00'),"
+                        "(3, NULL, NULL, 50, 5, 6, 70, '2024-01-03 12:00')")
+            SRC = {"id": "src", "type": "input", "config": {"table": "der"}}
+            OUT = {"id": "out", "type": "output", "config": {}}
+
+            def keepfields(*names):
+                return {"id": "sel", "type": "select", "config": {
+                    "fields": [{"name": n, "keep": True} for n in names]}}
+
+            def chain(mid, sel):
+                return {"nodes": [SRC, mid, sel, OUT], "edges": [
+                    {"from": {"node": "src", "port": "out"},
+                     "to": {"node": mid["id"], "port": "in"}},
+                    {"from": {"node": mid["id"], "port": "out"},
+                     "to": {"node": "sel", "port": "in"}},
+                    {"from": {"node": "sel", "port": "out"},
+                     "to": {"node": "out", "port": "in"}}]}
+
+            # coalesce: picks survive pruning of the derived column
+            g = chain({"id": "co", "type": "coalesce",
+                       "config": {"cols": ["a", "b"], "name": "ab"}},
+                      keepfields("id"))
+            eq(nf.needed_columns(g, [("out", "out")]).get(("src", "out")),
+               {"id", "a", "b"}, "coalesce liveness keeps picks")
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "coalesce+select runs: %s" % r.get("error"))
+            eq(r.get("columns"), ["id"], "coalesce+select output shape")
+
+            # rank: order column survives pruning of the rank itself
+            g = chain({"id": "rk", "type": "rank",
+                       "config": {"order": "score"}}, keepfields("id"))
+            need("score" in (nf.needed_columns(g, [("out", "out")])
+                             .get(("src", "out")) or set()),
+                 "rank liveness keeps the order column")
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "rank+select runs: %s" % r.get("error"))
+
+            # perioddelta: default output name is per-mode (percent here), so
+            # liveness must not assume "period_change"
+            g = {"nodes": [SRC,
+                           {"id": "sel0", "type": "select", "config": {
+                               "fields": [{"name": "id", "keep": True},
+                                          {"name": "amt", "keep": True},
+                                          {"name": "d", "keep": True}]}},
+                           {"id": "pd", "type": "perioddelta", "config": {
+                               "value": "amt", "order": "d",
+                               "mode": "percent"}},
+                           keepfields("period_change_pct"), OUT],
+                 "edges": [
+                     {"from": {"node": "src", "port": "out"},
+                      "to": {"node": "sel0", "port": "in"}},
+                     {"from": {"node": "sel0", "port": "out"},
+                      "to": {"node": "pd", "port": "in"}},
+                     {"from": {"node": "pd", "port": "out"},
+                      "to": {"node": "sel", "port": "in"}},
+                     {"from": {"node": "sel", "port": "out"},
+                      "to": {"node": "out", "port": "in"}}]}
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"),
+                 "perioddelta default-name flow runs: %s" % r.get("error"))
+            eq(r.get("columns"), ["period_change_pct"],
+               "perioddelta percent output column")
+            eq(r["rows"][0][0], None, "first row has no previous period")
+            need(abs((r["rows"][1][0] or 0) - 20.0) < 1e-9,
+                 "percent delta = (60-50)/50*100 = 20, got %r"
+                 % (r["rows"][1][0],))
+
+            # unpivot: keep-columns are prunable passthrough (both sides agree)
+            g = chain({"id": "up", "type": "unpivot",
+                       "config": {"keep": ["id"], "unpivot": ["q1", "q2"]}},
+                      keepfields("value"))
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "unpivot+select runs: %s" % r.get("error"))
+            eq([row[0] for row in r["rows"]], [1, 3, 5, 2, 4, 6],
+               "unpivot values correct with keep pruned (q1s then q2s)")
+            # ...but a wanted keep survives, case-insensitively
+            g = chain({"id": "up", "type": "unpivot",
+                       "config": {"keep": ["id"], "unpivot": ["q1", "q2"]}},
+                      keepfields("ID", "value"))
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"),
+                 "unpivot keep case-insensitive runs: %s" % r.get("error"))
+            eq([row[0] for row in r["rows"]], [1, 2, 3, 1, 2, 3],
+               "unpivot keep column survives pushdown")
+
+            # formula: a sibling-formula reference (DuckDB-style alias reuse)
+            # must pull the sibling into the emit set AND its deps upstream
+            g = chain({"id": "fx", "type": "formula", "config": {"formulas": [
+                {"name": "f1", "expr": "[amt] * 2"},
+                {"name": "f2", "expr": "[amt] * 2 + 1"}]}},
+                keepfields("f2"))
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "formula sibling flow runs: %s"
+                 % r.get("error"))
+            eq([row[0] for row in r["rows"]], [101, 121, 141],
+               "formula values correct after pushdown")
+            nm = nf.needed_columns(
+                chain({"id": "fx", "type": "formula", "config": {"formulas": [
+                    {"name": "f1", "expr": "[amt] * 2"},
+                    {"name": "f2", "expr": "[f1] + 1"}]}},
+                    keepfields("f2")), [("out", "out")])
+            need("amt" in (nm.get(("src", "out")) or set())
+                 and "f1" not in (nm.get(("src", "out")) or set()),
+                 "sibling name resolved through the formula, not upstream")
+
+            # renamecols: two mappings to one target de-dup to x / x_2 in
+            # schema order -- liveness can't map the alias back to one source,
+            # so it must keep every colliding source
+            g = chain({"id": "rn", "type": "renamecols", "config": {
+                "mappings": [{"from": "a", "to": "x"},
+                             {"from": "b", "to": "x"}]}}, keepfields("x_2"))
+            need({"a", "b"} <= set(nf.needed_columns(g, [("out", "out")])
+                                   .get(("src", "out")) or set()),
+                 "renamecols dup target keeps both sources")
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "renamecols dup target runs: %s"
+                 % r.get("error"))
+            eq([row[0] for row in r["rows"]], [10, 20, None],
+               "x_2 holds the second (b) mapping's values")
+
+            # join liveness: a suffixed de-dup alias (r_x_2) must map back to
+            # the real right-side column, not just keys
+            jnode = {"id": "j", "type": "join", "config": {
+                "keys": [{"left": "id", "right": "id"}]}}
+            deps = nf._node_needed_inputs(jnode, "right", {"r_a_2"})
+            need("a" in deps or "a_2" in deps,
+                 "join liveness maps r_a_2 back to source column: %s" % deps)
+        finally:
+            s.shutdown()
+
+    def t_node_name_collisions():
+        # Derived output names that collide with an existing input column must
+        # REPLACE it (not emit a duplicate that silently binds the original),
+        # and internal helper aliases must dodge real columns.
+        from samql_core import nodeflow as nf
+        s = Session()
+        try:
+            eng, _ = s._engine_obj(
+                s._flow_engine_target({"nodes": [], "edges": []}))
+            eng.execute("CREATE TABLE coll (path TEXT, rest TEXT)")
+            eng.execute("INSERT INTO coll VALUES ('a-b-c', 'orig')")
+            eng.execute("CREATE TABLE coll2 (id, coalesced, a)")
+            eng.execute("INSERT INTO coll2 VALUES (1, 3, 1), (2, NULL, 2)")
+            eng.execute("CREATE TABLE coll3 (_tn_rn, v)")
+            eng.execute("INSERT INTO coll3 VALUES (1, 100), (2, 200)")
+
+            # split piece named like an input column wins; no duplicate column
+            g = {"nodes": [
+                {"id": "src", "type": "input", "config": {"table": "coll"}},
+                {"id": "sp", "type": "split", "config": {
+                    "col": "path", "delim": "-", "names": ["path", "rest2"]}},
+                {"id": "out", "type": "output", "config": {}}],
+                "edges": [
+                    {"from": {"node": "src", "port": "out"},
+                     "to": {"node": "sp", "port": "in"}},
+                    {"from": {"node": "sp", "port": "out"},
+                     "to": {"node": "out", "port": "in"}}]}
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "split collision runs: %s" % r.get("error"))
+            eq(r.get("columns"), ["rest", "path", "rest2"],
+               "split piece replaces the shadowed input column")
+            eq(r["rows"][0], ["orig", "a", "b"], "split values after replace")
+
+            # coalesce named (case-variant) like an input column: one column,
+            # coalesced values, no shadow
+            g = {"nodes": [
+                {"id": "src", "type": "input", "config": {"table": "coll2"}},
+                {"id": "co", "type": "coalesce", "config": {
+                    "cols": ["a", "coalesced"], "name": "Coalesced"}},
+                {"id": "out", "type": "output", "config": {}}],
+                "edges": [
+                    {"from": {"node": "src", "port": "out"},
+                     "to": {"node": "co", "port": "in"}},
+                    {"from": {"node": "co", "port": "out"},
+                     "to": {"node": "out", "port": "in"}}]}
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "coalesce case-variant runs: %s"
+                 % r.get("error"))
+            eq(r.get("columns"), ["id", "coalesced", "a"],
+               "coalesce case-variant replaces in place")
+            eq([row[1] for row in r["rows"]], [1, 2],
+               "coalesced values win over the shadowed column")
+
+            # topn: helper alias dodges a real _tn_rn input column
+            g = {"nodes": [
+                {"id": "src", "type": "input", "config": {"table": "coll3"}},
+                {"id": "tn", "type": "topn",
+                 "config": {"sort": "v", "n": 1, "desc": True}},
+                {"id": "out", "type": "output", "config": {}}],
+                "edges": [
+                    {"from": {"node": "src", "port": "out"},
+                     "to": {"node": "tn", "port": "in"}},
+                    {"from": {"node": "tn", "port": "out"},
+                     "to": {"node": "out", "port": "in"}}]}
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "topn collision runs: %s" % r.get("error"))
+            eq(r["rows"], [[2, 200]],
+               "topn filters on the row number, not the user's _tn_rn column")
+
+            # multijoin: a wired input with no join step is a loud error
+            # (silently dropping its data was the old behaviour)
+            g = {"nodes": [
+                {"id": "a", "type": "input", "config": {"table": "coll2"}},
+                {"id": "b", "type": "input", "config": {"table": "coll2"}},
+                {"id": "cc", "type": "input", "config": {"table": "coll2"}},
+                {"id": "mj", "type": "multijoin", "config": {"joins": [
+                    {"input": "in2",
+                     "on": [{"left": "id", "right": "id"}]}]}},
+                {"id": "out", "type": "output", "config": {}}],
+                "edges": [
+                    {"from": {"node": "a", "port": "out"},
+                     "to": {"node": "mj", "port": "in1"}},
+                    {"from": {"node": "b", "port": "out"},
+                     "to": {"node": "mj", "port": "in2"}},
+                    {"from": {"node": "cc", "port": "out"},
+                     "to": {"node": "mj", "port": "in3"}},
+                    {"from": {"node": "mj", "port": "out"},
+                     "to": {"node": "out", "port": "in"}}]}
+            r = s.run_nodeflow(g, "out", "out")
+            need(r.get("error") and "in3" in str(r.get("error")),
+                 "multijoin unjoined input raises, got: %s" % r.get("error"))
+
+            # SQL node guard: a CTE shadow or string literal of a wired name
+            # is legal SQL, not a rewrite failure
+            relmap = {"orders": '(SELECT * FROM "orders" WHERE x > 1)'}
+            try:
+                nf._sqljoin_rewrite_tables(
+                    "WITH orders AS (SELECT 1 AS x) SELECT * FROM orders",
+                    relmap)
+                nf._sqljoin_rewrite_tables(
+                    "SELECT * FROM real_tbl "
+                    "WHERE note = 'from orders delayed'", relmap)
+            except nf.NodeflowError as e:
+                need(False, "sql guard must allow CTE shadow/literal: %s" % e)
+            try:
+                nf._assert_wired_tables_rewritten(
+                    "SELECT * FROM orders", "SELECT * FROM orders", relmap)
+                need(False, "sql guard must still catch a bare wired ref")
+            except nf.NodeflowError:
+                pass
+        finally:
+            s.shutdown()
+
+    def t_cancel_and_freshness_hardening():
+        # Audit hardening: the restart-persistent flow cache screens nested
+        # (group-child) nodes recursively; python nodes cancel promptly;
+        # reconcile reports the cancelled sentinel; NodeFlow results stamp the
+        # pre-build epoch; materialize severs file provenance; the origin
+        # watcher digests a pure touch instead of forcing a reload.
+        from samql_core import python_node as pyn
+        from samql_core.originwatch import OriginWatch
+        from samql_core.session import DUCKDB_TARGET
+        s = Session()
+        try:
+            # persistent cache: nested volatile / nondeterministic children
+            # must keep the whole graph out (top-level-only screening used to
+            # let a restart restore frozen remote/random data)
+            if s.optional_features().get("duckdb"):
+                s.persistent_flow_cache = True
+
+                def grp(child):
+                    return {"nodes": [{"id": "g", "type": "group",
+                                       "config": {"children": [child]}}]}
+                for child in (
+                        {"id": "c", "type": "python",
+                         "config": {"code": "out = 1"}},
+                        {"id": "c", "type": "apinode", "config": {}},
+                        {"id": "c", "type": "sample",
+                         "config": {"mode": "random"}}):
+                    need(s._persistent_flow_salt(grp(child), DUCKDB_TARGET)
+                         is None,
+                         "persistent salt rejects nested %s" % child["type"])
+
+            # python node: Stop interrupts a tight loop promptly (was: only
+            # the timeout bounded it)
+            t0 = time.monotonic()
+            try:
+                pyn.run_script("while True:\n    pass", timeout_s=60,
+                               should_cancel=lambda: time.monotonic() - t0
+                               > 0.3)
+                need(False, "python node should have been cancelled")
+            except pyn.PythonNodeCancelled:
+                need(time.monotonic() - t0 < 15, "python cancel was prompt")
+
+            # reconcile: a flagged run reports the cancelled sentinel, and
+            # the one-pass->legacy fallback never re-runs after a cancel
+            s.db.add_table_streaming("ra", ["k", "v"], iter([(1, 2), (2, 3)]))
+            s.db.add_table_streaming("rb", ["k", "v"], iter([(1, 2), (3, 4)]))
+            s.flag_run_cancelled("q-recon-x")
+            res = s.reconcile({"left": "ra", "right": "rb", "keys": ["k"],
+                               "query_id": "q-recon-x"})
+            need(res.get("cancelled") is True,
+                 "pre-cancelled reconcile reports cancelled: %s" % res)
+
+            # NodeFlow run: the result stamps the epoch observed BEFORE the
+            # build (a mid-build mutation must expire it, not stamp it live)
+            g = {"nodes": [
+                {"id": "src", "type": "input", "config": {"table": "ra"}},
+                {"id": "out", "type": "output", "config": {}}],
+                "edges": [{"from": {"node": "src", "port": "out"},
+                           "to": {"node": "out", "port": "in"}}]}
+            ep = int(getattr(s, "_data_epoch", 0) or 0)
+            r = s.run_nodeflow(g, "out", "out")
+            need(not r.get("error"), "flow runs: %s" % r.get("error"))
+            eq(r.get("data_epoch"), ep,
+               "nodeflow result stamped with the pre-build epoch")
+
+            # materialize over an existing name severs file provenance (the
+            # persistent-cache salt must not read the old file's signature)
+            s.db.table_sources["ra"] = "C:/nonexistent/old-source.csv"
+            r = s.materialize("ra", "SELECT 1 AS k, 9 AS v",
+                              target="__local__")
+            need(not r.get("error"), "materialize runs: %s" % r.get("error"))
+            need(not (getattr(s.db, "table_sources", {}) or {}).get("ra"),
+                 "materialize drops old file provenance")
+
+            # iterator rebinding: a None-registered run gains an engine
+            # binding per pass so Stop interrupts mid-pass
+            s._register_run("q-rebind", None)
+            s._rebind_run_engine("q-rebind", s.db)
+            need(s._running["q-rebind"]["engine"] is s.db,
+                 "rebind creates the engine binding")
+            s._unregister_run("q-rebind")
+
+            # grid create: a flagged run cancels before inserting
+            s.flag_run_cancelled("q-grid-x")
+            r = s.create_table_from_grid("gt", ["a"], [["1"], ["2"]],
+                                         query_id="q-grid-x")
+            need(r.get("cancelled") is True,
+                 "grid create honours a pre-set cancel: %s" % r)
+        finally:
+            s.shutdown()
+
+        # origin watcher: a pure touch (mtime only, same size+content) is NOT
+        # a change; a size change IS. Poll digests confirm instead of forcing
+        # a reload + epoch bump per tick.
+        ow = OriginWatch()
+        fd, p = tempfile.mkstemp()
+        try:
+            os.write(fd, b"hello-origin")
+            os.close(fd)
+            ow.register("sqlite", "t1", p)
+            ow.poll(force=True)  # baseline
+            os.utime(p, None)
+            need(("sqlite", "t1") not in ow.poll(force=True),
+                 "pure touch is not a content change")
+            with open(p, "ab") as fh:
+                fh.write(b"!")
+            need(("sqlite", "t1") in ow.poll(force=True),
+                 "a real content change is flagged")
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+
     def t_shared_subgraph():
         # A node feeding more than one target is materialised once for the
         # whole batch (the gap that Run all closes), while staying correct.
@@ -35739,7 +36244,11 @@ def backend_tests(datadir, csv_path, json_path):
             # verifying profile+secret resolution via a thin wrapper.
             real_fetch = s.fetch_sqlserver_node
 
-            def fetch_with_fake_connect(node_id, config, query_id=None):
+            # graph=None: the real fetch_sqlserver_node now takes a graph (for
+            # ${variable} resolution, like the API node), and the auto-fetch
+            # path forwards it -- so the fake must accept and forward it too.
+            def fetch_with_fake_connect(node_id, config, graph=None,
+                                        query_id=None):
                 cfg = dict(config or {})
                 pk = (cfg.get("profile_key") or "").strip() or "mssql:Prod"
                 prof = s.connection_profiles.get(pk)
@@ -35754,7 +36263,7 @@ def backend_tests(datadir, csv_path, json_path):
                 name = (cfg.get("connection") or "Prod").strip() or "Prod"
                 s.connections[name] = fake
                 # Call the real body after connection is active (skips open).
-                out = real_fetch(node_id, cfg, query_id=query_id)
+                out = real_fetch(node_id, cfg, graph=graph, query_id=query_id)
                 if cfg.get("database"):
                     need(fake.used and "Sales" in str(fake.used),
                          "USE database ran: %r" % fake.used)
@@ -40579,6 +41088,10 @@ def backend_tests(datadir, csv_path, json_path):
         ("flow: group (filter+bin) -> summarize", t_flow_group_in_pipeline),
         ("flow: group multi-input (bound join inside)", t_flow_group_multi_input),
         ("flow: variable node ${name} substitution", t_flow_variable_node),
+        ("flow: variable node expression values (DATE_TIME_NOW/TODAY)",
+         t_flow_variable_expressions),
+        ("flow: SQL Server node resolves ${variables} on fetch",
+         t_sqlserver_node_resolves_variables),
         ("flow: write node append / overwrite / idempotent", t_flow_write_append),
         ("flow: write overwrite replaces after input change",
          t_flow_write_overwrite_input_change),
@@ -40655,6 +41168,14 @@ def backend_tests(datadir, csv_path, json_path):
          t_projection_pushdown),
         ("projection pushdown oddities (weird names, case, literals)",
          t_pushdown_oddities),
+        ("pushdown keeps derived-column inputs (coalesce/rank/perioddelta/"
+         "unpivot/formula/renamecols/join-alias)",
+         t_pushdown_derived_columns),
+        ("node output-name collisions + SQL guard literals/CTEs",
+         t_node_name_collisions),
+        ("cancel + freshness hardening (persistent groups, python, reconcile, "
+         "epoch, materialize, origin touch)",
+         t_cancel_and_freshness_hardening),
         ("shared-subgraph materialisation (computed once across targets)",
          t_shared_subgraph),
         ("join modes (inner / left / semi / anti)", t_join_modes),

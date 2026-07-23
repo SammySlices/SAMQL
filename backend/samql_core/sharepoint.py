@@ -112,17 +112,23 @@ def _http_json(url, token, timeout=60, classic=False, auth_mode="bearer"):
 
 
 def _http_stream_to_file(url, token, dest_path, timeout=120,
-                         chunk_size=1024 * 1024, auth_mode="bearer"):
+                         chunk_size=1024 * 1024, auth_mode="bearer",
+                         should_cancel=None):
     """Stream a SharePoint/Graph download straight to ``dest_path``.
 
     Never buffers the whole body in RAM (a multi-GB drive item must not be
-    ``resp.read()``'d). Returns ``(nbytes, filename_or_None, final_url)``.
+    ``resp.read()``'d). ``should_cancel`` (optional zero-arg callable) is
+    polled between chunks so a Stop interrupts a long download; it raises
+    InterruptedError, and the caller is expected to delete the partial file.
+    Returns ``(nbytes, filename_or_None, final_url)``.
     """
     mode = (auth_mode or "bearer").lower()
     allow_private = mode == "windows"
     validate_outbound_http_url(
         url, purpose="SharePoint download", allow_private=allow_private)
     if mode == "windows":
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("cancelled")
         raw, final, hdrs = _windows_get(
             url,
             headers={
@@ -156,6 +162,8 @@ def _http_stream_to_file(url, token, dest_path, timeout=120,
             total = 0
             with open(dest_path, "wb") as out:
                 while True:
+                    if should_cancel is not None and should_cancel():
+                        raise InterruptedError("cancelled")
                     buf = resp.read(chunk_size)
                     if not buf:
                         break
@@ -276,8 +284,9 @@ def _reject_windows_on_graph(site_url, auth_mode):
 
 
 def fetch_sharepoint_items(site_url, list_title, bearer_token, timeout=60,
-                           auth_mode="bearer"):
-    """Return ``(records, meta)`` where records are dicts ready to flatten."""
+                           auth_mode="bearer", should_cancel=None):
+    """Return ``(records, meta)`` where records are dicts ready to flatten.
+    ``should_cancel`` is polled between pages (InterruptedError on Stop)."""
     _reject_windows_on_graph(site_url, auth_mode)
     token = _require_auth(bearer_token, auth_mode, action="fetching")
     url = _graph_list_url(site_url, list_title)
@@ -290,6 +299,8 @@ def fetch_sharepoint_items(site_url, list_title, bearer_token, timeout=60,
     next_url = url
     pages = 0
     while next_url and pages < 50:
+        if should_cancel is not None and should_cancel():
+            raise InterruptedError("cancelled")
         pages += 1
         data, _ = _http_json(
             next_url, token, timeout=timeout, classic=classic,
@@ -339,10 +350,13 @@ def fetch_sharepoint_items(site_url, list_title, bearer_token, timeout=60,
 
 
 def browse_drive(site_url, folder_path, bearer_token, timeout=60,
-                 auth_mode="bearer"):
-    """Browse drive folders/files. Returns rows as list-of-dicts + meta."""
+                 auth_mode="bearer", should_cancel=None):
+    """Browse drive folders/files. Returns rows as list-of-dicts + meta.
+    ``should_cancel`` is checked before the fetch (InterruptedError on Stop)."""
     _reject_windows_on_graph(site_url, auth_mode)
     token = _require_auth(bearer_token, auth_mode, action="browsing")
+    if should_cancel is not None and should_cancel():
+        raise InterruptedError("cancelled")
     _, host, _, _ = _site_parts(site_url)
     if "sharepoint.com" not in host and not host.endswith("sharepoint.us"):
         # Classic: folders via GetFolderByServerRelativeUrl
@@ -418,13 +432,16 @@ def browse_drive(site_url, folder_path, bearer_token, timeout=60,
 
 
 def download_drive_item(site_url, item_id, bearer_token, download_url=None,
-                        timeout=120, dest_path=None, auth_mode="bearer"):
+                        timeout=120, dest_path=None, auth_mode="bearer",
+                        should_cancel=None):
     """Download one drive item.
 
     When ``dest_path`` is set, streams the body straight to that path and
     returns ``(nbytes, filename, meta)``. Without ``dest_path``, returns
     ``(bytes, filename, meta)`` for small/compat callers (still streams via a
     temp file so peak RAM is one file copy, not a live socket buffer + write).
+    ``should_cancel`` is polled between streamed chunks (InterruptedError on
+    Stop; the partial file is the caller's to remove).
     """
     if download_url or (site_url and item_id):
         _reject_windows_on_graph(site_url or "", auth_mode)
@@ -433,7 +450,8 @@ def download_drive_item(site_url, item_id, bearer_token, download_url=None,
     def _to_dest(url, fallback_name, via):
         if dest_path:
             nbytes, name, final = _http_stream_to_file(
-                url, token, dest_path, timeout=timeout, auth_mode=auth_mode)
+                url, token, dest_path, timeout=timeout, auth_mode=auth_mode,
+                should_cancel=should_cancel)
             return nbytes, name or fallback_name, {
                 "url": final, "item_id": item_id, "via": via,
             }

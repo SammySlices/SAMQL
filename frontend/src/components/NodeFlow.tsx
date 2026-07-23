@@ -509,6 +509,7 @@ export const NodeFlow: React.FC<{
     activeTabId,
     graphSignature: graphSig,
     dataEpoch,
+    active,
     nodes,
     edges,
     ensureChartFor,

@@ -314,9 +314,16 @@ describe("useNodeFlowInspectorController column probe cache", () => {
       rerender({ selectedId: "sel-bot", graphSig: "sig-sibling-1" });
     });
 
-    // Immediately after switch: must not expose top Select's columns.
-    expect(result.current.inspCols.in).toBeUndefined();
-    expect(result.current.inspColsProbing).toBe(true);
+    // Immediately after switch: must not expose top Select's columns. Either
+    // the probe is still pending (undefined) or a shared-cache hit already
+    // published the BOTTOM select's own columns — never the top's.
+    const afterSwitch = result.current.inspCols.in;
+    if (afterSwitch !== undefined) {
+      expect(afterSwitch).toEqual(["gamma", "delta"]);
+      expect(result.current.inspColsProbing).toBe(false);
+    } else {
+      expect(result.current.inspColsProbing).toBe(true);
+    }
 
     await waitFor(() => {
       expect(result.current.inspCols.in).toEqual(["gamma", "delta"]);

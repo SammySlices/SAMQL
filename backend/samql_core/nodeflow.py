@@ -639,6 +639,15 @@ def _rewrite_tables_regex(q, name_to_rel):
     return out
 
 
+def _strip_literals_comments(q):
+    """Blank out single-quoted string literals and SQL comments so textual
+    checks don't mistake their contents for table references."""
+    s = re.sub(r"'(?:[^']|'')*'", " ", q or "")
+    s = re.sub(r"--[^\n]*", " ", s)
+    s = re.sub(r"/\*.*?\*/", " ", s, flags=re.S)
+    return s
+
+
 def _wired_table_still_bare(q, name):
     """True when ``name`` still appears as a bare FROM/JOIN table reference."""
     if not q or not name:
@@ -646,7 +655,7 @@ def _wired_table_still_bare(q, name):
     esc = re.escape(name)
     return bool(re.search(
         r"(?i)\b(from|join)\s+(?:\"%s\"|\[%s\]|%s\b)" % (esc, esc, esc),
-        q))
+        _strip_literals_comments(q)))
 
 
 def _assert_wired_tables_rewritten(q_before, q_after, name_to_rel):
@@ -659,7 +668,9 @@ def _assert_wired_tables_rewritten(q_before, q_after, name_to_rel):
     Upstream relations often embed the catalog name themselves
     (``SELECT * FROM "orders"`` inside an Input subquery). Those are scrubbed
     out before the bare-name check so only an unre-written user FROM/JOIN
-    trips the guard.
+    trips the guard. A name the user re-defined as a CTE is skipped too:
+    both rewrite paths deliberately leave CTE shadows alone, so flagging
+    them here would hard-block legal SQL.
     """
     if not name_to_rel:
         return
@@ -668,8 +679,9 @@ def _assert_wired_tables_rewritten(q_before, q_after, name_to_rel):
     for rel in sorted((v for v in name_to_rel.values() if v),
                       key=len, reverse=True):
         scrubbed = scrubbed.replace(rel, " _REL_ ")
+    cte_names = {n.lower() for n in _sqljoin_cte_names(scrubbed)}
     for name in name_to_rel:
-        if not name:
+        if not name or name.lower() in cte_names:
             continue
         if not _wired_table_still_bare(q_before, name):
             continue
@@ -787,7 +799,10 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                 "Set a file path or glob in the file browser node -- it can "
                 "include ${variables}, e.g. /data/*_${as_of}.csv.")
         esc = pat.replace("'", "''")  # keep the path inside the SQL string
-        ext = pat.rsplit(".", 1)[-1].lower() if "." in pat else ""
+        # Sniff the reader from the BASENAME's extension only -- a dot in a
+        # directory component ("/data.2024/f*") must not misroute the reader.
+        basename = pat.replace("\\", "/").rsplit("/", 1)[-1]
+        ext = basename.rsplit(".", 1)[-1].lower() if "." in basename else ""
         if ext in ("parquet", "pq"):
             reader = ("read_parquet('%s', filename=true, union_by_name=true)"
                       % esc)
@@ -1049,6 +1064,14 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         if not steps:
             raise NodeflowError(
                 "Add at least one join linking another input to the base.")
+        unjoined = [p for p in connected if p != base and p not in present]
+        if unjoined:
+            raise NodeflowError(
+                "The multi-join's %s input %s wired but has no join step -- "
+                "add a join for it (or disconnect it); otherwise its data "
+                "would be silently missing from the output."
+                % (", ".join(unjoined),
+                   "is" if len(unjoined) == 1 else "are"))
         used = set()
 
         def uniq(name):
@@ -1066,9 +1089,9 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         for inp, _against, pairs in steps:
             # drop a right key only when it duplicates its paired left key by
             # name; keep distinct-named join keys (e.g. COLUMN_NAME = source_field)
-            rkeys = {r for l, r in pairs if l.lower() == r.lower()}
+            rkeys = {r.lower() for l, r in pairs if l.lower() == r.lower()}
             for c in _cols_of_rel(cols_of, rels[inp]):
-                if c in rkeys:
+                if c.lower() in rkeys:
                     continue
                 cand = c if c.lower() not in used else ("%s_%s" % (inp, c))
                 sel.append("%s.%s AS %s"
@@ -1126,8 +1149,27 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         for n, e in valid:
             _assert_single_sql_fragment(e, 'Formula "%s"' % n)
         fnames = {n.lower() for n, _ in valid}
+        expr_by_name = {n.lower(): e for n, e in valid}
         incols = _cols_of_rel(cols_of, up)
         want = None if needed is None else {str(x).lower() for x in needed}
+        # A formula may reference a sibling formula's output name (DuckDB
+        # resolves same-SELECT aliases). Emitting only the wanted formula then
+        # leaves the reference dangling, so close the emit set over sibling
+        # references.
+        if want is None:
+            emit = set(fnames)
+        else:
+            emit = set()
+            queue = [w for w in want if w in fnames]
+            while queue:
+                nm = queue.pop()
+                if nm in emit:
+                    continue
+                emit.add(nm)
+                for ident in _ident_cols(expr_by_name[nm]):
+                    il = ident.lower()
+                    if il in fnames and il not in emit:
+                        queue.append(il)
         # Keep only passthrough columns and derived formulas that are consumed
         # downstream. The liveness pass has already retained every source
         # column referenced by the selected expressions.
@@ -1135,7 +1177,7 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                if c.lower() not in fnames
                and (want is None or c.lower() in want)]
         for n, e in valid:
-            if want is None or n.lower() in want:
+            if n.lower() in emit:
                 sel.append("(%s) AS %s" % (_prepare_expr(e), _q(n)))
         if not sel:  # defensive fallback for an unknown downstream column
             sel = [_q(c) for c in incols if c.lower() not in fnames]
@@ -1223,9 +1265,15 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                 "Pick at least one column for the unpivot node to turn into rows.")
         name_field = (cfg.get("name_field") or "field").strip() or "field"
         value_field = (cfg.get("value_field") or "value").strip() or "value"
+        # Keep-columns are pure passthrough: emit only those still wanted
+        # downstream (the value/name fields and unpivoted columns are always
+        # built). Mirrors the liveness branch in _node_needed_inputs.
+        want = None if needed is None else {str(x).lower() for x in needed}
+        keep_sel = [k for k in keep
+                    if want is None or str(k).lower() in want]
         parts = []
         for c in cols:
-            sel = [_q(k) for k in keep]
+            sel = [_q(k) for k in keep_sel]
             sel.append("'%s' AS %s" % (c.replace("'", "''"), _q(name_field)))
             sel.append("%s AS %s" % (_q(c), _q(value_field)))
             parts.append("SELECT %s FROM %s AS _up" % (", ".join(sel), up))
@@ -1491,8 +1539,35 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         if not names:
             raise NodeflowError(
                 "Name at least one output column for the split node.")
+        # De-dup output names (engines bind case-insensitively; two pieces
+        # named alike would produce an ambiguous/duplicate column).
+        seen = set()
+        uniq = []
+        for nm in names:
+            base, k = nm, 2
+            while nm.lower() in seen:
+                nm = "%s_%d" % (base, k)
+                k += 1
+            seen.add(nm.lower())
+            uniq.append(nm)
+        names = uniq
         dq = delim.replace("'", "''")
         dlen = len(delim)
+        orig = _cols_of_rel(cols_of, src)
+        # Helper/rest columns must not collide with a real column or an output
+        # name -- a same-named input would silently shadow (or be shadowed by)
+        # the computed piece.
+        taken = {c.lower() for c in orig} | {nm.lower() for nm in names}
+        names_l = {nm.lower() for nm in names}
+        # A piece name that matches an input column REPLACES it (mirrors
+        # bin/rank): the star would carry the ORIGINAL column through every
+        # layer and the later "name" reference would bind the original,
+        # silently dropping the split value (SQLite) or erroring on the
+        # duplicate name (DuckDB). Only rewrite the star when a collision
+        # actually exists, so the common path is byte-identical.
+        collision = names_l & {c.lower() for c in orig}
+        star0 = ("*" if not collision else
+                 ", ".join(_q(c) for c in orig if c.lower() not in names_l))
         inner = src
         prev = _q(col)
         n = len(names)
@@ -1500,17 +1575,22 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
             part = ("CASE WHEN instr(%s, '%s') > 0 THEN substr(%s, 1, "
                     "instr(%s, '%s') - 1) ELSE %s END"
                     % (prev, dq, prev, prev, dq, prev))
-            sel = ["*", "%s AS %s" % (part, _q(names[i]))]
+            sel = [star0 if i == 0 else "*", "%s AS %s" % (part, _q(names[i]))]
             if i < n - 1:
                 rcol = "_sp_r%d" % i
+                k = 2
+                while rcol.lower() in taken:
+                    rcol = "_sp_r%d_%d" % (i, k)
+                    k += 1
+                taken.add(rcol.lower())
                 rest = ("CASE WHEN instr(%s, '%s') > 0 THEN substr(%s, "
                         "instr(%s, '%s') + %d) ELSE '' END"
                         % (prev, dq, prev, prev, dq, dlen))
                 sel.append("%s AS %s" % (rest, _q(rcol)))
                 prev = _q(rcol)
             inner = "(SELECT %s FROM %s AS _sp%d)" % (", ".join(sel), inner, i)
-        orig = _cols_of_rel(cols_of, src)
-        final = [_q(c) for c in orig] + [_q(nm) for nm in names]
+        final = [_q(c) for c in orig if c.lower() not in names_l]
+        final += [_q(nm) for nm in names]
         return "SELECT %s FROM %s AS _spf" % (", ".join(final), inner)
 
     if typ == "validate":
@@ -1529,9 +1609,9 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         if not extracts:
             raise NodeflowError(
                 "Add at least one field to extract (path -> new column).")
-        names = {n for _, n in extracts}
+        names = {str(n).lower() for _, n in extracts}
         cols = _cols_of_rel(cols_of, src)
-        sel = [_q(c) for c in cols if c not in names]
+        sel = [_q(c) for c in cols if c.lower() not in names]
         for path, name in extracts:
             p = str(path).strip()
             if not p.startswith("$"):
@@ -1651,6 +1731,10 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                         n = int(op.get("n") or 0)
                     except (TypeError, ValueError):
                         n = 0
+                    # an unbounded n materialises a 2n-byte blob per row on
+                    # SQLite (and an n-char string per row on DuckDB) -- clamp
+                    # to a sane width like perioddelta clamps its offset.
+                    n = max(0, min(n, 10000))
                     ch = (str(op.get("char") or " ")[:1]) or " "
                     chl = _strlit(ch)
                     if engine == "duckdb":
@@ -1810,18 +1894,35 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                     raise NodeflowError("Unknown date unit: %s" % unit)
                 expr = "date_diff('%s', %s, %s)" % (unit, other_expr, qcol)
             else:
-                days = "(julianday(%s) - julianday(%s))" % (qcol, other_expr)
+                # Match DuckDB's date_diff boundary-counting semantics:
+                # truncate both sides to the unit, then scale the day
+                # difference. A bare julianday() subtraction would truncate a
+                # fractional 24h span toward zero (10h apart -> 0 "days"),
+                # and units outside these four used to fall through to days.
+                if unit not in ("day", "hour", "minute", "second"):
+                    raise NodeflowError(
+                        "On SQLite the date-diff unit must be day, hour, "
+                        "minute, or second (got %s)." % unit)
+                fmt = {"day": "%Y-%m-%d",
+                       "hour": "%Y-%m-%d %H:00:00",
+                       "minute": "%Y-%m-%d %H:%M:00",
+                       "second": "%Y-%m-%d %H:%M:%S"}[unit]
                 mult = {"day": "", "hour": " * 24", "minute": " * 1440",
-                        "second": " * 86400"}.get(unit, "")
+                        "second": " * 86400"}[unit]
+                days = ("(julianday(strftime('%s', %s)) - "
+                        "julianday(strftime('%s', %s)))"
+                        % (fmt, qcol, fmt, other_expr))
                 expr = "CAST(%s%s AS INTEGER)" % (days, mult)
         else:
             raise NodeflowError("Unknown date op: %s" % op)
         name = (cfg.get("name") or default_name).strip() or default_name
         cols = _cols_of_rel(cols_of, src)
         proj = []
+        name_l = name.lower()
         for c in cols:
-            proj.append("%s AS %s" % (expr, _q(c)) if c == name else _q(c))
-        if name not in cols:
+            proj.append("%s AS %s" % (expr, _q(c))
+                        if c.lower() == name_l else _q(c))
+        if name_l not in {c.lower() for c in cols}:
             proj.append("%s AS %s" % (expr, _q(name)))
         return "SELECT %s FROM %s AS _dt" % (", ".join(proj), src)
 
@@ -1913,14 +2014,23 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         desc = bool(cfg.get("desc"))
         groups = [g for g in (cfg.get("group") or []) if g]
         cols = _cols_of_rel(cols_of, src)
+        # The row-number helper alias must not collide with a real input
+        # column -- a same-named input would be bound by the WHERE instead of
+        # the row number, silently keeping the wrong rows.
+        rn = "_tn_rn"
+        cols_l = {c.lower() for c in cols}
+        k = 2
+        while rn.lower() in cols_l:
+            rn = "_tn_rn%d" % k
+            k += 1
         part = ("PARTITION BY " + ", ".join(_q(g) for g in groups) + " "
                 if groups else "")
         order = "%s %s" % (_q(sort), "DESC" if desc else "ASC")
-        inner = ("SELECT *, ROW_NUMBER() OVER (%sORDER BY %s) AS _tn_rn "
-                 "FROM %s AS _tn" % (part, order, src))
+        inner = ("SELECT *, ROW_NUMBER() OVER (%sORDER BY %s) AS %s "
+                 "FROM %s AS _tn" % (part, order, _q(rn), src))
         proj = ", ".join(_q(c) for c in cols)
-        return ("SELECT %s FROM (%s) AS _tnw WHERE _tn_rn <= %d"
-                % (proj, inner, n))
+        return ("SELECT %s FROM (%s) AS _tnw WHERE %s <= %d"
+                % (proj, inner, _q(rn), n))
 
     if typ == "crossjoin":
         left = need("left")
@@ -1955,9 +2065,14 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         cols = _cols_of_rel(cols_of, src)
         expr = "COALESCE(%s)" % ", ".join(_q(c) for c in pick)
         proj = []
+        name_l = name.lower()
+        # Replace an existing column case-insensitively -- an exact-case test
+        # would emit both `coalesced` and `Coalesced`, and downstream
+        # references would bind the ORIGINAL column's values.
         for c in cols:
-            proj.append("%s AS %s" % (expr, _q(c)) if c == name else _q(c))
-        if name not in cols:
+            proj.append("%s AS %s" % (expr, _q(c))
+                        if c.lower() == name_l else _q(c))
+        if name_l not in {c.lower() for c in cols}:
             proj.append("%s AS %s" % (expr, _q(name)))
         return "SELECT %s FROM %s AS _co" % (", ".join(proj), src)
 
@@ -2774,10 +2889,20 @@ def _node_needed_inputs(node, in_port, needed_out):
             cols = [cfg.get("col")] if cfg.get("col") else []
         dims = rows | {c for c in (cols or []) if c}
         vals = cfg.get("values")
-        if vals is None:
-            vals = [{"field": cfg.get("value")}] if cfg.get("value") else []
-        return dims | {(v.get("field") or "").strip() for v in vals
-                       if (v.get("field") or "").strip()}
+        if not vals:
+            # None or [] both fall back to the legacy single measure, exactly
+            # like the runner in session._pivot_crosstab_sql.
+            vals = [cfg.get("value")] if cfg.get("value") else []
+
+        def _measure(v):
+            # Mirror the runner: a measure may be a plain column name or a
+            # {"field"/"value", "agg"} object (legacy configs used "value").
+            if isinstance(v, str):
+                return v.strip()
+            if isinstance(v, dict):
+                return (v.get("field") or v.get("value") or "").strip()
+            return ""
+        return dims | {m for m in (_measure(v) for v in vals) if m}
 
     if typ == "unpivot":
         if in_port != "in":
@@ -2787,8 +2912,11 @@ def _node_needed_inputs(node, in_port, needed_out):
         if needed_out is None:
             return keep | vals
         # The configured value columns are referenced by every UNION branch,
-        # even when a later select keeps only identifiers.
-        return ({c for c in keep if c in needed_out} | vals)
+        # even when a later select keeps only identifiers. Keep-columns are
+        # selected case-insensitively (matching the SQL's wanted filter), so
+        # compare lowercased like every other branch.
+        want_l = {str(n).lower() for n in needed_out}
+        return ({c for c in keep if str(c).lower() in want_l} | vals)
 
     if typ == "groupconcat":
         if in_port != "in":
@@ -2849,12 +2977,23 @@ def _node_needed_inputs(node, in_port, needed_out):
             expr = (f.get("expr") or "").strip()
             if name and expr:
                 outputs[name.lower()] = expr
-        for out in want:
-            expr = outputs.get(str(out).lower())
+        # Resolve sibling-formula references transitively: an expression may
+        # use another formula's output name, which is produced by THIS node,
+        # not by the upstream input -- passing it up as a dependency would
+        # prune the columns the sibling's own expression needs.
+        queue = list(want)
+        seen = set()
+        while queue:
+            out = str(queue.pop())
+            ol = out.lower()
+            if ol in seen:
+                continue
+            seen.add(ol)
+            expr = outputs.get(ol)
             if expr is None:
                 deps.add(out)
             else:
-                deps |= _ident_cols(expr)
+                queue.extend(_ident_cols(expr))
         return deps
 
     if typ == "python":
@@ -2883,7 +3022,16 @@ def _node_needed_inputs(node, in_port, needed_out):
         return deps
 
     if typ == "perioddelta":
-        out = (cfg.get("out") or "period_change").strip().lower()
+        # Mirror the SQL's per-mode default output name (node_output_sql);
+        # hardcoding "period_change" loses value/order/partition whenever a
+        # non-absolute mode runs with the default name cleared.
+        mode = (cfg.get("mode") or "absolute").strip().lower()
+        out = (cfg.get("out") or {
+            "absolute": "period_change",
+            "percent": "period_change_pct",
+            "previous": "previous_value",
+            "running_total": "running_total",
+        }.get(mode, "period_change")).strip().lower()
         deps = {n for n in want if str(n).lower() != out}
         if out in want_l:
             deps.add((cfg.get("value") or "").strip())
@@ -2895,10 +3043,30 @@ def _node_needed_inputs(node, in_port, needed_out):
         if any((cfg.get("prefix"), cfg.get("suffix"), cfg.get("case"),
                 cfg.get("find"), cfg.get("replace"))):
             return None
-        rev = {str(m.get("to")).lower(): str(m.get("from"))
-               for m in (cfg.get("mappings") or [])
-               if m.get("from") and m.get("to")}
-        return {rev.get(str(n).lower(), n) for n in want}
+        mappings = [(str(m.get("from")), str(m.get("to")))
+                    for m in (cfg.get("mappings") or [])
+                    if m.get("from") and m.get("to")]
+        # Two mappings with the same target de-dup to x / x_2 in SCHEMA order
+        # at run time (node_output_sql), so a `to` name can't be mapped back
+        # to a single source here — and neither can its `_N` alias. Same rule
+        # as the select branch: keep every colliding source when the shared
+        # target (or one of its `_N` aliases) is wanted.
+        target_counts = {}
+        for _f, t in mappings:
+            tl = t.lower()
+            target_counts[tl] = target_counts.get(tl, 0) + 1
+        rev = {t.lower(): f for f, t in mappings
+               if target_counts[t.lower()] == 1}
+        out = {rev.get(str(n).lower(), str(n)) for n in want}
+        for f, t in mappings:
+            tl = t.lower()
+            if target_counts[tl] <= 1:
+                continue
+            if tl in want_l or any(
+                    w.startswith(tl + "_")
+                    and w[len(tl) + 1:].isdigit() for w in want_l):
+                out |= {sf for sf, st in mappings if st.lower() == tl}
+        return out
 
     if typ in ("join", "antijoin", "crossjoin"):
         pairs = [(k.get("left"), k.get("right"))
@@ -2909,11 +3077,25 @@ def _node_needed_inputs(node, in_port, needed_out):
             pairs = [(l, r) for l, r in pairs if l and r]
         left_keys = {l for l, _r in pairs}
         right_keys = {r for _l, r in pairs}
-        # Output aliases can collide (right fields become r_<name>), so pass
-        # both original and de-prefixed candidates to each side. Sources
+        # Output aliases can collide: right fields become r_<name>, and a
+        # colliding alias gets a numeric suffix (r_x_2). Map every wanted name
+        # back to every plausible source column — strip the r_ prefix and any
+        # trailing _N to a fixpoint, like the multijoin branch below — so
+        # pushdown can't prune the column feeding a suffixed alias. Sources
         # intersect the set with their real schemas.
-        candidates = want | {str(n)[2:] for n in want
-                             if str(n).lower().startswith("r_")}
+        candidates = {str(n) for n in want}
+        changed = True
+        while changed:
+            changed = False
+            for name in list(candidates):
+                cands = []
+                if name.lower().startswith("r_"):
+                    cands.append(name[2:])
+                cands.append(re.sub(r"_\d+$", "", name))
+                for cand in cands:
+                    if cand and cand not in candidates:
+                        candidates.add(cand)
+                        changed = True
         if in_port == "left":
             return left_keys | candidates
         if in_port == "right":
@@ -2962,16 +3144,19 @@ def _node_needed_inputs(node, in_port, needed_out):
     if typ == "coalesce":
         out = (cfg.get("name") or "coalesced").strip().lower()
         deps = {n for n in want if str(n).lower() != out}
-        if out in want_l:
-            deps |= {c for c in (cfg.get("cols") or []) if c}
+        # The SQL always builds the COALESCE expression (renaming in place
+        # when the name matches an existing column), so the picks are needed
+        # even when a downstream projection drops the output name.
+        deps |= {c for c in (cfg.get("cols") or []) if c}
         return deps
 
     if typ == "rank":
         out = (cfg.get("out") or "rank").strip().lower()
         deps = {n for n in want if str(n).lower() != out}
-        if out in want_l or cfg.get("top_n") not in (None, ""):
-            deps.add((cfg.get("order") or "").strip())
-            deps |= {c for c in (cfg.get("partition") or []) if c}
+        # The rank expression is always emitted, so its OVER columns are
+        # needed even when a downstream projection drops the rank itself.
+        deps.add((cfg.get("order") or "").strip())
+        deps |= {c for c in (cfg.get("partition") or []) if c}
         return {c for c in deps if c}
 
     if typ == "topn":

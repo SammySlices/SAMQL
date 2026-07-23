@@ -5,6 +5,10 @@ interface UseNodeFlowChartHydrationOptions {
   activeTabId: string;
   graphSignature: string;
   dataEpoch: number;
+  /** When false, NodeFlow is hidden but kept mounted — defer re-hydration
+   * until it becomes visible again (the cleared chart data can't go stale
+   * while hidden, and re-fetching then is wasted work). */
+  active?: boolean;
   nodes: NbNode[];
   edges: NbEdge[];
   ensureChartFor: (node: NbNode | null, force?: boolean) => Promise<void>;
@@ -21,6 +25,7 @@ export function useNodeFlowChartHydration({
   activeTabId,
   graphSignature,
   dataEpoch,
+  active = true,
   nodes,
   edges,
   ensureChartFor,
@@ -33,6 +38,7 @@ export function useNodeFlowChartHydration({
   ensureRef.current = ensureChartFor;
 
   useEffect(() => {
+    if (!active) return;
     const currentNodes = nodesRef.current;
     if (!currentNodes.length) return;
 
@@ -85,6 +91,9 @@ export function useNodeFlowChartHydration({
     };
     // dataEpoch is a dep so a data change (which clears the chart-data cache in
     // the exec controller) re-queues the redraw -- otherwise expanded charts /
-    // dashboards stayed blank until a manual refresh.
-  }, [activeTabId, graphSignature, dataEpoch]);
+    // dashboards stayed blank until a manual refresh. `active` defers that
+    // re-queue while NodeFlow is hidden: the data was already cleared, so
+    // hydrating on return still shows fresh results without a background
+    // refetch storm.
+  }, [activeTabId, graphSignature, dataEpoch, active]);
 }

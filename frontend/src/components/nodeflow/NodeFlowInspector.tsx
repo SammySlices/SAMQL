@@ -1,6 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
 import { api } from "../../lib/api";
+import {
+  cancelOne,
+  isCancelledError,
+  registerRun,
+  unregisterRun,
+} from "../../lib/runController";
+import { uid } from "../../lib/ids";
 import { paletteColors } from "../../lib/chartOption";
 import {
   nodeShowsBody,
@@ -317,6 +324,19 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
   );
   const [mssqlSecretsOk, setMssqlSecretsOk] = useState(false);
   const [mssqlPwd, setMssqlPwd] = useState("");
+  // SharePoint drive download: registered under a query id so Activity Stop
+  // reaches it, and aborted when the inspector closes mid-download.
+  const spDownloadRef = useRef<{
+    queryId: string;
+    ctrl: AbortController;
+  } | null>(null);
+  useEffect(
+    () => () => {
+      const cur = spDownloadRef.current;
+      if (cur) cancelOne(cur.queryId, cur.ctrl);
+    },
+    [],
+  );
   useEffect(() => setApiPwDraft(""), [sel?.id]);
   useEffect(() => setMssqlPwd(""), [sel?.id]);
   useEffect(() => {
@@ -5242,44 +5262,85 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                     identifier, inserted verbatim). An iterator can override
                     these per pass.
                   </div>
-                  {(sel.config.vars || []).map((row: any, i: number) => (
-                    <div key={i} className="nb2-var-row">
-                      <input
-                        className="nb2-in nb2-var-name"
-                        placeholder="name"
-                        value={row.name || ""}
-                        onChange={(e) => {
-                          const next = [...(sel.config.vars || [])];
-                          next[i] = { ...next[i], name: e.target.value };
-                          patch(sel.id, { vars: next });
-                        }}
-                      />
-                      <span className="nb2-var-eq">=</span>
-                      <input
-                        className="nb2-in nb2-var-val"
-                        placeholder="value"
-                        value={row.value || ""}
-                        onChange={(e) => {
-                          const next = [...(sel.config.vars || [])];
-                          next[i] = { ...next[i], value: e.target.value };
-                          patch(sel.id, { vars: next });
-                        }}
-                      />
-                      <button
-                        className="btn ghost icon xbtn"
-                        title="Remove variable"
-                        onClick={() =>
-                          patch(sel.id, {
-                            vars: (sel.config.vars || []).filter(
-                              (_: any, j: number) => j !== i,
-                            ),
-                          })
+                  <div className="nb2-hint-sm">
+                    Press <b>fx</b> to make a value an <b>expression</b>{" "}
+                    (evaluated once per run, like a formula). Handy for dates:{" "}
+                    <code>DATE_TIME_NOW()</code>, <code>TODAY()</code>,{" "}
+                    <code>{"TODAY() - INTERVAL 7 DAY"}</code>,{" "}
+                    <code>{"date_trunc('month', TODAY())"}</code>. The result is
+                    substituted as a plain literal, so a SQL Server node can
+                    filter on it directly:{" "}
+                    <code>{"WHERE OrderDate >= '${as_of}'"}</code>.
+                  </div>
+                  {(sel.config.vars || []).map((row: any, i: number) => {
+                    const isExpr = (row.kind || "text") === "expr";
+                    const setRow = (patchRow: Record<string, any>) => {
+                      const next = [...(sel.config.vars || [])];
+                      next[i] = { ...next[i], ...patchRow };
+                      patch(sel.id, { vars: next });
+                    };
+                    return (
+                      <div
+                        key={i}
+                        className={
+                          "nb2-var-row" + (isExpr ? " nb2-var-row-expr" : "")
                         }
                       >
-                        ×
-                      </button>
-                    </div>
-                  ))}
+                        <input
+                          className="nb2-in nb2-var-name"
+                          placeholder="name"
+                          value={row.name || ""}
+                          onChange={(e) => setRow({ name: e.target.value })}
+                        />
+                        <span className="nb2-var-eq">=</span>
+                        {isExpr ? (
+                          <textarea
+                            className="nb2-in mono nb2-var-val nb2-var-expr"
+                            rows={2}
+                            spellCheck={false}
+                            placeholder="DATE_TIME_NOW()"
+                            value={row.value || ""}
+                            onChange={(e) => setRow({ value: e.target.value })}
+                          />
+                        ) : (
+                          <input
+                            className="nb2-in nb2-var-val"
+                            placeholder="value"
+                            value={row.value || ""}
+                            onChange={(e) => setRow({ value: e.target.value })}
+                          />
+                        )}
+                        <button
+                          className={"btn ghost icon xbtn" + (isExpr ? " on" : "")}
+                          title={
+                            isExpr
+                              ? "Expression — click for a literal text value"
+                              : "Text value — click to use an expression (fx)"
+                          }
+                          data-testid={`variable-fx-${i}`}
+                          aria-pressed={isExpr}
+                          onClick={() =>
+                            setRow({ kind: isExpr ? "text" : "expr" })
+                          }
+                        >
+                          fx
+                        </button>
+                        <button
+                          className="btn ghost icon xbtn"
+                          title="Remove variable"
+                          onClick={() =>
+                            patch(sel.id, {
+                              vars: (sel.config.vars || []).filter(
+                                (_: any, j: number) => j !== i,
+                              ),
+                            })
+                          }
+                        >
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })}
                   <button
                     className="btn sm"
                     onClick={() =>
@@ -5940,6 +6001,14 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                           patch(sel.id, { query: e.target.value })
                         }
                       />
+                      <div className="nb2-hint-sm">
+                        Workflow variables work here — <code>{"{{name}}"}</code>{" "}
+                        for a quoted text value, <code>{"${name}"}</code> for the
+                        raw value. A variable node's <b>fx</b> expression (e.g.{" "}
+                        <code>DATE_TIME_NOW()</code>) is evaluated locally and
+                        sent as a plain literal, so you can filter with{" "}
+                        <code>{"WHERE OrderDate >= '${as_of}'"}</code>.
+                      </div>
                     </>
                   )}
                   {inspectorType === "sharepoint" && (
@@ -6322,10 +6391,27 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                             );
                             return;
                           }
+                          // supersede a prior click, then register so Activity
+                          // Stop aborts the fetch AND interrupts the backend.
+                          const prev = spDownloadRef.current;
+                          if (prev) cancelOne(prev.queryId, prev.ctrl);
+                          const queryId = "sp-dl-" + uid();
+                          const ctrl = new AbortController();
+                          spDownloadRef.current = { queryId, ctrl };
+                          registerRun(queryId, ctrl);
                           try {
-                            const r = await api.sharepointDownload({
-                              config: sel.config,
-                            });
+                            const r = await api.sharepointDownload(
+                              { config: sel.config, query_id: queryId },
+                              ctrl.signal,
+                            );
+                            if (r.cancelled) {
+                              onToast(
+                                "warn",
+                                "Download cancelled",
+                                "Stopped at your request.",
+                              );
+                              return;
+                            }
                             if (r.error || !r.ok) {
                               onToast(
                                 "error",
@@ -6340,11 +6426,23 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                               r.path || r.filename || "Saved to Downloads.",
                             );
                           } catch (e: any) {
+                            if (isCancelledError(e, queryId)) {
+                              onToast(
+                                "warn",
+                                "Download cancelled",
+                                "Stopped at your request.",
+                              );
+                              return;
+                            }
                             onToast(
                               "error",
                               "Download failed",
                               e?.message || String(e),
                             );
+                          } finally {
+                            unregisterRun(queryId, ctrl);
+                            if (spDownloadRef.current?.queryId === queryId)
+                              spDownloadRef.current = null;
                           }
                         }}
                       >

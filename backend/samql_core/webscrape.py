@@ -415,15 +415,21 @@ def scrape_to_columns_rows(
     table_index=0,
     timeout=30,
     json_path=None,
+    should_cancel=None,
 ):
-    """Return ``(columns, rows, meta)`` for loading into an engine table."""
+    """Return ``(columns, rows, meta)`` for loading into an engine table.
+    ``should_cancel`` is checked before and after the (size-capped) fetch."""
     mode_l = (mode or "tables").strip().lower()
     accept = (
         "application/json,text/json;q=0.9,*/*;q=0.8"
         if mode_l == "json"
         else "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8"
     )
+    if should_cancel is not None and should_cancel():
+        raise InterruptedError("cancelled")
     text, final_url, ctype = _fetch_url(url, timeout=timeout, accept=accept)
+    if should_cancel is not None and should_cancel():
+        raise InterruptedError("cancelled")
     return content_to_columns_rows(
         text,
         mode=mode_l,

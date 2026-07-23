@@ -16,6 +16,7 @@ the value as a quoted SQL string literal automatically, so you can just write
 variable are left untouched so a typo surfaces instead of silently vanishing.
 """
 import copy
+import datetime as _dt
 import re
 
 # ${name}; name is a normal identifier (letters/digits/underscore, not leading
@@ -50,11 +51,86 @@ def _sql_str_literal(value):
     return sql_str_literal(value)
 
 
-def collect_vars(graph):
+# ---- expression-valued variables ------------------------------------------
+# A variable row may carry ``kind: "expr"``: its ``value`` is then a SQL
+# expression evaluated ONCE per run (like a formula node's expression, but
+# scalar and with no input relation) and the resulting value becomes the
+# variable's text. That is what makes ``${as_of}`` usable in a SQL Server WHERE
+# clause: the expression is evaluated locally by DuckDB and substituted as a
+# plain literal, so the remote dialect never has to understand the function.
+#
+# Friendly zero-arg aliases so an author does not need DuckDB spellings. Only
+# zero-arg forms are rewritten (``NAME()``), which cannot collide with a real
+# function call that takes arguments.
+_VAR_FUNCS = {
+    "date_time_now": "current_timestamp",
+    "datetime_now": "current_timestamp",
+    "date_now": "current_date",
+    "today": "current_date",
+    "now": "current_timestamp",
+    "utc_now": "current_timestamp",
+}
+
+_ZERO_ARG_CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)")
+
+
+def expand_var_functions(expr):
+    """Rewrite friendly zero-arg aliases (``DATE_TIME_NOW()`` -> engine SQL).
+
+    Unknown zero-arg calls are left alone so real engine functions still work.
+    """
+    if not expr or "(" not in expr:
+        return expr
+
+    def repl(m):
+        target = _VAR_FUNCS.get(m.group(1).lower())
+        return target if target else m.group(0)
+
+    return _ZERO_ARG_CALL.sub(repl, expr)
+
+
+def render_scalar(value):
+    """Render an evaluated scalar as the variable's substitution text.
+
+    Dates / timestamps are rendered ISO-style WITHOUT timezone suffix or
+    microseconds so the text drops straight into another dialect's literal
+    (notably a SQL Server ``WHERE d >= '...'``). Everything else is ``str``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, _dt.datetime):
+        return value.replace(tzinfo=None, microsecond=0).isoformat(sep=" ")
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    return str(value)
+
+
+def is_expr_row(row):
+    """True when a variable row's value is a SQL expression, not literal text.
+
+    ``kind: "expr"`` is the explicit marker written by the variable node's
+    Expression mode. Rows with no ``kind`` stay literal text, so every saved
+    workflow keeps its existing meaning.
+    """
+    if not isinstance(row, dict):
+        return False
+    return str(row.get("kind") or "text").strip().lower() == "expr"
+
+
+def collect_vars(graph, evaluate=None):
     """Build {name: value_text} from every ``variable`` node in the graph.
 
-    A variable node's config is ``{"vars": [{"name": ..., "value": ...}, ...]}``.
-    Blank names are skipped; later definitions win on a duplicate name."""
+    A variable node's config is ``{"vars": [{"name", "value", "kind"}, ...]}``.
+    Blank names are skipped; later definitions win on a duplicate name.
+
+    Rows marked ``kind: "expr"`` hold a SQL expression. When an ``evaluate``
+    callable is supplied it is called with the (alias-expanded) expression and
+    must return the scalar result; the rendered scalar becomes the value. With
+    no evaluator the expression text is used verbatim -- callers that only need
+    the *names* (probes, brace checks) therefore do not pay for engine work.
+    """
     ctx = {}
     if not isinstance(graph, dict):
         return ctx
@@ -69,7 +145,11 @@ def collect_vars(graph):
             if not name:
                 continue
             val = row.get("value")
-            ctx[name] = "" if val is None else str(val)
+            text = "" if val is None else str(val)
+            if is_expr_row(row) and evaluate is not None and text.strip():
+                text = render_scalar(
+                    evaluate(expand_var_functions(text.strip()), name))
+            ctx[name] = text
     return ctx
 
 
@@ -110,15 +190,19 @@ def _sub_tree(obj, ctx):
     return obj
 
 
-def resolve_graph(graph, extra=None):
+def resolve_graph(graph, extra=None, evaluate=None):
     """Return a copy of ``graph`` with ``${name}`` tokens resolved from its
     variable nodes (overridden by ``extra``, used by the iterator). The variable
     nodes themselves are left untouched so they can't reference each other (no
     chaining / cycles). When there is nothing to resolve, the original graph is
-    returned unchanged (no copy)."""
+    returned unchanged (no copy).
+
+    ``evaluate`` (see :func:`collect_vars`) turns ``kind: "expr"`` rows into
+    their computed scalar, so a date variable can be defined once as
+    ``DATE_TIME_NOW()`` and land in every downstream node as a plain literal."""
     if not isinstance(graph, dict):
         return graph
-    ctx = collect_vars(graph)
+    ctx = collect_vars(graph, evaluate=evaluate)
     if extra:
         ctx.update({str(k): ("" if v is None else str(v))
                     for k, v in extra.items()})
