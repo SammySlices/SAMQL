@@ -30,9 +30,9 @@ const TILES: {
 }[] = [
   { key: "a_only", label: "Only in A", cls: "t-a" },
   { key: "b_only", label: "Only in B", cls: "t-b" },
-  { key: "non_matching", label: "Not matching", cls: "t-nm" },
-  { key: "matching", label: "Matching", cls: "t-m" },
-  { key: "total", label: "Total records", cls: "t-tot" },
+  { key: "matching", label: "Matching Common Record Count", cls: "t-m" },
+  { key: "a_total", label: "A Total Records", cls: "t-tot" },
+  { key: "b_total", label: "B Total Records", cls: "t-tot" },
 ];
 
 

@@ -16244,7 +16244,8 @@ def backend_tests(datadir, csv_path, json_path):
             eq(out["totals"],
                {"a_only": 1, "b_only": 1,
                 "null_keys": {"a": 1, "b": 1},
-                "matching": 3, "non_matching": 2, "total": 7},
+                "matching": 3, "non_matching": 2,
+                "a_total": 8, "b_total": 9, "total": 7},
                "totals at key grain with null_keys visible")
             f = {x["field"]: x for x in out["fields"]}
             need(f["txt"]["non_matching"] == 2
@@ -18864,7 +18865,7 @@ def backend_tests(datadir, csv_path, json_path):
             eq(one["totals"],
                {"a_only": 1, "b_only": 1,
                 "null_keys": {"a": 1, "b": 1}, "matching": 1,
-                "non_matching": 1, "total": 4},
+                "non_matching": 1, "a_total": 5, "b_total": 4, "total": 4},
                "hand-computed totals (dup keys deduped; the "
                "NULL-key-on-both-sides row lands in NO bucket -- "
                ".452: and is counted under null_keys)")
@@ -34764,6 +34765,40 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_identical_refetch_keeps_epoch():
+        # A source re-fetch that returns identical content is NOT a catalog
+        # mutation. Run/chart/seed re-fetches of a volatile source used to
+        # bump the epoch every time, and the next catalog poll pruned the
+        # very previews the run had just produced (chart flash, then "No
+        # cached results" on every node).
+        s = Session()
+        try:
+            if not s.optional_features().get("duckdb"):
+                return
+            content = [("a", 1), ("b", 2)]
+            s._load_hidden_columns_rows(
+                "n1", "__nbapi_", ["c", "v"], content, "t")
+            e1 = s._data_epoch
+            s._load_hidden_columns_rows(
+                "n1", "__nbapi_", ["c", "v"], content, "t")
+            eq(s._data_epoch, e1,
+               "identical re-fetch does not bump the data epoch")
+            s._load_hidden_columns_rows(
+                "n1", "__nbapi_", ["c", "v"], content + [("c", 3)], "t")
+            eq(s._data_epoch, e1 + 1,
+               "changed content still bumps the data epoch")
+            # A change confined to a LATER column (same row count, same first
+            # column) must still bump: the content signature has to cover every
+            # column, not just the first, or a stale preview survives.
+            e2 = s._data_epoch
+            s._load_hidden_columns_rows(
+                "n1", "__nbapi_", ["c", "v"], [("a", 1), ("b", 2), ("c", 999)],
+                "t")
+            eq(s._data_epoch, e2 + 1,
+               "a change in a non-first column still bumps the epoch")
+        finally:
+            s.shutdown()
+
     def t_server_main_boots():
         # The real server main() boots end-to-end and serves health. A crash
         # in the post-bind startup path (sweeps, warm, banner) is invisible
@@ -41511,6 +41546,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_node_freeze_and_engine_mode),
         ("server main() boots end-to-end (startup crash smoke)",
          t_server_main_boots),
+        ("identical source re-fetch keeps the data epoch",
+         t_identical_refetch_keeps_epoch),
         ("shared-subgraph materialisation (computed once across targets)",
          t_shared_subgraph),
         ("join modes (inner / left / semi / anti)", t_join_modes),

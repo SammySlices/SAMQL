@@ -15226,6 +15226,12 @@ class Session:
             "b": _count(f"SELECT COUNT(*) FROM {q(right)} "
                         f"WHERE {_anyn_b}"),
         }
+        # Per-side record counts for the report header (the old lump "Total
+        # records" tile hid which side the rows came from).
+        side_totals = {
+            "a": _count(f"SELECT COUNT(*) FROM {q(left)}"),
+            "b": _count(f"SELECT COUNT(*) FROM {q(right)}"),
+        }
         out = {
             "engine": engine_kind,
             "keys": keys,
@@ -15234,6 +15240,7 @@ class Session:
                 "a_only": a_only, "b_only": b_only,
                 "null_keys": null_keys,
                 "matching": row_match, "non_matching": row_nonmatch,
+                "a_total": side_totals["a"], "b_total": side_totals["b"],
                 "total": a_only + b_only + matched,
             },
             "fields": fields,
@@ -16031,11 +16038,64 @@ class Session:
                 pass
         self._api_node_tables.pop(node_id, None)
 
+    def _content_sig(self, eng, table):
+        """Whole-table content signature for change detection (DuckDB only).
+
+        A row count plus an order-independent hash over every column -- two
+        pulls of the same remote data compare equal, so an identical re-fetch
+        need not count as a catalog mutation. None when uncomputable (non-
+        DuckDB engine / missing table), which callers treat as 'changed'.
+        """
+        try:
+            if eng is None or getattr(eng, "ENGINE_KIND", None) != "duckdb":
+                return None
+            _c, rows = eng.execute(
+                'SELECT COUNT(*) AS n, SUM(hash(COLUMNS(*))) AS h '
+                'FROM "%s"' % table)
+            if rows and rows[0]:
+                # COLUMNS(*) expands to one hash-sum PER column, so the row is
+                # (count, sum_hash_col1, sum_hash_col2, ...). Key on the WHOLE
+                # row -- taking rows[0][1] alone would miss a change confined to
+                # a later column and wrongly treat the re-fetch as identical,
+                # leaving a stale preview on screen (latest-data-wins broken).
+                return tuple(rows[0])
+        except Exception:
+            pass
+        return None
+
+    def _unbump_if_identical_refetch(self, old_sig, eng, table):
+        """Undo the epoch bump an import just made when the re-fetched table
+        is content-identical to the one it replaced. A fetch that returns the
+        same remote data is not a catalog mutation -- without this, every Run
+        of a volatile-source flow bumps the epoch (and each chart/seed
+        re-fetch bumps it AGAIN), and the next catalog poll prunes the very
+        previews the run just produced."""
+        if old_sig is None:
+            return
+        new_sig = self._content_sig(eng, table)
+        if new_sig is None or new_sig != old_sig:
+            return
+        try:
+            with self._epoch_lock:
+                if getattr(self, "_data_epoch", 0) > 0:
+                    self._data_epoch -= 1
+        except Exception:
+            pass
+
     def _load_hidden_columns_rows(self, node_id, prefix, columns, rows,
                                   source_label, query_id=None):
         """Materialize columns/rows into a hidden ``__…`` table for source nodes."""
         import hashlib
         from .engines import HAS_DUCKDB
+        # Content-signature of the table this load replaces (if any): an
+        # identical re-pull must not bump the data epoch (see
+        # _unbump_if_identical_refetch).
+        _prev = self._api_node_tables.get(node_id) or {}
+        _old_sig = (
+            self._content_sig(
+                self.duckdb if _prev.get("engine") == "duckdb" else self.db,
+                _prev.get("table"))
+            if _prev.get("table") else None)
         self._drop_hidden_source_table(node_id)
         base = prefix + hashlib.md5(str(node_id).encode("utf-8")).hexdigest()[:10]
         cols = [str(c) for c in (columns or [])]
@@ -16074,6 +16134,7 @@ class Session:
             "engine": engine, "name": tname, "rows": n,
         }])
         eng = self.duckdb if engine == "duckdb" else self.db
+        self._unbump_if_identical_refetch(_old_sig, eng, tname)
         col_now = list((getattr(eng, "table_columns", {}) or {}).get(tname) or cols)
         return {
             "ok": True,
@@ -16245,10 +16306,24 @@ class Session:
         import hashlib
         base = "__nbsql_" + hashlib.md5(
             str(node_id).encode("utf-8")).hexdigest()[:10]
+        # Content-signature of the table this fetch replaces (if any): an
+        # identical re-pull must not bump the data epoch (see
+        # _unbump_if_identical_refetch).
+        _prev = self._api_node_tables.get(node_id) or {}
+        _old_sig = (
+            self._content_sig(
+                self.duckdb if _prev.get("engine") == "duckdb" else self.db,
+                _prev.get("table"))
+            if _prev.get("table") else None)
         self._drop_hidden_source_table(node_id)
         res = self.import_from_connection(
             conn_name, query, base_name=base, destination="duckdb",
             query_id=query_id)
+        if res.get("table"):
+            self._unbump_if_identical_refetch(
+                _old_sig,
+                self.duckdb if res.get("engine") == "duckdb" else self.db,
+                res.get("table"))
         # Restore the shared connection's previous database (see above) --
         # before any return, success or failure.
         if prev_db:

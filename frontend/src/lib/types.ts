@@ -403,6 +403,8 @@ export interface ReconcileTotals {
   b_only: number;
   matching: number;
   non_matching: number;
+  a_total: number;
+  b_total: number;
   total: number;
 }
 
