@@ -540,6 +540,12 @@ export function useNodeFlowExecutionController({
         // used -- otherwise downstream previews show the variable's static
         // value (a params-run's whole point is the typed value).
         lastRunParamsRef.current,
+        // This seed pass runs immediately after the Run all that just fetched
+        // every connector (SQL Server / SharePoint / Web scrape). Reuse those
+        // freshly-materialised tables instead of a second remote round-trip,
+        // so a slow source is not re-pulled in the background after results
+        // already showed.
+        true,
       );
       if (
         cancelRequested.current ||
@@ -1403,7 +1409,11 @@ export function useNodeFlowExecutionController({
     else delete sc[name];
     patchStyle(node, "seriesColors", Object.keys(sc).length ? sc : undefined);
   };
-  const ensureChartFor = (node: NbNode | null, force = false): Promise<void> => {
+  const ensureChartFor = (
+    node: NbNode | null,
+    force = false,
+    reuseSources = false,
+  ): Promise<void> => {
     if (!node || node.type !== "chart") return Promise.resolve();
     const key = `chart:${node.id}`;
     // Signature of everything that affects the fetched/rendered chart data, so a
@@ -1445,6 +1455,9 @@ export function useNodeFlowExecutionController({
           owner.controller.signal,
           // Hydrate with the same variable overrides the last run used.
           lastRunParamsRef.current,
+          // Post-run hydration reuses the connector tables the run just
+          // materialised (no second remote fetch in the background).
+          reuseSources,
         );
         if (!isAuxRequestCurrent(owner)) return;
         if (wasCancelled(r) || !!r.cancelled) {
@@ -2588,11 +2601,13 @@ export function useNodeFlowExecutionController({
       for (const n of runNodes) {
         if (!closure.has(n.id) || !nodeShowsBody(n)) continue;
         if (n.type === "chart") {
-          void ensureChartFor(n, true);
+          // reuseSources: this hydration follows the Run all that just fetched
+          // the chain's connectors — reuse those tables, don't re-pull.
+          void ensureChartFor(n, true, true);
         } else if (n.type === "dashboard") {
           (n.config.panes || ["in1", "in2", "in3", "in4"]).forEach(
             (port: string) =>
-              void ensureChartFor(upstreamChartNode(n, port), true),
+              void ensureChartFor(upstreamChartNode(n, port), true, true),
           );
         }
       }

@@ -1984,6 +1984,7 @@ export const api = {
     preview = false,
     previewLimit?: number,
     params?: Record<string, string>,
+    reuseSources = false,
   ) =>
     jsonFetch<{
       ok?: boolean;
@@ -2013,6 +2014,9 @@ export const api = {
         preview_limit: previewLimit,
         // Run-time workflow-variable overrides ("Ask at run" rows).
         ...(params ? { params } : {}),
+        // Post-run seed pass: reuse the connector tables the run just
+        // materialised instead of a second remote fetch.
+        ...(reuseSources ? { reuse_fetched_sources: true } : {}),
       }),
     }),
   nodeflowColumns: (graph: unknown, node: string, port: string) =>
@@ -2045,6 +2049,7 @@ export const api = {
     queryId?: string,
     signal?: AbortSignal,
     params?: Record<string, string>,
+    reuseSources = false,
   ) =>
     jsonFetch<ChartData & { error?: string; cancelled?: boolean }>(
       "/api/nodeflow/chart",
@@ -2054,6 +2059,9 @@ export const api = {
         body: JSON.stringify({
           graph, node, spec, query_id: queryId,
           ...(params ? { params } : {}),
+          // Post-run chart hydration: reuse the connector tables the run just
+          // materialised instead of a second remote fetch.
+          ...(reuseSources ? { reuse_fetched_sources: true } : {}),
         }),
       },
     ),

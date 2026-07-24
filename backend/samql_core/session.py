@@ -942,6 +942,12 @@ class Session:
         # an optional injected fetcher (fetch_json's signature) used instead of
         # the network -- the seam tests and the iterator drive the node through.
         self._api_node_tables = {}
+        # Run ids (query ids) whose connector sources should be REUSED from
+        # their last materialisation rather than re-fetched. Set by the
+        # post-run seed + chart-hydration passes -- derived views of a run that
+        # just fetched -- so a slow SQL Server / SharePoint / Web scrape pull is
+        # not repeated in the background after the node's results have shown.
+        self._reuse_source_runs = set()
         self._api_fetcher = None
         # optional injected streaming spooler (fetch_to_file's signature):
         # used instead of the network so the spool-to-disk path is testable.
@@ -4806,40 +4812,49 @@ class Session:
         return out
 
     def run_nodeflow_chart(self, graph, node_id, spec, query_id=None,
-                           params=None):
+                           params=None, reuse_fetched_sources=False):
         """Materialise a chart node's input and build a chart from it (reusing
         chart_data), returning ChartData for the canvas to render. ``params``
         overrides workflow-variable values for this build (a Run-all with
-        promoted parameters must hydrate the chart with the SAME values)."""
+        promoted parameters must hydrate the chart with the SAME values).
+        ``reuse_fetched_sources`` reuses a connector's last-materialised table
+        instead of re-fetching -- the post-run chart hydration is a derived
+        view of a run that just fetched, so no second remote pull is needed."""
         from . import nodeflow
         created = []
         et = LOCAL_TARGET
+        reuse_marked = self._mark_reuse_sources(
+            query_id, reuse_fetched_sources)
         try:
-            et = self._flow_engine_target(graph)
-            sn, sp = nodeflow.upstream(graph, node_id, "in")
-            if sn is None:
-                return {"error": "Connect an input to the chart node."}
-            eng0, _k0 = self._engine_obj(et)
-            self._register_run(
-                query_id, eng0, surface="node",
-                label=self._flow_node_label(graph, node_id))
-            tmp = self._materialize_flow(graph, sn, sp, et, created,
-                                         query_id=query_id,
-                                         var_overrides=params)
-            et = getattr(self, "_flow_build_target", et)
-        except Exception as e:
+            try:
+                et = self._flow_engine_target(graph)
+                sn, sp = nodeflow.upstream(graph, node_id, "in")
+                if sn is None:
+                    return {"error": "Connect an input to the chart node."}
+                eng0, _k0 = self._engine_obj(et)
+                self._register_run(
+                    query_id, eng0, surface="node",
+                    label=self._flow_node_label(graph, node_id))
+                tmp = self._materialize_flow(graph, sn, sp, et, created,
+                                             query_id=query_id,
+                                             var_overrides=params)
+                et = getattr(self, "_flow_build_target", et)
+            except Exception as e:
+                self._flow_cleanup(query_id, et, created)
+                return self._flow_exc(e)
+            eng, kind = self._engine_obj(et)
+            cs = dict(spec or {})
+            cs.pop("result_id", None)
+            cs["table"] = tmp
+            cs["engine"] = kind
+            if query_id:
+                cs["query_id"] = query_id
+            out = self.chart_data(cs)
             self._flow_cleanup(query_id, et, created)
-            return self._flow_exc(e)
-        eng, kind = self._engine_obj(et)
-        cs = dict(spec or {})
-        cs.pop("result_id", None)
-        cs["table"] = tmp
-        cs["engine"] = kind
-        if query_id:
-            cs["query_id"] = query_id
-        out = self.chart_data(cs)
-        self._flow_cleanup(query_id, et, created)
-        return out
+            return out
+        finally:
+            if reuse_marked:
+                self._unmark_reuse_sources(query_id)
 
     def run_nodeflow_reconcile(self, graph, node_id, keys, compare=None,
                                balance=None, query_id=None):
@@ -6273,7 +6288,8 @@ class Session:
         return res
 
     def run_nodeflows(self, graph, requests, query_id=None,
-                      preview=False, preview_limit=None, params=None):
+                      preview=False, preview_limit=None, params=None,
+                      reuse_fetched_sources=False):
         """Run several NodeFlow terminals in one materialisation pass.
 
         Independent DuckDB branches are scheduled on separate child
@@ -6281,6 +6297,9 @@ class Session:
         shared work is still computed once.  Each result is returned in the
         ordinary pageable query envelope, tagged with its node and port.
         ``params`` overrides workflow-variable values for the whole batch.
+        ``reuse_fetched_sources`` reuses a connector's last-materialised table
+        instead of re-fetching (the post-run seed pass -- a derived view of a
+        run that just fetched, so no second remote round-trip is needed).
         """
         from . import nodeflow
         norm = []
@@ -6313,6 +6332,10 @@ class Session:
                   if preview_limit else None)
         created = []
         et = LOCAL_TARGET
+        # Reuse just-materialised connector sources for the post-run seed pass
+        # (marked here, cleared in finally). No-op unless the caller opted in.
+        reuse_marked = self._mark_reuse_sources(
+            query_id, reuse_fetched_sources)
         try:
             et = self._flow_engine_target(graph)
             eng, _kind = self._engine_obj(et)
@@ -6396,6 +6419,8 @@ class Session:
                 _iter_missing_accum_hint(err_str(e), graph),
                 getattr(self, "duckdb", None))}
         finally:
+            if reuse_marked:
+                self._unmark_reuse_sources(query_id)
             self._flow_cleanup(query_id, et, created)
 
     def _stream_relation_to_file(self, eng, sql, path, fmt, batch=10000):
@@ -7194,18 +7219,70 @@ class Session:
             uniq.append(n)
         return uniq
 
+    def _mark_reuse_sources(self, query_id, enabled):
+        """Flag a run so :meth:`_ensure_source_nodes_fetched` reuses the tables
+        an immediately-preceding run already materialised for its connector
+        sources (SQL Server / SharePoint / Web scrape / API) instead of a
+        second network fetch. Used by the post-run seed + chart-hydration
+        passes. Returns True when the flag was set, so the caller clears
+        exactly what it set."""
+        if not (enabled and query_id):
+            return False
+        with self._running_lock:
+            self._reuse_source_runs.add(query_id)
+        return True
+
+    def _unmark_reuse_sources(self, query_id):
+        """Clear a reuse flag set by :meth:`_mark_reuse_sources`."""
+        if not query_id:
+            return
+        with self._running_lock:
+            self._reuse_source_runs.discard(query_id)
+
+    def _reuse_materialized_source(self, node_id):
+        """The table a connector source last materialised into, IF it still
+        exists in its engine -- ``{table, engine, columns}`` or ``None`` (never
+        fetched, or an engine reset dropped it). Lets the post-run seed / chart
+        passes reuse a run's own fetch rather than hitting the remote source a
+        second time."""
+        rec = self._api_node_tables.get(node_id) or {}
+        tname = (rec.get("table") or "").strip()
+        if not tname:
+            return None
+        engine = rec.get("engine") or "duckdb"
+        eng = self.duckdb if engine == "duckdb" else self.db
+        if eng is None:
+            return None
+        tcols = getattr(eng, "table_columns", {}) or {}
+        if tname not in tcols:
+            return None
+        return {"table": tname, "engine": engine,
+                "columns": list(tcols.get(tname) or [])}
+
     def _ensure_source_nodes_fetched(self, graph, start_nodes, query_id=None,
                                      skip_ids=None):
         """Fetch upstream SQL Server / SharePoint / Web scrape nodes in place
         so ``config.table`` is set before compile. Mutates ``graph`` node
         configs. ``skip_ids`` (frozen-hit sources) are left untouched this
-        run. Raises ``nodeflow.NodeflowError`` on failure."""
+        run. Raises ``nodeflow.NodeflowError`` on failure.
+
+        When the run is flagged for source reuse (the seed + chart passes that
+        follow a Run all -- see :meth:`_mark_reuse_sources`), a connector whose
+        table the just-finished run already materialised is reused in place of a
+        fresh fetch. Those passes are derived views of that run, so the freshest
+        data is already on disk; re-fetching only repeats a slow remote pull in
+        the background after the results have shown (and can stall). A connector
+        with nothing materialised falls back to a real fetch."""
         from . import nodeflow
         sources = self._volatile_source_nodes_upstream(graph, start_nodes)
         if skip_ids:
             sources = [n for n in sources if n.get("id") not in skip_ids]
         if not sources:
             return
+        reuse = False
+        if query_id:
+            with self._running_lock:
+                reuse = query_id in self._reuse_source_runs
         # Index every node (including nested children) for config patches.
         by_id = {}
 
@@ -7226,6 +7303,18 @@ class Session:
             typ = n.get("type")
             cfg = dict(n.get("config") or {})
             label = (cfg.get("label") or typ or "source")
+            if reuse:
+                reused = self._reuse_materialized_source(nid)
+                if reused is not None:
+                    live = by_id.get(nid) or n
+                    live_cfg = dict(live.get("config") or {})
+                    live_cfg["table"] = reused.get("table") or ""
+                    if reused.get("engine"):
+                        live_cfg["engine"] = reused.get("engine")
+                    if reused.get("columns") is not None:
+                        live_cfg["columns"] = reused.get("columns")
+                    live["config"] = live_cfg
+                    continue
             fr = self.fetch_source_node(
                 typ, nid, cfg, graph=graph, query_id=query_id)
             if fr.get("cancelled"):

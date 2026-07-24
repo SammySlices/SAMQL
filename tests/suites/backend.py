@@ -2666,6 +2666,93 @@ def backend_tests(datadir, csv_path, json_path):
                 pass
             _sh.rmtree(d, ignore_errors=True)
 
+    def t_nodeflow_seed_reuses_connector_no_refetch():
+        # Regression: after a Run all fetched a SQL Server (or other connector)
+        # source and showed results, the post-run seed + chart passes re-ran the
+        # graph and RE-FETCHED the remote source every time -- so the Activity
+        # panel kept showing a SQL Server pull running in the background after
+        # the node's results had already landed (and a slow server could stall
+        # there). The seed/chart passes now REUSE the table the run just
+        # materialised (reuse_fetched_sources) instead of a second round-trip,
+        # while a plain rerun still re-fetches (latest-data-wins).
+        from samql_core.session import Session
+
+        class FakeSql:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, sql):
+                self.calls += 1
+                return (["id", "region"], [(1, "East"), (2, "West")])
+
+            def execute_cursor(self, sql, batch=1000):
+                cols, rows = self.execute(sql)
+                return cols, rows, None
+
+            def interrupt(self):
+                pass
+
+        s = Session()
+        try:
+            conn = FakeSql()
+            s.connections["fakesql"] = conn
+            g = {"nodes": [
+                {"id": "src", "type": "sqlserver",
+                 "config": {"connection": "fakesql",
+                            "query": "SELECT id, region FROM t"}}],
+                 "edges": []}
+            req = [{"node": "src", "port": "out"}]
+
+            # Main run: fetches the source once and materialises its table.
+            r1 = s.run_nodeflows(g, req, query_id="seed-main", preview=True)
+            need(not r1.get("error"), "main run: %s" % r1.get("error"))
+            eq(conn.calls, 1, "main run fetches the SQL Server source once")
+            rec = s._api_node_tables.get("src") or {}
+            need(bool(rec.get("table")),
+                 "the fetch records a materialised table for the node")
+
+            # A plain rerun (no reuse flag) still re-fetches -- proving the flag,
+            # not incidental caching, is what suppresses the extra round-trip.
+            r2 = s.run_nodeflows(g, req, query_id="seed-again", preview=True)
+            need(not r2.get("error"), "second run: %s" % r2.get("error"))
+            eq(conn.calls, 2, "a normal rerun re-fetches (latest-data-wins)")
+
+            # The post-run seed pass reuses the just-materialised table: NO third
+            # fetch, and it still returns the run's rows.
+            r3 = s.run_nodeflows(g, req, query_id="seed-reuse", preview=True,
+                                 reuse_fetched_sources=True)
+            need(not r3.get("error"), "reuse seed: %s" % r3.get("error"))
+            eq(conn.calls, 2,
+               "the seed pass reuses the fetched table (no background re-fetch)")
+            rows3 = ((r3.get("results") or [{}])[0].get("rows")) or []
+            eq(len(rows3), 2, "reused seed still returns the run's rows")
+
+            # A chart hydration pass reuses it too (still no extra fetch).
+            gc = {"nodes": [
+                {"id": "src", "type": "sqlserver",
+                 "config": {"connection": "fakesql",
+                            "query": "SELECT id, region FROM t"}},
+                {"id": "ch", "type": "chart",
+                 "config": {"x": "region", "y": "id", "agg": "count"}}],
+                 "edges": [{"from": {"node": "src", "port": "out"},
+                            "to": {"node": "ch", "port": "in"}}]}
+            rc = s.run_nodeflow_chart(
+                gc, "ch", {"chart_type": "bar", "x": "region", "y": "id",
+                           "agg": "count"},
+                query_id="chart-reuse", reuse_fetched_sources=True)
+            need(not rc.get("error"), "reuse chart: %s" % rc.get("error"))
+            eq(conn.calls, 2,
+               "the chart hydration reuses the fetched table (no re-fetch)")
+
+            # The reuse flag is per-run and cleared once the pass ends.
+            need(not s._reuse_source_runs,
+                 "reuse flag is cleared after the seed/chart passes")
+        finally:
+            try:
+                s.shutdown()
+            except Exception:
+                pass
+
     def t_input_signature_recheck_and_fresh_run():
         # NodeFlow Input recheck on run: replace in place + clear last-run.
         # Optional fresh_run skips volatile hits between unchanged runs.
@@ -42413,6 +42500,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_uniquify_origin_watch_fresh_reload),
         ("latest-data: watcher clears IDE/Journal/NodeFlow last-run",
          t_watcher_clears_last_run_ide_journal_nodeflow),
+        ("nodeflow: post-run seed/chart reuse connector fetch (no re-pull)",
+         t_nodeflow_seed_reuses_connector_no_refetch),
         ("latest-data: Input recheck in-place + Fresh run skips cache",
          t_input_signature_recheck_and_fresh_run),
         ("latest-data: origin reload error surfaced (not silent)",

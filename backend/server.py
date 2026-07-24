@@ -4067,7 +4067,8 @@ class Api:
         return s.run_nodeflows(
             graph, b.get("requests") or [],
             query_id=b.get("query_id"), preview=bool(b.get("preview")),
-            preview_limit=b.get("preview_limit"), params=b.get("params"))
+            preview_limit=b.get("preview_limit"), params=b.get("params"),
+            reuse_fetched_sources=bool(b.get("reuse_fetched_sources")))
 
     @staticmethod
     def nodeflow_columns(s, m, body, ctx):
@@ -4088,7 +4089,9 @@ class Api:
         graph = b.get("graph") or {}
         return s.run_nodeflow_chart(graph, b.get("node"), b.get("spec") or {},
                                     query_id=b.get("query_id"),
-                                    params=b.get("params"))
+                                    params=b.get("params"),
+                                    reuse_fetched_sources=bool(
+                                        b.get("reuse_fetched_sources")))
 
     @staticmethod
     def nodeflow_browse(s, m, body, ctx):
