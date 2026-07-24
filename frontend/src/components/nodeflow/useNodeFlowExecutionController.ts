@@ -58,16 +58,18 @@ export const NODEFLOW_SOURCE_TYPES = new Set([
 ]);
 
 /**
- * Connector sources. They materialize via Fetch, so they are NOT bare Run-all
- * leaves. But once a Fetch has set ``config.table`` they are peekable: compile
- * resolves them to their materialized table, and the backend re-fetches
- * SQL Server / SharePoint / Web scrape on every run (latest-data-wins), so a
- * peek returns CURRENT data rather than a retained result.
+ * Connector sources. They materialize via Fetch, so an UNFETCHED connector is
+ * not a Run-all leaf. But once a Fetch has set ``config.table`` they are
+ * peekable AND runnable: compile resolves them to their materialized table,
+ * and the backend re-fetches SQL Server / SharePoint / Web scrape on every
+ * run (latest-data-wins), so both a peek and a Run-all leaf return CURRENT
+ * data rather than a retained result.
  *
  * Without this, a fetched connector was a dead end: the fetch's own result
  * patch invalidated its preview, the drawer refused to peek ("No cached
- * results — use Run all"), and Run all skipped it too — so freshly fetched
- * rows appeared and then vanished with no way to get them back.
+ * results — use Run all"), and Run all skipped it too ("Nothing to run") —
+ * so freshly fetched rows appeared and then vanished with no way to get
+ * them back.
  */
 export const NODEFLOW_CONNECTOR_TYPES = new Set([
   "apinode",
@@ -2297,7 +2299,7 @@ export function useNodeFlowExecutionController({
           (PORTS[n.type]?.outputs?.length || 0) > 0 &&
           !hasOut(n) &&
           !SKIP_LEAF.has(n.type) &&
-          (hasIn(n) || SOURCES.has(n.type)),
+          (hasIn(n) || SOURCES.has(n.type) || connectorMayPeek(n)),
       );
     }
 

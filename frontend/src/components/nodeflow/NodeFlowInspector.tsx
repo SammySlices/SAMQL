@@ -503,6 +503,31 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   </button>
                 </span>
                 <span className="nb2-insp-head-actions">
+                  {(PORTS[sel.type]?.outputs?.length || 0) > 0 && (
+                    <button
+                      className={
+                        "btn ghost icon nb2-freeze-btn" +
+                        (sel.config.frozen ? " on" : "")
+                      }
+                      data-testid="node-freeze-toggle"
+                      onClick={() =>
+                        patch(sel.id, { frozen: !sel.config.frozen })
+                      }
+                      title={
+                        sel.config.frozen
+                          ? "Frozen — output pinned; runs reuse it until config changes. Click to unfreeze."
+                          : "Freeze output — pin this node's output; later runs reuse it until config changes."
+                      }
+                      aria-label={
+                        sel.config.frozen
+                          ? "Unfreeze node"
+                          : "Freeze node"
+                      }
+                      aria-pressed={!!sel.config.frozen}
+                    >
+                      ❄
+                    </button>
+                  )}
                   <button
                     className="btn ghost icon danger"
                     onClick={() => removeNode(sel.id)}
@@ -518,21 +543,6 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                 value={sel.config.label || ""}
                 onChange={(e) => patch(sel.id, { label: e.target.value })}
               />
-
-              {(PORTS[sel.type]?.outputs?.length || 0) > 0 && (
-                <label className="nb2-chk" data-testid="node-freeze-row">
-                  <input
-                    type="checkbox"
-                    data-testid="node-freeze-toggle"
-                    checked={!!sel.config.frozen}
-                    onChange={(e) =>
-                      patch(sel.id, { frozen: e.target.checked })
-                    }
-                  />{" "}
-                  Freeze output (skip recompute on later runs until this node
-                  or its upstream config changes)
-                </label>
-              )}
 
               {childSelCtx && (
                 <div className="nb2-note nb2-childcrumb">

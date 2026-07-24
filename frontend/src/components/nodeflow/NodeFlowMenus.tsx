@@ -37,6 +37,12 @@ interface NodeFlowMenusProps {
   pasteClipboard: (at?: { x: number; y: number }) => void;
   deleteMany: (ids: string[]) => void;
   removeNode: (id: string) => void;
+  /** Batch-pin/unpin outputs (skip recompute on later runs). */
+  setFrozenMany?: (ids: string[], frozen: boolean) => void;
+  /** How many of the menu's target nodes are currently frozen. */
+  frozenSelectedCount?: number;
+  /** At least one target node produces output (can be frozen). */
+  canFreeze?: boolean;
   canOpenCreatedNode?: boolean;
   onOpenCreatedNode?: () => void;
   deleteConfirm: DeleteConfirmState | null;
@@ -62,6 +68,9 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
   pasteClipboard,
   deleteMany,
   removeNode,
+  setFrozenMany,
+  frozenSelectedCount,
+  canFreeze,
   canOpenCreatedNode,
   onOpenCreatedNode,
   deleteConfirm,
@@ -182,6 +191,34 @@ export const NodeFlowMenus = React.memo(function NodeFlowMenus({
                     <Icon.Plus size={13} /> Paste
                   </button>
                   <div className="sep" />
+                  {canFreeze && setFrozenMany && (
+                    <button
+                      data-testid="node-menu-freeze"
+                      title={
+                        (frozenSelectedCount || 0) >= count
+                          ? "Unfreeze — recompute on the next run"
+                          : "Freeze — pin this output; later runs reuse it until config changes"
+                      }
+                      onClick={() => {
+                        const unfreeze =
+                          (frozenSelectedCount || 0) >= count;
+                        setFrozenMany(
+                          multi ? selectedIds.slice() : [nodeMenu.id],
+                          !unfreeze,
+                        );
+                        setNodeMenu(null);
+                      }}
+                    >
+                      ❄{" "}
+                      {(frozenSelectedCount || 0) >= count
+                        ? multi
+                          ? `Unfreeze ${count} nodes`
+                          : "Unfreeze node"
+                        : multi
+                          ? `Freeze ${count} nodes`
+                          : "Freeze node"}
+                    </button>
+                  )}
                   <button
                     className="danger"
                     onClick={() => {

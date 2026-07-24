@@ -6717,6 +6717,11 @@ button.nb2-sphere-container-toggle:focus-visible {
   padding: 0 2px;
 }
 .nb2-node-freeze:hover { color: var(--text); }
+
+/* freeze toggle in the inspector head (next to Delete): active = pinned */
+.nb2-freeze-btn { color: var(--text-dim); }
+.nb2-freeze-btn.on { color: var(--accent); }
+.nb2-freeze-btn:hover { color: var(--text); }
 /* a bypassed node is dimmed + dashed so it reads as "passing through" */
 .nb2-node.bypassed {
   opacity: 0.62;

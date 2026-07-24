@@ -2170,4 +2170,78 @@ describe("leafRunPort / Filter leaf Run all", () => {
       expect(run.mock.calls[0][2]).toBe("out");
     }
   });
+
+  it("Run all treats a FETCHED connector as a runnable leaf", async () => {
+    // A fetched SQL Server node (config.table stamped) runs as a Run-all
+    // leaf -- the backend re-fetches on run, so the result is current data.
+    // An UNFETCHED connector still shows "Nothing to run" (press Fetch).
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["x"],
+      rows: [[1]],
+      total_rows: 1,
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+
+    for (const fetched of [true, false] as const) {
+      run.mockClear();
+      const toast = vi.fn();
+      const n: NbNode = {
+        id: "lone-sql",
+        type: "sqlserver",
+        x: 0,
+        y: 0,
+        config: fetched
+          ? { label: "SQL", table: "__nbsql_abc", query: "SELECT 1" }
+          : { label: "SQL", query: "SELECT 1" },
+      };
+      const liveRef: React.MutableRefObject<{
+        nodes: NbNode[];
+        edges: NbEdge[];
+      }> = { current: { nodes: [n], edges: [] } };
+      const { result, unmount } = renderHook(() =>
+        useNodeFlowExecutionController({
+          activeTabId: `tab-sql-${fetched}`,
+          nodes: [n],
+          edges: [],
+          liveRef,
+          graphSig: `graph-sql-${fetched}`,
+          dataEpoch: 1,
+          graphForApi: () => ({ nodes: [n], edges: [] }),
+          graphForRun: () => ({ nodes: [n], edges: [] }),
+          childCtx: () => null,
+          partialGroupGraph: () => ({ nodes: [], edges: [] }),
+          patch: vi.fn(),
+          setNodes: vi.fn(),
+          setNodeErrors: vi.fn(),
+          setNodeWarnings: vi.fn(),
+          onToast: toast,
+          fireRipple: vi.fn(),
+        }),
+      );
+
+      await act(async () => {
+        await result.current.runAll();
+      });
+
+      if (fetched) {
+        expect(toast).not.toHaveBeenCalledWith(
+          "warn",
+          "Nothing to run",
+          expect.anything(),
+        );
+        expect(run).toHaveBeenCalled();
+        expect(run.mock.calls[0][1]).toBe(n.id);
+        expect(run.mock.calls[0][2]).toBe("out");
+      } else {
+        expect(toast).toHaveBeenCalledWith(
+          "warn",
+          "Nothing to run",
+          expect.anything(),
+        );
+      }
+      unmount();
+    }
+  });
 });

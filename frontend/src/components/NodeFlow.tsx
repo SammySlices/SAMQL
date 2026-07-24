@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  PORTS,
   nodeSpawnOrigin,
   type NbEdge,
   type NbNode,
@@ -800,6 +801,49 @@ export const NodeFlow: React.FC<{
         pasteClipboard={pasteClipboard}
         deleteMany={deleteMany}
         removeNode={removeNode}
+        setFrozenMany={(ids, frozen) => {
+          // Freeze/unfreeze in one batch; only output-producing nodes can
+          // pin (backend ignores the rest, so don't pollute their config).
+          for (const id of ids) {
+            const n =
+              nodes.find((x) => x.id === id) ||
+              findChildNode(nodes, id)?.child ||
+              null;
+            if (!n) continue;
+            if ((PORTS[n.type]?.outputs?.length || 0) < 1) continue;
+            patchNode(id, { frozen });
+          }
+        }}
+        frozenSelectedCount={(() => {
+          const target =
+            selIds.length > 1 && nodeMenu && selIds.includes(nodeMenu.id)
+              ? selIds
+              : nodeMenu
+                ? [nodeMenu.id]
+                : [];
+          return target.filter((id) => {
+            const n =
+              nodes.find((x) => x.id === id) ||
+              findChildNode(nodes, id)?.child ||
+              null;
+            return !!n?.config?.frozen;
+          }).length;
+        })()}
+        canFreeze={(() => {
+          const target =
+            selIds.length > 1 && nodeMenu && selIds.includes(nodeMenu.id)
+              ? selIds
+              : nodeMenu
+                ? [nodeMenu.id]
+                : [];
+          return target.some((id) => {
+            const n =
+              nodes.find((x) => x.id === id) ||
+              findChildNode(nodes, id)?.child ||
+              null;
+            return !!n && (PORTS[n.type]?.outputs?.length || 0) > 0;
+          });
+        })()}
         canOpenCreatedNode={(() => {
           if (!nodeMenu) return false;
           const top =
