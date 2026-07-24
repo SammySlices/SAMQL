@@ -105,10 +105,10 @@ function saveChrome(patch: StoredChrome) {
 }
 
 const KIND_COLOR: Record<string, string> = {
-  array: "#c98a2b",
-  "array-scalar": "#c98a2b",
-  struct: "#5b8def",
-  map: "#8a6ad6",
+  array: "var(--kind-array)",
+  "array-scalar": "var(--kind-array)",
+  struct: "var(--kind-struct)",
+  map: "var(--kind-map)",
 };
 
 /** Normalize opaque JSON extract paths to dotted nest paths for flatten.
@@ -464,7 +464,8 @@ export const FieldExplorer: React.FC<Props> = ({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !minimized) onClose();
+      // A Modal above this panel owns Escape (modal-backdrop is present).
+      if (e.key === "Escape" && !minimized && !document.querySelector(".modal-backdrop")) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -985,7 +986,7 @@ export const FieldExplorer: React.FC<Props> = ({
                 </div>
               )}
               {!previewBusy && previewErr && selectedFields.length <= 1 && (
-                <div className="fx-note" style={{ color: "#c44" }} data-testid="fx-preview-error">
+                <div className="fx-note" style={{ color: "var(--error-text)" }} data-testid="fx-preview-error">
                   Preview: {previewErr}
                 </div>
               )}
@@ -1016,7 +1017,7 @@ export const FieldExplorer: React.FC<Props> = ({
               {multiCompose?.error && (
                 <div
                   className="fx-note"
-                  style={{ color: "#c44" }}
+                  style={{ color: "var(--error-text)" }}
                   data-testid="fx-multi-error"
                 >
                   {multiCompose.error}

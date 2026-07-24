@@ -453,6 +453,21 @@ export const api = {
       "/api/settings/concurrent-reads",
       { method: "POST", body: JSON.stringify({ on }) },
     ),
+  // Engine preference: "dual" routes by table location (default); "duckdb"
+  // sends unpinned flows + table-less queries to DuckDB when it is installed.
+  getEngineMode: () =>
+    jsonFetch<{ engine_mode: "dual" | "duckdb"; duckdb_available: boolean }>(
+      "/api/settings/engine-mode",
+    ),
+  setEngineMode: (mode: "dual" | "duckdb") =>
+    jsonFetch<{
+      engine_mode: "dual" | "duckdb";
+      duckdb_available: boolean;
+      error?: string;
+    }>("/api/settings/engine-mode", {
+      method: "POST",
+      body: JSON.stringify({ engine_mode: mode }),
+    }),
   // Toggle "flatten JSON on load"; POST {on} sets it, returns resulting state.
   // Soft recovery: swap in fresh engines and rebuild loaded tables from the
   // manifest. Does not wipe journal/NodeFlow or reload the page.
@@ -1934,6 +1949,7 @@ export const api = {
     signal?: AbortSignal,
     preview = false,
     previewLimit?: number,
+    params?: Record<string, string>,
   ) =>
     jsonFetch<{
       columns?: string[];
@@ -1955,6 +1971,8 @@ export const api = {
         query_id: queryId,
         preview,
         preview_limit: previewLimit,
+        // Run-time workflow-variable overrides ("Ask at run" rows).
+        ...(params ? { params } : {}),
       }),
     }),
   nodeflowRunBatch: (
@@ -1964,6 +1982,7 @@ export const api = {
     signal?: AbortSignal,
     preview = false,
     previewLimit?: number,
+    params?: Record<string, string>,
   ) =>
     jsonFetch<{
       ok?: boolean;
@@ -1991,6 +2010,8 @@ export const api = {
         query_id: queryId,
         preview,
         preview_limit: previewLimit,
+        // Run-time workflow-variable overrides ("Ask at run" rows).
+        ...(params ? { params } : {}),
       }),
     }),
   nodeflowColumns: (graph: unknown, node: string, port: string) =>

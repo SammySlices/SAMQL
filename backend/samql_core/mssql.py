@@ -11,12 +11,14 @@ path as the local SQLite / DuckDB engines.
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 from contextlib import contextmanager
 
 from .rows import spill_rows
-from .sqlutil import split_sql_batches, classify_sql_statement
+from .sqlutil import (split_sql_batches, classify_sql_statement,
+                      split_statements)
 
 # ---- optional dependencies ------------------------------------------
 try:
@@ -34,6 +36,31 @@ if sys.platform == "win32":
         HAS_PYWIN32 = True
     except Exception:
         HAS_PYWIN32 = False
+
+
+_SESSION_CONTEXT_LEADERS = ("use", "set")
+
+
+def _batch_is_session_context_only(batch):
+    """True only when EVERY statement in ``batch`` is a bare USE/SET.
+
+    USE / SET change session context (current database, session options) and
+    write no data, so a read-only connection may run them. But
+    ``classify_sql_statement`` inspects only a batch's LEADING keyword, so a
+    single GO-batch such as ``SET NOCOUNT ON; DELETE FROM t`` would classify as
+    a write, lead with ``SET``, and -- if we bypassed on the head alone --
+    smuggle the DELETE past the read-only guard. Splitting the batch into
+    ``;``-separated statements (string/comment aware) and requiring every one to
+    lead with USE/SET closes that hole while keeping the legitimate
+    database-switch (``USE [db]``) working."""
+    stmts = [s for s in split_statements(batch) if s.strip()]
+    if not stmts:
+        return False
+    for s in stmts:
+        m = re.match(r"\s*([A-Za-z_]+)", s)
+        if not m or m.group(1).lower() not in _SESSION_CONTEXT_LEADERS:
+            return False
+    return True
 
 
 def odbc_drivers():
@@ -284,6 +311,16 @@ class SQLServerConnection:
         if self.read_only:
             for b in batches:
                 if classify_sql_statement(b) == "write":
+                    # USE / SET switch session context (current database,
+                    # session options) -- they write no DATA, so a read-only
+                    # connection permits them (this is exactly what the connect
+                    # form's read-only hint promises). But classify keys off the
+                    # LEADING keyword only, so bypassing on the batch head alone
+                    # would let a trailing write ride along, e.g.
+                    # "SET NOCOUNT ON; DELETE FROM t". Require EVERY statement in
+                    # the batch to be a bare USE/SET before allowing it through.
+                    if _batch_is_session_context_only(b):
+                        continue
                     head = b.strip().split(None, 1)[0][:14]
                     raise RuntimeError(
                         f'Read-only connection "{self.name}": blocked '

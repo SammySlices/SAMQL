@@ -791,6 +791,12 @@ class Session:
         # projection pushdown: source nodes read only the columns used
         # downstream. Can be disabled via config if ever suspect.
         self.project_pushdown = bool(self.config.get("project_pushdown", True))
+        # Engine preference: "dual" (default) routes each flow/query by where
+        # its tables live; "duckdb" sends every UNPINNED flow and table-less
+        # query to DuckDB when installed (a table that only exists on SQLite
+        # still forces SQLite -- preference, not relocation).
+        self.engine_mode = str(
+            self.config.get("engine_mode", "dual") or "dual").strip().lower()
         # Incremental flow cache: reuse a node's materialised output across
         # previews/runs when its subtree + projection + the data epoch are all
         # unchanged. Content-addressed (each cached table is named by its
@@ -912,6 +918,12 @@ class Session:
         self._flow_cache = self._flow_cache_registry.entries
         self._flow_cache_stats = self._flow_cache_registry.stats
         self._flow_cache_lock = self._flow_cache_registry.lock
+        # Frozen nodes (user-pinned outputs): (nid, port) -> {"fp", "table",
+        # "engine"}. Unlike the volatile flow cache these survive data-epoch
+        # bumps -- freezing is an explicit user choice, badged on the canvas,
+        # and only a subtree CONFIG change (fingerprint move), an engine
+        # recycle, or unfreezing recomputes the node.
+        self._frozen_flow_tables = {}
         self._data_epoch = 0
         # Serializes the epoch's read-modify-write: two concurrent mutations
         # (origin-watcher thread + a user write) must not lose an increment
@@ -1028,6 +1040,25 @@ class Session:
                     if pref is not None:
                         self.duckdb.concurrent_reads = bool(pref)
         return self.duckdb
+
+    def _duckdb_only(self):
+        """True when the engine preference routes unpinned work to DuckDB."""
+        return self.engine_mode == "duckdb" and HAS_DUCKDB
+
+    def set_engine_mode(self, mode):
+        """Set the engine preference at runtime and persist it: "dual"
+        (route by table location) or "duckdb" (unpinned flows and table-less
+        queries always run on DuckDB when installed)."""
+        mode = str(mode or "").strip().lower()
+        if mode not in ("dual", "duckdb"):
+            return {"error": "engine_mode must be 'dual' or 'duckdb'."}
+        self.engine_mode = mode
+        try:
+            self.config.set("engine_mode", mode)
+        except Exception:
+            pass
+        return {"ok": True, "engine_mode": mode,
+                "duckdb_available": bool(HAS_DUCKDB)}
 
     def set_flatten_json(self, on):
         """Toggle 'flatten JSON on load' at runtime and persist it.
@@ -2519,6 +2550,79 @@ class Session:
             return True
         except Exception:
             return False
+
+    def _frozen_node_map(self, graph, needed_map, engine_target, eng):
+        """(frozen_map, frozen_hits) for the graph's user-frozen nodes.
+
+        frozen_map: nid -> (preferred_port, epoch-constant subtree fp).
+        frozen_hits: nid -> still-live table from a previous run, usable
+        as-is (only a config/subtree edit, an engine recycle, or unfreezing
+        recomputes). Freezing is an explicit per-node user choice, so these
+        hits deliberately ignore the data epoch -- the canvas badge tells
+        the user the data is pinned.
+        """
+        from . import nodeflow
+        frozen_map, frozen_hits = {}, {}
+        try:
+            ff = nodeflow.flow_fingerprints(
+                graph, needed_map, 0,
+                "duckdb" if engine_target == DUCKDB_TARGET else "sqlite")
+        except Exception:
+            ff = {}
+        for n in (graph.get("nodes") or []):
+            cfg = n.get("config") or {}
+            nid = n.get("id")
+            if not cfg.get("frozen") or not nid:
+                continue
+            fp = ff.get(nid)
+            if not fp:
+                continue
+            prt = nodeflow._preferred_output_port(n.get("type"))
+            frozen_map[nid] = (prt, fp)
+            ent = self._frozen_flow_tables.get((nid, prt))
+            if (ent and ent.get("fp") == fp
+                    and ent.get("engine") == engine_target
+                    and self._table_exists(eng, ent.get("table"))):
+                frozen_hits[nid] = ent["table"]
+        return frozen_map, frozen_hits
+
+    def _frozen_source_skip(self, graph, targets, frozen_hits):
+        """Volatile source ids that need NOT be fetched this run: upstream
+        only of frozen-hit nodes (those subtrees are never rebuilt). A
+        source that also feeds a non-frozen branch is still fetched."""
+        if not frozen_hits:
+            return ()
+        block = set(frozen_hits)
+        back = {}
+        for e in (graph.get("edges") or []):
+            t = (e.get("to") or {}).get("node")
+            f = (e.get("from") or {}).get("node")
+            if t and f:
+                back.setdefault(t, []).append(f)
+        live, stack = set(), [n for n, _ in targets if n and n not in block]
+        while stack:
+            x = stack.pop()
+            if x in live:
+                continue
+            live.add(x)
+            stack.extend(p for p in back.get(x, ()) if p not in block)
+        skip = set()
+        for n in self._volatile_source_nodes_upstream(
+                graph, [x for x, _ in targets]):
+            if n.get("id") not in live:
+                skip.add(n.get("id"))
+        return skip
+
+    def _evict_frozen_tables(self, eng, cap=16):
+        """Bound the frozen-table registry; evict oldest (and drop their
+        tables) past ``cap`` entries."""
+        while len(self._frozen_flow_tables) > cap:
+            key, ent = next(iter(self._frozen_flow_tables.items()))
+            self._frozen_flow_tables.pop(key, None)
+            try:
+                eng.execute('DROP TABLE IF EXISTS "%s"' % ent.get("table"))
+            except Exception:
+                pass
 
     def _flow_cache_get(self, fp):
         return self._flow_cache_registry.get(fp)
@@ -4534,6 +4638,12 @@ class Session:
         materialises (which is far more expensive) when a pivot upstream means
         the columns are shaped at run time."""
         from . import nodeflow
+        # Resolve ${vars} like the batch probe does (lenient: an unfinished
+        # expression falls back to raw text rather than breaking the probe) --
+        # otherwise a node referencing a variable probes with the raw token
+        # and the inspector silently shows no columns for that step.
+        graph = applyvars.resolve_graph(
+            graph, evaluate=self._variable_expr_evaluator(lenient=True))
         try:
             # .475: a shred node's ports read tables its pre-pass creates;
             # ensure the family exists before we introspect or compile
@@ -4592,6 +4702,7 @@ class Session:
                 label=self._flow_node_label(graph, node_id))
             tmp = self._materialize_flow(graph, sn, sp, et, created,
                                          query_id=query_id)
+            et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -4626,6 +4737,7 @@ class Session:
                 label=self._flow_node_label(graph, node_id))
             tmp = self._materialize_flow(graph, sn, sp, et, created,
                                          query_id=query_id)
+            et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -4709,6 +4821,7 @@ class Session:
                 label=self._flow_node_label(graph, node_id))
             tmp = self._materialize_flow(graph, sn, sp, et, created,
                                          query_id=query_id)
+            et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -4747,6 +4860,7 @@ class Session:
                                           query_id=query_id)
             rtmp = self._materialize_flow(graph, rs[0], rs[1], et, created,
                                           query_id=query_id)
+            et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -4840,9 +4954,12 @@ class Session:
 
     def _flow_engine_target(self, graph):
         """The single engine a flow runs on, derived from its input tables and
-        any loaded tables referenced by SQL nodes."""
+        any loaded tables referenced by SQL nodes. Unpinned flows follow the
+        engine preference (always-DuckDB mode) instead of defaulting local."""
         eng = self._flow_pinned_engine(graph)
-        return DUCKDB_TARGET if eng == "duckdb" else LOCAL_TARGET
+        if eng:
+            return DUCKDB_TARGET if eng == "duckdb" else LOCAL_TARGET
+        return DUCKDB_TARGET if self._duckdb_only() else LOCAL_TARGET
 
     def _resolve_write_destination(self, wcfg):
         """Write-node store target: DuckDB by default; SQLite opt-in.
@@ -4992,7 +5109,8 @@ class Session:
     def _materialize_flows(self, graph, targets, engine_target,
                            collect=None, target_limits=None,
                            _allow_parallel=True, _engine_override=None,
-                           _persistent_tables=False, query_id=None):
+                           _persistent_tables=False, query_id=None,
+                           _sources_fetched=False, var_overrides=None):
         """Build every (node_id, port) in ``targets`` and everything upstream
         of them on ``engine_target`` in ONE pass, returning
         ``{(node_id, port): temp_table_name}``.
@@ -5013,7 +5131,18 @@ class Session:
         created are appended to ``collect`` so the caller can drop them."""
         targets = list(targets)
         target_limits = target_limits or {}
-        if _allow_parallel and _engine_override is None:
+        # Track the engine actually used for this build (it may flip after
+        # the source fetch, below); entry points re-read it for their final
+        # query / cleanup. Initialised up front so a raised build still
+        # leaves a sane value for the cleanup path.
+        self._flow_build_target = engine_target
+        # Frozen graphs stay single-pass: branch cursors can't see the main
+        # connection's frozen tables, so parallel workers would both miss the
+        # freeze and lose it when their connection closes.
+        has_frozen = any((n.get("config") or {}).get("frozen")
+                         for n in (graph.get("nodes") or []))
+        if (_allow_parallel and _engine_override is None
+                and not has_frozen):
             parallel = self._parallel_flow_groups(
                 graph, targets, engine_target, collect, target_limits,
                 query_id=query_id)
@@ -5023,8 +5152,11 @@ class Session:
         # below compiles a graph whose tokens are already filled in. Expression
         # variables (kind="expr") are evaluated here, so a date defined as
         # DATE_TIME_NOW() reaches the SQL Server node as a plain literal.
+        # var_overrides (the Run dialog's promoted parameters) win over the
+        # variable nodes' static values.
         graph = applyvars.resolve_graph(
-            graph, evaluate=self._variable_expr_evaluator())
+            graph, extra=var_overrides or None,
+            evaluate=self._variable_expr_evaluator())
         from . import nodeflow
         # Input file-origin recheck (mtime/size/ctime/inode + content digest).
         # Directory/appendfolder keep their own signature recheck on fetch.
@@ -5043,11 +5175,55 @@ class Session:
             # Unexpected probe errors: keep prior posture (do not abort run).
         except Exception:
             pass
+        # Frozen nodes are computed BEFORE the source fetch: a frozen hit
+        # means the whole upstream subtree is skipped, so the fetch must not
+        # touch its sources either. needed_map is shared with the liveness
+        # block below.
+        needed_map = {}
+        if getattr(self, "project_pushdown", True):
+            try:
+                needed_map = nodeflow.needed_columns(graph, list(targets))
+            except Exception:
+                needed_map = {}
+        fresh_run = bool(getattr(self, "fresh_run", False))
+        frozen_map, frozen_hits = {}, {}
+        if has_frozen and not fresh_run and _engine_override is None:
+            eng_for_frozen, _ = self._engine_obj(engine_target)
+            frozen_map, frozen_hits = self._frozen_node_map(
+                graph, needed_map, engine_target, eng_for_frozen)
         # SQL Server / SharePoint / Web scrape: reconnect + import before
         # compile so Dashboard / Run all work with a saved profile + password
-        # without a prior interactive Fetch.
-        self._ensure_source_nodes_fetched(
-            graph, [nid for nid, _port in targets], query_id=query_id)
+        # without a prior interactive Fetch. (Skipped on the engine-flip
+        # re-dispatch below -- the first pass already fetched them.)
+        if not _sources_fetched:
+            self._ensure_source_nodes_fetched(
+                graph, [nid for nid, _port in targets], query_id=query_id,
+                skip_ids=self._frozen_source_skip(
+                    graph, targets, frozen_hits))
+        # Source fetches land on their own engine (a SQL Server pull imports
+        # to DuckDB) and stamp _api_node_tables -- the very record
+        # _flow_engine_target pins on. Entry points pick the engine BEFORE
+        # this fetch, so a first run after restart would compile against
+        # tables that only exist on the other engine ("no such table" on run
+        # 1, silently fixed on run 2). Re-derive the target now that the
+        # fetch has stamped the pin, and re-dispatch when it flips (a mixed
+        # SQLite-input + remote-source flow raises the clear same-engine
+        # error here instead of the confusing missing-table one).
+        if _engine_override is None:
+            # Only a pin that MATERIALISED during the fetch forces a flip
+            # (LOCAL pre-fetch -> DuckDB hidden source table). An unpinned
+            # flow keeps the caller's chosen target -- run_nodeflow_to_table
+            # deliberately materialises on the write destination.
+            pin = self._flow_pinned_engine(graph)
+            if pin == "duckdb" and engine_target != DUCKDB_TARGET:
+                new_eng, _ = self._engine_obj(DUCKDB_TARGET)
+                self._rebind_run_engine(query_id, new_eng)
+                return self._materialize_flows(
+                    graph, targets, DUCKDB_TARGET, collect,
+                    target_limits=target_limits, query_id=query_id,
+                    _allow_parallel=_allow_parallel,
+                    _persistent_tables=_persistent_tables,
+                    _sources_fetched=True)
         # SHRED nodes create their relational tables before anything composes
         self._shred_flow_prepass(graph, targets)
         # All designed pre-build refreshes are done (file-origin rechecks,
@@ -5084,21 +5260,14 @@ class Session:
         # column liveness for projection pushdown: which columns each node's
         # output actually feeds downstream (target materialised in full). Source
         # nodes read only those, so a wide table behind a select isn't fully
-        # scanned. Off -> empty map -> every source stays SELECT *.
-        if getattr(self, "project_pushdown", True):
-            try:
-                needed_map = nodeflow.needed_columns(graph, list(targets))
-            except Exception:
-                needed_map = {}
-        else:
-            needed_map = {}
+        # scanned. Off -> empty map -> every source stays SELECT *. (Computed
+        # up front with the frozen-node pass.)
         # Incremental flow cache: a fingerprint per node output over its
         # subtree + projection + data epoch + engine. A boundary node whose
         # fingerprint is already cached is reused instead of recomputed. Empty
         # (no caching) when the cache is off or fingerprinting fails.
         # Fresh run: skip volatile + persistent reuse so the run always
         # executes against the current catalog after Input signature checks.
-        fresh_run = bool(getattr(self, "fresh_run", False))
         use_volatile_cache = bool(
             getattr(self, "flow_cache", False)
             and _engine_override is None
@@ -5253,7 +5422,11 @@ class Session:
                 if node is None:
                     raise nodeflow.NodeflowError("That node no longer exists.")
                 _ctyp = node.get("type")
+                # Frozen nodes are always a materialisation boundary: their
+                # output must become a real table so it can be pinned (or
+                # reused from a previous run's pin).
                 can_fuse = (fuse and _ctyp not in ("pivot", "python")
+                            and nid not in frozen_map
                             and not (cache_checkpoints
                                      and nid in checkpoint_nodes
                                      and (fps.get(nid)
@@ -5338,6 +5511,13 @@ class Session:
                         # stops consuming budget and being probed every run.
                         self._flow_cache_registry.discard(
                             fp, drop=False, stale=True)
+                # Frozen hit: a user-pinned output from a previous run, reused
+                # as-is regardless of the data epoch (validated up front).
+                fz_table = frozen_hits.get(nid)
+                if fz_table is not None and (
+                        frozen_map.get(nid) or (None, None))[0] == prt:
+                    built[key] = fz_table
+                    return fz_table
                 if persistent_fp:
                     # Include the port key explicitly: persistent_fp is
                     # "<40-hex fingerprint>_<port>", so persistent_fp[:16] slices
@@ -5363,6 +5543,18 @@ class Session:
                 if row_limit:
                     sql = "SELECT * FROM (%s) AS _preview LIMIT %d" % (
                         sql, max(1, int(row_limit)))
+                # Frozen miss: build into a kept table and pin it for later
+                # runs (off the per-pass drop list, epoch-independent).
+                fz = frozen_map.get(nid)
+                if fz is not None and fz[0] == prt:
+                    name = "__nbfreeze_%s_%s" % (fz[1][:20], port_key)
+                    _exec_create(name, sql)
+                    self._frozen_flow_tables[(nid, prt)] = {
+                        "fp": fz[1], "table": name,
+                        "engine": engine_target}
+                    self._evict_frozen_tables(eng)
+                    built[key] = name
+                    return name
                 if fp:
                     # content-addressed cache table; lifetime is the cache's
                     # (LRU), so it is NOT added to the per-pass drop list.
@@ -5412,7 +5604,7 @@ class Session:
 
     def _materialize_flows_isolated(self, graph, targets, engine_target,
                                     collect=None, target_limits=None,
-                                    query_id=None):
+                                    query_id=None, var_overrides=None):
         """Build ``targets`` group by group so one broken branch cannot sink
         the others.
 
@@ -5444,7 +5636,7 @@ class Session:
             try:
                 out = self._materialize_flows(
                     graph, group, engine_target, local, target_limits=limits,
-                    query_id=query_id)
+                    query_id=query_id, var_overrides=var_overrides)
             except nodeflow.NodeflowError as e:
                 self._drop_flow_temps(engine_target, local)
                 return self._flow_err(e, graph)
@@ -5533,7 +5725,8 @@ class Session:
                 raise nodeflow.NodeflowError("cancelled")
 
     def _materialize_flow(self, graph, node_id, port, engine_target,
-                          collect=None, row_limit=None, query_id=None):
+                          collect=None, row_limit=None, query_id=None,
+                          var_overrides=None):
         """Single-target convenience wrapper over :meth:`_materialize_flows`.
 
         ``row_limit`` is used by fast previews: only the terminal relation is
@@ -5546,7 +5739,8 @@ class Session:
         limits = {(node_id, port): row_limit} if row_limit else None
         out = self._materialize_flows(
             graph, [(node_id, port)], engine_target, collect,
-            target_limits=limits, query_id=query_id)
+            target_limits=limits, query_id=query_id,
+            var_overrides=var_overrides)
         return out[(node_id, port)]
 
     def _flow_cleanup(self, query_id, engine_target, names):
@@ -5839,7 +6033,12 @@ class Session:
         and an API node's URL wants ${name}."""
         from . import applyvars
         try:
-            ctx = applyvars.collect_vars(graph)
+            # Evaluate expr vars (lenient: an unfinished expression falls
+            # back to its raw text) so a NUMERIC expr value used as {{n}} is
+            # flagged exactly like a text "42" -- otherwise it slips through
+            # as a quoted string.
+            ctx = applyvars.collect_vars(
+                graph, evaluate=self._variable_expr_evaluator(lenient=True))
             rev = {}
             for e in graph.get("edges") or []:
                 fr = (e.get("from") or {}).get("node")
@@ -5998,11 +6197,13 @@ class Session:
         return out
 
     def run_nodeflow(self, graph, node_id, port, query_id=None,
-                     preview=False, preview_limit=None):
+                     preview=False, preview_limit=None, params=None):
         """Materialise a NodeFlow graph up to (node_id, port) into temp tables,
         then return a normal query-result envelope so the UI previews it in the
         grid (paging / charts / save-as-table all work). Cancellable via
-        ``query_id`` (cancel_query interrupts the running build statement)."""
+        ``query_id`` (cancel_query interrupts the running build statement).
+        ``params`` overrides workflow-variable values for this run (the Run
+        dialog's promoted parameters)."""
         from . import nodeflow
         _bad_brace = self._flow_brace_misuse(graph, node_id)
         if _bad_brace:
@@ -6037,8 +6238,13 @@ class Session:
             self._flow_build_epoch0 = None
             tmp = self._materialize_flow(
                 graph, node_id, port, et, created,
-                row_limit=preview_limit, query_id=query_id)
+                row_limit=preview_limit, query_id=query_id,
+                var_overrides=params)
             epoch0 = getattr(self, "_flow_build_epoch0", None)
+            # A source fetch may have flipped the build engine (LOCAL ->
+            # DuckDB); the final read and the temp cleanup must use the
+            # engine the build ACTUALLY used, not the pre-fetch guess.
+            et = getattr(self, "_flow_build_target", et)
         except nodeflow.NodeflowError as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_err(e, graph)
@@ -6062,13 +6268,14 @@ class Session:
         return res
 
     def run_nodeflows(self, graph, requests, query_id=None,
-                      preview=False, preview_limit=None):
+                      preview=False, preview_limit=None, params=None):
         """Run several NodeFlow terminals in one materialisation pass.
 
         Independent DuckDB branches are scheduled on separate child
         connections; targets sharing upstream nodes stay in one group so the
         shared work is still computed once.  Each result is returned in the
         ordinary pageable query envelope, tagged with its node and port.
+        ``params`` overrides workflow-variable values for the whole batch.
         """
         from . import nodeflow
         norm = []
@@ -6121,7 +6328,7 @@ class Session:
             try:
                 built = self._materialize_flows(
                     graph, norm, et, created, target_limits=limits,
-                    query_id=query_id)
+                    query_id=query_id, var_overrides=params)
             except nodeflow.NodeflowError:
                 # A node that fails must not sink the branches that never
                 # touch it. Drop the aborted pass, then rebuild the
@@ -6134,10 +6341,13 @@ class Session:
                     del created[:]
                 built, flow_errors = self._materialize_flows_isolated(
                     graph, norm, et, created, target_limits=limits,
-                    query_id=query_id)
+                    query_id=query_id, var_overrides=params)
                 if not built:
                     raise
             epoch0 = getattr(self, "_flow_build_epoch0", None)
+            # Same engine-flip re-read as run_nodeflow (the fetch may have
+            # moved the build to DuckDB after we picked LOCAL).
+            et = getattr(self, "_flow_build_target", et)
             results = []
             for nid, port in norm:
                 if self._run_is_cancelled(query_id):
@@ -6341,6 +6551,21 @@ class Session:
         import csv as _csv
         import json as _json
         import re as _re
+        # The folder / base name may carry ${vars} (report_${as_of}.csv);
+        # resolve them BEFORE the folder check and the name sanitiser, or the
+        # token is mangled into the file name (or created literally on disk).
+        if (isinstance(out_dir, str) and ("${" in out_dir or "{{" in out_dir)) \
+                or (isinstance(base_name, str)
+                    and ("${" in base_name or "{{" in base_name)):
+            try:
+                _ctx = applyvars.collect_vars(
+                    graph or {}, evaluate=self._variable_expr_evaluator())
+            except Exception:
+                _ctx = {}
+            if isinstance(out_dir, str):
+                out_dir = applyvars.substitute_text(out_dir, _ctx)
+            if isinstance(base_name, str):
+                base_name = applyvars.substitute_text(base_name, _ctx)
         out = self._resolve_export_dir(out_dir)
         if not out:
             return {"error": "Pick an output folder."}
@@ -6361,6 +6586,10 @@ class Session:
                 label=self._flow_node_label(graph, node_id))
             tmp = self._materialize_flow(graph, node_id, "out", et, created,
                                          query_id=query_id)
+            # A source fetch may have flipped the build engine -- stream and
+            # clean up on the engine the build actually used.
+            et = getattr(self, "_flow_build_target", et)
+            eng, _kind = self._engine_obj(et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -6401,11 +6630,28 @@ class Session:
         items = list(items or [])
         if not items:
             return {"error": "No outputs to export."}
+        # Folders / base names may carry ${vars} -- resolve once for the batch
+        # (same guard as export_nodeflow).
+        _ctx = None
+        for it in items:
+            if any(isinstance(it.get(k), str)
+                   and ("${" in it[k] or "{{" in it[k])
+                   for k in ("folder", "base_name")):
+                try:
+                    _ctx = applyvars.collect_vars(
+                        graph or {},
+                        evaluate=self._variable_expr_evaluator())
+                except Exception:
+                    _ctx = {}
+                break
         norm = []
         seen = {}
         for it in items:
             nid = it.get("node_id")
-            folder = self._resolve_export_dir(it.get("folder") or "")
+            raw_folder = it.get("folder") or ""
+            if _ctx is not None and isinstance(raw_folder, str):
+                raw_folder = applyvars.substitute_text(raw_folder, _ctx)
+            folder = self._resolve_export_dir(raw_folder)
             if not folder:
                 return {"error": "Pick an output folder for every output node."}
             fmt = (it.get("fmt") or "csv").lower()
@@ -6417,8 +6663,11 @@ class Session:
             _bad_brace = self._flow_brace_misuse(graph, nid)
             if _bad_brace:
                 return {"error": _bad_brace}
+            base_raw = it.get("base_name") or "output"
+            if _ctx is not None and isinstance(base_raw, str):
+                base_raw = applyvars.substitute_text(base_raw, _ctx)
             bn = _re.sub(r"[^A-Za-z0-9_-]+", "_",
-                         (it.get("base_name") or "output")).strip("_") \
+                         base_raw).strip("_") \
                 or "output"
             # de-collide files written into the same folder in this batch, so
             # two outputs sharing a name don't silently clobber each other.
@@ -6441,6 +6690,10 @@ class Session:
             targets = [(it["node_id"], "out") for it in norm]
             built = self._materialize_flows(graph, targets, et, created,
                                             query_id=query_id)
+            # A source fetch may have flipped the build engine -- stream and
+            # clean up on the engine the build actually used.
+            et = getattr(self, "_flow_build_target", et)
+            eng, _kind = self._engine_obj(et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
             return self._flow_exc(e)
@@ -6936,12 +7189,16 @@ class Session:
             uniq.append(n)
         return uniq
 
-    def _ensure_source_nodes_fetched(self, graph, start_nodes, query_id=None):
+    def _ensure_source_nodes_fetched(self, graph, start_nodes, query_id=None,
+                                     skip_ids=None):
         """Fetch upstream SQL Server / SharePoint / Web scrape nodes in place
         so ``config.table`` is set before compile. Mutates ``graph`` node
-        configs. Raises ``nodeflow.NodeflowError`` on failure."""
+        configs. ``skip_ids`` (frozen-hit sources) are left untouched this
+        run. Raises ``nodeflow.NodeflowError`` on failure."""
         from . import nodeflow
         sources = self._volatile_source_nodes_upstream(graph, start_nodes)
+        if skip_ids:
+            sources = [n for n in sources if n.get("id") not in skip_ids]
         if not sources:
             return
         # Index every node (including nested children) for config patches.
@@ -7114,6 +7371,20 @@ class Session:
         from . import nodeflow, applyvars
         import re as _re
         cfg = self._node_config(graph, node_id)
+        # The iterator's OWN fields (daterange start/end, the accumulator
+        # table name) may reference workflow variables -- resolve them once,
+        # up front (per-pass row vars legitimately can't name the accumulator,
+        # but workflow vars can; everything below reads the resolved cfg).
+        try:
+            _vctx = applyvars.collect_vars(
+                graph, evaluate=self._variable_expr_evaluator())
+            if _vctx:
+                cfg = applyvars._sub_tree(cfg, _vctx)
+        except Exception:
+            pass
+        _bad_brace = self._flow_brace_misuse(graph, node_id)
+        if _bad_brace:
+            return {"error": _bad_brace}
         # NEW container model: if the iterator holds inner children (like a
         # group), run them once per row of the wired "variables" input, with
         # that row's columns bound as scalar ${vars}. The classic driver +
@@ -7131,8 +7402,11 @@ class Session:
         # top input is not wired.
         vn, vp = nodeflow.upstream(graph, node_id, "vars")
         if vn is None and not var and driver_kind != "rows":
-            return {"error": "Wire a values table to the iterator's top input, "
-                    "or name the loop variable (e.g. as_of) and pick a driver."}
+            # The inspector has no loop-variable/driver fields (those remain
+            # workflow-file-only advanced config), so point at what the UI
+            # can actually do.
+            return {"error": "Wire a values table to the iterator's top "
+                    "input -- its rows drive the passes (one per row)."}
         bn, bp = nodeflow.upstream(graph, node_id, "in")
         if bn is None:
             return {"error": "Connect the body (the flow to repeat) to the "
@@ -7209,7 +7483,12 @@ class Session:
                 # identical too -- without this clear the cache hands back the
                 # first pass's rows. Same reasoning as run_while.
                 self._flow_cache_clear()
-                rg = applyvars.resolve_graph(graph, extra=extra)
+                # Evaluate expr variables (DATE_TIME_NOW() etc.) too --
+                # otherwise the raw expression TEXT is substituted into the
+                # loop body and every pass runs on a broken/unfiltered query.
+                rg = applyvars.resolve_graph(
+                    graph, extra=extra,
+                    evaluate=self._variable_expr_evaluator())
                 created, et = [], None
                 try:
                     for aid in api_ids:
@@ -7233,6 +7512,10 @@ class Session:
                     self._rebind_run_engine(query_id, eng)
                     tmp = self._materialize_flow(rg, bn, bp, et, created,
                                                  query_id=query_id)
+                    # A source fetch may have flipped the build engine.
+                    et = getattr(self, "_flow_build_target", et)
+                    eng, _kind = self._engine_obj(et)
+                    self._rebind_run_engine(query_id, eng)
                     mode = "overwrite" if (first and reset_first) else "append"
                     self._write_into_table(eng, accum, tmp, mode, replace_keys)
                     if accumulate == "reduce":
@@ -7301,7 +7584,8 @@ class Session:
         at most cap+1 rows so the pass cap is detectable without pulling a huge
         table into memory. ``query_id`` ties any source fetch in that input to
         the owning run so Stop can cancel it."""
-        rg = applyvars.resolve_graph(graph)
+        rg = applyvars.resolve_graph(
+            graph, evaluate=self._variable_expr_evaluator())
         et = self._flow_engine_target(rg)
         eng, _kind = self._engine_obj(et)
         created = []
@@ -7408,8 +7692,9 @@ class Session:
             var = (cfg.get("var") or "").strip()
             dkind = ((cfg.get("driver") or {}).get("kind") or "list")
             if not var and dkind != "rows":
-                return {"error": "Wire a variables table to the iterator's top "
-                        "input, or name a loop variable and choose a driver."}
+                return {"error": "Wire a variables table to the iterator's "
+                        "top input -- its rows drive the passes (one per "
+                        "row)."}
             try:
                 values, _n = self._iterator_values(cfg.get("driver"),
                                                    max_passes)
@@ -7455,7 +7740,9 @@ class Session:
         # list the fields the values row actually provides, so a typo or a
         # column-name mismatch is obvious instead of looking like a sync bug.
         probe_extra = _rename_row_vars(var_rows[0], cfg.get("var_rename"))
-        _probe = applyvars.resolve_graph(base, extra=probe_extra)
+        _probe = applyvars.resolve_graph(
+            base, extra=probe_extra,
+            evaluate=self._variable_expr_evaluator(lenient=True))
         _missing = applyvars.unresolved_tokens(
             self._node_config(_probe, "__iter_body").get("children"))
         if _missing:
@@ -7497,7 +7784,9 @@ class Session:
                 # identical fingerprint across passes, so stale rows would be
                 # served without this per-pass clear.
                 self._flow_cache_clear()
-                rg = applyvars.resolve_graph(base, extra=extra)
+                rg = applyvars.resolve_graph(
+                    base, extra=extra,
+                    evaluate=self._variable_expr_evaluator())
                 created, et = [], None
                 try:
                     inner_cfg = self._node_config(rg, "__iter_body")
@@ -7511,6 +7800,10 @@ class Session:
                     tmp = self._materialize_flow(
                         rg, "__iter_body", "out", et, created,
                         query_id=query_id)
+                    # A source fetch may have flipped the build engine.
+                    et = getattr(self, "_flow_build_target", et)
+                    eng, _kind = self._engine_obj(et)
+                    self._rebind_run_engine(query_id, eng)
                     mode = "overwrite" if (first and reset_first) else "append"
                     self._write_into_table(eng, accum, tmp, mode, replace_keys)
                     if accumulate == "reduce":
@@ -7581,6 +7874,18 @@ class Session:
         from . import nodeflow, applyvars
         import re as _re
         cfg = self._node_config(graph, node_id)
+        # Same up-front workflow-variable resolution as run_iterator: the
+        # accumulator name / driver fields may carry ${vars}.
+        try:
+            _vctx = applyvars.collect_vars(
+                graph, evaluate=self._variable_expr_evaluator())
+            if _vctx:
+                cfg = applyvars._sub_tree(cfg, _vctx)
+        except Exception:
+            pass
+        _bad_brace = self._flow_brace_misuse(graph, node_id)
+        if _bad_brace:
+            return {"error": _bad_brace}
         var = (cfg.get("var") or "").strip()
         bn, bp = nodeflow.upstream(graph, node_id, "in")
         if bn is None:
@@ -7624,7 +7929,9 @@ class Session:
                 # so without this it would hand back the first round's output.
                 self._flow_cache_clear()
                 extra = {var: str(i)} if var else {}
-                rg = applyvars.resolve_graph(graph, extra=extra)
+                rg = applyvars.resolve_graph(
+                    graph, extra=extra,
+                    evaluate=self._variable_expr_evaluator())
                 created, et = [], None
                 try:
                     for aid in api_ids:
@@ -7645,6 +7952,10 @@ class Session:
                     self._rebind_run_engine(query_id, eng)
                     tmp = self._materialize_flow(rg, bn, bp, et, created,
                                                  query_id=query_id)
+                    # A source fetch may have flipped the build engine.
+                    et = getattr(self, "_flow_build_target", et)
+                    eng, _kind = self._engine_obj(et)
+                    self._rebind_run_engine(query_id, eng)
                     mode = "overwrite" if (first and reset_first) else "append"
                     before = 0
                     if not (first and reset_first):
@@ -7834,7 +8145,11 @@ class Session:
         for n in names:
             if n in duck_cols and n not in sqlite_cols:
                 return DUCKDB_TARGET
-        return LOCAL_TARGET
+            if n in sqlite_cols and n not in duck_cols:
+                # A SQLite-only table must run there regardless of preference.
+                return LOCAL_TARGET
+        # No decisive table (or none at all): follow the engine preference.
+        return DUCKDB_TARGET if self._duckdb_only() else LOCAL_TARGET
 
     def cross_engine_conflict(self, sql):
         names = self._table_names_in(sql)
@@ -15518,10 +15833,31 @@ class Session:
         if not url:
             return {"error": "Give the API node a URL "
                     "(it can include ${variables})."}
-        # resolve ${vars} from the graph's variable nodes (if a graph is given)
+        # resolve ${vars} from the graph's variable nodes (if a graph is
+        # given). Expression variables are evaluated too -- matching the SQL
+        # Server node -- so an interactive Fetch hits the same values a full
+        # run would (e.g. a ${as_of} defined as DATE_TIME_NOW()). Guarded by
+        # an actual token: on runs the graph is already resolved, so this is
+        # a no-op and never re-evaluates expressions a second time.
         ctx = {}
+        _templated = ("${" in url or "{{" in url
+                      or any("${" in str(p.get("key", ""))
+                             or "${" in str(p.get("value", ""))
+                             or "{{" in str(p.get("key", ""))
+                             or "{{" in str(p.get("value", ""))
+                             for p in (cfg.get("params") or []))
+                      or any("${" in str(h.get("key", ""))
+                             or "${" in str(h.get("value", ""))
+                             or "{{" in str(h.get("key", ""))
+                             or "{{" in str(h.get("value", ""))
+                             for h in (cfg.get("headers") or []))
+                      or "${" in (cfg.get("auth_user") or ""))
         try:
-            ctx = applyvars.collect_vars(graph or {})
+            if graph and _templated:
+                ctx = applyvars.collect_vars(
+                    graph, evaluate=self._variable_expr_evaluator())
+            else:
+                ctx = applyvars.collect_vars(graph or {})
         except Exception:
             ctx = {}
 
@@ -15796,6 +16132,11 @@ class Session:
                     "Set a server, saved mssql profile, or active connection "
                     "name on the SQL Server node."}
 
+        # A connection reused by name is SHARED (Load a Table, other nodes):
+        # the USE below must not silently retarget it for the rest of the
+        # session, so capture its current database and restore it after the
+        # import. Connections this node just created own their context.
+        preexisting_conn = conn_name in self.connections
         if conn_name not in self.connections:
             from samql_core.mssql import (SQLServerConnection,
                                           build_mssql_conn_str,
@@ -15881,12 +16222,20 @@ class Session:
 
         # Optional default database (same role as the Load tab Database picker).
         database = (cfg.get("database") or "").strip()
+        prev_db = None
         if database:
             conn = self.connections.get(conn_name)
             if conn is not None:
                 try:
                     # Bracket-quote a simple identifier; reject odd names.
                     safe = database.replace("]", "]]")
+                    if preexisting_conn:
+                        try:
+                            _c, _r = conn.execute("SELECT DB_NAME()")
+                            prev_db = (_r[0][0]
+                                       if _r and _r[0] else None)
+                        except Exception:
+                            prev_db = None
                     conn.execute("USE [%s]" % safe)
                 except Exception as e:
                     return {"error":
@@ -15900,6 +16249,14 @@ class Session:
         res = self.import_from_connection(
             conn_name, query, base_name=base, destination="duckdb",
             query_id=query_id)
+        # Restore the shared connection's previous database (see above) --
+        # before any return, success or failure.
+        if prev_db:
+            try:
+                self.connections[conn_name].execute(
+                    "USE [%s]" % str(prev_db).replace("]", "]]"))
+            except Exception:
+                pass
         if res.get("error") or res.get("cancelled"):
             return res
         tname = res.get("table")
@@ -15927,10 +16284,18 @@ class Session:
             "rows": rows,
         }
 
-    def fetch_sharepoint_node(self, node_id, config, query_id=None):
+    def fetch_sharepoint_node(self, node_id, config, graph=None, query_id=None):
         from . import sharepoint as _sp
         from . import sharepoint_auth as _spa
+        from . import applyvars
         cfg = dict(config or {})
+        # Resolve ${vars} for an interactive Fetch (a run has them resolved
+        # already; expr vars evaluate only when a token is present).
+        ctx = self._source_cfg_vars(
+            graph, cfg, ("site_url", "list_title", "folder_path"))
+        for _k in ("site_url", "list_title", "folder_path"):
+            if isinstance(cfg.get(_k), str):
+                cfg[_k] = applyvars.substitute_text(cfg[_k], ctx)
         site = (cfg.get("site_url") or "").strip()
         mode = (cfg.get("mode") or "list").strip().lower()
         lst = (cfg.get("list_title") or "").strip()
@@ -16109,9 +16474,16 @@ class Session:
         except Exception as e:
             return {"error": str(e)}
 
-    def fetch_webscrape_node(self, node_id, config, query_id=None):
+    def fetch_webscrape_node(self, node_id, config, graph=None, query_id=None):
         from . import webscrape as _ws
+        from . import applyvars
         cfg = dict(config or {})
+        # Resolve ${vars} for an interactive Fetch (a run has them resolved
+        # already; expr vars evaluate only when a token is present).
+        ctx = self._source_cfg_vars(graph, cfg, ("url", "json_path"))
+        for _k in ("url", "json_path"):
+            if isinstance(cfg.get(_k), str):
+                cfg[_k] = applyvars.substitute_text(cfg[_k], ctx)
         url = (cfg.get("url") or "").strip()
         if not url:
             return {"error": "Give the Web scrape node a URL."}
@@ -16150,6 +16522,23 @@ class Session:
             out["url"] = (meta or {}).get("url", url)
         return out
 
+    def _source_cfg_vars(self, graph, cfg, keys):
+        """Variable context for an interactive source Fetch. Expression
+        variables are evaluated only when one of ``keys`` actually carries a
+        ${token} -- on runs the graph is already resolved, so this stays a
+        no-op and never re-evaluates expressions a second time."""
+        from . import applyvars
+        templated = any(isinstance(cfg.get(k), str)
+                        and ("${" in cfg[k] or "{{" in cfg[k])
+                        for k in keys)
+        try:
+            if graph and templated:
+                return applyvars.collect_vars(
+                    graph, evaluate=self._variable_expr_evaluator())
+            return applyvars.collect_vars(graph or {})
+        except Exception:
+            return {}
+
     def fetch_source_node(self, node_type, node_id, config, graph=None,
                           query_id=None):
         typ = (node_type or "").strip().lower()
@@ -16160,9 +16549,11 @@ class Session:
             return self.fetch_sqlserver_node(node_id, config, graph=graph,
                                              query_id=query_id)
         if typ == "sharepoint":
-            return self.fetch_sharepoint_node(node_id, config, query_id=query_id)
+            return self.fetch_sharepoint_node(node_id, config, graph=graph,
+                                              query_id=query_id)
         if typ == "webscrape":
-            return self.fetch_webscrape_node(node_id, config, query_id=query_id)
+            return self.fetch_webscrape_node(node_id, config, graph=graph,
+                                             query_id=query_id)
         return {"error": "Unknown source node type: %s" % typ}
 
     def load_folder_files(self, folder, query_id=None):
@@ -16757,6 +17148,16 @@ class Session:
         if self.duckdb is not None:
             try:
                 self.duckdb.recycle()
+            except Exception:
+                pass
+        # Shutdown means the engines are done for good: stop their heartbeat
+        # daemons explicitly rather than relying on weakref GC (the SESSION
+        # global keeps the managers alive until process exit).
+        for eng in (self.db, self.duckdb):
+            try:
+                beatd = getattr(eng, "_beatd", None)
+                if beatd is not None:
+                    beatd.stop()
             except Exception:
                 pass
         for p in self.temp_files:

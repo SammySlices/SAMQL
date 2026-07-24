@@ -66,10 +66,10 @@ function shortType(type?: string): string {
 }
 
 const KIND_COLOR: Record<string, string> = {
-  array: "#c98a2b",
-  "array-scalar": "#c98a2b",
-  struct: "#5b8def",
-  map: "#8a6ad6",
+  array: "var(--kind-array)",
+  "array-scalar": "var(--kind-array)",
+  struct: "var(--kind-struct)",
+  map: "var(--kind-map)",
   scalar: "",
 };
 
@@ -257,7 +257,9 @@ const TablesTree: React.FC<
       .then((r) =>
         setColsCache((p) => ({ ...p, [name]: r.columns || [] })),
       )
-      .catch(() => setColsCache((p) => ({ ...p, [name]: [] })))
+      .catch(() => {
+        /* leave unset so a later expand retries (matches fetchColFields) */
+      })
       .finally(() => setColsBusy((p) => ({ ...p, [name]: false })));
   };
   // Lazily-fetched nested-field tree for a nested column (STRUCT/LIST/MAP), so
@@ -871,7 +873,21 @@ const TablesTree: React.FC<
                         >
                           <span className="spin" /> loading fields…
                         </div>
-                      ) : (fields || []).length === 0 ? (
+                      ) : fields == null ? (
+                        // Fetch failed or was aborted by a competing discovery
+                        // (nothing is cached on failure) — offer a retry instead
+                        // of a false "no nested fields".
+                        <div
+                          className="tree-col faint"
+                          style={{ paddingLeft: 26, cursor: "pointer" }}
+                          title="Nested-field discovery was interrupted — click to retry"
+                          onClick={() =>
+                            fetchColFields(key, t.engine, t.name, c.name)
+                          }
+                        >
+                          ↻ retry loading fields
+                        </div>
+                      ) : fields.length === 0 ? (
                         <div
                           className="tree-col faint"
                           style={{ paddingLeft: 26 }}

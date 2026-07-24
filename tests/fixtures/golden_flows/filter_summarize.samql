@@ -1,0 +1,36 @@
+{
+  "samql": "workflow",
+  "version": 2,
+  "payloadVersion": 1,
+  "kind": "node",
+  "name": "golden/filter-summarize",
+  "savedAt": "2026-07-23T00:00:00.000Z",
+  "payload": {
+    "nodes": [
+      {"id": "in", "type": "input", "config": {"table": "data"}},
+      {"id": "v", "type": "variable", "config": {"vars": [
+        {"name": "min_score", "value": "30"}]}},
+      {"id": "flt", "type": "filter",
+       "config": {"condition": "score >= ${min_score}"}},
+      {"id": "sum", "type": "summarize", "config": {
+        "group_by": ["category"],
+        "aggs": [
+          {"col": "id", "func": "count", "name": "n"},
+          {"col": "score", "func": "avg", "name": "avg_score"}
+        ]}},
+      {"id": "srt", "type": "sort",
+       "config": {"sorts": [{"col": "category", "dir": "asc"}]}},
+      {"id": "out", "type": "output", "config": {}}
+    ],
+    "edges": [
+      {"from": {"node": "in", "port": "out"},
+       "to": {"node": "flt", "port": "in"}},
+      {"from": {"node": "flt", "port": "true"},
+       "to": {"node": "sum", "port": "in"}},
+      {"from": {"node": "sum", "port": "out"},
+       "to": {"node": "srt", "port": "in"}},
+      {"from": {"node": "srt", "port": "out"},
+       "to": {"node": "out", "port": "in"}}
+    ]
+  }
+}

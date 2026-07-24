@@ -47,6 +47,15 @@
   --error-fade: rgba(229, 97, 75, 0.13);
   --warn: #d9a13b;
   --info: #4f9cf9;
+  --ok: #6ed061;
+  /* Body-text variants of --error / kind hues: --error itself is a border/
+     accent red that only reaches ~4.4:1 on panels, so small error text uses
+     this brighter (dark theme) / darker (light theme) variant instead. */
+  --error-text: #f0785f;
+  /* Nested-field kind labels (Sidebar tree, Field Explorer, Diagnostics) */
+  --kind-array: #c98a2b;
+  --kind-struct: #5b8def;
+  --kind-map: #9a7ae6;
 
   --mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Fira Code",
     ui-monospace, Menlo, Consolas, monospace;
@@ -127,8 +136,16 @@ html[data-theme="light"] {
 
   --error: #c43c2a;
   --error-fade: rgba(196, 60, 42, 0.12);
-  --warn: #b07a1a;
+  /* Darker than the dark-theme warn amber so small warn text holds 4.5:1
+     on light panels (dots / bars / borders also pick this up). */
+  --warn: #644200;
   --info: #2f6fbf;
+  /* Darker than the dark-theme ok green so it holds 4.5:1 on light panels */
+  --ok: #1e5a1c;
+  --error-text: #862314;
+  --kind-array: #7a5200;
+  --kind-struct: #2a5bb0;
+  --kind-map: #5b3ea8;
 
   --shadow: 0 8px 28px rgba(17, 17, 17, 0.08);
 }
@@ -373,7 +390,7 @@ html.theme-light .btn.danger:hover {
 html.theme-light .btn.xbtn,
 html.theme-light .btn.ghost.xbtn,
 html.theme-light .iconbtn.xbtn {
-  color: #e5484d;
+  color: var(--error);
   border-color: rgba(229, 72, 77, 0.45);
   background: rgba(229, 72, 77, 0.12);
 }
@@ -768,7 +785,7 @@ html.theme-light .nb-badge {
 html.theme-light .nb-badge.ran {
   background: color-mix(in srgb, var(--accent) 55%, #d8d8d8);
   border-color: var(--accent);
-  color: var(--accent-hi);
+  color: #144515;
 }
 html.theme-light .nb-badge.run {
   background: var(--chrome-ink);
@@ -2168,19 +2185,19 @@ body.editor-ivory .code textarea.ta::selection {
   background: rgba(84, 185, 73, 0.28);
 }
 body.editor-ivory .t-keyword {
-  color: #1f7a3a;
+  color: #1a6530;
 }
 body.editor-ivory .t-function {
-  color: #9a6b00;
+  color: #7a5500;
 }
 body.editor-ivory .t-string {
   color: #9a3b25;
 }
 body.editor-ivory .t-number {
-  color: #1c6fb0;
+  color: #175c94;
 }
 body.editor-ivory .t-comment {
-  color: #8a8472;
+  color: #5f5a48;
 }
 body.editor-ivory .t-ident {
   color: #20262f;
@@ -2537,6 +2554,13 @@ body.editor-ivory .code textarea.ta::placeholder {
   font-weight: 700;
   margin-bottom: 6px;
   font-family: var(--ui);
+}
+/* Light theme: the pale dark-theme red (#f0b6ab) is ~1:1 on light panels;
+   --error alone reaches only 3.14 on the error-fade tint, so use the darker
+   error text variant. */
+html.theme-light .error-box,
+html[data-theme="light"] .error-box {
+  color: var(--error-text);
 }
 
 /* profiler */
@@ -3017,6 +3041,11 @@ body.editor-ivory .code textarea.ta::placeholder {
 .mem-top.hot {
   color: #f0b6ab;
   border-color: var(--error);
+}
+/* Light: #f0b6ab is 1.0:1 on --raised; --error alone is 2.99, so go darker. */
+html.theme-light .mem-top.hot,
+html[data-theme="light"] .mem-top.hot {
+  color: var(--error-text);
 }
 
 /* file browser */
@@ -3532,11 +3561,11 @@ html[data-theme="light"] .btn.ghost.modal-pin-btn.pin-on:hover {
 }
 .msg-banner.err {
   background: var(--error-fade);
-  color: var(--error);
+  color: var(--error-text);
 }
 .msg-banner.ok {
   background: var(--accent-fade);
-  color: var(--accent-hi);
+  color: var(--ok);
 }
 
 /* right-click context menu (result tabs) */
@@ -6398,6 +6427,27 @@ html[data-theme="light"] .btn.ghost.modal-pin-btn.pin-on:hover {
 .nb2-sphere-face:active {
   cursor: grabbing;
 }
+/* freeze badge on a frozen sphere node (click to unfreeze) */
+.nb2-sphere-freeze {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: var(--panel);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 0;
+}
+.nb2-sphere-freeze:hover { color: var(--text); }
 .nb2-sphere-icon {
   position: relative;
   display: inline-flex;
@@ -6655,6 +6705,18 @@ button.nb2-sphere-container-toggle:focus-visible {
 .nb2-node-bypass.off::after {
   transform: translateX(0);
 }
+/* freeze badge: shown on a frozen node's head; click unpins the output */
+.nb2-node-freeze {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.nb2-node-freeze:hover { color: var(--text); }
 /* a bypassed node is dimmed + dashed so it reads as "passing through" */
 .nb2-node.bypassed {
   opacity: 0.62;
@@ -7720,11 +7782,11 @@ div.nb2-node.sphere.sel {
   color: inherit;
 }
 .nb2-statusbar.error .nb2-status-text {
-  color: #d05656;
+  color: var(--error-text);
 }
 .btn.danger {
   border-color: #d0565680;
-  color: #c64a4a;
+  color: var(--error-text);
 }
 .btn.danger:hover {
   background: #d0565618;
@@ -7831,6 +7893,17 @@ html[data-theme="light"] .nb2-statusbar.error .nb2-status-text {
   align-items: center;
   gap: 6px;
   margin-top: 5px;
+}
+/* per-row "Ask at run" promote checkbox on a variable row */
+.nb2-var-param {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  cursor: pointer;
 }
 .nb2-var-row .nb2-var-name {
   flex: 0 0 38%;
@@ -9148,6 +9221,26 @@ button:not(:disabled):active { transform: scale(0.97); }
 .act-kind.k-hdfs { background: var(--remote-fade); color: var(--remote); }
 .act-kind.k-convert { background: var(--duck-fade); color: var(--duck); }
 .act-kind.k-api { background: var(--accent-fade); color: var(--accent-hi); }
+/* Light: badge text sits on a fade tint over --raised task cards; the shared
+   hues reach only 1.7–2.9:1 there, so each gets a darkened light variant. */
+html.theme-light .act-kind,
+html[data-theme="light"] .act-kind,
+html.theme-light .act-kind.k-api,
+html[data-theme="light"] .act-kind.k-api {
+  color: #144515;
+}
+html.theme-light .act-kind.k-load,
+html[data-theme="light"] .act-kind.k-load,
+html.theme-light .act-kind.k-convert,
+html[data-theme="light"] .act-kind.k-convert {
+  color: #644200;
+}
+html.theme-light .act-kind.k-restore,
+html[data-theme="light"] .act-kind.k-restore,
+html.theme-light .act-kind.k-hdfs,
+html[data-theme="light"] .act-kind.k-hdfs {
+  color: #1a4384;
+}
 .act-target { color: var(--text-dim); }
 
 /* ---- Activity tray: background-task cards ----------------------------- */
@@ -9173,6 +9266,14 @@ button:not(:disabled):active { transform: scale(0.97); }
 .task-err {
   font-size: 12px; color: var(--error, var(--warn)); margin-top: 6px;
   white-space: pre-wrap; word-break: break-word;
+}
+/* Light: --error on --raised task cards is 2.99:1; use the darker text red.
+   (td.warn already clears 4.5 via the darker light --warn.) */
+html.theme-light .task-state.st-error,
+html[data-theme="light"] .task-state.st-error,
+html.theme-light .task-err,
+html[data-theme="light"] .task-err {
+  color: var(--error-text);
 }
 .task-badge {
   display: inline-flex; align-items: center; gap: 3px; margin-left: 6px;
@@ -12350,7 +12451,7 @@ html.theme-light .nb-badge.run {
 html.theme-light .nb-badge.ran {
   background: color-mix(in srgb, var(--accent) 55%, #d8d8d8) !important;
   border-color: var(--accent) !important;
-  color: var(--accent-hi) !important;
+  color: #144515 !important;
 }
 /* Light-mode DataGrid zebra (beats earlier theme mixes; dark mode untouched). */
 html.theme-light .grow,
@@ -12388,6 +12489,28 @@ html[data-theme="light"] .chip.duckdb {
 html.theme-light .chip.duckdb .dot,
 html[data-theme="light"] .chip.duckdb .dot {
   background: var(--duck) !important;
+}
+/* sqlite / remote chips get the same black-chip treatment: their tinted
+   text on tint backgrounds only reached 3.38 / 3.10 on light panels. */
+html.theme-light .chip.sqlite,
+html[data-theme="light"] .chip.sqlite {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink) !important;
+  color: #ffffff !important;
+}
+html.theme-light .chip.sqlite .dot,
+html[data-theme="light"] .chip.sqlite .dot {
+  background: var(--accent) !important;
+}
+html.theme-light .chip.remote,
+html[data-theme="light"] .chip.remote {
+  background: var(--chrome-ink) !important;
+  border-color: var(--chrome-ink) !important;
+  color: #ffffff !important;
+}
+html.theme-light .chip.remote .dot,
+html[data-theme="light"] .chip.remote .dot {
+  background: var(--remote) !important;
 }
 html.theme-light .seg-btn:not(.on),
 html[data-theme="light"] .seg-btn:not(.on) {

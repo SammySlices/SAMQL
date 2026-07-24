@@ -2674,9 +2674,28 @@ export default function App() {
             /* ignore */
           }
         }
+      } else if (
+        !ctrl.signal.aborted &&
+        !res.cancelled &&
+        res.error !== "cancelled"
+      ) {
+        // A rerun the user did not cancel must not fail silently — the tab
+        // keeps its old rows and, from the paging hook, its optimistic sort.
+        toast(
+          "error",
+          "Re-run failed",
+          res.error || "The query returned no result.",
+        );
       }
-    } catch {
-      /* ignore refresh errors (incl. abort when superseded) */
+    } catch (e: any) {
+      /* ignore refresh errors the user caused (abort when superseded) */
+      if (!isCancelledError(e, queryId)) {
+        toast(
+          "error",
+          "Re-run failed",
+          e?.message || "The query could not be re-run.",
+        );
+      }
     } finally {
       unregisterRun(queryId);
       endRun(key, ctrl);

@@ -325,7 +325,7 @@ export const NODE_HELP: Record<string, NodeHelp> = {
   variable: {
     title: "Variables",
     what: "Defines ${name} = value pairs other nodes can reference. A value can be literal text or an fx expression (DATE_TIME_NOW(), TODAY()) evaluated once per run.",
-    use: "Use the names in expressions, table names, file globs, API URLs, or a SQL Server WHERE clause anywhere downstream.",
+    use: "Use the names in expressions, table names, file globs, API URLs, or a SQL Server WHERE clause anywhere downstream. Tick “Ask at run” on a row to be prompted for its value before each Run all — the typed value overrides the stored one for that run only.",
   },
   text: {
     title: "Note",
@@ -354,7 +354,7 @@ export function getNodeHelp(type: string): NodeHelp {
     NODE_HELP[type] || {
       title: type,
       what: "A node in your flow.",
-      use: "Wire inputs on the left into this node and its output onward.",
+      use: "Wire inputs on the left into this node and its output onward. Tick “Freeze output” in the inspector to pin its result — later runs reuse it until this node or its upstream config changes.",
     }
   );
 }

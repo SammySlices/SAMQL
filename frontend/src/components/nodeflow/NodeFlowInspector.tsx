@@ -519,6 +519,21 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                 onChange={(e) => patch(sel.id, { label: e.target.value })}
               />
 
+              {(PORTS[sel.type]?.outputs?.length || 0) > 0 && (
+                <label className="nb2-chk" data-testid="node-freeze-row">
+                  <input
+                    type="checkbox"
+                    data-testid="node-freeze-toggle"
+                    checked={!!sel.config.frozen}
+                    onChange={(e) =>
+                      patch(sel.id, { frozen: e.target.checked })
+                    }
+                  />{" "}
+                  Freeze output (skip recompute on later runs until this node
+                  or its upstream config changes)
+                </label>
+              )}
+
               {childSelCtx && (
                 <div className="nb2-note nb2-childcrumb">
                   Step {childSelCtx.index + 1} inside group “
@@ -5325,6 +5340,20 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                         >
                           fx
                         </button>
+                        <label
+                          className="nb2-var-param"
+                          title="Ask at run — Run all prompts for this value and overrides it for that run only"
+                        >
+                          <input
+                            type="checkbox"
+                            data-testid={`variable-param-${i}`}
+                            checked={!!row.param}
+                            onChange={(e) =>
+                              setRow({ param: e.target.checked || undefined })
+                            }
+                          />{" "}
+                          Ask at run
+                        </label>
                         <button
                           className="btn ghost icon xbtn"
                           title="Remove variable"

@@ -1,0 +1,17 @@
+{
+  "filter_summarize.samql": {
+    "columns": ["category", "n", "avg_score"],
+    "rows": 3,
+    "first_rows": [["alpha", 13, 58.5], ["beta", 13, 60.0], ["gamma", 14, 59.25]]
+  },
+  "join_lookup.samql": {
+    "rows": 60,
+    "columns_include": ["tier"],
+    "first_row": [0, "name_0", 0.0, "alpha", "2024-01-01", "A"]
+  },
+  "params_filter.samql": {
+    "rows": 0,
+    "with_params": {"min_score": "30"},
+    "rows_with_params": 40
+  }
+}

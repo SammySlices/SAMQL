@@ -21,7 +21,7 @@ import type {
 } from "../lib/types";
 import { Icon } from "./Icon";
 import { ChartView } from "./ChartView";
-import { paletteColors } from "../lib/chartOption";
+import { paletteColors, THEMES } from "../lib/chartOption";
 import { ColumnOptGroups } from "./ColumnOptGroups";
 
 interface Props {
@@ -45,6 +45,46 @@ const PALETTE = [
   "#d96bb0",
   "#9bbf3c",
 ];
+
+// Light-theme series marks for the native SVG fallback: the dark palette
+// drops to 1.14:1 on the #d8d8d8 light canvas; each of these clears 3:1.
+const PALETTE_LIGHT = [
+  "#2f7a2a",
+  "#2f6fbf",
+  "#8a6d00",
+  "#c43c2a",
+  "#7a4fd0",
+  "#1e7a76",
+  "#b03a82",
+  "#5f7a14",
+];
+
+// Chrome colors for the native SVG fallback (ChartSvg/Axes), keyed off the
+// same signal buildChartOption uses: data.style.theme === "light". Line/grid
+// tones come from chartOption's THEMES; text values clear 4.5:1 on the light
+// canvas. Dark entries are the long-standing hardcoded values, unchanged.
+const SVG_CHART_THEME = {
+  dark: {
+    text: "#9aa3b2",
+    tick: "#6b7480",
+    grid: "#23272f",
+    axisLine: "#3a404b",
+    sliceStroke: "#15171b",
+    series: PALETTE,
+    line: "#54b949",
+    lineDot: "#6ed061",
+  },
+  light: {
+    text: THEMES.light.axis,
+    tick: THEMES.light.axis,
+    grid: THEMES.light.grid,
+    axisLine: THEMES.light.border,
+    sliceStroke: THEMES.light.bg,
+    series: PALETTE_LIGHT,
+    line: PALETTE_LIGHT[0],
+    lineDot: "#1e5a1c",
+  },
+};
 
 const PALETTE_NAMES: ChartPalette[] = [
   "samql",
@@ -548,9 +588,14 @@ const W = 720;
 const H = 440;
 const PAD = { l: 64, r: 24, t: 24, b: 90 };
 
+type SvgChartTheme = (typeof SVG_CHART_THEME)["dark"];
+
 const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
   const plotW = W - PAD.l - PAD.r;
   const plotH = H - PAD.t - PAD.b;
+  // Same light signal buildChartOption keys off (chart style > Theme).
+  const th: SvgChartTheme =
+    data.style?.theme === "light" ? SVG_CHART_THEME.light : SVG_CHART_THEME.dark;
 
   if (data.chart_type === "scatter") {
     const pts = data.series[0]?.points || [];
@@ -576,9 +621,10 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
           plotH={plotH}
           xlabel={data.x}
           ylabel={data.y || ""}
+          th={th}
         />
         {pts.map((p, i) => (
-          <circle key={i} cx={sx(p.x)} cy={sy(p.y)} r={3} fill="#54b949" opacity={0.7} />
+          <circle key={i} cx={sx(p.x)} cy={sy(p.y)} r={3} fill={th.line} opacity={0.7} />
         ))}
       </svg>
     );
@@ -608,7 +654,7 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
       const y1 = cy + rad * Math.sin(a1);
       return {
         d: `M${cx},${cy} L${x0},${y0} A${rad},${rad} 0 ${large} 1 ${x1},${y1} Z`,
-        color: PALETTE[i % PALETTE.length],
+        color: th.series[i % th.series.length],
         label: labels[i],
         pct: frac * 100,
       };
@@ -616,12 +662,12 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
     return (
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W }}>
         {slices.map((s, i) => (
-          <path key={i} d={s.d} fill={s.color} stroke="#15171b" strokeWidth={1.5} />
+          <path key={i} d={s.d} fill={s.color} stroke={th.sliceStroke} strokeWidth={1.5} />
         ))}
         {slices.slice(0, 12).map((s, i) => (
           <g key={i} transform={`translate(${W - 150},${30 + i * 18})`}>
             <rect width={11} height={11} fill={s.color} rx={2} />
-            <text x={16} y={10} fontSize={11} fill="#9aa3b2">
+            <text x={16} y={10} fontSize={11} fill={th.text}>
               {String(s.label).slice(0, 16)} {s.pct.toFixed(0)}%
             </text>
           </g>
@@ -648,6 +694,7 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
         ylabel={data.series[0]?.name || ""}
         xlabel={data.x}
         hideXTicks
+        th={th}
       />
       {/* baseline */}
       <line
@@ -655,12 +702,12 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
         x2={PAD.l + plotW}
         y1={sy(0)}
         y2={sy(0)}
-        stroke="#3a404b"
+        stroke={th.axisLine}
       />
       {isLine ? (
         <polyline
           fill="none"
-          stroke="#54b949"
+          stroke={th.line}
           strokeWidth={2}
           points={values
             .map((v, i) => `${PAD.l + band * (i + 0.5)},${sy(v)}`)
@@ -677,7 +724,7 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
               y={by}
               width={band * 0.76}
               height={Math.max(1, bh)}
-              fill="#54b949"
+              fill={th.line}
               opacity={0.92}
             >
               <title>
@@ -694,7 +741,7 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
             cx={PAD.l + band * (i + 0.5)}
             cy={sy(v)}
             r={3}
-            fill="#6ed061"
+            fill={th.lineDot}
           />
         ))}
       {/* x labels (thinned to avoid overlap) */}
@@ -708,7 +755,7 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
             x={cx}
             y={PAD.t + plotH + 16}
             fontSize={10}
-            fill="#9aa3b2"
+            fill={th.text}
             textAnchor="end"
             transform={`rotate(-40 ${cx} ${PAD.t + plotH + 16})`}
           >
@@ -730,7 +777,8 @@ const Axes: React.FC<{
   xlabel: string;
   ylabel: string;
   hideXTicks?: boolean;
-}> = ({ ymin, ymax, plotH, plotW, xlabel, ylabel, hideXTicks, xmin, xmax }) => {
+  th: SvgChartTheme;
+}> = ({ ymin, ymax, plotH, plotW, xlabel, ylabel, hideXTicks, xmin, xmax, th }) => {
   const ticks = 5;
   const yvals = Array.from(
     { length: ticks + 1 },
@@ -747,13 +795,13 @@ const Axes: React.FC<{
               x2={PAD.l + plotW}
               y1={yy}
               y2={yy}
-              stroke="#23272f"
+              stroke={th.grid}
             />
             <text
               x={PAD.l - 8}
               y={yy + 3}
               fontSize={10}
-              fill="#6b7480"
+              fill={th.tick}
               textAnchor="end"
             >
               {Math.abs(v) >= 1000
@@ -767,7 +815,7 @@ const Axes: React.FC<{
         x={PAD.l - 46}
         y={PAD.t + plotH / 2}
         fontSize={11}
-        fill="#9aa3b2"
+        fill={th.text}
         textAnchor="middle"
         transform={`rotate(-90 ${PAD.l - 46} ${PAD.t + plotH / 2})`}
       >
@@ -777,21 +825,21 @@ const Axes: React.FC<{
         x={PAD.l + plotW / 2}
         y={H - 10}
         fontSize={11}
-        fill="#9aa3b2"
+        fill={th.text}
         textAnchor="middle"
       >
         {xlabel}
       </text>
       {!hideXTicks && (
         <>
-          <text x={PAD.l} y={PAD.t + plotH + 16} fontSize={10} fill="#6b7480">
+          <text x={PAD.l} y={PAD.t + plotH + 16} fontSize={10} fill={th.tick}>
             {Number(xmin.toFixed(2))}
           </text>
           <text
             x={PAD.l + plotW}
             y={PAD.t + plotH + 16}
             fontSize={10}
-            fill="#6b7480"
+            fill={th.tick}
             textAnchor="end"
           >
             {Number(xmax.toFixed(2))}

@@ -1252,6 +1252,13 @@ def _graceful_shutdown(*_args):
         except Exception as exc:
             print("[samql] shutdown: session.shutdown failed: %s" % exc,
                   file=sys.stderr)
+    # Stop the stall watchdog's background thread explicitly (daemon +
+    # os._exit covers it in production, but shutdown should mean stopped).
+    try:
+        from samql_core import watchdog as _wd
+        _wd.stop()
+    except Exception:
+        pass
     try:
         tmputil.cleanup_instance()
     except Exception as exc:
@@ -1696,6 +1703,18 @@ class Api:
         if "on" in b:
             s.set_concurrent_reads(bool(b.get("on")))
         return {"concurrent_reads": s.concurrent_reads_enabled()}
+
+    @staticmethod
+    def engine_mode_setting(s, m, body, ctx):
+        """GET/POST the engine preference: "dual" (route by table location,
+        default) or "duckdb" (unpinned flows + table-less queries always run
+        on DuckDB when installed -- shrinks the dual-engine surface)."""
+        if m == "GET":
+            from samql_core.engines import HAS_DUCKDB
+            return {"engine_mode": s.engine_mode,
+                    "duckdb_available": bool(HAS_DUCKDB)}
+        b = body or {}
+        return s.set_engine_mode(b.get("engine_mode") or b.get("mode"))
 
     @staticmethod
     def flatten_json_setting(s, m, body, ctx):
@@ -4038,7 +4057,7 @@ class Api:
         return s.run_nodeflow(
             graph, b.get("node"), b.get("port") or "out",
             query_id=b.get("query_id"), preview=bool(b.get("preview")),
-            preview_limit=b.get("preview_limit"))
+            preview_limit=b.get("preview_limit"), params=b.get("params"))
 
     @staticmethod
     def nodeflow_run_batch(s, m, body, ctx):
@@ -4047,7 +4066,7 @@ class Api:
         return s.run_nodeflows(
             graph, b.get("requests") or [],
             query_id=b.get("query_id"), preview=bool(b.get("preview")),
-            preview_limit=b.get("preview_limit"))
+            preview_limit=b.get("preview_limit"), params=b.get("params"))
 
     @staticmethod
     def nodeflow_columns(s, m, body, ctx):
@@ -4371,6 +4390,8 @@ ROUTES = [
     ("POST", r"^/api/diagnostics/run$", Api.diagnostics_run),
     ("POST", r"^/api/engine/reset$", Api.engine_reset),
     ("POST", r"^/api/settings/concurrent-reads$", Api.concurrent_reads),
+    ("GET", r"^/api/settings/engine-mode$", Api.engine_mode_setting),
+    ("POST", r"^/api/settings/engine-mode$", Api.engine_mode_setting),
     ("POST", r"^/api/settings/flatten-json$", Api.flatten_json_setting),
     ("POST", r"^/api/settings/fresh-load$", Api.fresh_load_setting),
     ("GET", r"^/api/settings/load-thresholds$", Api.load_thresholds_settings),
@@ -4520,6 +4541,12 @@ ROUTES = [
     ("POST", r"^/api/hdfs/browse$", Api.hdfs_browse),
     ("POST", r"^/api/hdfs/load-file-start$", Api.hdfs_load_file_start),
 ]
+# Routes that must never trigger a Session construction: they answer (and
+# tear down) fine with the possibly-None global. /api/health is exempted
+# even earlier (before body parsing).
+_SESSION_FREE_PATHS = frozenset({
+    "/api/shutdown", "/api/launcher/keep-on-close",
+})
 _COMPILED = [(meth, re.compile(pat), fn) for meth, pat, fn in ROUTES]
 
 
@@ -5030,7 +5057,13 @@ class Handler(BaseHTTPRequestHandler):
             if not mobj:
                 continue
             try:
-                s = get_session()
+                # Shutdown routes need no Session of their own -- building a
+                # full Session() (seconds on a cold frozen boot) just to tear
+                # it down can blow the launcher's stop budget and demote a
+                # graceful stop to a taskkill. Answer with the global as-is
+                # (None when never constructed; both handlers tolerate it).
+                s = (SESSION if path in _SESSION_FREE_PATHS
+                     else get_session())
                 result = fn(s, mobj, body, ctx)
             except ApiError as e:
                 log_server_error(method, path, e.status, "ApiError",

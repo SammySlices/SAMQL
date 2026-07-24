@@ -1,0 +1,24 @@
+{
+  "samql": "workflow",
+  "version": 2,
+  "payloadVersion": 1,
+  "kind": "node",
+  "name": "golden/params-filter",
+  "savedAt": "2026-07-23T00:00:00.000Z",
+  "payload": {
+    "nodes": [
+      {"id": "in", "type": "input", "config": {"table": "data"}},
+      {"id": "v", "type": "variable", "config": {"vars": [
+        {"name": "min_score", "value": "1000", "param": true}]}},
+      {"id": "flt", "type": "filter",
+       "config": {"condition": "score >= ${min_score}"}},
+      {"id": "out", "type": "output", "config": {}}
+    ],
+    "edges": [
+      {"from": {"node": "in", "port": "out"},
+       "to": {"node": "flt", "port": "in"}},
+      {"from": {"node": "flt", "port": "true"},
+       "to": {"node": "out", "port": "in"}}
+    ]
+  }
+}

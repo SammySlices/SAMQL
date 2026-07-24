@@ -125,7 +125,7 @@ export const CreateCreatedNodeModal: React.FC<{
         </div>
       </label>
       {preview.error ? (
-        <p className="muted" style={{ color: "var(--danger, #b33)" }}>
+        <p className="muted" style={{ color: "var(--error-text)" }}>
           {preview.error}
         </p>
       ) : (

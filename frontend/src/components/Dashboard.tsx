@@ -600,6 +600,8 @@ export const Dashboard: React.FC<{
     if (configKind == null && expandedId == null) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // A Modal above this panel owns Escape (modal-backdrop is present).
+      if (document.querySelector(".modal-backdrop")) return;
       if (expandedId) {
         closeExpand();
         return;

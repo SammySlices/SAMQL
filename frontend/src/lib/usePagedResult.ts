@@ -307,7 +307,13 @@ export function usePagedResult<T extends PagedResultSnapshot>(
 
         if (page.error === EXPIRED_ERROR && allowRerun && opts.rerunExpired) {
           const freshResultId = await opts.rerunExpired(id, operation);
-          if (!freshResultId || generationOf(id) !== generation) return;
+          if (generationOf(id) !== generation) return;
+          if (!freshResultId) {
+            // Rerun produced no result — surface it instead of returning
+            // silently with the header's optimistic sort/filter still shown.
+            opts.onError?.(operation, "rerun did not produce a fresh result");
+            return;
+          }
           const freshItem = opts.getItem(id);
           if (!freshItem) return;
           const retried: PagedView = {

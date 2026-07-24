@@ -709,7 +709,7 @@ const DataGridImpl: React.FC<Props> = ({
                 ? `Stopped at the ${page.result_cap.toLocaleString()}-row safety limit`
                 : "Result was truncated"
             }
-            style={{ color: "#c98a2b" }}
+            style={{ color: "var(--warn)" }}
           >
             Capped
             {page.result_cap != null

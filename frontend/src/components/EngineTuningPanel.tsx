@@ -32,6 +32,53 @@ export const EngineTuningPanel: React.FC<{ onToast: ToastFn }> = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
+  // Engine routing preference (persisted server-side). dual = route by table
+  // location; duckdb = unpinned flows + table-less queries always use DuckDB.
+  const [engineMode, setEngineMode] = useState<"dual" | "duckdb">("dual");
+  const [duckdbAvailable, setDuckdbAvailable] = useState(true);
+  const [engineModeBusy, setEngineModeBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getEngineMode()
+      .then((r) => {
+        if (cancelled) return;
+        setEngineMode(r.engine_mode === "duckdb" ? "duckdb" : "dual");
+        setDuckdbAvailable(r.duckdb_available !== false);
+      })
+      .catch(() => {
+        /* leave the control at its default; tuning below still works */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const applyEngineMode = async (mode: "dual" | "duckdb") => {
+    if (mode === engineMode) return;
+    setEngineModeBusy(true);
+    try {
+      const r = await api.setEngineMode(mode);
+      if (r.error) {
+        onToast("error", "Engine mode", r.error);
+        return;
+      }
+      setEngineMode(r.engine_mode === "duckdb" ? "duckdb" : "dual");
+      setDuckdbAvailable(r.duckdb_available !== false);
+      onToast(
+        "ok",
+        "Engine mode",
+        r.engine_mode === "duckdb"
+          ? "Always DuckDB (when available)"
+          : "Automatic (route by table location)",
+      );
+    } catch (e: any) {
+      onToast("error", "Engine mode", e?.message || String(e));
+    } finally {
+      setEngineModeBusy(false);
+    }
+  };
 
   const applyResponse = useCallback(
     (r: Awaited<ReturnType<typeof api.engineTuning>>) => {
@@ -117,6 +164,46 @@ export const EngineTuningPanel: React.FC<{ onToast: ToastFn }> = ({
 
   return (
     <div data-testid="engine-tuning-panel" className="settings-grid">
+      <div
+        className="threshold-field"
+        style={{ gridColumn: "1 / -1" }}
+        title="Which engine runs unpinned flows and table-less queries"
+      >
+        <span className="threshold-field-head">
+          <span>Engine</span>
+        </span>
+        <div
+          className="engine-mode-seg"
+          data-testid="engine-mode-control"
+          style={{ display: "flex", flexWrap: "wrap", gap: 4 }}
+        >
+          <button
+            type="button"
+            className={"btn sm" + (engineMode === "dual" ? " primary" : " ghost")}
+            disabled={engineModeBusy || !duckdbAvailable}
+            aria-pressed={engineMode === "dual"}
+            data-testid="engine-mode-dual"
+            onClick={() => void applyEngineMode("dual")}
+          >
+            Automatic (route by table location)
+          </button>
+          <button
+            type="button"
+            className={"btn sm" + (engineMode === "duckdb" ? " primary" : " ghost")}
+            disabled={engineModeBusy || !duckdbAvailable}
+            aria-pressed={engineMode === "duckdb"}
+            data-testid="engine-mode-duckdb"
+            onClick={() => void applyEngineMode("duckdb")}
+          >
+            Always DuckDB (when available)
+          </button>
+        </div>
+        <span className="faint" style={{ fontSize: 11, display: "block", marginTop: 2 }}>
+          {duckdbAvailable
+            ? "Automatic keeps tables on the engine they live on; Always DuckDB prefers DuckDB for anything unpinned."
+            : "DuckDB is not available in this build — engine routing is fixed."}
+        </span>
+      </div>
       <div className="hint" style={{ marginBottom: 4, gridColumn: "1 / -1" }}>
         Adjust DuckDB&apos;s memory limit and thread count for this session.
         Changes apply immediately when the engine is idle.

@@ -552,7 +552,7 @@ export const FileLoadTab: React.FC<{
           {preflight?.blockers.map((msg) => (
             <div
               key={msg}
-              style={{ color: "#e07070", fontSize: 12.5, marginBottom: 4 }}
+              style={{ color: "var(--error-text)", fontSize: 12.5, marginBottom: 4 }}
             >
               {msg}
             </div>
@@ -560,7 +560,7 @@ export const FileLoadTab: React.FC<{
           {preflight?.warnings.map((msg) => (
             <div
               key={msg}
-              style={{ color: "#c98a2b", fontSize: 12.5, marginBottom: 4 }}
+              style={{ color: "var(--warn)", fontSize: 12.5, marginBottom: 4 }}
             >
               {msg}
             </div>

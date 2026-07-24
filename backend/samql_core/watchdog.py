@@ -177,10 +177,16 @@ def start(threshold_s=90.0, interval_s=15.0, log_path=None):
         worker.start()
 
 
+def stop():
+    """Stop the daemon thread (production shutdown path; also used by tests
+    via _stop_background_for_tests). Safe to call more than once."""
+    _stop_background_for_tests()
+
+
 def _stop_background_for_tests():
     """Stop the daemon and wait until any in-progress scan has left its
     critical section. Test-only; the production process keeps one watchdog for
-    its lifetime."""
+    its lifetime (and stops it via stop() during _graceful_shutdown)."""
     global _started, _thread, _stop_event
     with _start_lock:
         worker = _thread

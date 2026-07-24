@@ -9,7 +9,7 @@ import type { DiagnosticMeta, TableInfo } from "../lib/types";
 // a readable key/value + raw dump, so a future diagnostic needs no UI changes.
 
 const feat = (v: unknown) => (v ? "\u2713" : "\u2717");
-const featColor = (v: unknown) => (v ? "#2e8b57" : "#b04a4a");
+const featColor = (v: unknown) => (v ? "var(--ok)" : "var(--error-text)");
 
 const EnvStrip: React.FC<{ env: Record<string, any> }> = ({ env }) => {
   const features: Record<string, boolean> = env.features || {};
@@ -80,7 +80,7 @@ const LoadResultView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
         v={`${r.read_stdlib_s}s · ${r.read_stdlib_n} recs`}
       />
       {slower && (
-        <div style={{ color: "#b04a4a", fontSize: 12, margin: "2px 0 2px 158px" }}>
+        <div style={{ color: "var(--error-text)", fontSize: 12, margin: "2px 0 2px 158px" }}>
           {r.hint || "ijson is slower here — try SAMQL_JSON_READER=stdlib"}
         </div>
       )}
@@ -109,7 +109,7 @@ const LoadResultView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
                 fontSize: 12,
                 margin: "2px 0 2px 158px",
                 opacity: 0.85,
-                color: w.fast ? "#2e8b57" : "#b04a4a",
+                color: w.fast ? "var(--ok)" : "var(--error-text)",
               }}
             >
               {w.fast
@@ -141,7 +141,7 @@ const LoadResultView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
         {(r.per_table || r.tables || []).map((t: any) => (
           <div
             key={t.name}
-            style={{ color: t.error ? "#b04a4a" : undefined }}
+            style={{ color: t.error ? "var(--error-text)" : undefined }}
           >
             {t.name} — {t.rows} rows, {t.cols} cols
             {t.error
@@ -197,7 +197,7 @@ const LoadResultView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
 };
 
 const bottleneckColor = (b: string) =>
-  b && b !== "none" ? "#b04a4a" : "#2e8b57";
+  b && b !== "none" ? "var(--error-text)" : "var(--ok)";
 
 const FullAnalysisView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
   const scan = r.scan || {};
@@ -246,12 +246,12 @@ const FullAnalysisView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
         whole-file scan
       </div>
       {scan.scan_error && (
-        <div style={{ color: "#b04a4a", fontSize: 12 }}>
+        <div style={{ color: "var(--error-text)", fontSize: 12 }}>
           scan error: {scan.scan_error}
         </div>
       )}
       {scan.complete === false && (
-        <div style={{ color: "#b04a4a", fontSize: 12, marginBottom: 2 }}>
+        <div style={{ color: "var(--error-text)", fontSize: 12, marginBottom: 2 }}>
           scan hit the time budget — covered {scan.bytes_covered_mb} MB of{" "}
           {r.file?.size_mb} MB
           {scan.read_mbps ? ` (~${scan.read_mbps} MB/s)` : ""}; reading the whole
@@ -289,7 +289,7 @@ const FullAnalysisView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
         {heavy.slice(0, 6).map((h: any) => (
           <div
             key={h.record_index}
-            style={{ color: h.max_array_len >= 100000 ? "#b04a4a" : undefined }}
+            style={{ color: h.max_array_len >= 100000 ? "var(--error-text)" : undefined }}
           >
             #{h.record_index} — array {Number(h.max_array_len).toLocaleString()},
             elements {Number(h.elements).toLocaleString()}
@@ -327,7 +327,7 @@ const FullAnalysisView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
         {perT.map((t: any) => (
           <div
             key={t.name}
-            style={{ color: t.error ? "#b04a4a" : undefined }}
+            style={{ color: t.error ? "var(--error-text)" : undefined }}
           >
             {t.name} — {t.rows} rows, {t.cols} cols
             {t.error
@@ -343,7 +343,7 @@ const FullAnalysisView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
         ))}
       </div>
       {errs.length > 0 && (
-        <div style={{ color: "#b04a4a", fontSize: 12, marginTop: 4 }}>
+        <div style={{ color: "var(--error-text)", fontSize: 12, marginTop: 4 }}>
           {errs.length} table(s) failed to write — the real load falls back to
           the slow nested path when this happens.
         </div>
@@ -355,9 +355,9 @@ const FullAnalysisView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
             heaviest record, flattened directly (#{hv.record_index})
           </div>
           {hv.error ? (
-            <div style={{ color: "#b04a4a", fontSize: 12 }}>{hv.error}</div>
+            <div style={{ color: "var(--error-text)", fontSize: 12 }}>{hv.error}</div>
           ) : hv.skipped_flatten ? (
-            <div style={{ color: "#b04a4a", fontSize: 12 }}>
+            <div style={{ color: "var(--error-text)", fontSize: 12 }}>
               record #{hv.record_index} projects to ~
               {Number(hv.est_rows).toLocaleString()} rows (array{" "}
               {Number(hv.max_array_len).toLocaleString()}) — not flattened here
@@ -401,7 +401,7 @@ const HeaviestResultView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
         v={Number(r.max_array_len).toLocaleString()}
       />
       {r.explosive && (
-        <div style={{ color: "#b04a4a", fontSize: 12, margin: "4px 0" }}>
+        <div style={{ color: "var(--error-text)", fontSize: 12, margin: "4px 0" }}>
           → a record has a {Number(r.max_array_len).toLocaleString()}-element
           array; flattening it explodes into that many child rows in one step —
           which is what makes the load crawl while the byte progress sits still.
@@ -415,7 +415,7 @@ const HeaviestResultView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
           <div
             key={h.record_index}
             style={{
-              color: h.max_array_len >= 100000 ? "#b04a4a" : undefined,
+              color: h.max_array_len >= 100000 ? "var(--error-text)" : undefined,
             }}
           >
             record #{h.record_index} — biggest array{" "}
@@ -433,10 +433,10 @@ const StructureView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
   const hints = r.hints || [];
   const ft = r.file_tree;
   const kindColor: Record<string, string> = {
-    array: "#c98a2b",
-    "array-scalar": "#c98a2b",
-    struct: "#5b8def",
-    map: "#8a6ad6",
+    array: "var(--kind-array)",
+    "array-scalar": "var(--kind-array)",
+    struct: "var(--kind-struct)",
+    map: "var(--kind-map)",
     scalar: "",
   };
   const NodeRows = ({ nodes }: { nodes: any[] }) => (
@@ -457,7 +457,7 @@ const StructureView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
           </span>
           <span style={{ opacity: 0.55 }}> : {n.type}</span>
           {(n.kind === "array" || n.kind === "array-scalar") && (
-            <span style={{ color: "#c98a2b" }}> ⇗ array</span>
+            <span style={{ color: "var(--kind-array)" }}> ⇗ array</span>
           )}
           {n.path && <span style={{ opacity: 0.5 }}> — {n.path}</span>}
           {n.note && !n.path && (
@@ -499,7 +499,7 @@ const StructureView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
             whole record{ft.access === "json" ? " as JSON" : ""}
           </div>
           {ft.complete === false && (
-            <div style={{ color: "#c98a2b", fontSize: 11, marginBottom: 2 }}>
+            <div style={{ color: "var(--warn)", fontSize: 11, marginBottom: 2 }}>
               sampled {Number(ft.sampled).toLocaleString()} records in {ft.scan_s}
               s (not the whole file — deeper fields may be missing)
             </div>
@@ -532,7 +532,7 @@ const StructureView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
 
 const GenericResultView: React.FC<{ r: Record<string, any> }> = ({ r }) => {
   if (r && r.error) {
-    return <div style={{ color: "#b04a4a", fontSize: 13 }}>{String(r.error)}</div>;
+    return <div style={{ color: "var(--error-text)", fontSize: 13 }}>{String(r.error)}</div>;
   }
   return (
     <div>
@@ -648,7 +648,7 @@ export const DiagnosticsPanel: React.FC<{
     <div data-testid="diagnostics-panel">
       {env && <EnvStrip env={env} />}
       {loadErr && (
-        <div style={{ color: "#b04a4a", fontSize: 13 }}>{loadErr}</div>
+        <div style={{ color: "var(--error-text)", fontSize: 13 }}>{loadErr}</div>
       )}
 
       <div style={{ marginTop: 10 }}>
@@ -732,7 +732,7 @@ export const DiagnosticsPanel: React.FC<{
       </div>
 
       {err && (
-        <div style={{ color: "#b04a4a", fontSize: 13, marginTop: 10 }}>{err}</div>
+        <div style={{ color: "var(--error-text)", fontSize: 13, marginTop: 10 }}>{err}</div>
       )}
 
       {result != null && (

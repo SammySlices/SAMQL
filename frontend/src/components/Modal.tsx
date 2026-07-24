@@ -38,6 +38,11 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
 
+// Stack of mounted modals (push on mount, pop on unmount). Only the
+// topmost entry answers Escape / backdrop dismissal, so Escape in a nested
+// shell (Load File → Browse) closes just that shell, not the modal below.
+const modalStack: symbol[] = [];
+
 export const Modal: React.FC<Props> = ({
   title,
   onClose,
@@ -58,6 +63,19 @@ export const Modal: React.FC<Props> = ({
   const previousFocus = useRef<HTMLElement | null>(null);
   const titleId = useId();
   const closeMs = fast ? 120 : 160;
+  const [stackId] = useState(() => Symbol("modal"));
+  const isTopmost = useCallback(
+    () => modalStack[modalStack.length - 1] === stackId,
+    [stackId],
+  );
+
+  useEffect(() => {
+    modalStack.push(stackId);
+    return () => {
+      const i = modalStack.lastIndexOf(stackId);
+      if (i >= 0) modalStack.splice(i, 1);
+    };
+  }, [stackId]);
 
   const beginClose = useCallback(() => {
     if (closing || closeTimer.current != null) return;
@@ -74,8 +92,10 @@ export const Modal: React.FC<Props> = ({
 
   const beginDismiss = useCallback(() => {
     if (pinned) return;
+    // A nested modal above this one owns dismissal; leave it to them.
+    if (!isTopmost()) return;
     beginClose();
-  }, [beginClose, pinned]);
+  }, [beginClose, pinned, isTopmost]);
 
   useEffect(() => {
     previousFocus.current =
@@ -99,11 +119,13 @@ export const Modal: React.FC<Props> = ({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // A nested modal above this one owns Escape; leave it to them.
+        if (!isTopmost()) return;
         e.preventDefault();
         beginDismiss();
         return;
       }
-      if (e.key !== "Tab") return;
+      if (e.key !== "Tab" || !isTopmost()) return;
       const dialog = dialogRef.current;
       if (!dialog) return;
       const items = Array.from(
@@ -127,7 +149,7 @@ export const Modal: React.FC<Props> = ({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [beginDismiss]);
+  }, [beginDismiss, isTopmost]);
 
   // Portal to body so nested shells (Load File → Browse) are not trapped by
   // an ancestor's contain/overflow/radius — fixed backdrops must cover the

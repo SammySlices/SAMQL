@@ -150,6 +150,14 @@ vi.mock("../lib/api", () => ({
     sweepTemp: vi.fn(),
     flowCacheInfo: vi.fn(),
     engineTuning: vi.fn(),
+    getEngineMode: vi.fn(async () => ({
+      engine_mode: "dual",
+      duckdb_available: true,
+    })),
+    setEngineMode: vi.fn(async (mode: "dual" | "duckdb") => ({
+      engine_mode: mode,
+      duckdb_available: true,
+    })),
   },
 }));
 

@@ -20,6 +20,7 @@ import { NodeFlowScene } from "./nodeflow/NodeFlowScene";
 import { NodeFlowStatusBar } from "./nodeflow/NodeFlowStatusBar";
 import { NodeFlowTabBar } from "./nodeflow/NodeFlowTabBar";
 import { NodeFlowInspectorPanel } from "./nodeflow/NodeFlowInspectorPanel";
+import { Modal } from "./Modal";
 import { useNodeFlowAnimations } from "./nodeflow/useNodeFlowAnimations";
 import { useNodeFlowChartHydration } from "./nodeflow/useNodeFlowChartHydration";
 import { useNodeFlowCanvasInteractions } from "./nodeflow/useNodeFlowCanvasInteractions";
@@ -36,6 +37,32 @@ import {
   registerActiveNodeFlowGraphGetter,
 } from "../lib/createdNodes";
 import { clearNodeflowColsCache } from "../lib/nodeflowColumnsCache";
+
+/**
+ * Variable rows flagged "Ask at run" (``param: true``), collected from every
+ * variable node in the graph (including container children) — these become
+ * the Run-all dialog's drafts. First occurrence of a name wins.
+ */
+const promotedFlowParams = (
+  list: NbNode[],
+): { name: string; value: string }[] => {
+  const out: { name: string; value: string }[] = [];
+  const seen = new Set<string>();
+  const visit = (n: NbNode) => {
+    if (n.type === "variable") {
+      for (const row of (n.config?.vars || []) as any[]) {
+        const name = String(row?.name || "").trim();
+        if (!row?.param || !name || seen.has(name)) continue;
+        seen.add(name);
+        out.push({ name, value: String(row?.value ?? "") });
+      }
+    }
+    const children = n.config?.children;
+    if (Array.isArray(children)) children.forEach(visit);
+  };
+  (list || []).forEach(visit);
+  return out;
+};
 
 export const NodeFlow: React.FC<{
   tables: TableInfo[];
@@ -456,6 +483,31 @@ export const NodeFlow: React.FC<{
   });
   documentStatusRef.current = setDocumentStatus;
 
+  // "Ask at run" variable rows prompt for values before Run all; the drafts
+  // reset each time the dialog opens. null = dialog closed.
+  const [runParamDrafts, setRunParamDrafts] = useState<
+    { name: string; value: string }[] | null
+  >(null);
+  const requestRunAll = () => {
+    // Snapshot the click-time graph (same ref runAll reads) so a just-typed
+    // row is seen even before React commits the next render.
+    const promoted = promotedFlowParams(liveRef.current.nodes);
+    if (promoted.length) setRunParamDrafts(promoted);
+    else void runAll();
+  };
+  const runAllWithParams = () => {
+    const drafts = runParamDrafts || [];
+    setRunParamDrafts(null);
+    // Only names still flagged param at click time are sent as overrides.
+    const still = new Set(
+      promotedFlowParams(liveRef.current.nodes).map((p) => p.name),
+    );
+    const params = Object.fromEntries(
+      drafts.filter((p) => still.has(p.name)).map((p) => [p.name, p.value]),
+    );
+    void runAll(params);
+  };
+
   const {
     groupHover,
     marquee,
@@ -576,7 +628,7 @@ export const NodeFlow: React.FC<{
         onAddTab={addTab}
         running={running}
         onCancelRun={() => { void cancelRun(); }}
-        onRunAll={() => { void runAll(); }}
+        onRunAll={requestRunAll}
         canUndo={hist.canUndo}
         canRedo={hist.canRedo}
         onUndo={undo}
@@ -773,7 +825,7 @@ export const NodeFlow: React.FC<{
         running={running}
         nodeCount={nodes.length}
         cancelRun={() => { void cancelRun(); }}
-        runAll={() => { void runAll(); }}
+        runAll={requestRunAll}
         addTypeAt={(type, point) => {
           const group = groupAtContentPoint(point.x, point.y);
           if (
@@ -797,6 +849,55 @@ export const NodeFlow: React.FC<{
         nodeCount={nodes.length}
         edgeCount={edges.length}
       />
+
+      {runParamDrafts && (
+        <Modal
+          title="Run parameters"
+          onClose={() => setRunParamDrafts(null)}
+          testId="nodeflow-run-params"
+          footer={
+            <>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setRunParamDrafts(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                data-testid="nodeflow-run-params-run"
+                onClick={runAllWithParams}
+              >
+                Run
+              </button>
+            </>
+          }
+        >
+          <div className="hint" style={{ marginBottom: 8 }}>
+            These variables are marked “Ask at run”. Values override the
+            stored ones for this run only.
+          </div>
+          {runParamDrafts.map((draft, i) => (
+            <div className="form-row" key={draft.name}>
+              <label>{draft.name}</label>
+              <input
+                className="nb2-in"
+                data-testid={`nodeflow-run-param-${draft.name}`}
+                value={draft.value}
+                onChange={(e) =>
+                  setRunParamDrafts((cur) =>
+                    (cur || []).map((p, j) =>
+                      j === i ? { ...p, value: e.target.value } : p,
+                    ),
+                  )
+                }
+              />
+            </div>
+          ))}
+        </Modal>
+      )}
     </div>
   );
 };

@@ -1114,7 +1114,10 @@ export function useNodeFlowExecutionController({
 
   // run a node's pipeline to completion (no Output node needed). Results stay
   // out of the preview drawer until the user clicks an output port (doPreview).
-  const runLeaf = async (node: NbNode): Promise<RunOutcome> => {
+  const runLeaf = async (
+    node: NbNode,
+    params?: Record<string, string>,
+  ): Promise<RunOutcome> => {
     const id = startRun(`Running ${node.config.label}…`, [node.id]);
     const cctx = childCtx(node.id);
     const graph = cctx
@@ -1128,7 +1131,16 @@ export function useNodeFlowExecutionController({
       registerRun(id, ctrl);
       let r;
       try {
-        r = await api.nodeflowRun(graph, runNode, port, id, ctrl.signal);
+        r = await api.nodeflowRun(
+          graph,
+          runNode,
+          port,
+          id,
+          ctrl.signal,
+          false,
+          undefined,
+          params,
+        );
       } finally {
         unregisterRun(id, ctrl);
       }
@@ -1171,7 +1183,10 @@ export function useNodeFlowExecutionController({
   // scheduler. Shared ancestors are computed once; disjoint DuckDB branches
   // execute on separate registered child connections. Group children retain
   // their partial-graph semantics and therefore stay on runLeaf individually.
-  const runLeafBatch = async (leaves: NbNode[]): Promise<RunOutcome[]> => {
+  const runLeafBatch = async (
+    leaves: NbNode[],
+    params?: Record<string, string>,
+  ): Promise<RunOutcome[]> => {
     const id = startRun(
       `Running ${leaves.length} NodeFlow branches…`,
       leaves.map((node) => node.id),
@@ -1184,6 +1199,9 @@ export function useNodeFlowExecutionController({
         leaves.map((n) => ({ node: n.id, port: leafRunPort(n.type) })),
         id,
         ctrl.signal,
+        false,
+        undefined,
+        params,
       );
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
@@ -2212,7 +2230,7 @@ export function useNodeFlowExecutionController({
     }
   };
 
-  const runAll = async () => {
+  const runAll = async (params?: Record<string, string>) => {
     const batchScope = scopeVersionRef.current;
     // A new batch owns fresh cancellation state. Clear it before computing
     // terminals or starting any child run so no prior Stop can poison Run all.
@@ -2333,7 +2351,7 @@ export function useNodeFlowExecutionController({
       runList.every((n) => !childCtx(n.id))
     ) {
       const batched = [...runList];
-      batchOutcomes = await runLeafBatch(runList);
+      batchOutcomes = await runLeafBatch(runList, params);
       if (batchScope !== scopeVersionRef.current) return;
       batched.forEach((n, i) => {
         if (batchOutcomes[i]?.ok) successfulTerminalIds.push(n.id);
@@ -2374,7 +2392,7 @@ export function useNodeFlowExecutionController({
     // lets terminals on different engines run at once -- while per-run temp
     // tables are uniquely named so concurrent runs can't collide.
     const runOne = (n: NbNode): Promise<RunOutcome> => {
-      if (mode === "leaves") return runLeaf(n);
+      if (mode === "leaves") return runLeaf(n, params);
       const kind = n.type === "output" ? outputKind(n) : "data";
       return n.type === "iterator"
         ? doRunIterator(n)

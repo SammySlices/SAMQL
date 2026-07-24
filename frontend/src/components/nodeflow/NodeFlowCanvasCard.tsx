@@ -512,6 +512,22 @@ function NodeFlowCanvasCardImpl({
                 onPointerDown={(event) => actions.startNodeDrag(event, node)}
               >
                 <SphereNodeIcon node={node} />
+                {node.config.frozen ? (
+                  <button
+                    type="button"
+                    className="nb2-sphere-freeze"
+                    data-testid="nodeflow-node-frozen"
+                    title="Frozen — output pinned; runs reuse it until config changes. Click to unfreeze."
+                    aria-label="Frozen — click to unfreeze"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      actions.patchNode(node.id, { frozen: false });
+                    }}
+                  >
+                    ❄
+                  </button>
+                ) : null}
                 {isContainer && (
                   <button
                     type="button"
@@ -641,6 +657,21 @@ function NodeFlowCanvasCardImpl({
                   }
                 />
               )}
+              {node.config.frozen ? (
+                <button
+                  className="nb2-node-freeze"
+                  data-testid="nodeflow-node-frozen"
+                  title="Frozen — output pinned; runs reuse it until config changes. Click to unfreeze."
+                  aria-label="Frozen — click to unfreeze"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    actions.patchNode(node.id, { frozen: false });
+                  }}
+                >
+                  ❄
+                </button>
+              ) : null}
               {(node.type === "chart" ||
                 node.type === "dashboard" ||
                 isContainer) && (
@@ -688,6 +719,22 @@ function NodeFlowCanvasCardImpl({
               </div>
             ) : node.type === "variable" ? (
               <div className="nb2-var-body">
+                {(() => {
+                  const paramCount = (node.config.vars || []).filter(
+                    (value: any) =>
+                      value && value.param && String(value.name || "").trim(),
+                  ).length;
+                  return paramCount > 0 ? (
+                    <div className="nb2-var-chip" data-testid="nodeflow-var-params">
+                      <span
+                        className="nb2-var-chip-fx"
+                        title="Ask at run — Run all prompts for these values and overrides them for that run only"
+                      >
+                        {paramCount} param{paramCount === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                  ) : null;
+                })()}
                 {(node.config.vars || []).filter((value: any) => value && value.name).length ? (
                   (node.config.vars || [])
                     .filter((value: any) => value && value.name)

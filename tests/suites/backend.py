@@ -9806,8 +9806,10 @@ def backend_tests(datadir, csv_path, json_path):
         nb = _nodeflow_source()
 
         # (1) runAll clears the flag up front (a fresh batch is never
-        # pre-cancelled), not only via startRun's runDepth===0 path.
-        runall = nb.split("const runAll = async () => {", 1)[1][:800]
+        # pre-cancelled), not only via startRun's runDepth===0 path. Match the
+        # declaration prefix, not a brittle zero-arg form -- runAll may take
+        # optional params (e.g. parameterized flows).
+        runall = nb.split("const runAll = async (", 1)[1][:800]
         need("cancelRequested.current = false" in runall,
              "runAll resets the cancel flag before starting the batch")
 
@@ -17890,13 +17892,19 @@ def backend_tests(datadir, csv_path, json_path):
              ".nb2-node { transition: box-shadow" in css),
         ]
         # the audit itself, kept honest: exactly ONE production component
-        # owns a modal backdrop (the shared Modal with the .435 exit).
-        # Component tests may mention the class without owning one.
+        # RENDERS a modal backdrop (the shared Modal with the .435 exit).
+        # Merely querying its presence (a panel checking
+        # querySelector(".modal-backdrop") so a modal above it owns Escape)
+        # is not ownership. Component tests may mention the class freely.
         import glob as _g
-        owners = [f for f in _g.glob(os.path.join(
-            ROOT, "frontend", "src", "components", "*.tsx"))
-            if ".test." not in os.path.basename(f)
-            and "modal-backdrop" in open(f, encoding="utf-8").read()]
+        owners = []
+        for f in _g.glob(os.path.join(ROOT, "frontend", "src",
+                                      "components", "*.tsx")):
+            if ".test." in os.path.basename(f):
+                continue
+            src = open(f, encoding="utf-8").read()
+            if '"modal-backdrop" +' in src or 'className="modal-backdrop"' in src:
+                owners.append(f)
         checks += [("one backdrop owner (the shared Modal)",
                     len(owners) == 1
                     and owners[0].endswith("Modal.tsx"))]
@@ -26702,6 +26710,27 @@ def backend_tests(datadir, csv_path, json_path):
         cause, fix = classify_mssql_error("Login timeout expired")
         need(bool(cause and fix), "error classifier returned nothing")
 
+    def t_mssql_readonly_session_context_guard():
+        # A read-only SQL Server connection permits USE/SET (they switch session
+        # context and write no data) but must NOT let a data write ride along in
+        # the same GO-batch. classify_sql_statement keys off the leading keyword
+        # only, so the guard splits the batch and requires EVERY statement to be
+        # a bare USE/SET. This is a pure function (no pyodbc / live connection).
+        from samql_core.mssql import _batch_is_session_context_only as ok
+        # allowed: pure session-context batches
+        for good in ("USE [Sales]", "use master", "SET NOCOUNT ON",
+                     "USE [db]; SET NOCOUNT ON", "SET @x = 'DELETE; DROP'"):
+            need(ok(good), "session-context batch is allowed: %r" % good)
+        # blocked: a write smuggled behind a USE/SET head (the bug this closes)
+        for bad in ("SET NOCOUNT ON; DELETE FROM t", "USE [db]; UPDATE t SET x=1",
+                    "SET NOCOUNT ON;\nDROP TABLE t", "DELETE FROM t",
+                    "USE [db]; INSERT INTO t VALUES (1)"):
+            need(not ok(bad),
+                 "a write behind a USE/SET head is NOT allowed: %r" % bad)
+        # empty / whitespace is not a session-context bypass
+        need(not ok("") and not ok("   ;  "),
+             "an empty batch does not bypass the guard")
+
     def t_mssql_alt_auth():
         # The 'Alternate Windows account (runas /netonly)' method and the
         # driver auto-pick are pure and run without pyodbc/pywin32.
@@ -34492,6 +34521,249 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_flow_engine_flip_and_variable_paths():
+        # Audit fixes: (1) a source fetch that lands on DuckDB flips the flow
+        # engine BEFORE compile -- a first run after restart must not die with
+        # "no such table"; (2) expr variables evaluate inside iterator loops;
+        # (3) ${vars} resolve into export file names; (4) an unpinned write
+        # still materialises on the write destination (no wrong flip).
+        from samql_core.session import DUCKDB_TARGET
+        s = Session()
+        try:
+            if not s.optional_features().get("duckdb"):
+                return
+            eng = s.get_duckdb()
+            # -- 1: pre-fetch pin is None (LOCAL), the fetch stamps duckdb --
+            def fake_fetch(typ, nid, cfg, graph=None, query_id=None):
+                eng.execute('CREATE TABLE IF NOT EXISTS "__nbsql_t1" (v INTEGER)')
+                eng.execute('DELETE FROM "__nbsql_t1"')
+                eng.execute('INSERT INTO "__nbsql_t1" VALUES (7)')
+                s._api_node_tables[nid] = {
+                    "table": "__nbsql_t1", "engine": "duckdb"}
+                return {"ok": True, "table": "__nbsql_t1",
+                        "engine": "duckdb", "columns": ["v"], "rows": 1}
+            orig_fetch = s.fetch_source_node
+            s.fetch_source_node = fake_fetch
+            try:
+                g = {"nodes": [
+                    {"id": "src", "type": "sqlserver",
+                     "config": {"query": "SELECT 1"}},
+                    {"id": "out", "type": "output", "config": {}}],
+                    "edges": [{"from": {"node": "src", "port": "out"},
+                               "to": {"node": "out", "port": "in"}}]}
+                need(s._flow_pinned_engine(g) is None,
+                     "pre-fetch pin is empty (LOCAL default)")
+                r = s.run_nodeflow(g, "out", "out")
+                need(not r.get("error"),
+                     "first run flips engine instead of dying: %s"
+                     % r.get("error"))
+                eq(r.get("rows"), [[7]], "rows came from the duckdb fetch")
+            finally:
+                s.fetch_source_node = orig_fetch
+
+            # -- 2: expr variable evaluates inside an iterator loop --
+            s.db.execute("CREATE TABLE itvals (n)")
+            s.db.execute("INSERT INTO itvals VALUES (1), (2), (3)")
+            g2 = {"nodes": [
+                {"id": "v1", "type": "variable", "config": {"vars": [
+                    {"name": "threshold", "value": "1 + 1",
+                     "kind": "expr"}]}},
+                {"id": "it", "type": "iterator", "config": {
+                    "children": [
+                        {"id": "inp", "type": "input",
+                         "config": {"table": "itvals"}},
+                        {"id": "f", "type": "filter",
+                         "config": {"condition": "n >= ${threshold}"}}],
+                    "accumulate": "append", "table": "acc_var"}},
+                {"id": "vt", "type": "input", "config": {"table": "itvals"}}],
+                "edges": [
+                    {"from": {"node": "inp", "port": "out"},
+                     "to": {"node": "f", "port": "in"}},
+                    {"from": {"node": "vt", "port": "out"},
+                     "to": {"node": "it", "port": "vars"}}]}
+            r = s.run_iterator(g2, "it", query_id="q-var-it")
+            need(not r.get("error"),
+                 "iterator with expr var runs: %s" % r.get("error"))
+            eq(r.get("rows"), 6,
+               "3 passes x 2 rows where n >= 2 (expr evaluated per pass)")
+
+            # -- 3: ${vars} resolve into the export file name --
+            import tempfile as _tf
+            d = _tf.mkdtemp()
+            g3 = {"nodes": [
+                {"id": "v", "type": "variable", "config": {"vars": [
+                    {"name": "tag", "value": "sales"}]}},
+                {"id": "s", "type": "sql",
+                 "config": {"sql": "SELECT 1 AS x"}},
+                {"id": "o", "type": "output", "config": {}}],
+                "edges": [{"from": {"node": "s", "port": "out"},
+                           "to": {"node": "o", "port": "in"}}]}
+            r = s.export_nodeflow(g3, "o", d, "csv",
+                                  base_name="report_${tag}",
+                                  query_id="q-exp-var")
+            need(not r.get("error"), "export with var name: %s"
+                 % r.get("error"))
+            need(r.get("file") == "report_sales.csv",
+                 "var resolved into the file name: %s" % r.get("file"))
+
+            # -- 4: an unpinned write still lands on the write destination --
+            g4 = {"nodes": [
+                {"id": "s", "type": "sql", "config": {
+                    "sql": "WITH t(c) AS (VALUES ('a'),('b')) SELECT c FROM t"}},
+                {"id": "w", "type": "write", "config": {
+                    "name": "flip_cats", "mode": "overwrite"}}],
+                "edges": [{"from": {"node": "s", "port": "out"},
+                           "to": {"node": "w", "port": "in"}}]}
+            r = s.run_nodeflow_to_table(g4, "w", "flip_cats")
+            need(not r.get("error"),
+                 "unpinned write stays on the destination engine: %s"
+                 % r.get("error"))
+            need("flip_cats" in (getattr(eng, "table_columns", {}) or {}),
+                 "the table landed in DuckDB (the default destination)")
+        finally:
+            s.shutdown()
+
+    def t_golden_flows():
+        # Golden-flow regression pack: real .samql workflow files (the same
+        # envelope Save As writes) run headless and compared against pinned
+        # expectations. Catches node-semantics / config-shape drift that unit
+        # tests miss. To add one: Save As a flow into
+        # tests/fixtures/golden_flows/, then pin its result in expected.json.
+        import glob as _gg
+        pack = os.path.join(ROOT, "tests", "fixtures", "golden_flows")
+        exp = json.load(open(os.path.join(pack, "expected.json"),
+                             encoding="utf-8"))
+        files = sorted(_gg.glob(os.path.join(pack, "*.samql")))
+        need(len(files) >= 3, "golden pack present (%d flows)" % len(files))
+        s = _loaded_session()
+        try:
+            def _cell_eq(wv, gv, what):
+                if isinstance(wv, bool):
+                    eq(gv, wv, what)
+                elif isinstance(wv, (int, float)):
+                    try:
+                        need(abs(float(gv) - float(wv)) < 1e-6,
+                             "%s ~ %r vs %r" % (what, gv, wv))
+                    except (TypeError, ValueError):
+                        need(False, "%s not numeric: %r" % (what, gv))
+                else:
+                    eq(gv, wv, what)
+
+            for path in files:
+                name = os.path.basename(path)
+                env = json.load(open(path, encoding="utf-8"))
+                need(env.get("samql") == "workflow"
+                     and env.get("kind") == "node",
+                     "%s is a node workflow envelope" % name)
+                graph = env.get("payload") or {}
+                need(isinstance(graph.get("nodes"), list)
+                     and isinstance(graph.get("edges"), list),
+                     "%s payload carries nodes+edges" % name)
+                e = exp[name]
+
+                r = s.run_nodeflow(graph, "out", "out")
+                need(not r.get("error"), "%s runs: %s" % (name, r.get("error")))
+                if "columns" in e:
+                    eq(r.get("columns"), e["columns"],
+                       "%s output columns" % name)
+                for col in e.get("columns_include", []):
+                    need(col in (r.get("columns") or []),
+                         "%s includes %s" % (name, col))
+                eq(r.get("total_rows"), e.get("rows"), "%s row count" % name)
+                if "first_rows" in e:
+                    for want, got in zip(e["first_rows"], r["rows"]):
+                        for wv, gv in zip(want, got):
+                            _cell_eq(wv, gv, "%s cell" % name)
+                if "first_row" in e:
+                    for wv, gv in zip(e["first_row"], r["rows"][0]):
+                        _cell_eq(wv, gv, "%s first-row cell" % name)
+                # promoted-parameter flows also exercise the run-time params
+                # override (params_filter.samql)
+                if "with_params" in e:
+                    r2 = s.run_nodeflow(graph, "out", "out",
+                                        params=e["with_params"])
+                    need(not r2.get("error"),
+                         "%s with params runs: %s" % (name, r2.get("error")))
+                    eq(r2.get("total_rows"), e.get("rows_with_params"),
+                       "%s params override changes the result" % name)
+        finally:
+            s.shutdown()
+
+    def t_node_freeze_and_engine_mode():
+        # Node freeze: a node marked config.frozen pins its output across
+        # runs -- later runs reuse the pinned table even after the source
+        # data changes (an explicit user choice, canvas-badged). Unfreezing
+        # (or editing the subtree) recomputes. Engine mode "duckdb" routes
+        # unpinned flows/queries to DuckDB when installed.
+        s = Session()
+        try:
+            eng = s.db
+            eng.execute("CREATE TABLE frz (v)")
+            eng.execute("INSERT INTO frz VALUES (1), (2)")
+            eng.sync_catalog()
+
+            def flow(frozen):
+                return {"nodes": [
+                    {"id": "in", "type": "input",
+                     "config": {"table": "frz", "frozen": frozen}},
+                    {"id": "sel", "type": "select", "config": {
+                        "fields": [{"name": "v", "keep": True}]}},
+                    {"id": "out", "type": "output", "config": {}}],
+                    "edges": [
+                        {"from": {"node": "in", "port": "out"},
+                         "to": {"node": "sel", "port": "in"}},
+                        {"from": {"node": "sel", "port": "out"},
+                         "to": {"node": "out", "port": "in"}}]}
+
+            # run 1: frozen build pins the output
+            r1 = s.run_nodeflow(flow(True), "out", "out")
+            need(not r1.get("error"), "freeze run 1: %s" % r1.get("error"))
+            eq(r1.get("total_rows"), 2, "two rows initially")
+            need(len(s._frozen_flow_tables) == 1,
+                 "the frozen output is pinned for later runs")
+            # data changes underneath: a frozen run does NOT see it
+            eng.execute("INSERT INTO frz VALUES (3)")
+            r2 = s.run_nodeflow(flow(True), "out", "out")
+            need(not r2.get("error"), "freeze run 2: %s" % r2.get("error"))
+            eq(r2.get("total_rows"), 2,
+               "frozen node serves the pinned output after a data change")
+            # unfrozen: the new row appears
+            r3 = s.run_nodeflow(flow(False), "out", "out")
+            need(not r3.get("error"), "unfrozen run: %s" % r3.get("error"))
+            eq(r3.get("total_rows"), 3, "unfreeze recomputes")
+            # config change invalidates the pin (different table)
+            eng.execute("CREATE TABLE frz2 (v)")
+            eng.execute("INSERT INTO frz2 VALUES (9)")
+            g4 = flow(True)
+            g4["nodes"][0]["config"]["table"] = "frz2"
+            r4 = s.run_nodeflow(g4, "out", "out")
+            need(not r4.get("error"), "frozen config change: %s"
+                 % r4.get("error"))
+            eq(r4.get("total_rows"), 1,
+               "a subtree edit moves the fingerprint and recomputes")
+
+            # always-DuckDB mode: unpinned flow + table-less query prefer it
+            if s.optional_features().get("duckdb"):
+                r = s.set_engine_mode("duckdb")
+                need(r.get("ok"), "engine mode set: %s" % r)
+                try:
+                    from samql_core.session import DUCKDB_TARGET
+                    eq(s._flow_engine_target(
+                        {"nodes": [{"id": "s", "type": "sql",
+                                    "config": {"sql": "SELECT 1"}}],
+                         "edges": []}),
+                       DUCKDB_TARGET, "unpinned flow targets DuckDB")
+                    eq(s._choose_local_engine("SELECT 1"),
+                       DUCKDB_TARGET, "table-less query targets DuckDB")
+                    # a SQLite-only table still forces SQLite (preference,
+                    # not relocation)
+                    eq(s._choose_local_engine('SELECT * FROM "frz"'),
+                       "__local__", "sqlite-only table stays on SQLite")
+                finally:
+                    s.set_engine_mode("dual")
+        finally:
+            s.shutdown()
+
     def t_node_name_collisions():
         # Derived output names that collide with an existing input column must
         # REPLACE it (not emit a duplicate that silently binds the original),
@@ -36204,11 +36476,11 @@ def backend_tests(datadir, csv_path, json_path):
         try:
             class _FakeConn:
                 def __init__(self):
-                    self.used = None
+                    self.used = []
 
                 def execute(self, sql):
                     if str(sql).strip().upper().startswith("USE "):
-                        self.used = sql
+                        self.used.append(sql)
                         return (None, None)
                     return (["id", "name"],
                             [(1, "ann"), (2, "bob")])
@@ -36267,6 +36539,9 @@ def backend_tests(datadir, csv_path, json_path):
                 if cfg.get("database"):
                     need(fake.used and "Sales" in str(fake.used),
                          "USE database ran: %r" % fake.used)
+                    need("USE [1]" in str(fake.used),
+                         "the shared connection's previous database is "
+                         "restored after the import: %r" % fake.used)
                 return out
 
             s.fetch_sqlserver_node = fetch_with_fake_connect
@@ -40968,6 +41243,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("drop evicts cached result", t_drop_evicts),
         ("materialize + reconcile over it", t_materialize),
         ("mssql conn-string builder + classifier", t_mssql_conn_str),
+        ("mssql read-only guard: USE/SET only, no smuggled write",
+         t_mssql_readonly_session_context_guard),
         ("mssql alternate-account auth + driver pick", t_mssql_alt_auth),
         ("mssql catalog (schema-only) query routing", t_mssql_catalog_routing),
         ("flatten json -> one CSV per relational table",
@@ -41176,6 +41453,13 @@ def backend_tests(datadir, csv_path, json_path):
         ("cancel + freshness hardening (persistent groups, python, reconcile, "
          "epoch, materialize, origin touch)",
          t_cancel_and_freshness_hardening),
+        ("flow engine flip after source fetch + variable paths "
+         "(iterator/export/write)",
+         t_flow_engine_flip_and_variable_paths),
+        ("golden flow regression pack (.samql files run headless)",
+         t_golden_flows),
+        ("node freeze (pinned output) + always-DuckDB engine mode",
+         t_node_freeze_and_engine_mode),
         ("shared-subgraph materialisation (computed once across targets)",
          t_shared_subgraph),
         ("join modes (inner / left / semi / anti)", t_join_modes),
