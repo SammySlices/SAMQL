@@ -2,12 +2,28 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-24.689
+Current build:   2026-07-24.690
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-24.690  (v2.16.4)
+
+CHART Y-AXIS CONTROLS + SQL SERVER BRACE GUARDS + DUCKDB DEFAULT ENGINE.
+
+- Charts gain "Fit Y to data" and explicit Y min / max on bar/line/area (and
+  scatter in NodeFlow), applied to the ECharts value axis.
+- Variables: an author-quoted token '{{name}}' now collapses to one escaped SQL
+  literal instead of ''value''. The SQL Server node fetch runs the same
+  {{name}} misuse checks as a full run and rejects {{in}}/{{input}} (it has no
+  input relation) with an actionable message.
+- Engine preference DEFAULT flips dual -> duckdb: an unpinned flow / table-less
+  query routes to DuckDB by default when installed (a SQLite-only table still
+  forces SQLite -- preference, not relocation). Set engine_mode="dual" to keep
+  the legacy route-by-table behavior.
 
 ----------------------------------------------------------------------
 build 2026-07-24.689  (v2.16.4)
