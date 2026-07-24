@@ -2,12 +2,24 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-24.688
+Current build:   2026-07-24.689
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-24.689  (v2.16.4)
+
+RECONCILE PER-SIDE TOTALS + IDENTICAL-REFETCH EPOCH UN-BUMP.
+
+The reconcile report shows A / B total record counts separately (plus the
+matching common count) instead of a lump "Total records" tile. Separately, a
+volatile-source re-fetch that returns identical content no longer bumps the
+data epoch, so it does not prune the previews a run just produced. The content
+signature keys on every column (a change confined to a later column is still
+detected -- latest-data-wins preserved).
 
 ----------------------------------------------------------------------
 build 2026-07-24.688  (v2.16.4)
