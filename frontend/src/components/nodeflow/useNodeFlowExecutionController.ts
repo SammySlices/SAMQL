@@ -366,6 +366,13 @@ export function useNodeFlowExecutionController({
   // produced (see rememberTableLastRun). The catalog prop can lag a run's own
   // epoch bump (source fetches), so the effective epoch is the max of both.
   const seenDataEpochRef = useRef(0);
+  // Workflow-variable overrides of the most recent run (promoted params from
+  // the Run dialog). The seed batch and chart refresh that follow a params
+  // run must build with the SAME values, or every downstream preview/chart
+  // shows the variable's STATIC value instead of what the user typed.
+  const lastRunParamsRef = useRef<Record<string, string> | undefined>(
+    undefined,
+  );
   dataEpochRef.current = Math.max(dataEpoch, seenDataEpochRef.current);
   /** Open drawer snapshot — used to refresh after Run all seeds last-run cache. */
   const previewRef = useRef<NodeFlowPreview | null>(null);
@@ -529,6 +536,10 @@ export function useNodeFlowExecutionController({
         ctrl.signal,
         true,
         LAST_RUN_SEED_PREVIEW_LIMIT,
+        // The seed pass must build with the SAME variable overrides the run
+        // used -- otherwise downstream previews show the variable's static
+        // value (a params-run's whole point is the typed value).
+        lastRunParamsRef.current,
       );
       if (
         cancelRequested.current ||
@@ -1137,6 +1148,7 @@ export function useNodeFlowExecutionController({
     node: NbNode,
     params?: Record<string, string>,
   ): Promise<RunOutcome> => {
+    lastRunParamsRef.current = params;
     const id = startRun(`Running ${node.config.label}…`, [node.id]);
     const cctx = childCtx(node.id);
     const graph = cctx
@@ -1206,6 +1218,7 @@ export function useNodeFlowExecutionController({
     leaves: NbNode[],
     params?: Record<string, string>,
   ): Promise<RunOutcome[]> => {
+    lastRunParamsRef.current = params;
     const id = startRun(
       `Running ${leaves.length} NodeFlow branches…`,
       leaves.map((node) => node.id),
@@ -1403,7 +1416,11 @@ export function useNodeFlowExecutionController({
       "|" +
       (node.config.chart_type || "bar") +
       "|e" +
-      dataEpochRef.current;
+      dataEpochRef.current +
+      // The run's variable overrides shape the data too: a chart hydrated
+      // under region=EMEA must NOT serve for region=US on the next run.
+      "|p" +
+      JSON.stringify(lastRunParamsRef.current || {});
     const existing = chartPromisesRef.current.get(key);
     if (!force && existing) return existing;
     const cur = chartDataRef.current[node.id];
@@ -1426,6 +1443,8 @@ export function useNodeFlowExecutionController({
           chartSpecOf(node),
           owner.queryId,
           owner.controller.signal,
+          // Hydrate with the same variable overrides the last run used.
+          lastRunParamsRef.current,
         );
         if (!isAuxRequestCurrent(owner)) return;
         if (wasCancelled(r) || !!r.cancelled) {

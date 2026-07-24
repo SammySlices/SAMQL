@@ -2043,13 +2043,17 @@ export const api = {
     spec: unknown,
     queryId?: string,
     signal?: AbortSignal,
+    params?: Record<string, string>,
   ) =>
     jsonFetch<ChartData & { error?: string; cancelled?: boolean }>(
       "/api/nodeflow/chart",
       {
         signal,
         method: "POST",
-        body: JSON.stringify({ graph, node, spec, query_id: queryId }),
+        body: JSON.stringify({
+          graph, node, spec, query_id: queryId,
+          ...(params ? { params } : {}),
+        }),
       },
     ),
   nodeflowBrowse: (

@@ -4805,9 +4805,12 @@ class Session:
         self._flow_cleanup(query_id, et, created)
         return out
 
-    def run_nodeflow_chart(self, graph, node_id, spec, query_id=None):
+    def run_nodeflow_chart(self, graph, node_id, spec, query_id=None,
+                           params=None):
         """Materialise a chart node's input and build a chart from it (reusing
-        chart_data), returning ChartData for the canvas to render."""
+        chart_data), returning ChartData for the canvas to render. ``params``
+        overrides workflow-variable values for this build (a Run-all with
+        promoted parameters must hydrate the chart with the SAME values)."""
         from . import nodeflow
         created = []
         et = LOCAL_TARGET
@@ -4821,7 +4824,8 @@ class Session:
                 query_id, eng0, surface="node",
                 label=self._flow_node_label(graph, node_id))
             tmp = self._materialize_flow(graph, sn, sp, et, created,
-                                         query_id=query_id)
+                                         query_id=query_id,
+                                         var_overrides=params)
             et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)

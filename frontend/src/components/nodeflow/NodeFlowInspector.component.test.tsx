@@ -909,3 +909,64 @@ describe("NodeFlowInspector", () => {
     );
   });
 });
+
+describe("chart Style & colors panel interactions", () => {
+  const chartNode: NbNode = {
+    id: "ch-1",
+    type: "chart",
+    x: 0,
+    y: 0,
+    config: { chart_type: "bar", x: "category", y: "total" },
+  };
+
+  it("summary toggles the section open and every control patches the node", () => {
+    const patchStyle = vi.fn();
+    const patch = vi.fn();
+    render(
+      <NodeFlowInspector
+        context={context(chartNode, {
+          patch,
+          patchStyle,
+          inspCols: { in: ["category", "total"] },
+          chartData: {},
+        })}
+      />,
+    );
+    const summary = document.querySelector(".nb2-style > summary");
+    expect(summary).not.toBeNull();
+    expect(summary!.textContent).toContain("Style & colors");
+
+    const details = document.querySelector(".nb2-style") as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    fireEvent.click(summary!);
+    expect(details.open).toBe(true);
+
+    const selects = Array.from(details.querySelectorAll("select"));
+    expect(selects.length).toBeGreaterThanOrEqual(2);
+    // palette select is the first in the section
+    fireEvent.change(selects[0], { target: { value: "vivid" } });
+    expect(patchStyle).toHaveBeenCalledWith(chartNode, "palette", "vivid");
+    // theme select is the second
+    fireEvent.change(selects[1], { target: { value: "light" } });
+    expect(patchStyle).toHaveBeenCalledWith(chartNode, "theme", "light");
+    // yScale checkbox + yMin/yMax inputs (the scaling controls)
+    const yScaleLabel = Array.from(details.querySelectorAll("label")).find(
+      (l) => l.textContent?.includes("Fit Y to data"),
+    );
+    expect(yScaleLabel).toBeTruthy();
+    const yScale = yScaleLabel!.querySelector(
+      'input[type="checkbox"]',
+    ) as HTMLInputElement;
+    expect(yScale).not.toBeNull();
+    fireEvent.click(yScale);
+    expect(patchStyle).toHaveBeenCalledWith(chartNode, "yScale", true);
+    fireEvent.change(screen.getByTestId("chart-ymin"), {
+      target: { value: "39000" },
+    });
+    expect(patchStyle).toHaveBeenCalledWith(chartNode, "yMin", 39000);
+    fireEvent.change(screen.getByTestId("chart-ymax"), {
+      target: { value: "40000" },
+    });
+    expect(patchStyle).toHaveBeenCalledWith(chartNode, "yMax", 40000);
+  });
+});

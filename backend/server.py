@@ -4086,7 +4086,8 @@ class Api:
         b = body or {}
         graph = b.get("graph") or {}
         return s.run_nodeflow_chart(graph, b.get("node"), b.get("spec") or {},
-                                    query_id=b.get("query_id"))
+                                    query_id=b.get("query_id"),
+                                    params=b.get("params"))
 
     @staticmethod
     def nodeflow_browse(s, m, body, ctx):

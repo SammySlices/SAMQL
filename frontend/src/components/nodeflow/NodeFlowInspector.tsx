@@ -4669,7 +4669,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                   )}
 
                   <details className="nb2-style">
-                    <summary>Style &amp; colours</summary>
+                    <summary>Style &amp; colors</summary>
                     <label className="nb2-lbl">Colour palette</label>
                     <select
                       className="nb2-in"

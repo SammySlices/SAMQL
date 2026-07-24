@@ -388,7 +388,7 @@ const ChartPanelImpl: React.FC<Props> = ({
         </div>
         <button
           className="btn ghost sm"
-          title="Colours & style"
+          title="Colors & style"
           onClick={() => setShowStyle((v) => !v)}
         >
           {showStyle ? "Hide style" : "Style"}
