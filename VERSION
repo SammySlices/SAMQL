@@ -2,12 +2,40 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-23.684
+Current build:   2026-07-24.685
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-24.685  (v2.16.4)
+
+NODE FREEZE + RUN PARAMETERS + ENGINE MODE + VAR/ENGINE SWEEP.
+
+A large feature + reliability batch (Kimi assistant) plus a security hardening
+of the read-only SQL Server guard tightened this session. Both suites pass.
+
+- Node Freeze: pin a node's output (config.frozen -> kept __nbfreeze_* table)
+  across data changes until unfreeze / upstream edit. Canvas ❄ badge.
+- Run parameters: mark a variable "Ask at run" (vars[].param) to be prompted in
+  a Run parameters dialog; params thread through the flow run.
+- Engine mode (dual|duckdb): route unpinned flows + table-less queries to
+  DuckDB when set; a SQLite-only table still forces SQLite. Persisted setting.
+- Engine-flip-after-fetch fix: a remote-source flow no longer errors "no such
+  table" on the first run after restart (the build engine is re-derived after a
+  fetch flips it).
+- ${var} resolution sweep: export file names, iterator/while/loop bodies,
+  SharePoint/webscrape/API fetches. Shared MSSQL connection restores its prior
+  database after a node USE [db].
+- Frontend: re-run failures now toast; modal-stack Escape ownership; Field
+  Explorer nested-field retry; theme-aware chart fallback + WCAG contrast pass.
+
+SECURITY: a read-only SQL Server connection permitted any batch beginning with
+USE/SET, so a write could ride along (SET NOCOUNT ON; DELETE FROM t). The guard
+now requires EVERY statement in a batch to be a bare USE/SET, keeping the
+legitimate USE [db] switch while blocking smuggled writes.
 
 ----------------------------------------------------------------------
 build 2026-07-23.684  (v2.16.4)
