@@ -3640,6 +3640,7 @@ class Api:
             b.get("config") or {},
             graph=b.get("graph"),
             query_id=b.get("query_id"),
+            columns_only=bool(b.get("columns_only")),
         )
 
     @staticmethod

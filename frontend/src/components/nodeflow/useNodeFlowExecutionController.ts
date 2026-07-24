@@ -2155,6 +2155,88 @@ export function useNodeFlowExecutionController({
     }
   };
 
+  // Get columns (SQL Server node): pull just the query's column headers --
+  // no data -- so downstream nodes can be configured against real fields
+  // before any fetch. The names land in config.columns, which the compiler
+  // serves as an empty relation until a real fetch lands (the fetch's live
+  // table then takes over).
+  const doGetColumns = async (
+    node: NbNode,
+    configExtra?: Record<string, unknown>,
+  ): Promise<RunOutcome> => {
+    if (node.type !== "sqlserver") {
+      onToast("error", "Get columns", "Only the SQL Server node supports this.");
+      return { ok: false };
+    }
+    if (!(node.config.query || "").trim()) {
+      onToast("error", "Add a query", "The SQL Server node needs a SELECT to run.");
+      return { ok: false };
+    }
+    if (
+      !(node.config.server || "").trim() &&
+      !(node.config.profile_key || "").trim() &&
+      !(node.config.connection || "").trim()
+    ) {
+      onToast(
+        "error",
+        "Connection required",
+        "Set a server / saved profile, or an active connection name.",
+      );
+      return { ok: false };
+    }
+    const fetchConfig = configExtra
+      ? { ...node.config, ...configExtra }
+      : node.config;
+    const id = startRun(`Reading columns for ${node.config.label}…`, [node.id]);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
+    try {
+      const r = await api.nodeSourceFetch(
+        {
+          type: node.type,
+          node_id: node.id,
+          config: fetchConfig,
+          graph: graphForRun(),
+          query_id: id,
+          columns_only: true,
+        },
+        ctrl.signal,
+      );
+      if (wasCancelled(r, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      if (r.error || !r.ok || !(r.columns || []).length) {
+        onToast(
+          "error",
+          "Get columns failed",
+          r.error || "The query returned no column metadata.",
+        );
+        finishRun(id, { error: r.error || "Failed." }, "");
+        return { ok: false };
+      }
+      const cols = r.columns || [];
+      patchNode(node.id, { columns: cols });
+      onToast(
+        "ok",
+        "Columns pulled",
+        `${cols.length} column(s) — downstream nodes can use them now; Fetch loads the data.`,
+      );
+      finishRun(id, r, `${cols.length} columns`);
+      return { ok: true };
+    } catch (e: any) {
+      if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
+        finishRun(id, { cancelled: true }, "");
+        return { ok: false, cancelled: true };
+      }
+      onToast("error", "Get columns failed", e.message || String(e));
+      finishRun(id, { error: e.message || String(e) }, "");
+      return { ok: false };
+    } finally {
+      unregisterRun(id, ctrl);
+    }
+  };
+
   const doRunIterator = async (node: NbNode): Promise<RunOutcome> => {
     if (!(node.config.table || "").trim()) {
       onToast("error", "Name the output table", "Give the iterator's accumulator a table name.");
@@ -2623,6 +2705,7 @@ export function useNodeFlowExecutionController({
     doReadDirectory,
     doReadFolder,
     doFetchApi,
+    doGetColumns,
     doRunIterator,
     doRunWhile,
     doCreateTable,

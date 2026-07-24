@@ -851,9 +851,19 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
             "webscrape": "Web scrape",
         }.get(typ, typ)
         if not table:
+            # "Get columns" stores declared headers in config.columns so the
+            # author can build downstream nodes BEFORE the first fetch:
+            # compile them as a zero-row relation (field pickers and liveness
+            # probing work; a real fetch's table replaces this at run time).
+            decl = [str(c).strip() for c in (cfg.get("columns") or [])
+                    if str(c).strip()]
+            if decl:
+                return "SELECT %s WHERE 1=0" % ", ".join(
+                    "CAST(NULL AS VARCHAR) AS %s" % _q(c) for c in decl)
             raise NodeflowError(
                 "Fetch from the %s node first (press Fetch) so it has data "
-                "to read." % label)
+                "to read -- or press Get columns to pull just its headers."
+                % label)
         return _project_source("SELECT * FROM %s" % _q(table), needed, cols_of)
 
     if typ == "shred":

@@ -16043,6 +16043,40 @@ class Session:
                 pass
         self._api_node_tables.pop(node_id, None)
 
+    def _remote_columns(self, conn, query):
+        """Column names a remote query WOULD produce, without pulling rows.
+
+        ``sp_describe_first_result_set`` analyses the statement server-side
+        (handles ORDER BY / temp tables that defeat a TOP 0 wrap); the TOP 0
+        derived table is the fallback for older servers. Duplicate names are
+        suffixed like the import path's de-dup, so declared headers match the
+        table a later fetch actually builds.
+        """
+        q = (query or "").strip().rstrip(";")
+        names = []
+        try:
+            _c, rows = conn.execute(
+                "EXEC sp_describe_first_result_set @tsql = N'%s'"
+                % q.replace("'", "''"))
+            # result columns: is_hidden(0), column_ordinal(1), name(2), ...
+            for r in rows or []:
+                if r and len(r) > 2 and r[2] and not r[0]:
+                    names.append(str(r[2]))
+        except Exception:
+            names = []
+        if not names:
+            cols, _rows = conn.execute(
+                "SELECT TOP 0 * FROM (%s) AS _samql_cols" % q)
+            names = [str(c) for c in (cols or [])]
+        # Sanitize + de-dup through the SAME path a real import uses
+        # (engines._dedupe_columns: whitespace -> _, blanks filled, dedup) so
+        # the declared headers equal the table a later fetch actually builds.
+        # A hand-rolled dedup diverged (no whitespace sanitize, case-insensitive
+        # dedup), so a spaced alias like [Total Sales] declared "Total Sales"
+        # but fetched "Total_Sales" and the downstream node silently dropped it.
+        from .engines import _dedupe_columns
+        return _dedupe_columns(names)
+
     def _content_sig(self, eng, table):
         """Whole-table content signature for change detection (DuckDB only).
 
@@ -16149,7 +16183,8 @@ class Session:
             "rows": n,
         }
 
-    def fetch_sqlserver_node(self, node_id, config, graph=None, query_id=None):
+    def fetch_sqlserver_node(self, node_id, config, graph=None, query_id=None,
+                             columns_only=False):
         """Connect via a saved mssql profile, inline node fields, or an active
         connection name and import the node's query into a hidden table.
 
@@ -16323,6 +16358,32 @@ class Session:
         import hashlib
         base = "__nbsql_" + hashlib.md5(
             str(node_id).encode("utf-8")).hexdigest()[:10]
+        if columns_only:
+            # Get columns: pull the query's metadata WITHOUT its rows, so the
+            # author can build downstream nodes on real headers before any
+            # fetch. The stored config.columns compiles as an empty relation
+            # until a real fetch lands (which then wins).
+            conn = self.connections.get(conn_name)
+            if conn is None:
+                out = {"error": 'Connection "%s" is not active.' % conn_name}
+            else:
+                try:
+                    names = self._remote_columns(conn, query)
+                    out = ({"ok": True, "columns": names, "columns_only": True}
+                           if names else
+                           {"error": "The query returned no column metadata."})
+                except Exception as e:
+                    out = {"error": "Could not read columns: %s" % e}
+            # Restore the shared connection's previous database exactly as the
+            # fetch path does below -- an early return must not leak the
+            # USE [database] onto a connection shared with Load a Table.
+            if prev_db:
+                try:
+                    self.connections[conn_name].execute(
+                        "USE [%s]" % str(prev_db).replace("]", "]]"))
+                except Exception:
+                    pass
+            return out
         # Content-signature of the table this fetch replaces (if any): an
         # identical re-pull must not bump the data epoch (see
         # _unbump_if_identical_refetch).
@@ -16632,14 +16693,15 @@ class Session:
             return {}
 
     def fetch_source_node(self, node_type, node_id, config, graph=None,
-                          query_id=None):
+                          query_id=None, columns_only=False):
         typ = (node_type or "").strip().lower()
         if typ == "apinode":
             return self.fetch_api_node(node_id, config, graph=graph,
                                        query_id=query_id)
         if typ == "sqlserver":
             return self.fetch_sqlserver_node(node_id, config, graph=graph,
-                                             query_id=query_id)
+                                             query_id=query_id,
+                                             columns_only=columns_only)
         if typ == "sharepoint":
             return self.fetch_sharepoint_node(node_id, config, graph=graph,
                                               query_id=query_id)

@@ -964,6 +964,7 @@ export const api = {
       config: unknown;
       graph?: unknown;
       query_id?: string;
+      columns_only?: boolean;
     },
     signal?: AbortSignal,
   ) =>

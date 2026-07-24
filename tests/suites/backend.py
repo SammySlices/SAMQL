@@ -34862,6 +34862,101 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_sqlserver_get_columns():
+        # Get columns: metadata-only header pull for the SQL Server node.
+        # Declared config.columns compile as a zero-row relation BEFORE any
+        # fetch (downstream nodes build on real headers); after a fetch, the
+        # live table's columns take over.
+        s = Session()
+        try:
+            # the metadata reader itself (sp_describe path via a fake conn)
+            class _C:
+                def execute(self, sql):
+                    if "sp_describe_first_result_set" in sql:
+                        return (None, [
+                            (0, 1, "id"), (0, 2, "region"), (0, 3, "region"),
+                        ])
+                    return (["id", "region"], [])
+
+            names = s._remote_columns(_C(), "SELECT id, region FROM t")
+            eq(names, ["id", "region", "region_2"],
+               "duplicate headers deduped like the import path")
+
+            # Declared headers MUST equal what a real import produces, or the
+            # downstream node built on them breaks after Fetch. _remote_columns
+            # therefore runs the SAME engines._dedupe_columns the import uses:
+            # whitespace -> _, blanks filled, case-SENSITIVE dedup. A hand-rolled
+            # dedup diverged on spaced aliases / mixed case / a,a,a_2.
+            from samql_core.engines import _dedupe_columns as _dd
+            for raw in (["Order Date"], ["ID", "id"], ["a", "a", "a_2"],
+                        ["Name", "NAME"], ["Total Sales", "Total Sales"]):
+                class _Cd:
+                    def __init__(self, hdrs):
+                        self.hdrs = hdrs
+                    def execute(self, sql):
+                        if "sp_describe_first_result_set" in sql:
+                            return (None, [(0, i + 1, h)
+                                           for i, h in enumerate(self.hdrs)])
+                        return (self.hdrs, [])
+                got = s._remote_columns(_Cd(raw), "SELECT 1")
+                eq(got, _dd(raw),
+                   "declared headers match the import de-dup for %r" % raw)
+
+            # declared headers compile pre-fetch (no hidden table needed)
+            g = {"nodes": [
+                {"id": "src", "type": "sqlserver", "config": {
+                    "query": "SELECT a, b FROM t", "columns": ["a", "b"]}},
+                {"id": "sel", "type": "select", "config": {"fields": [
+                    {"name": "a", "keep": True},
+                    {"name": "b", "keep": True}]}},
+            ], "edges": [
+                {"from": {"node": "src", "port": "out"},
+                 "to": {"node": "sel", "port": "in"}}]}
+            eq(s.nodeflow_columns(g, "src", "out").get("columns"),
+               ["a", "b"], "declared headers available pre-fetch")
+            eq(s.nodeflow_columns(g, "sel", "out").get("columns"),
+               ["a", "b"], "downstream nodes see them pre-fetch")
+            # without declared headers the node still asks for Fetch first
+            g2 = {"nodes": [
+                {"id": "src", "type": "sqlserver", "config": {"query": "x"}},
+            ], "edges": []}
+            res = s.nodeflow_columns(g2, "src", "out")
+            err = res.get("error") or str(res)
+            need("Get columns" in err,
+                 "the error points at Get columns: %r" % (res,))
+            # after a fetch the live table wins (new columns show up)
+            s.db.execute("CREATE TABLE __nbsql_live (a, b, extra)")
+            g["nodes"][0]["config"]["table"] = "__nbsql_live"
+            eq(s.nodeflow_columns(g, "src", "out").get("columns"),
+               ["a", "b", "extra"], "live table columns take over after fetch")
+
+            # Get columns on a SHARED connection with a database set must
+            # restore the connection's previous database -- the early return
+            # used to leak the USE [Sales] and silently retarget a connection
+            # also used by Load a Table.
+            class _Shared:
+                def __init__(self):
+                    self.execed = []
+                def execute(self, sql):
+                    self.execed.append(sql)
+                    if "DB_NAME()" in sql:
+                        return (["db"], [("master",)])
+                    if "sp_describe_first_result_set" in sql:
+                        return (None, [(0, 1, "id")])
+                    return ([], [])
+            shared = _Shared()
+            s.connections["Prod"] = shared          # preexisting/shared
+            r = s.fetch_sqlserver_node(
+                "nX", {"connection": "Prod", "query": "SELECT id FROM t",
+                       "database": "Sales"}, columns_only=True)
+            need(r.get("ok") and r.get("columns") == ["id"],
+                 "get columns returned headers: %r" % (r,))
+            uses = [x for x in shared.execed if x.startswith("USE [")]
+            eq(uses, ["USE [Sales]", "USE [master]"],
+               "USE [Sales] is applied then restored to [master]: %r" % uses)
+        finally:
+            s.shutdown()
+
     def t_server_main_boots():
         # The real server main() boots end-to-end and serves health. A crash
         # in the post-bind startup path (sweeps, warm, banner) is invisible
@@ -36667,7 +36762,7 @@ def backend_tests(datadir, csv_path, json_path):
             # ${variable} resolution, like the API node), and the auto-fetch
             # path forwards it -- so the fake must accept and forward it too.
             def fetch_with_fake_connect(node_id, config, graph=None,
-                                        query_id=None):
+                                        query_id=None, columns_only=False):
                 cfg = dict(config or {})
                 pk = (cfg.get("profile_key") or "").strip() or "mssql:Prod"
                 prof = s.connection_profiles.get(pk)
@@ -36682,7 +36777,8 @@ def backend_tests(datadir, csv_path, json_path):
                 name = (cfg.get("connection") or "Prod").strip() or "Prod"
                 s.connections[name] = fake
                 # Call the real body after connection is active (skips open).
-                out = real_fetch(node_id, cfg, graph=graph, query_id=query_id)
+                out = real_fetch(node_id, cfg, graph=graph, query_id=query_id,
+                                 columns_only=columns_only)
                 if cfg.get("database"):
                     need(fake.used and "Sales" in str(fake.used),
                          "USE database ran: %r" % fake.used)
@@ -41613,6 +41709,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_identical_refetch_keeps_epoch),
         ("{{var}} on SQL Server node (quote-absorb, numeric guard, {{in}})",
          t_sqlserver_brace_variables),
+        ("SQL Server get-columns: declared headers pre-fetch, live table after",
+         t_sqlserver_get_columns),
         ("shared-subgraph materialisation (computed once across targets)",
          t_shared_subgraph),
         ("join modes (inner / left / semi / anti)", t_join_modes),

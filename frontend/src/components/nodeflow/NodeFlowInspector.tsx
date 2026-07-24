@@ -100,6 +100,7 @@ export interface NodeFlowInspectorContext {
   doCreateTable: (node: NbNode) => Promise<void>;
   doExport: (node: NbNode) => Promise<any>;
   doFetchApi: (node: NbNode, configExtra?: Record<string, unknown>) => Promise<any>;
+  doGetColumns: (node: NbNode, configExtra?: Record<string, unknown>) => Promise<any>;
   doPreview: (node: NbNode, port: string, title: string) => Promise<void>;
   doProfile: (node: NbNode) => Promise<void>;
   doReadDirectory: (node: NbNode, path: string, file: string) => Promise<void>;
@@ -194,6 +195,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
     doCreateTable,
     doExport,
     doFetchApi,
+    doGetColumns,
     doPreview,
     doProfile,
     doReadDirectory,
@@ -6463,6 +6465,23 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                       ? "Browse / Fetch"
                       : "Fetch"}
                   </button>
+                  {inspectorType === "sqlserver" && (
+                    <button
+                      className="btn sm nb2-prev"
+                      disabled={running}
+                      style={{ marginTop: 8, marginLeft: 6 }}
+                      data-testid="sqlserver-get-columns"
+                      title="Pull just this query's column headers (no data) so downstream nodes can be configured before you Fetch"
+                      onClick={() =>
+                        doGetColumns(
+                          sel,
+                          mssqlPwd ? { pwd: mssqlPwd } : undefined,
+                        )
+                      }
+                    >
+                      <Icon.Table size={13} /> Get columns
+                    </button>
+                  )}
                   {inspectorType === "sharepoint" &&
                     (sel.config.mode || "list") === "drive" && (
                       <button
