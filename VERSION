@@ -2,12 +2,26 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-24.691
+Current build:   2026-07-24.692
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-24.692  (v2.16.4)
+
+SQL SERVER "GET COLUMNS": HEADERS BEFORE A FETCH.
+
+A "Get columns" action pulls a SQL Server query's column headers WITHOUT its
+rows (sp_describe_first_result_set, TOP 0 fallback), so downstream nodes can be
+built on real names before the first fetch; the declared headers compile as a
+zero-row relation until a real fetch's table wins. Header names are normalized
+through the SAME de-dup the import uses, so a spaced alias like [Total Sales]
+declares Total_Sales in both -- a downstream node keeps working after fetch.
+Get columns on a shared connection with a database set restores the
+connection's previous database.
 
 ----------------------------------------------------------------------
 build 2026-07-24.691  (v2.16.4)
