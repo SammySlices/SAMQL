@@ -5485,7 +5485,13 @@ def main(argv=None):
     # dirs, so a live session's temp is never at risk).
     def _deferred_boot_sweeps():
         try:
-            tmputil.sweep_stale()
+            n = tmputil.sweep_stale()
+            if n:
+                # runs after the ready line (it is OFF the boot path now);
+                # the count is still reported for parity with the old sync
+                # sweep's console message
+                print("    - cleaned up %d leftover instance(s)" % n,
+                      flush=True)
         except Exception:
             pass
         try:
@@ -5600,8 +5606,6 @@ def main(argv=None):
                      name="alive-marker").start()
 
     bar.stop()  # clear the animation before printing the final status
-    if n:
-        print(f"    - cleaned up {n} leftover instance(s)", flush=True)
     print(f"    - ready  ->  {url}   (build {BUILD})", flush=True)
     print(
         "    frontend: " +

@@ -34764,6 +34764,55 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_server_main_boots():
+        # The real server main() boots end-to-end and serves health. A crash
+        # in the post-bind startup path (sweeps, warm, banner) is invisible
+        # to the make_server-based tests -- this caught a "server exited
+        # before it started" NameError once already.
+        import socket as _sk
+        import threading as _th
+        import time as _tm
+        import server as _sv
+
+        with _sk.socket() as _s:
+            _s.bind(("127.0.0.1", 0))
+            port = _s.getsockname()[1]
+        box = {"err": None}
+
+        def _run():
+            try:
+                _sv.main(["--no-browser", "--port", str(port)])
+            except SystemExit as e:
+                box["err"] = "SystemExit(%r)" % e.code
+            except Exception as e:
+                box["err"] = "%s: %s" % (type(e).__name__, e)
+
+        t = _th.Thread(target=_run, daemon=True, name="t-main-boot")
+        t.start()
+        ok = None
+        deadline = _tm.monotonic() + 30
+        while _tm.monotonic() < deadline:
+            if box["err"]:
+                break
+            try:
+                import urllib.request as _ur
+                with _ur.urlopen("http://127.0.0.1:%d/api/health" % port,
+                                 timeout=2) as r:
+                    ok = json.loads(r.read().decode("utf-8"))
+                if ok and ok.get("app") == "SamQL":
+                    break
+            except Exception:
+                ok = None
+            _tm.sleep(0.3)
+        need(box["err"] is None, "server main() crashed: %s" % box["err"])
+        need(ok and ok.get("app") == "SamQL",
+             "server main() serves /api/health: %r" % (ok,))
+        # stop WITHOUT /api/shutdown (its os._exit would kill the test run)
+        if _sv._HTTPD is not None:
+            _sv._HTTPD.shutdown()
+        t.join(timeout=15)
+        need(not t.is_alive(), "server main() exits after httpd.shutdown")
+
     def t_node_name_collisions():
         # Derived output names that collide with an existing input column must
         # REPLACE it (not emit a duplicate that silently binds the original),
@@ -41460,6 +41509,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_golden_flows),
         ("node freeze (pinned output) + always-DuckDB engine mode",
          t_node_freeze_and_engine_mode),
+        ("server main() boots end-to-end (startup crash smoke)",
+         t_server_main_boots),
         ("shared-subgraph materialisation (computed once across targets)",
          t_shared_subgraph),
         ("join modes (inner / left / semi / anti)", t_join_modes),
