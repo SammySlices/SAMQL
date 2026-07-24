@@ -2,12 +2,25 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-24.686
+Current build:   2026-07-24.687
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-24.687  (v2.16.4)
+
+NODEFLOW FREEZE UX: header toggle + right-click freeze/unfreeze.
+
+The Freeze control (pin a node's output; 685) moves from an inspector checkbox
+to a ❄ toggle in the inspector header, and gains a right-click
+"Freeze / Unfreeze node(s)" context-menu action that is batch-aware for a
+multi-selection. A fetched connector node (SQL Server / API / SharePoint /
+Web scrape) is now also a valid Run-all leaf -- not just previewable -- so
+freshly fetched rows are always reachable (the backend re-fetches on run, so
+the leaf returns current data).
 
 ----------------------------------------------------------------------
 build 2026-07-24.686  (v2.16.4)
