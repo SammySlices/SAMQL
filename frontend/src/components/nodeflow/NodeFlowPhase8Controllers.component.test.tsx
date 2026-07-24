@@ -2244,4 +2244,154 @@ describe("leafRunPort / Filter leaf Run all", () => {
       unmount();
     }
   });
+
+  it("Run all runs a flow that ENDS in a chart (upstream chain runs)", async () => {
+    // sqlserver(fetched) -> summarize -> chart: the chart is a valid leaves
+    // terminal (backend passthrough materialises the chain), so Run all must
+    // not say "Nothing to run", and it runs the chart's "out" port.
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["category", "total"],
+      rows: [["a", 4]],
+      total_rows: 1,
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+    const nodes: NbNode[] = [
+      { id: "src", type: "sqlserver", x: 0, y: 0,
+        config: { query: "SELECT 1", table: "__nbsql_x" } },
+      { id: "sum", type: "summarize", x: 0, y: 0,
+        config: { group_by: ["category"], aggs: [] } },
+      { id: "ch", type: "chart", x: 0, y: 0, config: {} },
+    ];
+    const edges: NbEdge[] = [
+      { id: "e1",
+        from: { node: "src", port: "out" },
+        to: { node: "sum", port: "in" } },
+      { id: "e2",
+        from: { node: "sum", port: "out" },
+        to: { node: "ch", port: "in" } },
+    ];
+    const liveRef: React.MutableRefObject<{
+      nodes: NbNode[];
+      edges: NbEdge[];
+    }> = { current: { nodes, edges } };
+    const toast = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useNodeFlowExecutionController({
+        activeTabId: "tab-chartflow",
+        nodes,
+        edges,
+        liveRef,
+        graphSig: "graph-chartflow",
+        dataEpoch: 1,
+        graphForApi: () => ({ nodes, edges }),
+        graphForRun: () => ({ nodes, edges }),
+        childCtx: () => null,
+        partialGroupGraph: () => ({ nodes: [], edges: [] }),
+        patch: vi.fn(),
+        setNodes: vi.fn(),
+        setNodeErrors: vi.fn(),
+        setNodeWarnings: vi.fn(),
+        onToast: toast,
+        fireRipple: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.runAll();
+    });
+
+    expect(toast).not.toHaveBeenCalledWith(
+      "warn",
+      "Nothing to run",
+      expect.anything(),
+    );
+    expect(run).toHaveBeenCalled();
+    const calledNodes = run.mock.calls.map((c) => c[1]);
+    expect(calledNodes).toContain("ch");
+    unmount();
+  });
+
+  it("run seeds survive the catalog epoch bump after a connector fetch", async () => {
+    // A sqlserver fetch bumps the backend data epoch mid-run (result carries
+    // data_epoch 2 while the catalog prop still says 1). Seeds must key with
+    // the RUN's epoch so the later poll bump (prop -> 2) does not prune them
+    // ("No cached results" on every node after Run all).
+    const run = vi.spyOn(api, "nodeflowRun").mockResolvedValue({
+      columns: ["v"],
+      rows: [[1]],
+      total_rows: 1,
+      data_epoch: 2,
+    } as any);
+    const batch = vi.spyOn(api, "nodeflowRunBatch").mockResolvedValue({
+      ok: true,
+      results: [
+        { node: "src", port: "out", columns: ["v"], rows: [[1]],
+          total_rows: 1, data_epoch: 2 },
+        { node: "sel", port: "out", columns: ["v"], rows: [[1]],
+          total_rows: 1, data_epoch: 2 },
+      ],
+    } as any);
+    vi.spyOn(api, "flowCacheInfo").mockResolvedValue({
+      parallel_nodeflows: false,
+    } as any);
+    const nodes: NbNode[] = [
+      { id: "src", type: "sqlserver", x: 0, y: 0,
+        config: { query: "SELECT 1", table: "__nbsql_x" } },
+      { id: "sel", type: "select", x: 0, y: 0,
+        config: { fields: [{ name: "v", keep: true }] } },
+    ];
+    const edges: NbEdge[] = [
+      { id: "e1",
+        from: { node: "src", port: "out" },
+        to: { node: "sel", port: "in" } },
+    ];
+    const liveRef: React.MutableRefObject<{
+      nodes: NbNode[];
+      edges: NbEdge[];
+    }> = { current: { nodes, edges } };
+    const toast = vi.fn();
+    const hookProps = (epoch: number) => ({
+      activeTabId: "tab-epochseed",
+      nodes,
+      edges,
+      liveRef,
+      graphSig: "graph-epochseed",
+      dataEpoch: epoch,
+      graphForApi: () => ({ nodes, edges }),
+      graphForRun: () => ({ nodes, edges }),
+      childCtx: () => null,
+      partialGroupGraph: () => ({ nodes: [], edges: [] }),
+      patch: vi.fn(),
+      setNodes: vi.fn(),
+      setNodeErrors: vi.fn(),
+      setNodeWarnings: vi.fn(),
+      onToast: toast,
+      fireRipple: vi.fn(),
+    });
+    const { result, rerender, unmount } = renderHook(
+      (props: { epoch: number }) =>
+        useNodeFlowExecutionController(hookProps(props.epoch)),
+      { initialProps: { epoch: 1 } },
+    );
+
+    await act(async () => {
+      await result.current.runAll();
+    });
+
+    const keyedWithRunEpoch = [...result.current.previewCache.current.keys()]
+      .filter((k) => k.split("::")[1] === "2");
+    expect(keyedWithRunEpoch.length).toBeGreaterThan(0);
+
+    // the catalog poll catches up (prop -> 2): seeds must NOT be pruned
+    act(() => {
+      rerender({ epoch: 2 });
+    });
+    const survivors = [...result.current.previewCache.current.keys()].filter(
+      (k) => k.split("::")[1] === "2",
+    );
+    expect(survivors.length).toBe(keyedWithRunEpoch.length);
+    unmount();
+  });
 });

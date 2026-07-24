@@ -5,6 +5,7 @@ import { compositeImages, renderToDataURL } from "../../lib/echart";
 import { uid } from "../../lib/ids";
 import {
   PORTS,
+  nodeShowsBody,
   type NbEdge,
   type NbNode,
 } from "../../lib/nodeFlowModel";
@@ -361,7 +362,11 @@ export function useNodeFlowExecutionController({
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
   const dataEpochRef = useRef(dataEpoch);
-  dataEpochRef.current = dataEpoch;
+  // Highest backend data_epoch observed in any run result this controller
+  // produced (see rememberTableLastRun). The catalog prop can lag a run's own
+  // epoch bump (source fetches), so the effective epoch is the max of both.
+  const seenDataEpochRef = useRef(0);
+  dataEpochRef.current = Math.max(dataEpoch, seenDataEpochRef.current);
   /** Open drawer snapshot — used to refresh after Run all seeds last-run cache. */
   const previewRef = useRef<NodeFlowPreview | null>(null);
   previewRef.current = preview;
@@ -462,11 +467,23 @@ export function useNodeFlowExecutionController({
       rows?: unknown[][];
       total_rows?: number;
       preview_limited?: boolean;
+      data_epoch?: number;
     },
     /** Terminal lineage id (may differ for group-child previews). */
     sourceNodeId?: string,
     sourcePort?: string,
   ) => {
+    // A run whose sources mutate (a SQL Server fetch bumps the backend data
+    // epoch mid-run) returns the POST-bump epoch. Key the seed with THAT
+    // epoch -- otherwise the next catalog poll would prune these just-seeded
+    // previews as stale and every downstream node reads "No cached results"
+    // after Run all. Latest-data-wins is preserved: a later real mutation
+    // bumps the catalog epoch past this seed and prunes it as usual.
+    const de = Number(result.data_epoch) || 0;
+    if (de > seenDataEpochRef.current) {
+      seenDataEpochRef.current = de;
+      dataEpochRef.current = Math.max(dataEpochRef.current, de);
+    }
     const pv: Extract<NodeFlowPreview, { kind: "table" }> = {
       kind: "table",
       title,
@@ -2256,10 +2273,12 @@ export function useNodeFlowExecutionController({
     const hasOut = (n: NbNode) => runEdges.some((e) => e.from.node === n.id);
     // Zero-input sources may be Run-all leaves with no inbound wire.
     const SOURCES = NODEFLOW_SOURCE_TYPES;
+    // Chart/browse/dashboard ARE valid terminals in leaves mode: the backend
+    // compiles them as a passthrough of their input, so running them
+    // materialises the whole upstream chain (which is how a flow ending in a
+    // chart runs at all). Text/output/write/iterator/while stay out -- the
+    // exporters path owns those.
     const SKIP_LEAF = new Set([
-      "browse",
-      "chart",
-      "dashboard",
       "text",
       "output",
       "write",
@@ -2459,6 +2478,24 @@ export function useNodeFlowExecutionController({
     // Open drawer: swap to new last-run rows (or clear if this node wasn't
     // part of the batch) so the UI never stays on pre–Run-all data.
     refreshOpenPreviewFromLastRun();
+    // A flow ending in a chart/dashboard terminal just ran through it.
+    // Re-render every EXPANDED chart in the attempted closure against the
+    // freshly run chain: charts otherwise hydrate only on spec / epoch /
+    // expand changes, so a Run-all refresh would leave them stale.
+    if (attemptedTerminalIds.length) {
+      const closure = ancestorNodeIds(edges, attemptedTerminalIds);
+      for (const n of runNodes) {
+        if (!closure.has(n.id) || !nodeShowsBody(n)) continue;
+        if (n.type === "chart") {
+          void ensureChartFor(n, true);
+        } else if (n.type === "dashboard") {
+          (n.config.panes || ["in1", "in2", "in3", "in4"]).forEach(
+            (port: string) =>
+              void ensureChartFor(upstreamChartNode(n, port), true),
+          );
+        }
+      }
+    }
     const bits = [`${ok} ran`];
     if (bad) bits.push(`${bad} failed`);
     if (isolated.length)
