@@ -791,12 +791,13 @@ class Session:
         # projection pushdown: source nodes read only the columns used
         # downstream. Can be disabled via config if ever suspect.
         self.project_pushdown = bool(self.config.get("project_pushdown", True))
-        # Engine preference: "dual" (default) routes each flow/query by where
-        # its tables live; "duckdb" sends every UNPINNED flow and table-less
-        # query to DuckDB when installed (a table that only exists on SQLite
-        # still forces SQLite -- preference, not relocation).
+        # Engine preference: "duckdb" (default) sends every UNPINNED flow and
+        # table-less query to DuckDB when installed; "dual" routes each
+        # flow/query by where its tables live (the legacy behavior). A table
+        # that only exists on SQLite still forces SQLite in both modes --
+        # preference, not relocation.
         self.engine_mode = str(
-            self.config.get("engine_mode", "dual") or "dual").strip().lower()
+            self.config.get("engine_mode", "duckdb") or "duckdb").strip().lower()
         # Incremental flow cache: reuse a node's materialised output across
         # previews/runs when its subtree + projection + the data epoch are all
         # unchanged. Content-addressed (each cached table is named by its
@@ -16174,11 +16175,23 @@ class Session:
                 return {"error": str(e)}
             except Exception:
                 ctx = {}
+            # The interactive Fetch runs the same misuse checks a full run
+            # does (a numeric {{var}} quotes as text, an API URL wants raw).
+            _mis = applyvars.brace_misuse(
+                {"nodes": [{"type": "sqlserver", "config": cfg}]}, ctx)
+            if _mis:
+                return {"error": _mis}
             for key in _templated:
                 cfg[key] = applyvars.substitute_text(cfg[key], ctx)
         query = (cfg.get("query") or "").strip()
         if not query:
             return {"error": "Enter a SQL query for the SQL Server node."}
+        if re.search(r"\{\{\s*(in|input)\s*\}\}", query):
+            return {"error": (
+                "{{in}} / {{input}} only work in the SQL node (they splice "
+                "the upstream relation). The SQL Server node has no input "
+                "-- write the table name directly, or use ${var} / {{var}} "
+                "for variables.")}
         conn_name = (cfg.get("connection") or "").strip()
         profile_key = (cfg.get("profile_key") or "").strip()
         secret_key = (cfg.get("secret_key") or "").strip() or profile_key

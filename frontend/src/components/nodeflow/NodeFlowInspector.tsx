@@ -4851,6 +4851,59 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                         Colour by value (gradient)
                       </label>
                     )}
+                    {(ctype === "bar" || ctype === "line" || ctype === "area" ||
+                      ctype === "scatter") && (
+                      <>
+                        <label className="nb2-check">
+                          <input
+                            type="checkbox"
+                            checked={!!cstyle.yScale}
+                            onChange={(e) => patchStyle(sel, "yScale", e.target.checked)}
+                          />{" "}
+                          Fit Y to data (don’t force zero)
+                        </label>
+                        <div className="nb2-axis-labels">
+                          <div>
+                            <label className="nb2-lbl">Y min</label>
+                            <input
+                              className="nb2-in"
+                              type="number"
+                              value={cstyle.yMin ?? ""}
+                              placeholder="auto"
+                              data-testid="chart-ymin"
+                              onChange={(e) =>
+                                patchStyle(
+                                  sel,
+                                  "yMin",
+                                  e.target.value === ""
+                                    ? undefined
+                                    : Number(e.target.value),
+                                )
+                              }
+                            />
+                          </div>
+                          <div>
+                            <label className="nb2-lbl">Y max</label>
+                            <input
+                              className="nb2-in"
+                              type="number"
+                              value={cstyle.yMax ?? ""}
+                              placeholder="auto"
+                              data-testid="chart-ymax"
+                              onChange={(e) =>
+                                patchStyle(
+                                  sel,
+                                  "yMax",
+                                  e.target.value === ""
+                                    ? undefined
+                                    : Number(e.target.value),
+                                )
+                              }
+                            />
+                          </div>
+                        </div>
+                      </>
+                    )}
                     {(isCat || isCandle) && (
                       <label className="nb2-check">
                         <input

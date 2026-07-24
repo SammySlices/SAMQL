@@ -349,6 +349,13 @@ export function buildChartOption(data: ChartData): Record<string, any> {
         ...named(style.yLabel),
         axisLine: { lineStyle: { color: theme.grid } },
         splitLine: { show: showGrid, lineStyle: { color: theme.grid } },
+        ...(typeof style.yMin === "number" && isFinite(style.yMin)
+          ? { min: style.yMin }
+          : {}),
+        ...(typeof style.yMax === "number" && isFinite(style.yMax)
+          ? { max: style.yMax }
+          : {}),
+        ...(style.yScale ? { scale: true } : {}),
       },
       series: [
         {
@@ -619,6 +626,15 @@ export function buildChartOption(data: ChartData): Record<string, any> {
     type: "value",
     axisLine: { lineStyle: { color: theme.grid } },
     splitLine: { show: showGrid, lineStyle: { color: theme.grid } },
+    // Optional Y scaling: explicit bounds win; "fit to data" lets small
+    // deltas read on a big-magnitude series instead of pinning zero.
+    ...(typeof style.yMin === "number" && isFinite(style.yMin)
+      ? { min: style.yMin }
+      : {}),
+    ...(typeof style.yMax === "number" && isFinite(style.yMax)
+      ? { max: style.yMax }
+      : {}),
+    ...(style.yScale ? { scale: true } : {}),
   };
   const withName = (ax: Record<string, any>, n?: string) =>
     n

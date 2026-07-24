@@ -34799,6 +34799,69 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_sqlserver_brace_variables():
+        # {{var}} in a SQL Server query: an author-quoted token ('{{x}}')
+        # must collapse to ONE literal (not ''x''); a numeric value in {{}}
+        # is flagged with an actionable message (use ${}); and {{in}} /
+        # {{input}} are rejected up front -- they only splice in the SQL
+        # node, and the SQL Server node has no input.
+        from samql_core import applyvars
+        # unit-level: substitution absorbs author-added quotes
+        ctx = {"as_of": "2026-01-15", "region": "EMEA"}
+        eq(applyvars.substitute_text("d >= '{{as_of}}'", ctx),
+           "d >= '2026-01-15'", "quoted {{var}} collapses to one literal")
+        eq(applyvars.substitute_text("r = {{region}}", ctx),
+           "r = 'EMEA'", "bare {{var}} still auto-quotes once")
+        eq(applyvars.substitute_text("d >= '${as_of}'", ctx),
+           "d >= '2026-01-15'", "raw ${var} inside author quotes unchanged")
+
+        s = Session()
+        try:
+            captured = []
+
+            class _FakeConn:
+                def execute(self, sql):
+                    captured.append(sql)
+                    return (["id"], [(1,)])
+
+            s.connections["Prod"] = _FakeConn()
+
+            def fake_import(name, query, base_name="x",
+                            destination="duckdb", query_id=None):
+                captured.append(("IMPORT", query))
+                return {"ok": True, "table": "__t", "engine": "duckdb",
+                        "columns": ["id"], "rows": 1}
+
+            s.import_from_connection = fake_import
+            graph = {"nodes": [
+                {"id": "v", "type": "variable", "config": {"vars": [
+                    {"name": "as_of", "value": "2026-01-15"},
+                    {"name": "limit", "value": "40 + 2", "kind": "expr"}]}},
+                {"id": "q", "type": "sqlserver", "config": {
+                    "connection": "Prod",
+                    "query": "SELECT * FROM Orders WHERE d >= '{{as_of}}'"}}],
+                "edges": []}
+            cfg = graph["nodes"][1]["config"]
+            r = s.fetch_sqlserver_node("q", dict(cfg), graph=graph)
+            need(not r.get("error"), "quoted {{var}} fetch: %s" % r.get("error"))
+            need(captured and "'2026-01-15'" in captured[-1][1]
+                 and "''2026" not in captured[-1][1],
+                 "the remote query carries one literal: %r"
+                 % (captured[-1],))
+
+            cfg["query"] = "SELECT * FROM Orders WHERE n < {{limit}}"
+            r = s.fetch_sqlserver_node("q", dict(cfg), graph=graph)
+            need(r.get("error") and "number" in str(r.get("error")),
+                 "numeric {{var}} is flagged with guidance: %r" % r.get("error"))
+
+            cfg["query"] = "SELECT * FROM {{in}} WHERE d > 1"
+            r = s.fetch_sqlserver_node("q", dict(cfg), graph=graph)
+            need(r.get("error") and "SQL node" in str(r.get("error")),
+                 "{{in}} rejected with a pointer at the SQL node: %r"
+                 % r.get("error"))
+        finally:
+            s.shutdown()
+
     def t_server_main_boots():
         # The real server main() boots end-to-end and serves health. A crash
         # in the post-bind startup path (sweeps, warm, banner) is invisible
@@ -41548,6 +41611,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_server_main_boots),
         ("identical source re-fetch keeps the data epoch",
          t_identical_refetch_keeps_epoch),
+        ("{{var}} on SQL Server node (quote-absorb, numeric guard, {{in}})",
+         t_sqlserver_brace_variables),
         ("shared-subgraph materialisation (computed once across targets)",
          t_shared_subgraph),
         ("join modes (inner / left / semi / anti)", t_join_modes),

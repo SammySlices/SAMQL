@@ -312,6 +312,9 @@ export interface ChartStyle {
   gradient?: boolean; // treemap / tree: colour leaves by value on a gradient
   dataZoom?: boolean; // candlestick / category: add a zoom+pan slider
   deltaMode?: "absolute" | "percent"; // delta chart: raw or period % change
+  yMin?: number; // bar / line / area / scatter: explicit Y axis lower bound
+  yMax?: number; // bar / line / area / scatter: explicit Y axis upper bound
+  yScale?: boolean; // fit the Y axis to the data range instead of forcing zero
 }
 
 export interface ChartSpec {

@@ -26,6 +26,9 @@ _TOKEN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # escaped) so you can write {{col}} instead of '${col}' for a text value. Bare
 # ${col} is still the raw form (numbers / identifiers / SQL fragments).
 _QTOKEN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+# A {{name}} token the author already wrapped in single quotes -- absorbed as
+# one literal by substitute_text so it can't double-quote into ''value''.
+_QTOKEN_QUOTED = re.compile(r"'\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}'")
 # {{in}} / {{input}} are reserved by the SQL node for splicing its input table,
 # so the auto-quote never touches them (a variable that happens to be named
 # "in"/"input" must use ${...} instead).
@@ -158,7 +161,11 @@ def substitute_text(text, ctx):
     form (value inserted verbatim -- you control quoting); ``{{name}}`` inserts
     the value as a quoted SQL string literal (the easy default for text). Tokens
     with no matching variable are returned unchanged (a typo surfaces). The
-    ``{{in}}`` / ``{{input}}`` SQL-splice keywords are never auto-quoted."""
+    ``{{in}}`` / ``{{input}}`` SQL-splice keywords are never auto-quoted.
+
+    A token the author already wrapped in single quotes (``'{{name}}'``) is
+    absorbed as one literal -- otherwise the auto-quote double-quotes it into
+    ``''value''``, which is a syntax error on every engine."""
     if not text or not ctx:
         return text
     if "${" not in text and "{{" not in text:
@@ -175,6 +182,8 @@ def substitute_text(text, ctx):
         return _sql_str_literal(ctx[name]) if name in ctx else m.group(0)
 
     text = _TOKEN.sub(repl_raw, text)
+    # Author-quoted tokens first: `'{{x}}'` -> one literal, not two.
+    text = _QTOKEN_QUOTED.sub(repl_quoted, text)
     text = _QTOKEN.sub(repl_quoted, text)
     return text
 

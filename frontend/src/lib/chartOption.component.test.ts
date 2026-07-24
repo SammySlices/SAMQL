@@ -49,3 +49,33 @@ describe("chartOption animation", () => {
     expect(opt.animationDuration).toBe(0);
   });
 });
+
+describe("Y axis scaling", () => {
+  it("pins explicit yMin/yMax on the value axis", () => {
+    const opt = buildChartOption({
+      ...sample,
+      style: { yMin: 39000, yMax: 40000 },
+    });
+    expect((opt.yAxis as any).min).toBe(39000);
+    expect((opt.yAxis as any).max).toBe(40000);
+  });
+
+  it("yScale fits the axis to the data range instead of forcing zero", () => {
+    const opt = buildChartOption({ ...sample, style: { yScale: true } });
+    expect((opt.yAxis as any).scale).toBe(true);
+    // and unset by default (zero-pinned bar axis)
+    const dflt = buildChartOption(sample);
+    expect((dflt.yAxis as any).scale).toBeUndefined();
+  });
+
+  it("applies scaling to the scatter y axis too", () => {
+    const opt = buildChartOption({
+      chart_type: "scatter",
+      series: [{ name: "s", points: [{ x: 1, y: 2 }] }],
+      style: { yMin: 0, yMax: 10, yScale: true },
+    } as any);
+    expect((opt.yAxis as any).min).toBe(0);
+    expect((opt.yAxis as any).max).toBe(10);
+    expect((opt.yAxis as any).scale).toBe(true);
+  });
+});

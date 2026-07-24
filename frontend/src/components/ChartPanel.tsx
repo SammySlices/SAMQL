@@ -516,6 +516,48 @@ const ChartPanelImpl: React.FC<Props> = ({
                 Zoom slider
               </label>
             )}
+            {isCat && (
+              <>
+                <label className="chart-style-check">
+                  <input
+                    type="checkbox"
+                    checked={!!style.yScale}
+                    onChange={(e) => patchStyle("yScale", e.target.checked)}
+                  />{" "}
+                  Fit Y to data (don’t force zero)
+                </label>
+                <div className="field">
+                  <label>Y min</label>
+                  <input
+                    type="number"
+                    value={style.yMin ?? ""}
+                    placeholder="auto"
+                    data-testid="chart-ymin"
+                    onChange={(e) =>
+                      patchStyle(
+                        "yMin",
+                        e.target.value === "" ? undefined : Number(e.target.value),
+                      )
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label>Y max</label>
+                  <input
+                    type="number"
+                    value={style.yMax ?? ""}
+                    placeholder="auto"
+                    data-testid="chart-ymax"
+                    onChange={(e) =>
+                      patchStyle(
+                        "yMax",
+                        e.target.value === "" ? undefined : Number(e.target.value),
+                      )
+                    }
+                  />
+                </div>
+              </>
+            )}
             <div className="chart-style-colors">
               <label>{isPieish || isTree ? "Slice colours" : "Series colours"}</label>
               {colorTargets.length === 0 ? (
@@ -596,6 +638,11 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
   // Same light signal buildChartOption keys off (chart style > Theme).
   const th: SvgChartTheme =
     data.style?.theme === "light" ? SVG_CHART_THEME.light : SVG_CHART_THEME.dark;
+  // Series colours follow the chosen palette exactly like the ECharts path --
+  // a fallback must not freeze palette edits to the hardcoded default.
+  const pal = paletteColors(data.style?.palette);
+  const lineCol = pal[0] || th.line;
+  const lineDot = pal[1] || pal[0] || th.lineDot;
 
   if (data.chart_type === "scatter") {
     const pts = data.series[0]?.points || [];
@@ -654,7 +701,7 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
       const y1 = cy + rad * Math.sin(a1);
       return {
         d: `M${cx},${cy} L${x0},${y0} A${rad},${rad} 0 ${large} 1 ${x1},${y1} Z`,
-        color: th.series[i % th.series.length],
+        color: pal[i % pal.length],
         label: labels[i],
         pct: frac * 100,
       };
@@ -677,8 +724,18 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
   }
 
   // bar / line / histogram
+  // Y domain: explicit yMin/yMax win; yScale fits the axis to the data range
+  // (small DoD deltas readable); otherwise keep the zero-pinned default.
+  const domLo = (typeof data.style?.yMin === "number" && isFinite(data.style.yMin))
+    ? (data.style.yMin as number)
+    : data.style?.yScale
+      ? vmin
+      : Math.min(0, vmin);
+  const domHi = (typeof data.style?.yMax === "number" && isFinite(data.style.yMax))
+    ? (data.style.yMax as number)
+    : vmax;
   const sy = (v: number) =>
-    PAD.t + plotH - ((v - Math.min(0, vmin)) / ((vmax - Math.min(0, vmin)) || 1)) * plotH;
+    PAD.t + plotH - ((v - domLo) / ((domHi - domLo) || 1)) * plotH;
   const band = plotW / labels.length;
   const isLine = data.chart_type === "line";
 
@@ -687,8 +744,8 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
       <Axes
         xmin={0}
         xmax={1}
-        ymin={Math.min(0, vmin)}
-        ymax={vmax}
+        ymin={domLo}
+        ymax={domHi}
         plotW={plotW}
         plotH={plotH}
         ylabel={data.series[0]?.name || ""}
@@ -696,18 +753,20 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
         hideXTicks
         th={th}
       />
-      {/* baseline */}
-      <line
-        x1={PAD.l}
-        x2={PAD.l + plotW}
-        y1={sy(0)}
-        y2={sy(0)}
-        stroke={th.axisLine}
-      />
+      {/* baseline (only when zero is inside the domain) */}
+      {domLo <= 0 && domHi >= 0 && (
+        <line
+          x1={PAD.l}
+          x2={PAD.l + plotW}
+          y1={sy(0)}
+          y2={sy(0)}
+          stroke={th.axisLine}
+        />
+      )}
       {isLine ? (
         <polyline
           fill="none"
-          stroke={th.line}
+          stroke={lineCol}
           strokeWidth={2}
           points={values
             .map((v, i) => `${PAD.l + band * (i + 0.5)},${sy(v)}`)
@@ -724,7 +783,7 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
               y={by}
               width={band * 0.76}
               height={Math.max(1, bh)}
-              fill={th.line}
+              fill={lineCol}
               opacity={0.92}
             >
               <title>
@@ -741,7 +800,7 @@ const ChartSvg: React.FC<{ data: ChartData }> = ({ data }) => {
             cx={PAD.l + band * (i + 0.5)}
             cy={sy(v)}
             r={3}
-            fill={th.lineDot}
+            fill={lineDot}
           />
         ))}
       {/* x labels (thinned to avoid overlap) */}
