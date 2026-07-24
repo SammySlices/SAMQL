@@ -2,12 +2,23 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-24.685
+Current build:   2026-07-24.686
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-24.686  (v2.16.4)
+
+BOOT-PATH FIX: remove a dangling leftover-instance counter reference.
+
+The move of leftover-instance cleanup off the boot path (685) left an "if n:"
+on the synchronous startup path referencing a counter no longer assigned
+there -- a latent crash at launch. The count is now reported from the deferred
+sweep and the stale reference is gone. Adds t_server_main_boots, an end-to-end
+smoke test that boots the real server main() and checks /api/health.
 
 ----------------------------------------------------------------------
 build 2026-07-24.685  (v2.16.4)
