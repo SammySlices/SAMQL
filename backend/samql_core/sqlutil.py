@@ -317,9 +317,11 @@ def sql_source_tables(sql):
     ``SELECT o.id`` still yields every column of ``Orders`` and of each joined
     table, so downstream nodes can be built on the full set.
 
-    Occurrences are preserved rather than de-duplicated: a self-join names the
-    table twice and so contributes its columns twice, exactly as ``SELECT *``
-    over the same FROM clause would.
+    Occurrences are preserved rather than de-duplicated here -- a self-join
+    or a CTE body naming the outer query's table yields the reference twice,
+    in order. The consumer collapses repeated references to the same RESOLVED
+    table (Session._remote_columns), so "Get columns" declares each table's
+    columns once.
 
     Skipped, because none has an INFORMATION_SCHEMA row: derived tables and
     subqueries (``FROM (SELECT ...) x``), CTE names declared in the same

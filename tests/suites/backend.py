@@ -34923,6 +34923,26 @@ def backend_tests(datadir, csv_path, json_path):
                 eq(got, _dd(raw),
                    "declared headers match the import de-dup for %r" % raw)
 
+            # A table referenced MORE THAN ONCE declares its columns ONCE.
+            # The reported shape: a CTE reads the same table the outer query
+            # joins back to -- doubling declared every field twice (id, id_2)
+            # and downstream nodes were built on phantom *_2 names no fetch
+            # ever produces.
+            cte_q = ("WITH Latest3 AS (SELECT TOP (3) dvid FROM "
+                     "[Vision].[usliq].[factLoans] GROUP BY dvid) "
+                     "SELECT CL.* FROM [Vision].[usliq].[factLoans] CL "
+                     "INNER JOIN Latest3 D ON CL.dvid = D.dvid")
+            cat2 = _Cat({("usliq", "factLoans"): ["dvid", "loan", "amt"]})
+            eq(s._remote_columns(cat2, cte_q), ["dvid", "loan", "amt"],
+               "a CTE + outer reference to one table declares it once")
+            # Mixed qualification of the same table also collapses (both
+            # resolve to dbo.Orders).
+            cat3 = _Cat({("dbo", "Orders"): ["id", "total"]})
+            eq(s._remote_columns(
+                cat3, "SELECT * FROM Orders o JOIN dbo.Orders b ON b.id=o.id"),
+               ["id", "total"],
+               "unqualified + dbo-qualified references resolve to one table")
+
             # An unqualified FROM prefers dbo over another schema's same-named
             # table; a query naming no real table declares nothing.
             amb = _Cat({("dbo", "T"): ["a"], ("sales", "T"): ["b"]})
@@ -34969,9 +34989,14 @@ def backend_tests(datadir, csv_path, json_path):
             err = res.get("error") or str(res)
             need("Get columns" in err,
                  "the error points at Get columns: %r" % (res,))
-            # after a fetch the live table wins (new columns show up)
-            s.db.execute("CREATE TABLE __nbsql_live (a, b, extra)")
-            g["nodes"][0]["config"]["table"] = "__nbsql_live"
+            # after a fetch the live table wins (new columns show up). Import
+            # through the registering path a real fetch uses -- a raw CREATE
+            # leaves the hidden table out of table_columns, so the probe has
+            # no engine pin and the always-DuckDB preference would look for
+            # the SQLite-fabricated table on the wrong engine.
+            tlive, _n = s.db.add_table_streaming(
+                "__nbsql_live", ["a", "b", "extra"], iter([]))
+            g["nodes"][0]["config"]["table"] = tlive
             eq(s.nodeflow_columns(g, "src", "out").get("columns"),
                ["a", "b", "extra"], "live table columns take over after fetch")
 
@@ -35040,8 +35065,10 @@ def backend_tests(datadir, csv_path, json_path):
         # browse, reconcile, column probes) reuses the cached hidden table;
         # a full run (refetch=True -- Run, Run all, Write, iterators),
         # a vanished table (restart / Clear all self-heal), and Fresh run
-        # re-pull from the remote server.
-        s = Session()
+        # re-pull from the remote server. _fresh_session, not Session():
+        # a persisted user config with Fresh run toggled on would force
+        # re-pulls and fail every reuse assertion below.
+        s = _fresh_session()
         real = s.fetch_source_node
         try:
             calls = {"n": 0}

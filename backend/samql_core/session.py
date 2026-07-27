@@ -16265,6 +16265,17 @@ class Session:
         a downstream node keeps working after Fetch. Two joined tables sharing
         a column name yield ``id`` and ``id_2``, exactly as a ``SELECT *`` over
         the same FROM clause would.
+
+        A table REFERENCED MORE THAN ONCE declares its columns once: the
+        common shape is a CTE body plus the outer query naming the same table
+        (``WITH d AS (SELECT ... FROM T) SELECT t.* FROM T t JOIN d ...``),
+        whose fetch returns each column a single time -- doubling the
+        declaration filled the field pickers with phantom ``*_2`` names no
+        fetch would ever produce. De-dup happens on the RESOLVED table (after
+        the unqualified-name schema resolution below), so ``FROM T`` and
+        ``JOIN dbo.T`` also collapse. The cost is that a same-scope self-join
+        under-declares its ``*_2`` side until Fetch -- every name declared
+        still exists after the fetch, which is the safe direction.
         """
         from .sqlutil import sql_source_tables
         refs = sql_source_tables(query)
@@ -16272,9 +16283,15 @@ class Session:
             return []
         by_table = self._information_schema_columns(conn, refs)
         names = []
+        used = set()
         for catalog, schema, table in refs:
-            names.extend(self._pick_table_columns(
-                by_table, catalog, schema, table))
+            key, cols = self._pick_table_columns(
+                by_table, catalog, schema, table)
+            if key is not None:
+                if key in used:
+                    continue
+                used.add(key)
+            names.extend(cols)
         from .engines import _dedupe_columns
         return _dedupe_columns(names)
 
@@ -16321,7 +16338,10 @@ class Session:
         return out
 
     def _pick_table_columns(self, by_table, catalog, schema, table):
-        """Columns for one FROM/JOIN reference out of an INFORMATION_SCHEMA map.
+        """``(resolved_key, columns)`` for one FROM/JOIN reference out of an
+        INFORMATION_SCHEMA map. ``resolved_key`` identifies the table the
+        reference actually resolved to (None when nothing matched) so the
+        caller can collapse repeated references to one declaration.
 
         An unqualified ``FROM Orders`` can match Orders in several schemas;
         prefer dbo (what an unqualified name resolves to for the overwhelming
@@ -16330,14 +16350,15 @@ class Session:
         """
         cat, tbl = catalog.lower(), table.lower()
         if schema:
-            return by_table.get((cat, schema.lower(), tbl), [])
+            key = (cat, schema.lower(), tbl)
+            return key, by_table.get(key, [])
         hits = sorted(k for k in by_table if k[0] == cat and k[2] == tbl)
         if not hits:
-            return []
+            return None, []
         for k in hits:
             if k[1] == "dbo":
-                return by_table[k]
-        return by_table[hits[0]]
+                return k, by_table[k]
+        return hits[0], by_table[hits[0]]
 
     def _content_sig(self, eng, table):
         """Whole-table content signature for change detection (DuckDB only).
