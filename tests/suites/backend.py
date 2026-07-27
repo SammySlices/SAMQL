@@ -25912,8 +25912,13 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_chart_pivot_pushdown():
         # Charts/pivots over a spilled result must aggregate in SQL (bounded
-        # memory) and match the Python reference exactly.
+        # memory) and match the Python reference exactly. This test is about
+        # the SQLITE spill store (DiskBackedRows) + pushdown parity, so route
+        # by table location (dual) -- the default always-DuckDB preference
+        # would send the unpinned __local__ CREATE to DuckDB and swap the
+        # store type out from under the assertions.
         s = _fresh_session()
+        s.engine_mode = "dual"
         try:
             s.run_query(
                 "CREATE TABLE big AS WITH RECURSIVE c(x) AS (SELECT 1 "
@@ -37343,6 +37348,69 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_duckdb_flow_chart_multiaxis_temp_table():
+        # A chart node's input is a TEMP table the flow just materialised on
+        # the DuckDB main connection. The multi-axis chart types (multiy /
+        # multix / candlestick) fetch rows via _source_rows, whose
+        # fresh-cursor read is a SEPARATE connection with its own temp schema
+        # and cannot see it -- 'Catalog Error: Table with name __nbflow_...
+        # does not exist!' on a SQL Server (DuckDB-pinned) flow while the
+        # select node's preview showed data fine. Guards the
+        # locked-main-connection fallback. Gated -- runs on the real machine.
+        if not feats["duckdb"]:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        try:
+            s.load_file(CSV, destination="duckdb", base_name="dfc")
+            g = {
+                "nodes": [
+                    {"id": "i", "type": "input",
+                     "config": {"table": "dfc", "label": "dfc"}},
+                    {"id": "sel", "type": "select",
+                     "config": {"label": "sel", "fields": [
+                         {"name": "category", "keep": True},
+                         {"name": "score", "keep": True},
+                         {"name": "id", "keep": True}]}},
+                    {"id": "c", "type": "chart", "config": {"label": "c"}},
+                ],
+                "edges": [
+                    {"from": {"node": "i", "port": "out"},
+                     "to": {"node": "sel", "port": "in"}},
+                    {"from": {"node": "sel", "port": "out"},
+                     "to": {"node": "c", "port": "in"}},
+                ],
+            }
+            r = s.run_nodeflow_chart(
+                g, "c", {"chart_type": "multiy", "x": "category",
+                         "y": "score", "y2": "id", "agg": "sum"})
+            need(not r.get("error"),
+                 "multiy chart over a DuckDB flow temp table: %r"
+                 % r.get("error"))
+            eq(len(r.get("series") or []), 2,
+               "multiy over a flow returns both series")
+            need(all((x.get("values") or []) for x in r["series"]),
+                 "both series carry aggregated values")
+            r2 = s.run_nodeflow_chart(
+                g, "c", {"chart_type": "multix", "x": "category",
+                         "y": "score", "x2": "category", "y2": "id",
+                         "agg": "sum"})
+            need(not r2.get("error"),
+                 "multix chart over a DuckDB flow temp table: %r"
+                 % r2.get("error"))
+            # The same temp-visibility trap exists on the generic result
+            # drain -- run_nodeflow's final read when the Parquet fast path
+            # is unavailable (no pyarrow). Force that path so the drain's
+            # locked-main-connection fallback is exercised even where
+            # pyarrow IS installed.
+            s.use_parquet_results = False
+            rp = s.run_nodeflow(g, "sel", "out")
+            need(not rp.get("error"),
+                 "flow read via the generic drain: %r" % rp.get("error"))
+            need(int(rp.get("total_rows") or 0) > 0,
+                 "drain read returns the select node's rows")
+        finally:
+            s.shutdown()
+
     def t_duckdb_paging():
         # Sorted + filtered paging over a DuckDB-resident result set. Gated.
         if not feats["duckdb"]:
@@ -42661,6 +42729,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("strange data through DuckDB ingester (gated)", t_duckdb_weird_data),
         ("DuckDB pivot + chart with no engine hint (gated)",
          t_duckdb_pivot_chart),
+        ("DuckDB flow chart: multi-axis reads the flow TEMP table (gated)",
+         t_duckdb_flow_chart_multiaxis_temp_table),
         ("DuckDB sorted + filtered paging (gated)", t_duckdb_paging),
         ("DuckDB + SQLite cross-engine reconcile error (gated)",
          t_duckdb_cross_engine_recon),

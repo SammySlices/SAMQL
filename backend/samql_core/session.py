@@ -6296,8 +6296,27 @@ class Session:
             return {"error": _duckdb_oom_flow_message(
                 _iter_missing_accum_hint(err_str(e), graph),
                 getattr(self, "duckdb", None))}
-        res = self.run_query('SELECT * FROM "%s"' % tmp, target=et,
-                             query_id=query_id, epoch0=epoch0)
+        # run_query re-resolves a LOCAL target by table location, and the
+        # engine preference (always-DuckDB) routes any table it can't find
+        # to DuckDB -- including this hidden temp, which would send a
+        # SQLite-built flow's read to the wrong engine ("Table ... does not
+        # exist"). Register the temp under its build engine for the read so
+        # the routing is decisive (the same trick reconcile uses); DuckDB
+        # targets skip re-resolution, so no pin is needed there.
+        pin_eng = None
+        if et == LOCAL_TARGET:
+            try:
+                pin_eng, _pk = self._engine_obj(et)
+                pin_eng.table_columns[tmp] = self._col_names(pin_eng,
+                                                             table=tmp)
+            except Exception:
+                pin_eng = None
+        try:
+            res = self.run_query('SELECT * FROM "%s"' % tmp, target=et,
+                                 query_id=query_id, epoch0=epoch0)
+        finally:
+            if pin_eng is not None:
+                pin_eng.table_columns.pop(tmp, None)
         if preview_limit and not res.get("error"):
             res.update({"preview": True,
                         "preview_limit": preview_limit,
@@ -6395,40 +6414,65 @@ class Session:
             # Same engine-flip re-read as run_nodeflow (the fetch may have
             # moved the build to DuckDB after we picked LOCAL).
             et = getattr(self, "_flow_build_target", et)
-            results = []
-            for nid, port in norm:
-                if self._run_is_cancelled(query_id):
-                    return {"error": "cancelled", "cancelled": True,
-                            "results": results}
-                failed = flow_errors.get((nid, port))
-                if failed is not None:
-                    # Per-branch failure rides in the results array so the UI
-                    # marks this terminal only, not every branch in the batch.
-                    res = dict(failed)
-                    culprit = res.get("node")
-                    if culprit and culprit != nid:
-                        res["error_node"] = culprit
+            # Same LOCAL-target read pin as run_nodeflow: without it the
+            # engine preference (always-DuckDB) re-routes the hidden temps'
+            # reads off the SQLite engine that built them.
+            pin_eng = None
+            pinned = []
+            if et == LOCAL_TARGET and built:
+                try:
+                    pin_eng, _pk = self._engine_obj(et)
+                except Exception:
+                    pin_eng = None
+                for tname in set(built.values()):
+                    if pin_eng is None:
+                        break
+                    try:
+                        pin_eng.table_columns[tname] = self._col_names(
+                            pin_eng, table=tname)
+                        pinned.append(tname)
+                    except Exception:
+                        pass
+            try:
+                results = []
+                for nid, port in norm:
+                    if self._run_is_cancelled(query_id):
+                        return {"error": "cancelled", "cancelled": True,
+                                "results": results}
+                    failed = flow_errors.get((nid, port))
+                    if failed is not None:
+                        # Per-branch failure rides in the results array so the
+                        # UI marks this terminal only, not every branch in the
+                        # batch.
+                        res = dict(failed)
+                        culprit = res.get("node")
+                        if culprit and culprit != nid:
+                            res["error_node"] = culprit
+                        res["node"] = nid
+                        res["port"] = port
+                        results.append(res)
+                        continue
+                    res = self.run_query(
+                        'SELECT * FROM "%s"' % built[(nid, port)],
+                        target=et, query_id=query_id, epoch0=epoch0)
                     res["node"] = nid
                     res["port"] = port
+                    if preview_limit and not res.get("error"):
+                        res.update({
+                            "preview": True,
+                            "preview_limit": preview_limit,
+                            "preview_limited":
+                                int(res.get("total_rows") or 0)
+                                >= preview_limit,
+                        })
                     results.append(res)
-                    continue
-                res = self.run_query(
-                    'SELECT * FROM "%s"' % built[(nid, port)],
-                    target=et, query_id=query_id, epoch0=epoch0)
-                res["node"] = nid
-                res["port"] = port
-                if preview_limit and not res.get("error"):
-                    res.update({
-                        "preview": True,
-                        "preview_limit": preview_limit,
-                        "preview_limited":
-                            int(res.get("total_rows") or 0) >= preview_limit,
-                    })
-                results.append(res)
-                if res.get("cancelled"):
-                    return {"error": "cancelled", "cancelled": True,
-                            "results": results}
-            return {"ok": True, "results": results}
+                    if res.get("cancelled"):
+                        return {"error": "cancelled", "cancelled": True,
+                                "results": results}
+                return {"ok": True, "results": results}
+            finally:
+                for tname in pinned:
+                    pin_eng.table_columns.pop(tname, None)
         except nodeflow.NodeflowError as e:
             return self._flow_err(e, graph)
         except Exception as e:
@@ -9630,11 +9674,42 @@ class Session:
                 if _looks_like_oom(err_str(e)):
                     raise
                 pass  # non-cancel cursor problem: generic drain fallback
-        cols, first, cursor = engine.execute_cursor(
-            sql, batch=self._RESULT_BATCH)
+        held_lock = None
+        shared_conn = False
+        try:
+            cols, first, cursor = engine.execute_cursor(
+                sql, batch=self._RESULT_BATCH)
+        except Exception as e:
+            # A DuckDB cursor() is a SEPARATE connection with its own
+            # temporary schema, so this drain cannot see a TEMP table the
+            # flow just materialised -- the path a flow result read takes
+            # when the Parquet fast path is unavailable (no pyarrow, or a
+            # multi-statement query). Retry once on the locked main
+            # connection, which can see it -- the same fallback the export
+            # stream uses. Never re-run a cancelled or OOM-failed statement:
+            # a cancel is a cancel, and an OOM would just explode again on a
+            # heavier path.
+            if (kind != "duckdb" or _is_interrupt(e)
+                    or self._run_is_cancelled(query_id)
+                    or _looks_like_oom(err_str(e))):
+                raise
+            held_lock = engine.write_lock
+            held_lock.acquire()
+            try:
+                cols, first, cursor = engine.execute_cursor(
+                    sql, batch=self._RESULT_BATCH, same_conn=True)
+                shared_conn = True
+            except BaseException:
+                held_lock.release()
+                held_lock = None
+                raise
         if cols is None:
+            if held_lock is not None:
+                held_lock.release()
             return None, None, 0, kind
         if cursor is None:
+            if held_lock is not None:
+                held_lock.release()
             return cols, first, len(first), kind
         # Drain the remainder. Keep small/medium results as a fast
         # in-memory list and only spill genuinely large ones into an
@@ -9668,10 +9743,15 @@ class Session:
                     capped = True
                     break
         finally:
-            try:
-                cursor.close()
-            except Exception:
-                pass
+            # same_conn retry: "cursor" IS the engine's main connection --
+            # closing it would close the engine itself.
+            if not shared_conn:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            if held_lock is not None:
+                held_lock.release()
         if store is not None:
             store.capped = capped
             store.cap = cap
@@ -13932,8 +14012,22 @@ class Session:
         if table is not None:
             engine = self._engine_kind_for_table(table) or engine
             eng = self.get_duckdb() if engine == "duckdb" else self.db
-            cols, first, cursor = eng.execute_cursor(
-                f'SELECT * FROM "{table}"', batch=10000)
+            sql = f'SELECT * FROM "{table}"'
+            try:
+                cols, first, cursor = eng.execute_cursor(sql, batch=10000)
+            except Exception as e:
+                if _is_interrupt(e):
+                    raise
+                # A DuckDB cursor() is a separate connection with its own
+                # temporary schema, so it cannot see the TEMP table a flow
+                # just materialised -- a chart node's multi-axis read lands
+                # here ("Table with name __nbflow_... does not exist").
+                # Retry on the locked main connection, which can see it --
+                # the same fallback the preview and export paths use. LIMIT
+                # keeps the serialized read bounded; a genuinely missing
+                # table raises the same error either way.
+                cols, rows = eng.execute(f"{sql} LIMIT {max(0, int(limit))}")
+                return list(cols or []), list(rows or [])
             if cols is None:
                 return [], []
             rows = list(first)
