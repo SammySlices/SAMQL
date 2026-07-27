@@ -2,12 +2,35 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-27.693
+Current build:   2026-07-27.694
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-27.694  (v2.16.4)
+
+SQL SERVER QUERIES RUN ONLY ON RUN/FETCH; GET COLUMNS PROPAGATES; FIELD
+PICKERS SURVIVE A RESTART.
+
+The post-run seed pass (and every preview batch) now REUSES the run's own
+connector fetch instead of re-running the remote query seconds after the
+run finished -- "queries rerun after finishing" is gone. Combined with
+build 693, a remote SQL Server query now runs ONLY on an explicit Fetch,
+Run, Run all, Write, iterators, exports, or Fresh run; previews, charts,
+seeds and tab switches rebuild locally from the cached table.
+
+Get columns now REBINDS the node to the fresh headers: the cached fetch of
+the pre-edit query is dropped (backend) and config.table cleared
+(frontend), so the new columns immediately propagate to downstream field
+pickers instead of being shadowed by the old fetched table.
+
+A saved workflow's connector whose hidden table died with the previous
+session falls back to its declared config.columns in the column probes --
+chart X/Y and downstream pickers offer the last-known fields WITHOUT
+re-running the connector.
 
 ----------------------------------------------------------------------
 build 2026-07-27.693  (v2.16.4)
