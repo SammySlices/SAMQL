@@ -2,12 +2,34 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-24.692
+Current build:   2026-07-27.693
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-27.693  (v2.16.4)
+
+SQL SERVER "GET COLUMNS" READS TABLE SCHEMAS; CONNECTOR CACHE PERSISTS
+UNTIL THE NEXT FULL RUN.
+
+Get columns now reads INFORMATION_SCHEMA for every table named in the query's
+FROM / JOIN clauses -- an explicit SELECT list still declares every column of
+every joined table (one INFORMATION_SCHEMA pass per catalog; self-joins count
+twice; name collisions de-dup positionally as id, id_2 exactly like a
+SELECT * fetch would). Derived tables, CTEs, table-valued functions, table
+variables and temp tables are skipped; a dead connection or missing
+permission surfaces its real error instead of "no table columns found".
+
+Fetched connector data (SQL Server / SharePoint / Web scrape) now persists
+until the next FULL run: previews, charts, browse, reconcile and column
+probes reuse the cached fetch instead of re-pulling from the remote server.
+Run, Run all, Write, iterators, exports, an explicit Fetch and Fresh run
+still re-pull (latest-data-wins). A cached table lost to a restart or Clear
+all self-heals on the next materialization, and Clear all / engine resets no
+longer leave ghost connector records that could mis-pin a flow's engine.
 
 ----------------------------------------------------------------------
 build 2026-07-24.692  (v2.16.4)
