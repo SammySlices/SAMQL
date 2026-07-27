@@ -406,6 +406,14 @@ class WorkflowStore:
 
     def __init__(self, dirname=None, filename="workflows.json"):
         self.path = app_config_dir(dirname) / filename
+        # Sidebar folder grouping of the saved workflows. Server-side so it
+        # survives exactly as long as the workflows it organizes -- browser
+        # localStorage (the original home) is per-profile: the AppWindow's
+        # WebView2 profile and a browser tab never shared it, and clearing
+        # either silently dissolved every folder. Derived from ``filename``
+        # so test stores stay isolated from the real one.
+        stem = filename[:-5] if filename.endswith(".json") else filename
+        self.groups_path = app_config_dir(dirname) / (stem + "_groups.json")
         self.entries = []
         self._load()
 
@@ -448,6 +456,38 @@ class WorkflowStore:
             self.entries = self.entries[-self.MAX_ENTRIES:]
         self._save()
         return new
+
+    def groups_get(self):
+        """The sidebar's folder-grouping state: {"version": 1, "groups":
+        [{id, kind, name, collapsed, members}, ...]}. Returns the empty
+        state when nothing was ever saved."""
+        raw = _load_json_container(self.groups_path, dict)
+        groups = raw.get("groups") if isinstance(raw, dict) else None
+        return {"version": 1,
+                "groups": groups if isinstance(groups, list) else []}
+
+    def groups_set(self, state):
+        """Persist the folder-grouping state (sanitized, capped). The
+        frontend owns the shape; here we only keep it a well-formed,
+        bounded {"version": 1, "groups": [...]} document."""
+        groups = []
+        for g in ((state or {}).get("groups") or [])[:200]:
+            if not isinstance(g, dict):
+                continue
+            gid = str(g.get("id") or "").strip()[:64]
+            kind = self._kind(g.get("kind"))
+            if not gid:
+                continue
+            groups.append({
+                "id": gid,
+                "kind": kind,
+                "name": str(g.get("name") or "Group").strip()[:80] or "Group",
+                "collapsed": bool(g.get("collapsed")),
+                "members": [str(m)[:256] for m in (g.get("members") or [])
+                            if isinstance(m, str)][:400],
+            })
+        atomic_write_json(self.groups_path, {"version": 1, "groups": groups})
+        return {"version": 1, "groups": groups}
 
     def delete(self, name, kind="node"):
         kind = self._kind(kind)

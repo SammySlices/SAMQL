@@ -31,6 +31,7 @@ import {
   groupsForKind,
   loadWorkflowGroups,
   moveWorkflowToGroup,
+  normalizeWorkflowGroups,
   renameWorkflowGroup,
   saveWorkflowGroups,
   toggleWorkflowGroupCollapsed,
@@ -1610,9 +1611,44 @@ const WorkflowsPanel: React.FC<Props> = ({
   const [renameDraft, setRenameDraft] = useState("");
   const [dropTarget, setDropTarget] = useState<string | null>(null);
 
+  // Folder grouping is persisted SERVER-SIDE next to the saved workflows it
+  // organizes (survives restarts, browser profiles, and the AppWindow /
+  // browser-tab split). localStorage remains a warm-start cache and the
+  // migration source: a server that has never stored groups is seeded from
+  // the local state once.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await api.workflowGroupsGet();
+        if (!alive) return;
+        const server = normalizeWorkflowGroups({
+          version: 1,
+          ...(r || {}),
+        });
+        if (server.groups.length) {
+          setGroupState(server);
+          saveWorkflowGroups(server);
+        } else {
+          const local = loadWorkflowGroups();
+          if (local.groups.length) {
+            // one-time migration of pre-server groups
+            api.workflowGroupsSet(local).catch(() => {});
+          }
+        }
+      } catch {
+        /* offline probe -- keep the localStorage state */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const persist = (next: ReturnType<typeof loadWorkflowGroups>) => {
     setGroupState(next);
     saveWorkflowGroups(next);
+    api.workflowGroupsSet(next).catch(() => {});
   };
 
   return (

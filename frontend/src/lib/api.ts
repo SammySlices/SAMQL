@@ -2045,6 +2045,9 @@ export const api = {
     queryId?: string,
     signal?: AbortSignal,
     params?: Record<string, string>,
+    /** true = explicit run (dashboard Run): re-pull connector data instead
+     * of reusing the cached fetch. */
+    refresh?: boolean,
   ) =>
     jsonFetch<ChartData & { error?: string; cancelled?: boolean }>(
       "/api/nodeflow/chart",
@@ -2054,6 +2057,7 @@ export const api = {
         body: JSON.stringify({
           graph, node, spec, query_id: queryId,
           ...(params ? { params } : {}),
+          ...(refresh ? { refresh: true } : {}),
         }),
       },
     ),
@@ -2081,6 +2085,9 @@ export const api = {
     queryId?: string,
     balance?: string | null,
     signal?: AbortSignal,
+    /** true = explicit run (dashboard Run): re-pull connector data instead
+     * of reusing the cached fetch. */
+    refresh?: boolean,
   ) =>
     jsonFetch<{
       totals?: Record<string, number>;
@@ -2097,7 +2104,10 @@ export const api = {
     }>("/api/nodeflow/reconcile", {
       signal,
       method: "POST",
-      body: JSON.stringify({ graph, node, keys, compare, balance, query_id: queryId }),
+      body: JSON.stringify({
+        graph, node, keys, compare, balance, query_id: queryId,
+        ...(refresh ? { refresh: true } : {}),
+      }),
     }),
   nodeflowExport: (
     graph: unknown,
@@ -2191,6 +2201,17 @@ export const api = {
     jsonFetch<{ ok?: boolean }>("/api/workflows", {
       method: "DELETE",
       body: JSON.stringify({ name, kind }),
+    }),
+  // Sidebar folder grouping of saved workflows -- persisted server-side next
+  // to the workflows themselves (survives restarts, profiles, browsers).
+  workflowGroupsGet: () =>
+    jsonFetch<{ version?: number; groups?: unknown[] }>(
+      "/api/workflows/groups",
+    ),
+  workflowGroupsSet: (state: unknown) =>
+    jsonFetch<{ ok?: boolean }>("/api/workflows/groups", {
+      method: "POST",
+      body: JSON.stringify(state),
     }),
   // read / write a workflow file anywhere on disk (Save As / Open)
   saveFile: (path: string, content: string) =>

@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { api, saveToDownloads } from "../lib/api";
+import { chartSpecForConfig } from "../lib/chartSpec";
 import { exportDashboardElementToPdf } from "../lib/dashboardPdf";
 import {
   activeDashboard,
@@ -252,16 +253,9 @@ function DashboardWidgetBody({
   );
 }
 
-function chartSpecOf(cfg: Record<string, unknown>) {
-  return {
-    chart_type: cfg.chart_type || "bar",
-    x: cfg.x || "",
-    y: cfg.y || "",
-    agg: cfg.agg || "sum",
-    series: cfg.series || "",
-    style: cfg.style || undefined,
-  };
-}
+// Chart specs are built by the SHARED lib/chartSpec builder -- a local
+// hand-rolled subset silently dropped y2 / x2 / bins / OHLC, which broke
+// "Multiple Y axes" (and multi-X / candlestick) widgets on the dashboard.
 
 async function runWorkflowWidget(
   workflowName: string,
@@ -296,18 +290,32 @@ async function runWorkflowWidget(
   const kind = kindFromUpstream(target.upstreamType);
 
   if (kind === "chart") {
+    const cfg = target.upstreamConfig;
     const r = await api.nodeflowChart(
       graph,
       target.upstreamId,
-      chartSpecOf(target.upstreamConfig),
+      chartSpecForConfig(cfg),
       queryId,
       signal,
+      undefined,
+      // A dashboard Run is an explicit run: pull the connector's LATEST
+      // data instead of reusing the cached fetch.
+      true,
     );
     if (wasCancelled(queryId) || r.cancelled) {
       return { kind: "error", message: "cancelled" };
     }
     if (r.error) return { kind: "error", message: r.error };
-    return { kind: "chart", data: r as ChartData };
+    // Re-attach the UI chart type + style (the backend was sent the mapped
+    // data-shape type, e.g. donut -> pie) exactly like the canvas renderer.
+    return {
+      kind: "chart",
+      data: {
+        ...(r as ChartData),
+        chart_type: (cfg.chart_type as ChartData["chart_type"]) || "bar",
+        style: (cfg.style as ChartData["style"]) || undefined,
+      },
+    };
   }
 
   if (kind === "reconcile") {
@@ -324,6 +332,7 @@ async function runWorkflowWidget(
       queryId,
       balance,
       signal,
+      true, // dashboard Run = explicit run: pull latest connector data
     );
     if (wasCancelled(queryId) || r.cancelled) {
       return { kind: "error", message: "cancelled" };

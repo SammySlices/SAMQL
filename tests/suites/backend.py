@@ -35101,6 +35101,19 @@ def backend_tests(datadir, csv_path, json_path):
             r = s.run_nodeflows(g, [{"node": "src", "port": "out"}])
             need(not r.get("error"), "full batch runs: %r" % r)
             eq(calls["n"], 6, "a full batch run re-pulls (latest-data-wins)")
+            # Chart runs: passive canvas hydration reuses the cached fetch;
+            # a dashboard Run passes refresh=True and pulls LATEST data.
+            g["nodes"].append({"id": "ch", "type": "chart", "config": {
+                "label": "ch", "chart_type": "bar", "x": "id"}})
+            g["edges"].append({"from": {"node": "src", "port": "out"},
+                               "to": {"node": "ch", "port": "in"}})
+            spec = {"chart_type": "bar", "x": "id"}
+            r = s.run_nodeflow_chart(g, "ch", dict(spec))
+            need(not r.get("error"), "chart hydration runs: %r" % r)
+            eq(calls["n"], 6, "canvas chart hydration reuses the cache")
+            r = s.run_nodeflow_chart(g, "ch", dict(spec), refresh=True)
+            need(not r.get("error"), "refreshed chart runs: %r" % r)
+            eq(calls["n"], 7, "a dashboard Run (refresh) pulls latest data")
         finally:
             s.fetch_source_node = real
             s.shutdown()
@@ -35789,11 +35802,32 @@ def backend_tests(datadir, csv_path, json_path):
             old = ws2.get("Old", "node")
             need(old is not None and old.get("kind") == "node",
                  "legacy (kind-less) entry migrates to node")
+
+            # Folder grouping persists server-side next to the workflows
+            # (localStorage was per browser profile: the AppWindow and a
+            # browser tab never shared it, and clearing either dissolved
+            # every folder). Roundtrip -> reload from DISK -> sanitize.
+            eq(ws.groups_get(), {"version": 1, "groups": []},
+               "groups default to empty")
+            ws.groups_set({"groups": [
+                {"id": "g1", "kind": "node", "name": "  Sales  ",
+                 "collapsed": True, "members": ["Q1", "Q2", 7]},
+                {"id": "", "kind": "node", "name": "dropped"},   # no id
+                "garbage",
+            ]})
+            ws3 = WorkflowStore(filename=ws.path.name)
+            got = ws3.groups_get()
+            eq(len(got["groups"]), 1, "malformed group entries are dropped")
+            eq(got["groups"][0],
+               {"id": "g1", "kind": "node", "name": "Sales",
+                "collapsed": True, "members": ["Q1", "Q2"]},
+               "groups survive a store reload from disk, sanitized")
         finally:
-            try:
-                _osw.unlink(ws.path)
-            except Exception:
-                pass
+            for p in (ws.path, ws.groups_path):
+                try:
+                    _osw.unlink(p)
+                except Exception:
+                    pass
 
     def t_sharepoint_drive_download():
         # browse_drive / download_drive_item require a token; session download

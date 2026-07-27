@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { paletteColors } from "../../lib/chartOption";
+import { chartSpecForConfig } from "../../lib/chartSpec";
 import { compositeImages, renderToDataURL } from "../../lib/echart";
 import { uid } from "../../lib/ids";
 import {
@@ -1361,27 +1362,10 @@ export function useNodeFlowExecutionController({
   };
   doPreviewRef.current = doPreview;
 
-  // Map a UI chart type to the data shape the backend produces. area reuses the
-  // bar (category + series) shape and donut reuses the pie (category + value)
-  // shape; the real UI type is re-attached client-side so the renderer can draw
-  // the variant. bar / line / pie / scatter / histogram pass straight through.
-  const backendChartType = (t?: string): string =>
-    t === "area" || t === "tree" ? "bar" : t === "donut" ? "pie" : t || "bar";
-  // The chart spec sent to the backend for a chart node.
-  const chartSpecOf = (node: NbNode) => ({
-    chart_type: backendChartType(node.config.chart_type) as any,
-    x: node.config.x,
-    y: node.config.y || undefined,
-    series: node.config.series || undefined,
-    agg: node.config.agg || "sum",
-    bins: node.config.bins || undefined,
-    open: node.config.open || undefined,
-    high: node.config.high || undefined,
-    low: node.config.low || undefined,
-    close: node.config.close || undefined,
-    x2: node.config.x2 || undefined,
-    y2: node.config.y2 || undefined,
-  });
+  // The chart spec sent to the backend for a chart node -- shared with the
+  // Dashboard's widget runner (lib/chartSpec) so both surfaces send the same
+  // field set (y2 / x2 / bins / OHLC included).
+  const chartSpecOf = (node: NbNode) => chartSpecForConfig(node.config);
   // Re-attach the UI chart type + the node's style to the returned ChartData so
   // the renderer sees the real variant and the chosen palette / theme / labels.
   const styleChartData = (node: NbNode, r: any): ChartData => ({
@@ -1686,7 +1670,17 @@ export function useNodeFlowExecutionController({
   const fetchChartData = async (chartNode: NbNode): Promise<ChartData | null> => {
     const scope = scopeVersionRef.current;
     if (!chartNode || chartNode.type !== "chart" || !chartNode.config.x) return null;
-    const r = await api.nodeflowChart(graphForRun(), chartNode.id, chartSpecOf(chartNode));
+    // Image export is an explicit run: pull the connector's LATEST data
+    // (refresh) rather than reusing the cached fetch.
+    const r = await api.nodeflowChart(
+      graphForRun(),
+      chartNode.id,
+      chartSpecOf(chartNode),
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
     if (scope !== scopeVersionRef.current) return null;
     if (r.error || wasCancelled(r)) return null;
     return styleChartData(chartNode, r);

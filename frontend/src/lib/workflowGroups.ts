@@ -26,30 +26,36 @@ export function emptyWorkflowGroups(): WorkflowGroupsState {
   return { version: 1, groups: [] };
 }
 
+/** Sanitize an untrusted parsed state (localStorage or the server) into a
+ * well-formed WorkflowGroupsState; anything malformed becomes empty. */
+export function normalizeWorkflowGroups(parsed: unknown): WorkflowGroupsState {
+  const p = parsed as { version?: unknown; groups?: unknown } | null;
+  if (!p || p.version !== 1 || !Array.isArray(p.groups)) {
+    return emptyWorkflowGroups();
+  }
+  const groups: WorkflowGroup[] = [];
+  for (const g of p.groups as any[]) {
+    if (!g || typeof g.id !== "string" || typeof g.kind !== "string") continue;
+    if (!["ide", "journal", "node", "dashboard"].includes(g.kind)) continue;
+    groups.push({
+      id: g.id,
+      kind: g.kind as WorkflowKind,
+      name:
+        typeof g.name === "string" && g.name.trim() ? g.name.trim() : "Group",
+      collapsed: !!g.collapsed,
+      members: Array.isArray(g.members)
+        ? g.members.filter((m: unknown) => typeof m === "string")
+        : [],
+    });
+  }
+  return { version: 1, groups };
+}
+
 export function loadWorkflowGroups(): WorkflowGroupsState {
   try {
     const raw = window.localStorage?.getItem(WORKFLOW_GROUPS_KEY);
     if (!raw) return emptyWorkflowGroups();
-    const parsed = JSON.parse(raw);
-    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.groups)) {
-      return emptyWorkflowGroups();
-    }
-    const groups: WorkflowGroup[] = [];
-    for (const g of parsed.groups) {
-      if (!g || typeof g.id !== "string" || typeof g.kind !== "string") continue;
-      if (!["ide", "journal", "node", "dashboard"].includes(g.kind)) continue;
-      groups.push({
-        id: g.id,
-        kind: g.kind as WorkflowKind,
-        name:
-          typeof g.name === "string" && g.name.trim() ? g.name.trim() : "Group",
-        collapsed: !!g.collapsed,
-        members: Array.isArray(g.members)
-          ? g.members.filter((m: unknown) => typeof m === "string")
-          : [],
-      });
-    }
-    return { version: 1, groups };
+    return normalizeWorkflowGroups(JSON.parse(raw));
   } catch {
     return emptyWorkflowGroups();
   }

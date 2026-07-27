@@ -3495,6 +3495,14 @@ class Api:
         b = body or {}
         return s.workflow_delete(b.get("name"), b.get("kind") or "node")
 
+    @staticmethod
+    def workflow_groups_get(s, m, body, ctx):
+        return s.workflow_groups_get()
+
+    @staticmethod
+    def workflow_groups_set(s, m, body, ctx):
+        return s.workflow_groups_set(body or {})
+
     # ---- read/write a workflow file anywhere on disk (Save As / Open) ----
     @staticmethod
     def workspace_save_file(s, m, body, ctx):
@@ -4088,7 +4096,8 @@ class Api:
         graph = b.get("graph") or {}
         return s.run_nodeflow_chart(graph, b.get("node"), b.get("spec") or {},
                                     query_id=b.get("query_id"),
-                                    params=b.get("params"))
+                                    params=b.get("params"),
+                                    refresh=bool(b.get("refresh")))
 
     @staticmethod
     def nodeflow_browse(s, m, body, ctx):
@@ -4111,7 +4120,8 @@ class Api:
         return s.run_nodeflow_reconcile(
             graph, b.get("node"), b.get("keys") or [],
             b.get("compare") or [], b.get("balance"),
-            query_id=b.get("query_id"))
+            query_id=b.get("query_id"),
+            refresh=bool(b.get("refresh")))
 
     @staticmethod
     def nodeflow_export(s, m, body, ctx):
@@ -4479,6 +4489,8 @@ ROUTES = [
     ("POST", r"^/api/workflows$", Api.workflow_save),
     ("POST", r"^/api/workflows/load$", Api.workflow_load),
     ("DELETE", r"^/api/workflows$", Api.workflow_delete),
+    ("GET", r"^/api/workflows/groups$", Api.workflow_groups_get),
+    ("POST", r"^/api/workflows/groups$", Api.workflow_groups_set),
     ("POST", r"^/api/workspace/save-file$", Api.workspace_save_file),
     ("POST", r"^/api/workspace/open-file$", Api.workspace_open_file),
     ("POST", r"^/api/chart/data$", Api.chart_data),

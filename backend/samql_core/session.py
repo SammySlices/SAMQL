@@ -4821,11 +4821,13 @@ class Session:
         return out
 
     def run_nodeflow_chart(self, graph, node_id, spec, query_id=None,
-                           params=None):
+                           params=None, refresh=False):
         """Materialise a chart node's input and build a chart from it (reusing
         chart_data), returning ChartData for the canvas to render. ``params``
         overrides workflow-variable values for this build (a Run-all with
-        promoted parameters must hydrate the chart with the SAME values)."""
+        promoted parameters must hydrate the chart with the SAME values).
+        ``refresh`` marks an explicit run (a dashboard Run): connector
+        sources re-pull latest data instead of reusing the cached fetch."""
         from . import nodeflow
         created = []
         et = LOCAL_TARGET
@@ -4841,7 +4843,7 @@ class Session:
             tmp = self._materialize_flow(graph, sn, sp, et, created,
                                          query_id=query_id,
                                          var_overrides=params,
-                                         refetch_sources=False)
+                                         refetch_sources=bool(refresh))
             et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
@@ -4858,9 +4860,11 @@ class Session:
         return out
 
     def run_nodeflow_reconcile(self, graph, node_id, keys, compare=None,
-                               balance=None, query_id=None):
+                               balance=None, query_id=None, refresh=False):
         """Materialise a reconcile node's two inputs and run the reconcile
-        engine over them, returning the field-level report."""
+        engine over them, returning the field-level report. ``refresh`` marks
+        an explicit run (a dashboard Run): connector sources re-pull latest
+        data instead of reusing the cached fetch."""
         from . import nodeflow
         if not keys:
             return {"error": "Pick at least one key field to reconcile on."}
@@ -4879,10 +4883,10 @@ class Session:
                 label=self._flow_node_label(graph, node_id))
             ltmp = self._materialize_flow(graph, ls[0], ls[1], et, created,
                                           query_id=query_id,
-                                          refetch_sources=False)
+                                          refetch_sources=bool(refresh))
             rtmp = self._materialize_flow(graph, rs[0], rs[1], et, created,
                                           query_id=query_id,
-                                          refetch_sources=False)
+                                          refetch_sources=bool(refresh))
             et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
@@ -13758,6 +13762,12 @@ class Session:
 
     def workflow_delete(self, name, kind="node"):
         return {"ok": self.workflows.delete(name, kind)}
+
+    def workflow_groups_get(self):
+        return self.workflows.groups_get()
+
+    def workflow_groups_set(self, state):
+        return {"ok": True, **self.workflows.groups_set(state)}
 
     def _post_interrupt_hygiene(self, target):
         """After a cancel lands, leave the engine connection CLEAN: an

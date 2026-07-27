@@ -683,6 +683,23 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         need(not any(x.get("name") == "wf-http"
                      for x in d.get("workflows", [])),
              "deleted workflow no longer listed")
+        # folder grouping: server-side roundtrip (restore the user's real
+        # state afterwards -- the HTTP suite runs on the real config dir)
+        st, before = c.js("GET", "/api/workflows/groups")
+        eq(st, 200, "groups get status")
+        try:
+            st, d = c.js("POST", "/api/workflows/groups", {
+                "version": 1,
+                "groups": [{"id": "gh1", "kind": "node", "name": "HTTP",
+                            "members": ["wf-http"]}]})
+            eq(st, 200, "groups set status")
+            need(d.get("ok"), "groups set ok")
+            st, d = c.js("GET", "/api/workflows/groups")
+            need(any(g.get("id") == "gh1" for g in d.get("groups", [])),
+                 "groups roundtrip over HTTP")
+        finally:
+            c.js("POST", "/api/workflows/groups",
+                 {"version": 1, "groups": before.get("groups") or []})
         # kind-aware: the same name can exist once per kind (IDE/Journal/Node/Dashboard)
         c.js("POST", "/api/workflows",
              {"name": "shared", "kind": "node",

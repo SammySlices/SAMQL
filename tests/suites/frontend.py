@@ -4841,9 +4841,17 @@ console.log("OK");
               or 'from "../../lib/chartOption"' in nb)
              and 'from "./chartOption"' in rd("src", "lib", "echart.ts")),
             ("chart calls send series split + map UI type to data shape",
-             "backendChartType" in nb
-             and "chartSpecOf" in nb
-             and "styleChartData" in nb),
+             # The spec builder + UI-type mapping live in the SHARED
+             # lib/chartSpec module so the canvas and the Dashboard widget
+             # runner send the same field set (y2/x2/bins/OHLC included) --
+             # a hand-rolled dashboard subset broke Multiple Y axes widgets.
+             "chartSpecOf" in nb
+             and "styleChartData" in nb
+             and "backendChartType" in rd("src", "lib", "chartSpec.ts")
+             and "chartSpecForConfig" in rd("src", "lib", "chartSpec.ts")
+             and 'from "../../lib/chartSpec"' in nb
+             and 'from "../lib/chartSpec"'
+                 in rd("src", "components", "Dashboard.tsx")),
             # --- this batch: chart live-update, join modes, deletes, snapping,
             #     link selection, copy grid, red × buttons ---
             ("charts re-render from cache live (ChartView takes type/style; no refetch on style)",
