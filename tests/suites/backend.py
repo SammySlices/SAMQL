@@ -34970,6 +34970,27 @@ def backend_tests(datadir, csv_path, json_path):
             eq(s.nodeflow_columns(g, "src", "out").get("columns"),
                ["a", "b", "extra"], "live table columns take over after fetch")
 
+            # A STALE table binding (restart / Clear all dropped the hidden
+            # table) falls back to the declared headers in the column probes,
+            # so a saved workflow's chart / select field pickers keep offering
+            # the last-known fields WITHOUT re-running the connector.
+            g3 = {"nodes": [
+                {"id": "src", "type": "sqlserver", "config": {
+                    "query": "SELECT a, b FROM t",
+                    "table": "__nbsql_vanished",
+                    "columns": ["a", "b"]}},
+                {"id": "sel", "type": "select", "config": {"fields": [
+                    {"name": "a", "keep": True}]}},
+            ], "edges": [
+                {"from": {"node": "src", "port": "out"},
+                 "to": {"node": "sel", "port": "in"}}]}
+            eq(s.nodeflow_columns(g3, "src", "out").get("columns"),
+               ["a", "b"], "a stale table falls back to declared headers")
+            rb = s.nodeflow_columns_batch(
+                g3, [{"node": "sel", "port": "out"}])
+            eq((rb.get("results") or [{}])[0].get("columns"), ["a"],
+               "downstream pickers see them via the batch probe too")
+
             # Get columns on a SHARED connection with a database set must
             # restore the connection's previous database -- the early return
             # used to leak the USE [Sales] and silently retarget a connection
@@ -34987,11 +35008,21 @@ def backend_tests(datadir, csv_path, json_path):
                     return ([], [])
             shared = _Shared()
             s.connections["Prod"] = shared          # preexisting/shared
+            # A successful Get columns REBINDS the node: the cached fetch of
+            # the pre-edit query is dropped so the fresh headers propagate
+            # downstream instead of being shadowed by "live table wins".
+            told, _n = s.db.add_table_streaming(
+                "__nbsql_oldq", ["x"], iter([(1,)]))
+            s._api_node_tables["nX"] = {"table": told, "engine": "sqlite"}
             r = s.fetch_sqlserver_node(
                 "nX", {"connection": "Prod", "query": "SELECT id FROM t",
                        "database": "Sales"}, columns_only=True)
             need(r.get("ok") and r.get("columns") == ["id"],
                  "get columns returned headers: %r" % (r,))
+            need("nX" not in s._api_node_tables,
+                 "get columns dropped the pre-edit cached record")
+            need(told not in (s.db.table_columns or {}),
+                 "get columns dropped the pre-edit cached table")
             uses = [x for x in shared.execed if x.startswith("USE [")]
             eq(uses, ["USE [Sales]", "USE [master]"],
                "USE [Sales] is applied then restored to [master]: %r" % uses)
@@ -35058,6 +35089,18 @@ def backend_tests(datadir, csv_path, json_path):
             eq(s._api_node_tables, {}, "clear_all clears _api_node_tables")
             s._ensure_source_nodes_fetched(g, ["src"], refetch=False)
             eq(calls["n"], 5, "post-clear preview re-fetches (no ghost reuse)")
+            # The batch runner (run_nodeflows) drives the post-run seed pass
+            # and tab-restore reseeds with preview=True: it must REUSE the
+            # cached fetch -- re-running the remote query the run just
+            # executed was exactly the "queries rerun after finishing" bug.
+            # A real (non-preview) batch is a full run and re-pulls.
+            r = s.run_nodeflows(g, [{"node": "src", "port": "out"}],
+                                preview=True, preview_limit=5)
+            need(not r.get("error"), "preview batch runs: %r" % r)
+            eq(calls["n"], 5, "a preview batch (seed pass) does NOT re-fetch")
+            r = s.run_nodeflows(g, [{"node": "src", "port": "out"}])
+            need(not r.get("error"), "full batch runs: %r" % r)
+            eq(calls["n"], 6, "a full batch run re-pulls (latest-data-wins)")
         finally:
             s.fetch_source_node = real
             s.shutdown()

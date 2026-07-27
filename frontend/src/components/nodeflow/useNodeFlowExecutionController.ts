@@ -2220,7 +2220,11 @@ export function useNodeFlowExecutionController({
         return { ok: false };
       }
       const cols = r.columns || [];
-      patchNode(node.id, { columns: cols });
+      // Rebind the node to its declared headers: clear the cached table
+      // binding (the backend dropped the hidden table -- it belonged to the
+      // query as it was BEFORE the edit), otherwise "live table wins" in
+      // compile and downstream field pickers keep showing the old columns.
+      patchNode(node.id, { columns: cols, table: "" });
       onToast(
         "ok",
         "Columns pulled",

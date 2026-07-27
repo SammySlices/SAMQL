@@ -4602,6 +4602,7 @@ class Session:
         of one per port, and shared upstream subtrees are probed once."""
         graph = applyvars.resolve_graph(
             graph, evaluate=self._variable_expr_evaluator(lenient=True))
+        self._rebind_stale_connector_tables(graph)
         from . import nodeflow
         out = []
         eng_name = ("duckdb"
@@ -4656,6 +4657,7 @@ class Session:
         # and the inspector silently shows no columns for that step.
         graph = applyvars.resolve_graph(
             graph, evaluate=self._variable_expr_evaluator(lenient=True))
+        self._rebind_stale_connector_tables(graph)
         try:
             # .475: a shred node's ports read tables its pre-pass creates;
             # ensure the family exists before we introspect or compile
@@ -5632,7 +5634,8 @@ class Session:
 
     def _materialize_flows_isolated(self, graph, targets, engine_target,
                                     collect=None, target_limits=None,
-                                    query_id=None, var_overrides=None):
+                                    query_id=None, var_overrides=None,
+                                    refetch_sources=True):
         """Build ``targets`` group by group so one broken branch cannot sink
         the others.
 
@@ -5664,7 +5667,8 @@ class Session:
             try:
                 out = self._materialize_flows(
                     graph, group, engine_target, local, target_limits=limits,
-                    query_id=query_id, var_overrides=var_overrides)
+                    query_id=query_id, var_overrides=var_overrides,
+                    refetch_sources=refetch_sources)
             except nodeflow.NodeflowError as e:
                 self._drop_flow_temps(engine_target, local)
                 return self._flow_err(e, graph)
@@ -6358,10 +6362,15 @@ class Session:
             # run_nodeflow).
             self._flow_build_epoch0 = None
             flow_errors = {}
+            # A preview batch (the post-run seed pass, tab-restore reseeds)
+            # reuses the cached connector fetch -- it must never re-run the
+            # remote query the run just executed. Only a real (non-preview)
+            # batch is a full run with latest-data-wins.
             try:
                 built = self._materialize_flows(
                     graph, norm, et, created, target_limits=limits,
-                    query_id=query_id, var_overrides=params)
+                    query_id=query_id, var_overrides=params,
+                    refetch_sources=not preview)
             except nodeflow.NodeflowError:
                 # A node that fails must not sink the branches that never
                 # touch it. Drop the aborted pass, then rebuild the
@@ -6374,7 +6383,8 @@ class Session:
                     del created[:]
                 built, flow_errors = self._materialize_flows_isolated(
                     graph, norm, et, created, target_limits=limits,
-                    query_id=query_id, var_overrides=params)
+                    query_id=query_id, var_overrides=params,
+                    refetch_sources=not preview)
                 if not built:
                     raise
             epoch0 = getattr(self, "_flow_build_epoch0", None)
@@ -7284,6 +7294,33 @@ class Session:
             if fr.get("rows") is not None:
                 live_cfg["rows"] = fr.get("rows")
             live["config"] = live_cfg
+
+    def _rebind_stale_connector_tables(self, graph):
+        """Column-probe prep: a connector node whose cached fetch table no
+        longer exists (app restart, Clear all) but which carries declared
+        ``config.columns`` is rebound to those headers -- its ``table`` is
+        dropped from the probe's copy of the config so compile falls back to
+        the zero-row declared relation. Without this, a saved workflow's
+        chart / select field pickers show NOTHING after a restart until the
+        connector re-runs, even though the last run's headers are right
+        there in the saved config. Probe-only: materialize paths self-heal
+        by fetching instead."""
+        def _walk(nodes):
+            for n in nodes or []:
+                if not isinstance(n, dict):
+                    continue
+                cfg = n.get("config") or {}
+                if (n.get("type") in ("sqlserver", "sharepoint", "webscrape")
+                        and (cfg.get("table") or "").strip()
+                        and any(str(c).strip()
+                                for c in (cfg.get("columns") or []))
+                        and not self._source_table_live(n)):
+                    cfg = dict(cfg)
+                    cfg.pop("table", None)
+                    n["config"] = cfg
+                if n.get("type") in ("group", "iterator"):
+                    _walk((n.get("config") or {}).get("children"))
+        _walk((graph or {}).get("nodes"))
 
     def _source_table_live(self, node):
         """True when a connector node's cached fetch is still queryable --
@@ -16500,6 +16537,14 @@ class Session:
                                      "temp tables have no entry there."})
                 except Exception as e:
                     out = {"error": "Could not read columns: %s" % e}
+            if out.get("ok"):
+                # A successful Get columns REBINDS the node to its declared
+                # headers: the cached fetch (if any) belongs to the query as
+                # it was before the edit, and keeping it would shadow the
+                # fresh headers downstream (live table wins in compile). The
+                # frontend clears config.table to match; the next run
+                # fetches the edited query.
+                self._drop_hidden_source_table(node_id)
             # Restore the shared connection's previous database exactly as the
             # fetch path does below -- an early return must not leak the
             # USE [database] onto a connection shared with Load a Table.
