@@ -61,16 +61,18 @@ export const NODEFLOW_SOURCE_TYPES = new Set([
 /**
  * Connector sources. They materialize via Fetch, so an UNFETCHED connector is
  * not a Run-all leaf. But once a Fetch has set ``config.table`` they are
- * peekable AND runnable: compile resolves them to their materialized table,
- * and the backend re-fetches SQL Server / SharePoint / Web scrape on every
- * run (latest-data-wins), so both a peek and a Run-all leaf return CURRENT
- * data rather than a retained result.
+ * peekable AND runnable: compile resolves them to their materialized table.
+ * Fetched data persists until the next FULL run — previews, charts, browse
+ * and reconcile reuse the cached table, while an explicit Fetch, Run,
+ * Run all, Write, iterators and Fresh run re-pull from the remote server
+ * (latest-data-wins on those surfaces). A cached table lost to a restart or
+ * Clear all self-heals: the next materialization fetches it back.
  *
- * Without this, a fetched connector was a dead end: the fetch's own result
- * patch invalidated its preview, the drawer refused to peek ("No cached
- * results — use Run all"), and Run all skipped it too ("Nothing to run") —
- * so freshly fetched rows appeared and then vanished with no way to get
- * them back.
+ * Without the peek/leaf handling, a fetched connector was a dead end: the
+ * fetch's own result patch invalidated its preview, the drawer refused to
+ * peek ("No cached results — use Run all"), and Run all skipped it too
+ * ("Nothing to run") — so freshly fetched rows appeared and then vanished
+ * with no way to get them back.
  */
 export const NODEFLOW_CONNECTOR_TYPES = new Set([
   "apinode",
@@ -2155,11 +2157,12 @@ export function useNodeFlowExecutionController({
     }
   };
 
-  // Get columns (SQL Server node): pull just the query's column headers --
-  // no data -- so downstream nodes can be configured against real fields
-  // before any fetch. The names land in config.columns, which the compiler
-  // serves as an empty relation until a real fetch lands (the fetch's live
-  // table then takes over).
+  // Get columns (SQL Server node): pull the columns of the TABLES the query's
+  // FROM / JOIN clauses name -- no data, and not the query's projection -- so
+  // downstream nodes can be configured against the full field set before the
+  // SELECT list is finalized. The names land in config.columns, which the
+  // compiler serves as an empty relation until a real fetch lands (the fetch's
+  // live table then takes over).
   const doGetColumns = async (
     node: NbNode,
     configExtra?: Record<string, unknown>,
@@ -2210,7 +2213,8 @@ export function useNodeFlowExecutionController({
         onToast(
           "error",
           "Get columns failed",
-          r.error || "The query returned no column metadata.",
+          r.error ||
+            "No table columns found for the query's FROM / JOIN clauses.",
         );
         finishRun(id, { error: r.error || "Failed." }, "");
         return { ok: false };

@@ -34864,43 +34864,83 @@ def backend_tests(datadir, csv_path, json_path):
 
     def t_sqlserver_get_columns():
         # Get columns: metadata-only header pull for the SQL Server node.
-        # Declared config.columns compile as a zero-row relation BEFORE any
-        # fetch (downstream nodes build on real headers); after a fetch, the
-        # live table's columns take over.
+        # Columns come from INFORMATION_SCHEMA for the tables the query's
+        # FROM / JOIN clauses name -- NOT from the query's result set -- so an
+        # explicit SELECT list still declares every column of every joined
+        # table. Declared config.columns compile as a zero-row relation BEFORE
+        # any fetch; after a fetch, the live table's columns take over.
         s = Session()
         try:
-            # the metadata reader itself (sp_describe path via a fake conn)
-            class _C:
+            class _Cat:
+                """INFORMATION_SCHEMA fake over {(schema, table): [cols]}."""
+                def __init__(self, catalog):
+                    self.catalog = catalog
+                    self.execed = []
+
                 def execute(self, sql):
-                    if "sp_describe_first_result_set" in sql:
-                        return (None, [
-                            (0, 1, "id"), (0, 2, "region"), (0, 3, "region"),
-                        ])
-                    return (["id", "region"], [])
+                    self.execed.append(sql)
+                    if "INFORMATION_SCHEMA.COLUMNS" not in sql:
+                        return ([], [])
+                    rows = []
+                    for (sch, tbl), cols in sorted(self.catalog.items()):
+                        if "'%s'" % tbl in sql:
+                            rows.extend((sch, tbl, c) for c in cols)
+                    return (["TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME"], rows)
 
-            names = s._remote_columns(_C(), "SELECT id, region FROM t")
-            eq(names, ["id", "region", "region_2"],
-               "duplicate headers deduped like the import path")
+            # THE POINT: an explicit two-column SELECT over a LEFT JOIN still
+            # declares every column of BOTH tables. Reading the result set
+            # (what sp_describe_first_result_set used to do) would yield just
+            # the two projected columns and downstream nodes could not be built
+            # on the rest. Collisions de-dup positionally (id, id_2) exactly as
+            # a SELECT * over the same FROM clause would.
+            cat = _Cat({("dbo", "Orders"): ["id", "cust_id", "Total Sales"],
+                        ("dbo", "Customers"): ["id", "name"]})
+            got = s._remote_columns(cat, "SELECT o.id, c.name FROM dbo.Orders o "
+                                         "LEFT JOIN dbo.Customers c "
+                                         "ON c.id = o.cust_id")
+            eq(got, ["id", "cust_id", "Total_Sales", "id_2", "name"],
+               "joined tables' full column sets, not the projection")
+            need(not any("sp_describe" in x for x in cat.execed),
+                 "columns come from INFORMATION_SCHEMA, not the result set")
+            # One round trip per catalog, not per table.
+            eq(len([x for x in cat.execed if "INFORMATION_SCHEMA" in x]), 1,
+               "a two-table join is one INFORMATION_SCHEMA pass")
 
-            # Declared headers MUST equal what a real import produces, or the
-            # downstream node built on them breaks after Fetch. _remote_columns
-            # therefore runs the SAME engines._dedupe_columns the import uses:
-            # whitespace -> _, blanks filled, case-SENSITIVE dedup. A hand-rolled
-            # dedup diverged on spaced aliases / mixed case / a,a,a_2.
+            # Headers are sanitized through the SAME engines._dedupe_columns the
+            # import uses (whitespace -> _, blanks filled, case-SENSITIVE dedup),
+            # so a spaced column like [Total Sales] declares Total_Sales here AND
+            # after a Fetch -- a downstream node built on it keeps working.
             from samql_core.engines import _dedupe_columns as _dd
             for raw in (["Order Date"], ["ID", "id"], ["a", "a", "a_2"],
                         ["Name", "NAME"], ["Total Sales", "Total Sales"]):
-                class _Cd:
-                    def __init__(self, hdrs):
-                        self.hdrs = hdrs
-                    def execute(self, sql):
-                        if "sp_describe_first_result_set" in sql:
-                            return (None, [(0, i + 1, h)
-                                           for i, h in enumerate(self.hdrs)])
-                        return (self.hdrs, [])
-                got = s._remote_columns(_Cd(raw), "SELECT 1")
+                got = s._remote_columns(_Cat({("dbo", "t"): raw}),
+                                        "SELECT * FROM dbo.t")
                 eq(got, _dd(raw),
                    "declared headers match the import de-dup for %r" % raw)
+
+            # An unqualified FROM prefers dbo over another schema's same-named
+            # table; a query naming no real table declares nothing.
+            amb = _Cat({("dbo", "T"): ["a"], ("sales", "T"): ["b"]})
+            eq(s._remote_columns(amb, "SELECT * FROM T"), ["a"],
+               "unqualified name resolves to dbo")
+            eq(s._remote_columns(amb, "SELECT * FROM sales.T"), ["b"],
+               "an explicit schema wins over the dbo preference")
+            for q in ("SELECT 1", "SELECT * FROM (SELECT 1) x",
+                      "SELECT * FROM #tmp"):
+                eq(s._remote_columns(amb, q), [],
+                   "no FROM/JOIN table -> no declared columns: %r" % q)
+
+            # A dead connection / missing permission must surface ITS error --
+            # not the misleading "no table columns found" the empty result gets.
+            class _Dead:
+                def execute(self, sql):
+                    raise RuntimeError("login failed for user")
+            s.connections["Bad"] = _Dead()
+            r = s.fetch_sqlserver_node(
+                "nY", {"connection": "Bad", "query": "SELECT * FROM t"},
+                columns_only=True)
+            need("login failed" in (r.get("error") or ""),
+                 "connection errors surface verbatim: %r" % (r,))
 
             # declared headers compile pre-fetch (no hidden table needed)
             g = {"nodes": [
@@ -34941,8 +34981,9 @@ def backend_tests(datadir, csv_path, json_path):
                     self.execed.append(sql)
                     if "DB_NAME()" in sql:
                         return (["db"], [("master",)])
-                    if "sp_describe_first_result_set" in sql:
-                        return (None, [(0, 1, "id")])
+                    if "INFORMATION_SCHEMA.COLUMNS" in sql:
+                        return (["TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME"],
+                                [("dbo", "t", "id")])
                     return ([], [])
             shared = _Shared()
             s.connections["Prod"] = shared          # preexisting/shared
@@ -34955,6 +34996,70 @@ def backend_tests(datadir, csv_path, json_path):
             eq(uses, ["USE [Sales]", "USE [master]"],
                "USE [Sales] is applied then restored to [master]: %r" % uses)
         finally:
+            s.shutdown()
+
+    def t_connector_cache_reuse():
+        # Fetched connector data persists until the next FULL run: a
+        # preview-class materialization (refetch=False -- previews, charts,
+        # browse, reconcile, column probes) reuses the cached hidden table;
+        # a full run (refetch=True -- Run, Run all, Write, iterators),
+        # a vanished table (restart / Clear all self-heal), and Fresh run
+        # re-pull from the remote server.
+        s = Session()
+        real = s.fetch_source_node
+        try:
+            calls = {"n": 0}
+
+            def fake_fetch(typ, nid, cfg, graph=None, query_id=None,
+                           columns_only=False):
+                calls["n"] += 1
+                tname, _n = s.db.add_table_streaming(
+                    "__nbsql_reuse", ["id"], iter([(calls["n"],)]))
+                s._api_node_tables[nid] = {"table": tname, "engine": "sqlite"}
+                return {"ok": True, "table": tname, "engine": "sqlite",
+                        "columns": ["id"], "rows": 1}
+
+            s.fetch_source_node = fake_fetch
+            g = {"nodes": [
+                {"id": "src", "type": "sqlserver", "config": {
+                    "label": "sql", "connection": "Prod",
+                    "query": "SELECT 1 AS id"}},
+            ], "edges": []}
+            # nothing cached yet -> even a preview fetches (first run)
+            s._ensure_source_nodes_fetched(g, ["src"], refetch=False)
+            eq(calls["n"], 1, "first preview fetches (nothing cached)")
+            t1 = (g["nodes"][0]["config"] or {}).get("table")
+            need(t1, "fetch stamped config.table")
+            # preview again -> the cached fetch is reused, NO remote pull
+            s._ensure_source_nodes_fetched(g, ["src"], refetch=False)
+            eq(calls["n"], 1, "a preview reuses the cached fetch")
+            eq(g["nodes"][0]["config"].get("table"), t1,
+               "the cached table is kept as-is")
+            # a full run -> latest-data-wins, re-pull
+            s._ensure_source_nodes_fetched(g, ["src"], refetch=True)
+            eq(calls["n"], 2, "a full run re-pulls from the server")
+            # the cached table vanished (restart / Clear all) -> self-heal,
+            # even on a preview -- and the record dict must not ghost it
+            s.db.drop_table(g["nodes"][0]["config"]["table"])
+            s._api_node_tables.clear()
+            s._ensure_source_nodes_fetched(g, ["src"], refetch=False)
+            eq(calls["n"], 3, "a vanished table self-heals on preview")
+            # Fresh run overrides reuse everywhere
+            s.fresh_run = True
+            try:
+                s._ensure_source_nodes_fetched(g, ["src"], refetch=False)
+            finally:
+                s.fresh_run = False
+            eq(calls["n"], 4, "Fresh run forces a re-pull")
+            # clear_all must not leave ghost records that would fool the
+            # liveness check into reusing a dropped table
+            s.fetch_source_node = fake_fetch
+            s.clear_all()
+            eq(s._api_node_tables, {}, "clear_all clears _api_node_tables")
+            s._ensure_source_nodes_fetched(g, ["src"], refetch=False)
+            eq(calls["n"], 5, "post-clear preview re-fetches (no ghost reuse)")
+        finally:
+            s.fetch_source_node = real
             s.shutdown()
 
     def t_server_main_boots():
@@ -41709,8 +41814,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_identical_refetch_keeps_epoch),
         ("{{var}} on SQL Server node (quote-absorb, numeric guard, {{in}})",
          t_sqlserver_brace_variables),
-        ("SQL Server get-columns: declared headers pre-fetch, live table after",
+        ("SQL Server get-columns: FROM/JOIN table schemas, live table after",
          t_sqlserver_get_columns),
+        ("connector cache: previews reuse the fetch until the next full run",
+         t_connector_cache_reuse),
         ("shared-subgraph materialisation (computed once across targets)",
          t_shared_subgraph),
         ("join modes (inner / left / semi / anti)", t_join_modes),

@@ -6471,7 +6471,7 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
                       disabled={running}
                       style={{ marginTop: 8, marginLeft: 6 }}
                       data-testid="sqlserver-get-columns"
-                      title="Pull just this query's column headers (no data) so downstream nodes can be configured before you Fetch"
+                      title="Pull the columns of the tables this query's FROM / JOIN clauses name (no data) so downstream nodes can be configured before you Fetch"
                       onClick={() =>
                         doGetColumns(
                           sel,

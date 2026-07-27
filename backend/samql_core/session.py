@@ -1231,6 +1231,13 @@ class Session:
             pass
         self.db = DBManager(disk_backed=self.low_memory)
         reset.append("sqlite")
+        # The orphaned engines took every hidden connector fetch with them;
+        # keeping the records would ghost-pin flow engines and defeat the
+        # missing-table self-heal re-fetch.
+        try:
+            self._api_node_tables.clear()
+        except Exception:
+            pass
         try:
             self._invalidate_profiles()
             self._invalidate_counts()
@@ -1336,6 +1343,10 @@ class Session:
         # runtime bookkeeping back to construction values
         try:
             self._table_family.clear()
+        except Exception:
+            pass
+        try:
+            self._api_node_tables.clear()
         except Exception:
             pass
         try:
@@ -4657,7 +4668,8 @@ class Session:
             if self._flow_has_pivot_upstream(graph, node_id, port):
                 et = self._flow_engine_target(graph)
                 created = []
-                tmp = self._materialize_flow(graph, node_id, port, et, created)
+                tmp = self._materialize_flow(graph, node_id, port, et, created,
+                                             refetch_sources=False)
                 eng, _kind = self._engine_obj(et)
                 cols = self._col_names(eng, table=tmp)
                 self._drop_flow_temps(et, created)
@@ -4702,7 +4714,8 @@ class Session:
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
             tmp = self._materialize_flow(graph, sn, sp, et, created,
-                                         query_id=query_id)
+                                         query_id=query_id,
+                                         refetch_sources=False)
             et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
@@ -4825,7 +4838,8 @@ class Session:
                 label=self._flow_node_label(graph, node_id))
             tmp = self._materialize_flow(graph, sn, sp, et, created,
                                          query_id=query_id,
-                                         var_overrides=params)
+                                         var_overrides=params,
+                                         refetch_sources=False)
             et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
@@ -4862,9 +4876,11 @@ class Session:
                 query_id, eng0, surface="node",
                 label=self._flow_node_label(graph, node_id))
             ltmp = self._materialize_flow(graph, ls[0], ls[1], et, created,
-                                          query_id=query_id)
+                                          query_id=query_id,
+                                          refetch_sources=False)
             rtmp = self._materialize_flow(graph, rs[0], rs[1], et, created,
-                                          query_id=query_id)
+                                          query_id=query_id,
+                                          refetch_sources=False)
             et = getattr(self, "_flow_build_target", et)
         except Exception as e:
             self._flow_cleanup(query_id, et, created)
@@ -5026,7 +5042,8 @@ class Session:
         return [g[0] for g in groups]
 
     def _parallel_flow_groups(self, graph, targets, engine_target, collect,
-                              target_limits, query_id=None):
+                              target_limits, query_id=None,
+                              refetch_sources=True):
         """Build independent DuckDB target groups on separate connections."""
         if (engine_target != DUCKDB_TARGET or not self.parallel_nodeflows
                 or len(targets) < 2):
@@ -5083,7 +5100,7 @@ class Session:
                     graph, group, engine_target, local_names,
                     target_limits=limits, _allow_parallel=False,
                     _engine_override=branch, _persistent_tables=True,
-                    query_id=query_id)
+                    query_id=query_id, refetch_sources=refetch_sources)
                 return out, local_names
             except Exception:
                 # A failed worker never reaches the parent's completed-name
@@ -5115,7 +5132,8 @@ class Session:
                            collect=None, target_limits=None,
                            _allow_parallel=True, _engine_override=None,
                            _persistent_tables=False, query_id=None,
-                           _sources_fetched=False, var_overrides=None):
+                           _sources_fetched=False, var_overrides=None,
+                           refetch_sources=True):
         """Build every (node_id, port) in ``targets`` and everything upstream
         of them on ``engine_target`` in ONE pass, returning
         ``{(node_id, port): temp_table_name}``.
@@ -5150,7 +5168,7 @@ class Session:
                 and not has_frozen):
             parallel = self._parallel_flow_groups(
                 graph, targets, engine_target, collect, target_limits,
-                query_id=query_id)
+                query_id=query_id, refetch_sources=refetch_sources)
             if parallel is not None:
                 return parallel
         # resolve ${name} workflow-variable tokens once, up front: everything
@@ -5200,11 +5218,16 @@ class Session:
         # compile so Dashboard / Run all work with a saved profile + password
         # without a prior interactive Fetch. (Skipped on the engine-flip
         # re-dispatch below -- the first pass already fetched them.)
+        # refetch_sources=False (previews, charts, browse, reconcile, column
+        # probes) reuses the cached fetch when its table is still live, so
+        # fetched data persists until the next full run; a missing table
+        # (first run, post-restart) still fetches, and Fresh run overrides.
         if not _sources_fetched:
             self._ensure_source_nodes_fetched(
                 graph, [nid for nid, _port in targets], query_id=query_id,
                 skip_ids=self._frozen_source_skip(
-                    graph, targets, frozen_hits))
+                    graph, targets, frozen_hits),
+                refetch=refetch_sources or fresh_run)
         # Source fetches land on their own engine (a SQL Server pull imports
         # to DuckDB) and stamp _api_node_tables -- the very record
         # _flow_engine_target pins on. Entry points pick the engine BEFORE
@@ -5731,7 +5754,7 @@ class Session:
 
     def _materialize_flow(self, graph, node_id, port, engine_target,
                           collect=None, row_limit=None, query_id=None,
-                          var_overrides=None):
+                          var_overrides=None, refetch_sources=True):
         """Single-target convenience wrapper over :meth:`_materialize_flows`.
 
         ``row_limit`` is used by fast previews: only the terminal relation is
@@ -5740,12 +5763,15 @@ class Session:
         ``query_id`` is the owning run's id so an external source fetch that
         happens during the build (SQL Server / SharePoint / Web scrape) is
         registered under the run and Stop can actually cancel it.
+
+        ``refetch_sources=False`` (preview-class surfaces) reuses a cached
+        connector fetch instead of re-pulling from the remote server.
         """
         limits = {(node_id, port): row_limit} if row_limit else None
         out = self._materialize_flows(
             graph, [(node_id, port)], engine_target, collect,
             target_limits=limits, query_id=query_id,
-            var_overrides=var_overrides)
+            var_overrides=var_overrides, refetch_sources=refetch_sources)
         return out[(node_id, port)]
 
     def _flow_cleanup(self, query_id, engine_target, names):
@@ -6241,10 +6267,12 @@ class Session:
             # a mutation landing mid-build must expire the result, while a
             # reload-then-run refresh must NOT self-expire it.
             self._flow_build_epoch0 = None
+            # A preview reuses the cached connector fetch (data persists
+            # until the next full run); a full Run re-pulls latest data.
             tmp = self._materialize_flow(
                 graph, node_id, port, et, created,
                 row_limit=preview_limit, query_id=query_id,
-                var_overrides=params)
+                var_overrides=params, refetch_sources=not preview)
             epoch0 = getattr(self, "_flow_build_epoch0", None)
             # A source fetch may have flipped the build engine (LOCAL ->
             # DuckDB); the final read and the temp cleanup must use the
@@ -7195,15 +7223,27 @@ class Session:
         return uniq
 
     def _ensure_source_nodes_fetched(self, graph, start_nodes, query_id=None,
-                                     skip_ids=None):
+                                     skip_ids=None, refetch=True):
         """Fetch upstream SQL Server / SharePoint / Web scrape nodes in place
         so ``config.table`` is set before compile. Mutates ``graph`` node
         configs. ``skip_ids`` (frozen-hit sources) are left untouched this
-        run. Raises ``nodeflow.NodeflowError`` on failure."""
+        run. Raises ``nodeflow.NodeflowError`` on failure.
+
+        ``refetch=False`` is the preview-class contract: a source whose cached
+        table is still live is reused as-is, so fetched data persists until
+        the next FULL run (Run / Run all / Write / iterators / explicit
+        Fetch). A source with no live table -- never fetched, or dropped by a
+        restart / clear -- is still fetched, and Fresh run forces a re-pull
+        of everything.
+        """
         from . import nodeflow
+        refetch = refetch or bool(getattr(self, "fresh_run", False))
         sources = self._volatile_source_nodes_upstream(graph, start_nodes)
         if skip_ids:
             sources = [n for n in sources if n.get("id") not in skip_ids]
+        if not refetch:
+            sources = [n for n in sources
+                       if not self._source_table_live(n)]
         if not sources:
             return
         # Index every node (including nested children) for config patches.
@@ -7244,6 +7284,24 @@ class Session:
             if fr.get("rows") is not None:
                 live_cfg["rows"] = fr.get("rows")
             live["config"] = live_cfg
+
+    def _source_table_live(self, node):
+        """True when a connector node's cached fetch is still queryable --
+        ``config.table`` names a table that exists on either engine. The
+        engine hint in ``_api_node_tables`` is preferred; without one (e.g.
+        the fetch happened before a graph reload) both engines are probed."""
+        cfg = node.get("config") or {}
+        table = (cfg.get("table") or "").strip()
+        if not table:
+            return False
+        rec = self._api_node_tables.get(node.get("id")) or {}
+        if rec.get("table") == table and rec.get("engine"):
+            eng = self.duckdb if rec["engine"] == "duckdb" else self.db
+            return eng is not None and self._table_exists(eng, table)
+        for eng in (self.duckdb, self.db):
+            if eng is not None and self._table_exists(eng, table):
+                return True
+        return False
 
     def _daterange_values(self, driver):
         import datetime as _dt
@@ -12512,6 +12570,10 @@ class Session:
         self.db.drop_all()
         if self.duckdb is not None:
             self.duckdb.drop_all()
+        # drop_all took the hidden connector fetches with it -- a stale
+        # record here would ghost-pin a flow's engine (_flow_pinned_engine)
+        # and make _source_table_live trust a table that no longer exists.
+        self._api_node_tables.clear()
         with self._lock:
             for cr in self._results.values():
                 cr.close()
@@ -16044,38 +16106,97 @@ class Session:
         self._api_node_tables.pop(node_id, None)
 
     def _remote_columns(self, conn, query):
-        """Column names a remote query WOULD produce, without pulling rows.
+        """Columns of the TABLES a remote query reads, without pulling rows.
 
-        ``sp_describe_first_result_set`` analyses the statement server-side
-        (handles ORDER BY / temp tables that defeat a TOP 0 wrap); the TOP 0
-        derived table is the fallback for older servers. Duplicate names are
-        suffixed like the import path's de-dup, so declared headers match the
-        table a later fetch actually builds.
+        Read from INFORMATION_SCHEMA for every table named in the query's FROM
+        and JOIN clauses -- NOT from the query's result set. An explicit
+        ``SELECT o.id FROM Orders o LEFT JOIN Customers c ...`` therefore
+        declares every column of Orders AND of Customers, so downstream nodes
+        can be built on the full set before the SELECT list is finalized.
+
+        Note this is deliberately wider than what a fetch of that same query
+        builds (the fetch materializes the projection -- here, one column).
+        Only a ``SELECT *`` makes the two coincide.
+
+        Names are sanitized and de-duplicated through the SAME path a real
+        import uses (engines._dedupe_columns: whitespace -> _, blanks filled),
+        so a spaced header like [Total Sales] declares Total_Sales in both and
+        a downstream node keeps working after Fetch. Two joined tables sharing
+        a column name yield ``id`` and ``id_2``, exactly as a ``SELECT *`` over
+        the same FROM clause would.
         """
-        q = (query or "").strip().rstrip(";")
+        from .sqlutil import sql_source_tables
+        refs = sql_source_tables(query)
+        if not refs:
+            return []
+        by_table = self._information_schema_columns(conn, refs)
         names = []
-        try:
-            _c, rows = conn.execute(
-                "EXEC sp_describe_first_result_set @tsql = N'%s'"
-                % q.replace("'", "''"))
-            # result columns: is_hidden(0), column_ordinal(1), name(2), ...
-            for r in rows or []:
-                if r and len(r) > 2 and r[2] and not r[0]:
-                    names.append(str(r[2]))
-        except Exception:
-            names = []
-        if not names:
-            cols, _rows = conn.execute(
-                "SELECT TOP 0 * FROM (%s) AS _samql_cols" % q)
-            names = [str(c) for c in (cols or [])]
-        # Sanitize + de-dup through the SAME path a real import uses
-        # (engines._dedupe_columns: whitespace -> _, blanks filled, dedup) so
-        # the declared headers equal the table a later fetch actually builds.
-        # A hand-rolled dedup diverged (no whitespace sanitize, case-insensitive
-        # dedup), so a spaced alias like [Total Sales] declared "Total Sales"
-        # but fetched "Total_Sales" and the downstream node silently dropped it.
+        for catalog, schema, table in refs:
+            names.extend(self._pick_table_columns(
+                by_table, catalog, schema, table))
         from .engines import _dedupe_columns
         return _dedupe_columns(names)
+
+    def _information_schema_columns(self, conn, refs):
+        """``{(catalog, schema, table): [column, ...]}`` for ``refs``, lowered.
+
+        One INFORMATION_SCHEMA pass PER CATALOG rather than per table -- a
+        ten-way join is two round trips, not ten. The catalog is interpolated
+        as a bracketed identifier and the table names as string literals; both
+        come from the author's own query text, which the connection would run
+        verbatim anyway.
+        """
+        out = {}
+        catalogs = {}
+        err = None
+        for catalog, _schema, table in refs:
+            catalogs.setdefault(catalog, set()).add(table)
+        for catalog, tables in catalogs.items():
+            prefix = ("[%s]." % catalog.replace("]", "]]")) if catalog else ""
+            in_list = ", ".join(
+                "'%s'" % t.replace("'", "''") for t in sorted(tables))
+            try:
+                _c, rows = conn.execute(
+                    "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME "
+                    "FROM %sINFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_NAME IN (%s) "
+                    "ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION"
+                    % (prefix, in_list))
+            except Exception as e:
+                # One failing catalog must not sink the others -- but if EVERY
+                # lookup failed, surface the real error (dead connection,
+                # missing permission) instead of letting the caller report the
+                # misleading "no table columns found".
+                err = e
+                continue
+            for r in rows or []:
+                if not r or len(r) < 3:
+                    continue
+                key = (catalog.lower(), str(r[0] or "").lower(),
+                       str(r[1] or "").lower())
+                out.setdefault(key, []).append(str(r[2]))
+        if not out and err is not None:
+            raise err
+        return out
+
+    def _pick_table_columns(self, by_table, catalog, schema, table):
+        """Columns for one FROM/JOIN reference out of an INFORMATION_SCHEMA map.
+
+        An unqualified ``FROM Orders`` can match Orders in several schemas;
+        prefer dbo (what an unqualified name resolves to for the overwhelming
+        majority of logins) and otherwise take the first schema alphabetically
+        so the result is at least deterministic.
+        """
+        cat, tbl = catalog.lower(), table.lower()
+        if schema:
+            return by_table.get((cat, schema.lower(), tbl), [])
+        hits = sorted(k for k in by_table if k[0] == cat and k[2] == tbl)
+        if not hits:
+            return []
+        for k in hits:
+            if k[1] == "dbo":
+                return by_table[k]
+        return by_table[hits[0]]
 
     def _content_sig(self, eng, table):
         """Whole-table content signature for change detection (DuckDB only).
@@ -16359,10 +16480,11 @@ class Session:
         base = "__nbsql_" + hashlib.md5(
             str(node_id).encode("utf-8")).hexdigest()[:10]
         if columns_only:
-            # Get columns: pull the query's metadata WITHOUT its rows, so the
-            # author can build downstream nodes on real headers before any
-            # fetch. The stored config.columns compiles as an empty relation
-            # until a real fetch lands (which then wins).
+            # Get columns: read the columns of the tables the query's FROM /
+            # JOIN clauses name, WITHOUT its rows, so the author can build
+            # downstream nodes on real headers before any fetch. The stored
+            # config.columns compiles as an empty relation until a real fetch
+            # lands (which then wins).
             conn = self.connections.get(conn_name)
             if conn is None:
                 out = {"error": 'Connection "%s" is not active.' % conn_name}
@@ -16371,7 +16493,11 @@ class Session:
                     names = self._remote_columns(conn, query)
                     out = ({"ok": True, "columns": names, "columns_only": True}
                            if names else
-                           {"error": "The query returned no column metadata."})
+                           {"error": "No table columns found. Get columns "
+                                     "reads INFORMATION_SCHEMA for the tables "
+                                     "named in the query's FROM / JOIN "
+                                     "clauses; derived tables, CTEs and "
+                                     "temp tables have no entry there."})
                 except Exception as e:
                     out = {"error": "Could not read columns: %s" % e}
             # Restore the shared connection's previous database exactly as the
