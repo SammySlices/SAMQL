@@ -2,12 +2,39 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-27.694
+Current build:   2026-07-27.695
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-27.695  (v2.16.4)
+
+DASHBOARD CHARTS CARRY EVERY FIELD (MULTI-Y FIXED); DASHBOARD RUNS PULL
+LATEST DATA; WORKFLOW FOLDER GROUPS PERSIST SERVER-SIDE.
+
+Dashboard widgets now build their chart spec through the SAME shared
+builder the NodeFlow canvas uses (lib/chartSpec). The dashboard's
+hand-rolled subset silently dropped y2 / x2 / bins / open-high-low-close,
+so a "Multiple Y axes" widget always failed with "needs an X column and
+two Y columns" even with both Y fields picked; multi-X and candlestick
+widgets were equally broken, histogram ignored its bin count, and
+area / donut / treemap widgets lost their style and type mapping.
+
+A dashboard Run is an explicit run: chart and reconcile widgets now pass
+refresh=true and re-pull connector data (SQL Server / SharePoint / Web
+scrape) instead of reusing the cached fetch; data / pivot widgets already
+ran fresh. Chart image exports refresh too. Passive canvas chart
+hydration and previews keep reusing the cache.
+
+Saved Workflows folder grouping now persists SERVER-SIDE next to the
+workflows themselves (workflows_groups.json + GET/POST
+/api/workflows/groups). It previously lived only in browser localStorage,
+which the AppWindow's WebView2 profile and a browser tab never shared --
+and clearing either silently dissolved every folder. Existing local
+groups migrate to the server automatically on first load.
 
 ----------------------------------------------------------------------
 build 2026-07-27.694  (v2.16.4)
