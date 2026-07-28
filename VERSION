@@ -2,12 +2,45 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-27.695
+Current build:   2026-07-28.696
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-28.696  (v2.16.4)
+
+CHART NODES RENDER OVER CONNECTOR FLOWS (MULTI-AXIS FIXED); GET COLUMNS
+DECLARES EACH TABLE ONCE.
+
+A chart node fed through a select node from a SQL Server connection
+failed with 'Catalog Error: Table with name __nbflow_..._out does not
+exist! Did you mean "__nbsql_..."?' even though the select's preview
+showed rows. The multi-axis chart types (multiple Y, multiple X,
+candlestick) read their input rows on a FRESH DuckDB cursor -- a
+separate connection with its own temp schema that cannot see the TEMP
+table the flow just materialised. Chart row reads now retry on the
+locked main connection (the same fallback the preview and export paths
+already used), and the generic result drain -- the flow read path when
+the Parquet fast path is unavailable -- grew the same retry.
+
+Two related mis-routes fixed with it: a SQLite-pinned flow's final read
+was re-routed to DuckDB by the always-DuckDB engine preference (the
+hidden temp is registered under its build engine for the read, the same
+trick reconcile uses), so SQLite-resident flows run again under the
+build-690 default.
+
+Get columns: a table referenced MORE THAN ONCE in the same query -- the
+classic shape is a CTE reading the very table the outer query joins back
+to -- declared every one of its columns twice, filling field pickers
+with phantom *_2 names (DimValuationDateID_2, ...) that no fetch would
+ever produce. Repeated references now collapse to ONE declaration on the
+RESOLVED table, so identical references, an unqualified name plus its
+dbo-qualified twin, and self-joins all declare once; every declared name
+exists after the fetch. Two DIFFERENT tables sharing a column name still
+de-dup positionally to id / id_2, exactly as a SELECT * fetch would.
 
 ----------------------------------------------------------------------
 build 2026-07-27.695  (v2.16.4)
