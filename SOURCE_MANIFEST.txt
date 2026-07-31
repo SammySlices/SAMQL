@@ -1,5 +1,7 @@
 
 .gitattributes
+.github/RELEASE_NOTES.md
+.github/workflows/release-appwindow.yml
 .github/workflows/windows-browser.yml
 ARCHITECTURE.md
 BENCHMARKS.md

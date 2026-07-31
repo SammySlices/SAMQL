@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "product": "SamQL",
   "version": "2.16.4",
-  "build": "2026-07-20.673",
+  "build": "2026-07-31.697",
   "phase": 10,
   "generatedAt": "2026-07-20T14:29:07Z",
   "sourceManifest": "SOURCE_MANIFEST.txt",
-  "sourceFileCount": 384,
+  "sourceFileCount": 386,
   "runtime": {
     "pythonMinimum": "3.10",
     "nodeMinimum": "20.19",
@@ -26,7 +26,7 @@
       "oldestReadable": 0
     },
     "nodeFlowGraph": {
-      "current": 3,
+      "current": 4,
       "oldestReadable": 0
     },
     "nodeFlowTabs": {

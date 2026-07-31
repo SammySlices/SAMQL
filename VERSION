@@ -2,7 +2,7 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-28.696
+Current build:   2026-07-31.697
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
@@ -10,7 +10,37 @@ matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
 
 ----------------------------------------------------------------------
-build 2026-07-28.696  (v2.16.4)
+build 2026-07-31.697  (v2.16.4)
+
+RUN ALL OF WRITE NODES NO LONGER REPORTS "0 OF N DONE" CANCELLED AFTER
+AN UPSTREAM EDIT.
+
+Running a workflow, editing it upstream (the reported shape: inserting a
+union above several write nodes), then running again could end with the
+run dying partway and EVERY write terminal reporting cancelled -- the
+"Run all cancelled -- 0 of N done" toast -- while previews of the same
+chain kept working.
+
+Root cause: DuckDB's engine-wide interrupt() sets a sticky _cancel event
+that is never cleared by the interrupt itself; while it stays set the
+BeatDaemon re-interrupts every statement that outlives its ~3s beat and
+the cancellable row fetch unwinds immediately. The flag gets planted by
+any coarse engine-level cancel -- a Stop, or cancel_query's engine-wide
+fallback when a superseded preview/chart request has no precise cursor
+to interrupt (exactly what a burst of graph edits produces). run_query,
+run_nodeflow and run_nodeflows already clear the stale flag at entry;
+the write path (run_nodeflow_to_table) -- and the export, iterator,
+while, chart, browse, validate and reconcile flow paths -- never did.
+Before the fix, the edit also invalidated the flow cache, so the rebuilt
+upstream ran long enough for the stale flag to land: the run progressed
+through the fast early statements, died at the first heavy one, and
+every write in the batch unwound as {cancelled}.
+
+All nine flow entry points now clear the stale engine cancel at entry
+(the write path uses the engine-less form because its build engine and
+write destination can differ). Regression test plants the sticky flag
+and proves a write run succeeds, plus a source guard that every flow
+entry point keeps the clear.
 
 CHART NODES RENDER OVER CONNECTOR FLOWS (MULTI-AXIS FIXED); GET COLUMNS
 DECLARES EACH TABLE ONCE.
