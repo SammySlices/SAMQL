@@ -5,9 +5,11 @@ name: AppWindow build and release
 # distribution zips to a GitHub release tagged app-<BUILD>. Dispatch-only:
 # a release is an explicit act, never a side effect of a push.
 #
-# prune_old_releases (off by default) deletes every OTHER release (and its
-# app-* tag) after the new release has published successfully, leaving the
-# just-built release as the only one on the releases page.
+# prune_old_releases (off by default) deletes every existing release (and
+# its app-* tag) BEFORE the new release publishes -- but only after the
+# new zips have been built and verified, so a failed build can never
+# empty the releases page. The end state is the just-built release as the
+# only one listed.
 
 on:
   workflow_dispatch:
@@ -64,22 +66,7 @@ jobs:
             Write-Host ("{0}  {1:N0} bytes" -f $z, (Get-Item $z).Length)
           }
 
-      - name: Publish release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $build = "${{ steps.ident.outputs.build }}"
-          $tag = "app-$build"
-          gh release create $tag `
-            "dist/SamQL-AppWindow.zip" `
-            "dist/SamQL-AppWindow-Assistant.zip" `
-            --title "SamQL AppWindow $build" `
-            --target $env:GITHUB_SHA `
-            --notes-file .github/RELEASE_NOTES.md
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-      - name: Prune older releases
+      - name: Remove old releases
         if: ${{ success() && inputs.prune_old_releases }}
         shell: pwsh
         env:
@@ -95,3 +82,18 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit 1 }
             }
           }
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $build = "${{ steps.ident.outputs.build }}"
+          $tag = "app-$build"
+          gh release create $tag `
+            "dist/SamQL-AppWindow.zip" `
+            "dist/SamQL-AppWindow-Assistant.zip" `
+            --title "SamQL AppWindow $build" `
+            --target $env:GITHUB_SHA `
+            --notes-file .github/RELEASE_NOTES.md
+          if ($LASTEXITCODE -ne 0) { exit 1 }
