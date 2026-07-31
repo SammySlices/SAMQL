@@ -18,12 +18,21 @@ on:
         description: "Delete all older releases after publishing this build"
         type: boolean
         default: false
+  # A brand-new workflow is not dispatchable by filename until it exists on
+  # the default branch, so a commit-message marker on this branch is the
+  # bootstrap trigger: "[build-release]" builds + publishes, and
+  # "[prune-releases]" additionally removes the old releases first.
+  push:
+    branches: ["claude/workflow-union-write-canceled-mjhk0i"]
 
 permissions:
   contents: write
 
 jobs:
   build-release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[build-release]')
     runs-on: windows-latest
     timeout-minutes: 90
     env:
@@ -67,7 +76,9 @@ jobs:
           }
 
       - name: Remove old releases
-        if: ${{ success() && inputs.prune_old_releases }}
+        if: >-
+          ${{ success() && (inputs.prune_old_releases ||
+              contains(github.event.head_commit.message, '[prune-releases]')) }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
