@@ -29959,6 +29959,58 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_nodeflow_write_clears_stale_cancel():
+        # A sticky engine ``_cancel`` left SET by a prior engine-wide
+        # interrupt (a Stop, or cancel_query's coarse fallback when a
+        # superseded preview/chart request had no precise cursor to
+        # interrupt) used to fail EVERY subsequent write terminal: the
+        # cancellable row fetch / BeatDaemon saw the flag and unwound each
+        # run_nodeflow_to_table as {cancelled: True}, so a Run all of write
+        # nodes ended "Run all cancelled -- 0 of N done" while previews
+        # (run_nodeflow, which clears the flag) kept working. The write path
+        # must clear the stale flag at entry exactly like run_nodeflow does.
+        s = _loaded_session()
+        try:
+            try:
+                s.get_duckdb()
+            except RuntimeError:
+                skip("DuckDB not installed (the sticky _cancel event is "
+                     "DuckDB's)")
+            g = {"nodes": [
+                {"id": "i", "type": "input", "config": {"table": "data"}},
+                {"id": "w", "type": "write",
+                 "config": {"name": "stale_cancel_ok"}}],
+                "edges": [{"from": {"node": "i", "port": "out"},
+                           "to": {"node": "w", "port": "in"}}]}
+            # Plant the exact state an engine-wide interrupt leaves behind.
+            ev = getattr(s.duckdb, "_cancel", None)
+            need(ev is not None, "DuckDB manager exposes its _cancel event")
+            ev.set()
+            r = s.run_nodeflow_to_table(g, "w", "stale_cancel_ok")
+            need(not r.get("cancelled"),
+                 "a stale engine cancel must not mark the write cancelled")
+            need(r.get("ok"),
+                 "write succeeds despite a stale engine cancel: %s"
+                 % r.get("error"))
+            need(not ev.is_set(), "the stale cancel flag was cleared at entry")
+            # The sibling flow entry points share the guard -- the same stale
+            # flag also spuriously cancelled exports, iterators/while loops,
+            # and chart/browse/validate/reconcile builds.
+            src = open(os.path.join(ROOT, "backend", "samql_core",
+                                    "session.py"), encoding="utf-8").read()
+            for fname in ("run_nodeflow_to_table", "export_nodeflow",
+                          "export_nodeflow_many", "run_iterator", "run_while",
+                          "run_nodeflow_chart", "run_nodeflow_browse",
+                          "validate_nodeflow", "run_nodeflow_reconcile"):
+                body_at = src.find("def %s(" % fname)
+                need(body_at != -1, "session.py defines %s" % fname)
+                nxt = src.find("\n    def ", body_at + 1)
+                body = src[body_at:nxt if nxt != -1 else len(src)]
+                need("_clear_stale_engine_cancel" in body,
+                     "%s clears a stale engine cancel at entry" % fname)
+        finally:
+            s.shutdown()
+
     def t_apiload_scheme_guard():
         # The REST loader only fetches http(s); other schemes (file://, ftp://,
         # a bare path) are refused before any network/file access happens.
@@ -41859,6 +41911,8 @@ def backend_tests(datadir, csv_path, json_path):
         ("cancel an in-flight load: unwind + drop partial table + cleanup helpers", t_load_cancel),
         ("cancel a folder load between files (should_cancel)", t_load_folder_cancel),
         ("NodeFlow write-to-table node", t_nodeflow_write_to_table),
+        ("NodeFlow write clears a stale engine cancel (Run-all writes no "
+         "longer report 0/N cancelled)", t_nodeflow_write_clears_stale_cancel),
         ("REST loader only fetches http(s)", t_apiload_scheme_guard),
         ("NodeFlow node fusion (equivalence + fewer temps)", t_nodeflow_fusion),
         ("NodeFlow cancel plumbing (query_id + no-op cancel)", t_nodeflow_cancel_plumbing),

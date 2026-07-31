@@ -4712,6 +4712,9 @@ class Session:
             if sn is None:
                 return {"error": "Connect an input to the browse node."}
             eng, _kind = self._engine_obj(et)
+            # Same stale-cancel guard as run_nodeflow (sticky engine cancel
+            # must not auto-interrupt this build).
+            self._clear_stale_engine_cancel(eng, except_qid=query_id)
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
@@ -4748,6 +4751,9 @@ class Session:
             if sn is None:
                 return {"error": "Connect an input to the validate node."}
             eng, _kind = self._engine_obj(et)
+            # Same stale-cancel guard as run_nodeflow (sticky engine cancel
+            # must not auto-interrupt this build).
+            self._clear_stale_engine_cancel(eng, except_qid=query_id)
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
@@ -4837,6 +4843,9 @@ class Session:
             if sn is None:
                 return {"error": "Connect an input to the chart node."}
             eng0, _k0 = self._engine_obj(et)
+            # Same stale-cancel guard as run_nodeflow (sticky engine cancel
+            # must not auto-interrupt this build).
+            self._clear_stale_engine_cancel(eng0, except_qid=query_id)
             self._register_run(
                 query_id, eng0, surface="node",
                 label=self._flow_node_label(graph, node_id))
@@ -4878,6 +4887,9 @@ class Session:
                 return {"error": "Connect both the left and right inputs of "
                         "the reconcile node."}
             eng0, _k0 = self._engine_obj(et)
+            # Same stale-cancel guard as run_nodeflow (sticky engine cancel
+            # must not auto-interrupt this build).
+            self._clear_stale_engine_cancel(eng0, except_qid=query_id)
             self._register_run(
                 query_id, eng0, surface="node",
                 label=self._flow_node_label(graph, node_id))
@@ -6672,6 +6684,10 @@ class Session:
         try:
             et = self._flow_engine_target(graph)
             eng, _kind = self._engine_obj(et)
+            # Same stale-cancel guard as run_nodeflow: a sticky engine cancel
+            # from a prior Stop / superseded preview must not auto-interrupt
+            # this export's materialization.
+            self._clear_stale_engine_cancel(eng, except_qid=query_id)
             self._register_run(
                 query_id, eng, kind="export", surface="node",
                 label=self._flow_node_label(graph, node_id))
@@ -6775,6 +6791,10 @@ class Session:
         try:
             et = self._flow_engine_target(graph)
             eng, _kind = self._engine_obj(et)
+            # Same stale-cancel guard as run_nodeflow: a sticky engine cancel
+            # from a prior Stop / superseded preview must not auto-interrupt
+            # the batch's shared materialization.
+            self._clear_stale_engine_cancel(eng, except_qid=query_id)
             self._register_run(
                 query_id, eng, surface="node",
                 label="export (%d)" % len(items or []))
@@ -7147,6 +7167,15 @@ class Session:
                 et = write_et
             eng, _kind = self._engine_obj(et)
             dest_eng, dest_kind = self._engine_obj(write_et)
+            # Clear a sticky engine cancel left SET by a prior Stop / a
+            # superseded preview-cancel so the BeatDaemon does not
+            # auto-interrupt this write's materialization -- without this a
+            # Run all of write nodes reported every terminal cancelled
+            # ("0 of N done") after an upstream edit invalidated the flow
+            # cache. Same guard run_nodeflow / run_nodeflows already use;
+            # engine-less form because the build engine and the write
+            # destination can differ (SQLite build -> DuckDB write).
+            self._clear_stale_engine_cancel(except_qid=query_id)
             self._register_run(
                 query_id, eng, surface="node",
                 label=self._flow_node_label(graph, node_id))
@@ -7533,6 +7562,10 @@ class Session:
         _bad_brace = self._flow_brace_misuse(graph, node_id)
         if _bad_brace:
             return {"error": _bad_brace}
+        # The loop resolves its engine per pass, so clear sticky engine
+        # cancels on both engines up front (same stale-cancel guard as
+        # run_nodeflow; also covers the container path below).
+        self._clear_stale_engine_cancel(except_qid=query_id)
         # NEW container model: if the iterator holds inner children (like a
         # group), run them once per row of the wired "variables" input, with
         # that row's columns bound as scalar ${vars}. The classic driver +
@@ -8057,6 +8090,10 @@ class Session:
         reduce_aggs = cfg.get("reduce_aggs") or []
 
         api_ids = self._api_nodes_upstream(graph, bn)
+        # The loop resolves its engine per iteration, so clear sticky engine
+        # cancels on both engines up front (same stale-cancel guard as
+        # run_nodeflow).
+        self._clear_stale_engine_cancel(except_qid=query_id)
         self._register_run(query_id, None)
         iterations, last_engine, first, converged = 0, None, True, False
         try:
