@@ -1,4 +1,4 @@
-**SamQL AppWindow — build 2026-07-31.698 (v2.16.4)**
+**SamQL AppWindow — build 2026-08-04.698 (v2.16.4)**
 
 ### Run all continues past a Write node
 
