@@ -199,6 +199,7 @@ frontend/src/components/nodeflow/nodeFlowGraphCommands.component.test.ts
 frontend/src/components/nodeflow/nodeFlowGraphCommands.ts
 frontend/src/components/nodeflow/nodeFlowRenderModel.component.test.ts
 frontend/src/components/nodeflow/nodeFlowRenderModel.ts
+frontend/src/components/nodeflow/runAllWriteContinuation.component.test.tsx
 frontend/src/components/nodeflow/useNodeFlowAnimations.ts
 frontend/src/components/nodeflow/useNodeFlowAutosave.ts
 frontend/src/components/nodeflow/useNodeFlowCanvasInteractions.ts
