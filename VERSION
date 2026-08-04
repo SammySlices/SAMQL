@@ -2,12 +2,49 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-07-31.697
+Current build:   2026-07-31.698
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-07-31.698  (v2.16.4)
+
+RUN ALL CONTINUES PAST A WRITE NODE (CONTINUATION CHAINS).
+
+A data chain wired off a Write node's out port (inputs -> sql join ->
+write -> sql) never ran: the write's output stayed empty and the run
+visibly ended at the Write node. Run all classifies every
+output/write/iterator/while node as an exporter and, when any connected
+exporter exists, runs ONLY the exporters; the fallback "leaves" mode
+(which runs end-of-chain data nodes) never activates in that case. The
+downstream sql node was neither an exporter nor a leaf candidate, so it
+was simply never executed -- and the post-run row seeding covers only
+the ANCESTOR closure of attempted terminals, so a descendant of the
+write got no last-run rows either.
+
+Run all now collects "continuation leaves" -- data leaves whose
+ancestors include one of the run's exporters -- and runs them AFTER
+every exporter has finished, so a step reading the just-written table by
+name sees the committed rows (the write's out port remains a
+passthrough of the rows it wrote for {{in}}-style steps). A leaf under a
+failed or cancelled exporter is skipped: that exporter has already
+reported, and the leaf's input would be missing or stale. The leaves
+count in the finish toast, seed last-run previews, and re-render
+downstream charts like any other terminal.
+
+Related ordering hole closed in the same pass: an exporter wired
+downstream of another exporter (write -> ... -> output/write) could
+start concurrently with its upstream sink. Terminals now run in waves by
+exporter depth -- wave N+1 starts once wave N fully finishes -- so
+chained sinks commit in order. Flat flows (every exporter independent)
+land in a single wave and schedule exactly as before.
+
+Component tests pin both behaviors: the continuation leaf runs only
+after the write resolves (ordering is part of the contract), and a
+failed write skips the leaf.
 
 ----------------------------------------------------------------------
 build 2026-07-31.697  (v2.16.4)
