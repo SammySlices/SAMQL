@@ -2,12 +2,35 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-08-04.698
+Current build:   2026-08-10.699
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-08-10.699  (v2.16.4)
+
+JSON FIELD EXPLORER: COMBINED QUERY BINDS FIELDS FROM DIFFERENT
+NESTING LEVELS.
+
+Selecting fields from two different array depths -- e.g. id on the
+tradeValuations[] element plus metric on the nested metricValues[]
+element -- generated an All-rows query whose deeper CTE projected only
+its own UNNEST, so the final SELECT's "e2 ->> '$.id'" bound against a
+CTE exposing only e4 and DuckDB failed with 'Binder Error: Referenced
+column "e2" not found in FROM clause! Candidate bindings: "e4"'.
+
+composeMultiFieldSql handled outer scalars (the _cN carry) and
+deepest-level fields, but not a field whose hop chain is a proper
+non-empty prefix of the longest chain. It now collects those fields'
+element aliases and the CTE pipeline projects each one forward through
+every later hop ("SELECT e2, UNNEST(...) AS e4"), so the final SELECT
+binds all levels and outer values repeat on each exploded nested row --
+exactly what the panel promises. Verified against DuckDB: the pre-fix
+shape reproduces the reported binder error, the fixed shape returns
+the outer id repeated per nested metric row.
 
 ----------------------------------------------------------------------
 build 2026-08-04.698  (v2.16.4)

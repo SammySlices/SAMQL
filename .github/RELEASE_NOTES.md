@@ -1,16 +1,15 @@
-**SamQL AppWindow — build 2026-08-04.698 (v2.16.4)**
+**SamQL AppWindow — build 2026-08-10.699 (v2.16.4)**
 
-### Run all continues past a Write node
+### JSON Field Explorer: combined query binds fields from different nesting levels
 
-A data chain wired off a **Write to table** node's out port — the reported shape: two inputs → SQL join → **Write** → SQL — never ran: the run visibly ended at the Write node and nothing downstream produced results. Run all treats every output/write/iterator/while node as an exporter and, when any connected exporter exists, runs *only* the exporters; the fallback "leaves" mode that runs end-of-chain data nodes never activates in that case. The downstream SQL step was neither an exporter nor a leaf candidate, so it was simply never executed — and post-run row seeding covers only the *ancestor* closure of the run's terminals, so the node after the write got no rows either.
+Selecting fields from two different array depths — e.g. `id` on the `tradeValuations[]` element plus `metric` on the nested `metricValues[]` element — generated an All-rows query whose deeper CTE projected only its own UNNEST, so the final SELECT's `e2 ->> '$.id'` bound against a CTE exposing only `e4` and DuckDB failed with *`Binder Error: Referenced column "e2" not found in FROM clause! Candidate bindings: "e4"`*.
 
-Run all now collects **continuation leaves** — data leaves sitting downstream of one of the run's exporters — and runs them **after** every exporter has finished, so a step reading the just-written table by name sees the committed rows (the write's out port remains a passthrough of the rows it wrote for `{{in}}`-style steps). A leaf under a failed or cancelled exporter is skipped — that exporter already reported. Continuation leaves count in the finish toast, seed last-run previews, and refresh downstream charts like any other terminal.
+The composer handled outer scalars and deepest-level fields, but not a field whose UNNEST chain is a proper non-empty prefix of the longest chain. It now carries those fields' element aliases forward through every later hop CTE (`SELECT e2, UNNEST(...) AS e4`), so the final SELECT binds all levels and outer values repeat on each exploded nested row — exactly what the panel promises. Verified against DuckDB: the old shape reproduces the reported binder error; the fixed shape returns the outer `id` repeated per nested `metric` row.
 
-The same pass closes a related ordering hole: an exporter wired downstream of another exporter (write → … → output/write) could previously start concurrently with its upstream sink. Terminals now run in waves by exporter depth, so chained sinks commit in order; flat flows schedule exactly as before.
+### Also in this build
 
-### Also in this build (from 2026-07-31.697)
-
-**Run all of Write nodes no longer reports "0 of N done" cancelled after an upstream edit** — a sticky engine-level cancel flag (planted by a Stop or by superseding preview/chart requests during graph edits, e.g. inserting a union) was never cleared by the write/export/iterator/while/chart/browse/validate/reconcile flow paths, so the heartbeat daemon kept auto-interrupting every later statement and whole Run alls unwound as cancelled. All nine flow entry points now clear the stale flag at entry.
+- **Run all continues past a Write node** (from `2026-08-04.698`) — chains wired off a Write node's out port now run after the write commits (continuation leaves), and chained exporters run in dependency order.
+- **Run all of Write nodes no longer reports "0 of N done" cancelled after an upstream edit** (from `2026-07-31.697`) — all nine flow entry points clear the sticky engine-cancel flag at entry.
 
 Includes everything from `2026-07-28.696` and earlier.
 
