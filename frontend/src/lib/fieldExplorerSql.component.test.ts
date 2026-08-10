@@ -104,6 +104,46 @@ describe("fieldExplorerSql", () => {
     expect(out.sql).toContain('payload ->> \'$.sku\' AS "sku"');
   });
 
+  it("carries an intermediate-level element through deeper hops", () => {
+    // The 8/10 report: id lives on the tradeValuations[] element (1 hop),
+    // metric on the nested metricValues[] element (2 hops). The composed
+    // query previously bound "e2 ->> '$.id'" against the x4 CTE, which only
+    // projected e4 -> DuckDB BinderException 'Referenced column "e2" not
+    // found in FROM clause! Candidate bindings: "e4"'. Every hop CTE after
+    // an intermediate pick's own hop must keep projecting its element.
+    const hop1 =
+      "UNNEST(from_json(json_extract(data::JSON, '$.tradeValuations'), '[\"JSON\"]')) AS x2(e2)";
+    const hop2 =
+      "UNNEST(from_json(json_extract(e2, '$.metricValues'), '[\"JSON\"]')) AS x4(e4)";
+    const out = composeMultiFieldSql("api_results1", [
+      {
+        name: "id",
+        access: {
+          first: "data::JSON -> '$.tradeValuations[0]' ->> '$.id'",
+          sel: "e2 ->> '$.id'",
+          unnests: [hop1],
+        },
+      },
+      {
+        name: "metric",
+        access: {
+          first:
+            "data::JSON -> '$.tradeValuations[0]' -> '$.metricValues[0]' ->> '$.metric'",
+          sel: "e4 ->> '$.metric'",
+          unnests: [hop1, hop2],
+        },
+      },
+    ]);
+    expect(out.error).toBeUndefined();
+    // The deeper CTE re-projects e2 as a standalone column alongside its own
+    // UNNEST ("SELECT e2, UNNEST(...) AS e4"), so the final SELECT can bind
+    // both elements. Pre-fix, x4 projected ONLY the UNNEST and the query
+    // died in DuckDB's binder.
+    expect(out.sql).toMatch(/x4 AS \(\s*SELECT e2,\s*UNNEST\(/);
+    expect(out.sql).toContain('e2 ->> \'$.id\' AS "id"');
+    expect(out.sql).toContain('e4 ->> \'$.metric\' AS "metric"');
+  });
+
   it("rejects fields under sibling arrays", () => {
     const out = composeMultiFieldSql("t", [
       {

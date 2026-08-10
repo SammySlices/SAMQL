@@ -55,12 +55,19 @@ export function buildUnnestPipelineSql(
   opts?: {
     limit?: number | null;
     carry?: Array<{ alias: string; expr: string }>;
+    /** Element aliases from EARLIER hops (e.g. "e2") that the final SELECT
+     *  references, so every later CTE must keep projecting them forward.
+     *  Without this, a field at an intermediate nesting level binds against
+     *  a CTE that only exposes the deepest element ("Referenced column e2
+     *  not found ... Candidate bindings: e4"). */
+    carryElems?: string[];
     pretty?: boolean;
   },
 ): string {
   const tbl = `"${String(table).replace(/"/g, '""')}"`;
   const hops = unnests || [];
   const carry = opts?.carry || [];
+  const carryElems = new Set(opts?.carryElems || []);
   const pretty = !!opts?.pretty;
   const limit = opts?.limit;
   if (!hops.length) {
@@ -84,6 +91,8 @@ export function buildUnnestPipelineSql(
   const ctes: string[] = [];
   let prev = tbl;
   const carryCols = carry.map((c) => c.alias);
+  // Elements produced by earlier hops that must stay visible downstream.
+  const producedCarried: string[] = [];
   parsed.forEach((hop, i) => {
     const proj: string[] = [];
     if (i === 0) {
@@ -91,7 +100,9 @@ export function buildUnnestPipelineSql(
     } else {
       proj.push(...carryCols);
     }
+    proj.push(...producedCarried);
     proj.push(`UNNEST(${hop.expr}) AS ${hop.elem}`);
+    if (carryElems.has(hop.elem)) producedCarried.push(hop.elem);
     const projSql = pretty ? proj.join(`,\n${ind}`) : proj.join(", ");
     ctes.push(
       `${hop.alias} AS (${pretty ? `\n${ind}` : ""}SELECT ${projSql}${
@@ -177,6 +188,7 @@ export function composeMultiFieldSql(
 
   const tbl = `"${String(table).replace(/"/g, '""')}"`;
   const carry: Array<{ alias: string; expr: string }> = [];
+  const carryElems: string[] = [];
   const finalParts: string[] = [];
   usable.forEach((p, i) => {
     const alias = quoteAlias(p.name);
@@ -186,6 +198,14 @@ export function composeMultiFieldSql(
       carry.push({ alias: cAlias, expr: p.access!.sel! });
       finalParts.push(`  ${cAlias} AS ${alias}`);
     } else {
+      // A field at an INTERMEDIATE nesting level (its chain is a proper
+      // prefix of the longest chain) references the element of its own last
+      // hop (e.g. e2), which later hop CTEs must keep projecting so the
+      // final SELECT over the deepest CTE can still bind it.
+      if (u.length < longest.length) {
+        const elem = parseUnnestAsClause(u[u.length - 1])?.elem;
+        if (elem && !carryElems.includes(elem)) carryElems.push(elem);
+      }
       finalParts.push(`  ${p.access!.sel} AS ${alias}`);
     }
   });
@@ -201,6 +221,7 @@ export function composeMultiFieldSql(
       buildUnnestPipelineSql(table, finalParts.join(",\n"), longest, {
         limit: 50,
         carry,
+        carryElems,
         pretty: true,
       }) + ";";
   }
