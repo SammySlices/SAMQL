@@ -2,12 +2,30 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-08-10.699
+Current build:   2026-08-13.700
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-08-13.700  (v2.16.4)
+
+PINNED TABLES SHIFT THE WORKSPACE; NODEFLOW CONFIG OPENS ON CLICK,
+NOT DRAG.
+
+Pinning the Tables / History / Workflows drawer docks it in the body
+flex row so IDE, Journal, NodeFlow, and Dashboard shift right instead
+of sitting under the overlay. Unpinning keeps the temporary overlay
+peek. Verified in Chromium: pin moves the SQL editor and NodeFlow more
+than 200px.
+
+NodeFlow configure/inspector no longer opens on pointer-down. A left
+click under the 5px slop opens it; a move past the slop is a drag and
+keeps the panel closed (and closes it if it was already open). Fast
+drags that skip rAF still count as drags. Palette / highlight / group-
+child click still open configure.
 
 ----------------------------------------------------------------------
 build 2026-08-10.699  (v2.16.4)
