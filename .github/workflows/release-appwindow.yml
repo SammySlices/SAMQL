@@ -1,0 +1,110 @@
+name: AppWindow build and release
+
+# Builds the Windows AppWindow product exactly the way the local release
+# flow does (.\build.ps1 -AssistantPack runtime) and publishes the two
+# distribution zips to a GitHub release tagged app-<BUILD>. Dispatch-only:
+# a release is an explicit act, never a side effect of a push.
+#
+# prune_old_releases (off by default) deletes every existing release (and
+# its app-* tag) BEFORE the new release publishes -- but only after the
+# new zips have been built and verified, so a failed build can never
+# empty the releases page. The end state is the just-built release as the
+# only one listed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      prune_old_releases:
+        description: "Delete all older releases after publishing this build"
+        type: boolean
+        default: false
+  # A brand-new workflow is not dispatchable by filename until it exists on
+  # the default branch, so a commit-message marker on this branch is the
+  # bootstrap trigger: "[build-release]" builds + publishes, and
+  # "[prune-releases]" additionally removes the old releases first.
+  push:
+    branches: ["claude/workflow-union-write-canceled-mjhk0i"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[build-release]')
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Read build identity
+        id: ident
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "backend"
+          $build = python -c "import samql_core; print(samql_core.BUILD)"
+          if ($LASTEXITCODE -ne 0 -or -not $build) { exit 1 }
+          $version = python -c "import samql_core; print(samql_core.__version__)"
+          if ($LASTEXITCODE -ne 0 -or -not $version) { exit 1 }
+          "build=$build" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Building SamQL AppWindow $build (v$version)"
+
+      - name: Build AppWindow onedir + zips
+        shell: pwsh
+        run: .\build.ps1 -AssistantPack runtime -NoSign
+
+      - name: Verify build artifacts
+        shell: pwsh
+        run: |
+          foreach ($z in @("dist\SamQL-AppWindow.zip",
+                           "dist\SamQL-AppWindow-Assistant.zip")) {
+            if (-not (Test-Path $z)) { Write-Error "missing $z"; exit 1 }
+            Write-Host ("{0}  {1:N0} bytes" -f $z, (Get-Item $z).Length)
+          }
+
+      - name: Remove old releases
+        if: >-
+          ${{ success() && (inputs.prune_old_releases ||
+              contains(github.event.head_commit.message, '[prune-releases]')) }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $keep = "app-${{ steps.ident.outputs.build }}"
+          $tags = gh release list --limit 100 --json tagName --jq '.[].tagName'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          foreach ($t in $tags) {
+            if ($t -and $t -ne $keep) {
+              Write-Host "deleting release + tag $t"
+              gh release delete $t --cleanup-tag --yes
+              if ($LASTEXITCODE -ne 0) { exit 1 }
+            }
+          }
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $build = "${{ steps.ident.outputs.build }}"
+          $tag = "app-$build"
+          gh release create $tag `
+            "dist/SamQL-AppWindow.zip" `
+            "dist/SamQL-AppWindow-Assistant.zip" `
+            --title "SamQL AppWindow $build" `
+            --target $env:GITHUB_SHA `
+            --notes-file .github/RELEASE_NOTES.md
+          if ($LASTEXITCODE -ne 0) { exit 1 }

@@ -185,52 +185,96 @@ def _download(url: str, dest: Path, *, label: str) -> None:
     print(f"  saved {dest} ({dest.stat().st_size / (1024 * 1024):.1f} MiB)")
 
 
-def _pick_llama_asset(assets: list[dict], plat: str) -> tuple[str, str, str]:
-    """Return (name, browser_download_url, binary_name)."""
-    names = [a.get("name") or "" for a in assets]
-    binary = PLATFORM_ASSETS.get(plat, (None, "llama-server"))[1]
+# Accelerator markers that disqualify an archive as a plain-CPU build.
+_LLAMA_GPU_MARKERS = (
+    "cuda", "cudart", "vulkan", "rocm", "hip", "sycl", "opencl",
+    "openvino", "kompute",
+)
+
+
+def _pick_llama_asset_or_none(
+    assets: list[dict], plat: str
+) -> tuple[str, str, str] | None:
+    """Return (name, browser_download_url, binary_name), or None when the
+    release carries no matching archive. llama.cpp release CI sometimes
+    publishes a release with only a subset of binaries (e.g. CUDA-only), and
+    the CPU archive naming has changed over time (-bin-win-cpu-x64.zip today,
+    -bin-win-avx2-x64.zip in older releases) -- so match by meaning, not one
+    exact suffix, and let the caller walk back to an earlier release when a
+    whole release has nothing usable."""
     if plat == "win-cpu":
-        # llama-bNNNN-bin-win-cpu-x64.zip
-        for a in assets:
-            name = a.get("name") or ""
-            if name.endswith("-bin-win-cpu-x64.zip"):
-                return name, a["browser_download_url"], "llama-server.exe"
-        _die(
-            "no Windows CPU x64 zip in latest llama.cpp release; "
-            f"saw: {', '.join(names[:12])}..."
+        def is_cpu_win_zip(name: str) -> bool:
+            n = name.lower()
+            return (
+                n.startswith("llama-")
+                and n.endswith(".zip")
+                and "win" in n
+                and "x64" in n
+                and "arm" not in n
+                and not any(g in n for g in _LLAMA_GPU_MARKERS)
+            )
+        # Modern exact name first, then the historical avx2 spelling, then
+        # any remaining plain-CPU Windows zip (noavx / avx512 / ...).
+        ranked = (
+            lambda n: n.endswith("-bin-win-cpu-x64.zip"),
+            lambda n: is_cpu_win_zip(n) and "avx2" in n.lower(),
+            is_cpu_win_zip,
         )
+        for rank in ranked:
+            for a in assets:
+                name = a.get("name") or ""
+                if rank(name):
+                    return name, a["browser_download_url"], "llama-server.exe"
+        return None
     if plat == "linux-cpu":
-        # Prefer plain Ubuntu x64 CPU build (not cuda/vulkan/rocm/sycl).
-        candidates = []
         for a in assets:
             name = (a.get("name") or "")
-            if not name.startswith("llama-") or "ubuntu" not in name or "x64" not in name:
+            if not name.startswith("llama-") or "ubuntu" not in name \
+                    or "x64" not in name:
                 continue
-            if any(x in name for x in ("cuda", "vulkan", "rocm", "sycl", "openvino")):
+            if any(x in name for x in _LLAMA_GPU_MARKERS):
                 continue
             if name.endswith((".tar.gz", ".zip")):
-                candidates.append(a)
-        if not candidates:
-            _die(
-                "no Ubuntu x64 CPU archive in latest llama.cpp release; "
-                f"saw: {', '.join(names[:12])}..."
-            )
-        a = candidates[0]
-        return a["name"], a["browser_download_url"], "llama-server"
+                return name, a["browser_download_url"], "llama-server"
+        return None
     if plat == "macos-arm":
         for a in assets:
             name = a.get("name") or ""
             if "macos-arm64" in name and name.endswith(".tar.gz"):
                 return name, a["browser_download_url"], "llama-server"
-        _die("no macOS arm64 archive in latest llama.cpp release")
+        return None
     if plat == "macos-x64":
         for a in assets:
             name = a.get("name") or ""
             if "macos-x64" in name and name.endswith(".tar.gz"):
                 return name, a["browser_download_url"], "llama-server"
+        return None
+    _die(f"unknown platform key: {plat}")
+    return None  # unreachable
+
+
+def _pick_llama_asset(assets: list[dict], plat: str) -> tuple[str, str, str]:
+    """Return (name, browser_download_url, binary_name)."""
+    names = [a.get("name") or "" for a in assets]
+    picked = _pick_llama_asset_or_none(assets, plat)
+    if picked is not None:
+        return picked
+    if plat == "win-cpu":
+        _die(
+            "no Windows CPU x64 zip in latest llama.cpp release; "
+            f"saw: {', '.join(names[:12])}..."
+        )
+    if plat == "linux-cpu":
+        _die(
+            "no Ubuntu x64 CPU archive in latest llama.cpp release; "
+            f"saw: {', '.join(names[:12])}..."
+        )
+    if plat == "macos-arm":
+        _die("no macOS arm64 archive in latest llama.cpp release")
+    if plat == "macos-x64":
         _die("no macOS x64 archive in latest llama.cpp release")
     _die(f"unknown platform key: {plat}")
-    return binary, "", binary  # unreachable
+    return "", "", ""  # unreachable
 
 
 def _extract_runtime(archive: Path, binary_name: str, runtime_dir: Path) -> Path:
@@ -302,7 +346,32 @@ def fetch_llama(out_dir: Path, plat: str, *, force: bool) -> Path:
     meta = _http_json(f"https://api.github.com/repos/{LLAMA_REPO}/releases/latest")
     tag = meta.get("tag_name") or "?"
     assets = meta.get("assets") or []
-    name, url, binary_name = _pick_llama_asset(assets, plat)
+    picked = _pick_llama_asset_or_none(assets, plat)
+    if picked is None:
+        # llama.cpp release CI sometimes publishes a release missing the
+        # plain-CPU archives (e.g. CUDA-only). Walk back through recent
+        # releases and take the newest one that carries a usable archive
+        # instead of failing the whole build on upstream's partial release.
+        print(
+            f"  release {tag} has no usable {plat} archive; "
+            "scanning recent releases..."
+        )
+        recent = _http_json(
+            f"https://api.github.com/repos/{LLAMA_REPO}/releases?per_page=12"
+        )
+        for rel in recent if isinstance(recent, list) else []:
+            if rel.get("draft") or rel.get("prerelease"):
+                continue
+            if (rel.get("tag_name") or "") == tag:
+                continue
+            picked = _pick_llama_asset_or_none(rel.get("assets") or [], plat)
+            if picked is not None:
+                tag = rel.get("tag_name") or "?"
+                break
+    if picked is None:
+        # Reproduce the exact single-release error (message + asset list).
+        picked = _pick_llama_asset(assets, plat)
+    name, url, binary_name = picked
     print(f"  release {tag}: {name}")
 
     with tempfile.TemporaryDirectory(prefix="samql-llama-dl-") as td:

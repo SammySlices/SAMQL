@@ -2459,11 +2459,40 @@ export function useNodeFlowExecutionController({
       return;
     }
 
-    const totalTerminals = runList.length;
+    // .698: data chains wired off an exporter's out port (write → sql → …)
+    // are "continuation leaves". A Write node is a sink AND a passthrough,
+    // but these chains are not exporters, and leaves mode never activates
+    // while a connected exporter exists — so Run all used to dead-end at the
+    // Write node and never execute them. Collect them here; they run after
+    // the exporter waves below, so a step reading the just-written table by
+    // name sees the committed rows.
+    const exporterIdSet = new Set(runList.map((n) => n.id));
+    const continuationLeaves =
+      mode === "outputs"
+        ? runNodes.filter((n) => {
+            if (
+              !(PORTS[n.type]?.outputs?.length || 0) ||
+              SKIP_LEAF.has(n.type) ||
+              exporterIdSet.has(n.id) ||
+              hasOut(n) ||
+              !hasIn(n)
+            ) {
+              return false;
+            }
+            for (const id of ancestorNodeIds(runEdges, [n.id])) {
+              if (id !== n.id && exporterIdSet.has(id)) return true;
+            }
+            return false;
+          })
+        : [];
+    const totalTerminals = runList.length + continuationLeaves.length;
     // Preserve the complete attempted closure before the batching paths remove
     // terminals from runList. Even a failed terminal can have healthy ancestors
     // whose rows should remain available from their output-port previews.
-    const attemptedTerminalIds = runList.map((n) => n.id);
+    const attemptedTerminalIds = [
+      ...runList.map((n) => n.id),
+      ...continuationLeaves.map((n) => n.id),
+    ];
     // Top-level data leaves can use the backend multi-target scheduler. It
     // keeps shared ancestors single and runs genuinely independent DuckDB
     // branches concurrently. Child nodes need their own truncated group graph.
@@ -2541,21 +2570,76 @@ export function useNodeFlowExecutionController({
       /* keep default pool */
     }
     const results: RunOutcome[] = [...batchOutcomes];
-    let next = 0;
-    const worker = async () => {
-      while (next < runList.length) {
-        // Stop must halt the whole workflow: once cancellation is requested, no
-        // worker starts another node (the in-flight ones were already aborted +
-        // interrupted by cancelRun).
+    // .698: an exporter wired downstream of another exporter (write → … →
+    // output/write) must start only after its upstream sink commits, or a
+    // step reading the just-written table by name sees missing/stale rows.
+    // Group the terminals into waves by how many run-list exporters sit
+    // above them; wave N+1 starts once wave N fully finishes. Flat flows
+    // (every exporter independent — the overwhelmingly common shape) land
+    // in a single wave, so their scheduling is unchanged.
+    const exporterDepth = (n: NbNode) => {
+      let d = 0;
+      for (const id of ancestorNodeIds(runEdges, [n.id])) {
+        if (id !== n.id && exporterIdSet.has(id)) d += 1;
+      }
+      return d;
+    };
+    const waves = new Map<number, NbNode[]>();
+    for (const n of runList) {
+      const d = exporterDepth(n);
+      const wave = waves.get(d);
+      if (wave) wave.push(n);
+      else waves.set(d, [n]);
+    }
+    for (const depth of [...waves.keys()].sort((a, b) => a - b)) {
+      if (results.some((r) => r.cancelled)) break;
+      const wave = waves.get(depth)!;
+      let next = 0;
+      const worker = async () => {
+        while (next < wave.length) {
+          // Stop must halt the whole workflow: once cancellation is requested,
+          // no worker starts another node (the in-flight ones were already
+          // aborted + interrupted by cancelRun).
+          if (cancelRequested.current) break;
+          const n = wave[next++];
+          const outcome = await runOne(n);
+          results.push(outcome);
+          if (outcome.ok) successfulTerminalIds.push(n.id);
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, wave.length) }, () =>
+          worker(),
+        ),
+      );
+      if (batchScope !== scopeVersionRef.current) return;
+    }
+
+    // .698: run the continuation leaves now that every exporter finished, so
+    // SQL reading the just-written table sees committed rows. A leaf under a
+    // failed or cancelled exporter is skipped — that exporter has already
+    // reported, and the leaf's input would be missing or stale.
+    if (!results.some((r) => r.cancelled)) {
+      for (const n of continuationLeaves) {
         if (cancelRequested.current) break;
-        const n = runList[next++];
-        const outcome = await runOne(n);
+        let upstreamOk = true;
+        for (const id of ancestorNodeIds(runEdges, [n.id])) {
+          if (
+            id !== n.id &&
+            exporterIdSet.has(id) &&
+            !successfulTerminalIds.includes(id)
+          ) {
+            upstreamOk = false;
+            break;
+          }
+        }
+        if (!upstreamOk) continue;
+        const outcome = await runLeaf(n, params);
         results.push(outcome);
         if (outcome.ok) successfulTerminalIds.push(n.id);
       }
-    };
-    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
-    if (batchScope !== scopeVersionRef.current) return;
+      if (batchScope !== scopeVersionRef.current) return;
+    }
 
     if (results.some((r) => r.cancelled)) {
       onToast("warn", "Run all cancelled", `${results.filter((r) => r.ok).length} of ${totalTerminals} done`);
