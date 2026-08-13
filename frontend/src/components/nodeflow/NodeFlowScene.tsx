@@ -96,6 +96,7 @@ interface NodeFlowSceneProps {
   startWire: (event: React.PointerEvent, node: NbNode, port: string) => void;
   setHoveredInput: (nodeId: string, port: string | null) => void;
   setNodeMenu: React.Dispatch<React.SetStateAction<NodeMenuState | null>>;
+  openInspector?: (nodeId: string) => void;
   /** Dense NodeFlow — prop so memo'd Scene re-renders when Settings toggles it. */
   denseMode: boolean;
   /** Icon-sphere chrome — prop so memo'd Scene re-renders when Settings toggles it. */
@@ -153,6 +154,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
   startWire,
   setHoveredInput,
   setNodeMenu,
+  openInspector,
   denseMode,
   sphereMode,
 }: NodeFlowSceneProps) {
@@ -181,6 +183,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
     setSelectedId,
     setSelectedIds,
     setNodeMenu,
+    openInspector,
   };
   const cardActions = useMemo<NodeFlowCanvasCardActions>(
     () => ({
@@ -208,6 +211,7 @@ export const NodeFlowScene = React.memo(function NodeFlowScene({
       setSelectedId: (value) => cardActionsRef.current.setSelectedId(value),
       setSelectedIds: (value) => cardActionsRef.current.setSelectedIds(value),
       setNodeMenu: (value) => cardActionsRef.current.setNodeMenu(value),
+      openInspector: (nodeId) => cardActionsRef.current.openInspector?.(nodeId),
     }),
     [],
   );

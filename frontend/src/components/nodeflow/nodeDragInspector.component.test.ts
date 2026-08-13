@@ -2,6 +2,7 @@ import { readFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { describe, expect, it, vi } from "vitest";
+import { NODE_CLICK_SLOP_PX } from "./useNodeFlowCanvasInteractions";
 
 /**
  * Contract for node pointer gestures vs the tables/inspector drawer:
@@ -12,7 +13,7 @@ import { describe, expect, it, vi } from "vitest";
  * NodeFlowCanvasCard onContextMenu must not call onInspectorOpen.
  */
 describe("node drag vs inspector open contract", () => {
-  const THRESHOLD = 5;
+  const THRESHOLD = NODE_CLICK_SLOP_PX;
   const here = dirname(fileURLToPath(import.meta.url));
 
   function classifyPointerUp(opts: {
@@ -68,5 +69,8 @@ describe("node drag vs inspector open contract", () => {
     );
     expect(interactions).toMatch(/if\s*\(\s*event\.button\s*===\s*2\s*\)\s*return/);
     expect(interactions).toMatch(/event\.button\s*!==\s*2/);
+    expect(interactions).toMatch(/NODE_CLICK_SLOP_PX/);
+    expect(interactions).toMatch(/event\.clientX - drag\.startX/);
+    expect(interactions).toMatch(/apply\(\)/);
   });
 });

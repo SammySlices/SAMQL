@@ -247,6 +247,8 @@ export type NodeFlowCanvasCardActions = {
   setSelectedId: React.Dispatch<React.SetStateAction<string | null>>;
   setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
   setNodeMenu: React.Dispatch<React.SetStateAction<NodeMenuState | null>>;
+  /** Click-to-edit (group child row). Must not be used from canvas drag. */
+  openInspector?: (nodeId: string) => void;
 };
 
 export type NodeFlowCanvasCardProps = CanvasNodeMemoState & {
@@ -282,6 +284,7 @@ function ContainerChildrenBody({
     | "extractChildToCanvas"
     | "setSelectedId"
     | "setSelectedIds"
+    | "openInspector"
   >;
   groupDnd: React.MutableRefObject<{
     groupId: string;
@@ -333,6 +336,7 @@ function ContainerChildrenBody({
               event.stopPropagation();
               actions.setSelectedId(child.id);
               actions.setSelectedIds([]);
+              actions.openInspector?.(child.id);
             }}
             onDragStart={(event) => {
               event.stopPropagation();

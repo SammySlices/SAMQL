@@ -89,6 +89,9 @@ export type NodeFlowDragState =
   | PanDrag
   | MarqueeDrag;
 
+/** Movement under this px is a click (open configure). Past it is a drag. */
+export const NODE_CLICK_SLOP_PX = 5;
+
 interface UseNodeFlowCanvasInteractionsOptions {
   nodesRef: React.RefObject<NbNode[]>;
   edgesRef: React.RefObject<NbEdge[]>;
@@ -115,7 +118,7 @@ interface UseNodeFlowCanvasInteractionsOptions {
   /** Canvas grid snap while dragging (App Settings → Visual). Default OFF. */
   snap?: boolean;
   /** Quick click (pointerup under drag threshold) opens the inspector drawer. */
-  onInspectorOpen?: () => void;
+  onInspectorOpen?: (nodeId?: string) => void;
   /** Confirmed drag: keep the tables/inspector panel closed. */
   onInspectorClose?: () => void;
 }
@@ -254,7 +257,12 @@ export function useNodeFlowCanvasInteractions(
         const rawDx = lastX - drag.startX;
         const rawDy = lastY - drag.startY;
         if (!drag.moved) {
-          if (Math.abs(rawDx) < 5 && Math.abs(rawDy) < 5) return;
+          if (
+            Math.abs(rawDx) < NODE_CLICK_SLOP_PX &&
+            Math.abs(rawDy) < NODE_CLICK_SLOP_PX
+          ) {
+            return;
+          }
           drag.moved = true;
           // Confirmed drag — never open/keep the side panel expanded.
           current.onInspectorClose?.();
@@ -367,6 +375,11 @@ export function useNodeFlowCanvasInteractions(
         cancelAnimationFrame(rafHandle);
         rafHandle = 0;
       }
+      lastX = event.clientX;
+      lastY = event.clientY;
+      // Flush the last move so `moved` and node positions match this up.
+      // Otherwise a fast drag can pointerup before rAF and look like a click.
+      apply();
       const drag = dragRef.current;
       const current = optionsRef.current;
 
@@ -458,7 +471,7 @@ export function useNodeFlowCanvasInteractions(
         } else {
           const dx = Math.abs(event.clientX - (drag.startX ?? event.clientX));
           const dy = Math.abs(event.clientY - (drag.startY ?? event.clientY));
-          if (dx < 5 && dy < 5) {
+          if (dx < NODE_CLICK_SLOP_PX && dy < NODE_CLICK_SLOP_PX) {
             const node = current.nodesRef.current?.find(
               (item) => item.id === drag.fromNode,
             );
@@ -472,13 +485,18 @@ export function useNodeFlowCanvasInteractions(
           }
         }
       } else if (drag?.mode === "node") {
-        const wasDrag = !!drag.moved;
+        const dx = Math.abs(event.clientX - drag.startX);
+        const dy = Math.abs(event.clientY - drag.startY);
+        const wasDrag =
+          !!drag.moved ||
+          dx >= NODE_CLICK_SLOP_PX ||
+          dy >= NODE_CLICK_SLOP_PX;
         delete document.documentElement.dataset.samqlNfDrag;
         // Left quick-click only: right-click never starts a node drag
         // (startNodeDrag returns on button === 2), but still ignore
         // secondary-button ups so inspector open stays left-click only.
         if (!wasDrag && event.button !== 2) {
-          current.onInspectorOpen?.();
+          current.onInspectorOpen?.(drag.nodeId);
         }
         if (drag.ids.length === 1) {
           const node = current.nodesRef.current?.find(

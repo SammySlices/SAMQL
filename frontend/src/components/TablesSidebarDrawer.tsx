@@ -35,6 +35,8 @@ export interface TablesSidebarDrawerProps {
  * click, or a quick handle click. With hoverOpenFull, edge hover opens the
  * full panel and leave auto-hides (legacy). Inspector mode force-opens and
  * skips auto-hide. In-panel tabs switch content while open without re-sliding.
+ * When pinned, the drawer is in-flow so IDE / Journal / NodeFlow / Dashboard
+ * shift right instead of sitting under the panel.
  */
 export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
   enabled,
@@ -210,13 +212,15 @@ export const TablesSidebarDrawer: React.FC<TablesSidebarDrawerProps> = ({
         "tables-sidebar-drawer" +
         (drawerOpen ? " is-open" : " is-closed") +
         (peeking && !drawerOpen ? " is-peek" : "") +
-        (inspectorMode ? " is-inspector" : "")
+        (inspectorMode ? " is-inspector" : "") +
+        (pinned ? " is-pinned" : "")
       }
       style={{ ["--tables-sidebar-w" as string]: `${width}px` }}
       data-testid="tables-sidebar-drawer"
       data-open={drawerOpen ? "1" : "0"}
       data-peek={peeking && !drawerOpen ? "1" : "0"}
       data-hover-open-full={hoverOpenFull ? "1" : "0"}
+      data-pinned={pinned ? "1" : "0"}
       onPointerEnter={onEdgeApproach}
       onPointerLeave={scheduleLeave}
       onFocusCapture={onEdgeApproach}

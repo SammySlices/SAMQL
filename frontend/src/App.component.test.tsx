@@ -361,6 +361,9 @@ describe("App runtime behavior", () => {
       expect(nodeFlow).toHaveAttribute("data-inspector-over-tables", "1");
     });
     expect(localStorage.getItem("samql.tablesPanel.pinned")).toBe("1");
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    expect(drawer).toHaveAttribute("data-pinned", "1");
+    expect(drawer.className).toContain("is-pinned");
   });
 
   it("opens SQL assistant from Journal in copy-only mode", async () => {

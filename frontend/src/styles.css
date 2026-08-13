@@ -1362,7 +1362,8 @@ textarea:focus {
 /* ---- Tables / History / Workflows slide-out drawer ---- */
 /* Overlay on the left of .body so Journal / NodeFlow / Dashboard keep full
    width when the rail is closed. Closed = thin left-edge hit strip only;
-   hover / focus / click slides the panel out (no Settings hide-rail toggle). */
+   hover / focus / click slides the panel out (no Settings hide-rail toggle).
+   Pinned (.is-pinned) docks in the .body flex row so .main shifts right. */
 .tables-sidebar-drawer {
   position: absolute;
   left: 0;
@@ -1370,6 +1371,16 @@ textarea:focus {
   bottom: 0;
   z-index: 45;
   pointer-events: none;
+}
+.tables-sidebar-drawer.is-pinned {
+  position: relative;
+  left: auto;
+  top: auto;
+  bottom: auto;
+  flex: 0 0 var(--tables-sidebar-w, 290px);
+  width: var(--tables-sidebar-w, 290px);
+  align-self: stretch;
+  pointer-events: auto;
 }
 /* Full-height left hit strip while closed — nearly invisible until hover. */
 .tables-sidebar-edge {
@@ -1422,7 +1433,19 @@ textarea:focus {
 .tables-sidebar-drawer.is-open .tables-sidebar-panel {
   transform: translateX(0);
   pointer-events: auto;
+}
+.tables-sidebar-drawer.is-open:not(.is-pinned) .tables-sidebar-panel {
   box-shadow: 6px 0 28px rgba(0, 0, 0, 0.28);
+}
+.tables-sidebar-drawer.is-pinned .tables-sidebar-panel {
+  position: relative;
+  transform: none;
+  width: 100%;
+  height: 100%;
+  box-shadow: none;
+}
+.tables-sidebar-drawer.is-pinned .tables-sidebar-inner.sidebar {
+  border-right: 1px solid var(--border);
 }
 .tables-sidebar-inner.sidebar {
   flex: 1 1 auto;
@@ -1503,8 +1526,8 @@ html[data-theme="light"] .tables-sidebar-peek {
   border-color: var(--chrome-frame, var(--border));
   border-left: none;
 }
-html.theme-light .tables-sidebar-drawer.is-open .tables-sidebar-panel,
-html[data-theme="light"] .tables-sidebar-drawer.is-open .tables-sidebar-panel {
+html.theme-light .tables-sidebar-drawer.is-open:not(.is-pinned) .tables-sidebar-panel,
+html[data-theme="light"] .tables-sidebar-drawer.is-open:not(.is-pinned) .tables-sidebar-panel {
   box-shadow: 6px 0 24px rgba(0, 0, 0, 0.12);
 }
 .gutter-v {

@@ -2,14 +2,17 @@ name: AppWindow build and release
 
 # Builds the Windows AppWindow product exactly the way the local release
 # flow does (.\build.ps1 -AssistantPack runtime) and publishes the two
-# distribution zips to a GitHub release tagged app-<BUILD>. Dispatch-only:
-# a release is an explicit act, never a side effect of a push.
+# distribution zips to a GitHub release tagged app-<BUILD>.
 #
 # prune_old_releases (off by default) deletes every existing release (and
 # its app-* tag) BEFORE the new release publishes -- but only after the
 # new zips have been built and verified, so a failed build can never
 # empty the releases page. The end state is the just-built release as the
 # only one listed.
+#
+# Triggers: workflow_dispatch, or a push to master whose head commit
+# message contains [build-release]. Add [prune-releases] to also delete
+# older GitHub releases.
 
 on:
   workflow_dispatch:
@@ -18,12 +21,8 @@ on:
         description: "Delete all older releases after publishing this build"
         type: boolean
         default: false
-  # A brand-new workflow is not dispatchable by filename until it exists on
-  # the default branch, so a commit-message marker on this branch is the
-  # bootstrap trigger: "[build-release]" builds + publishes, and
-  # "[prune-releases]" additionally removes the old releases first.
   push:
-    branches: ["claude/workflow-union-write-canceled-mjhk0i"]
+    branches: ["master"]
 
 permissions:
   contents: write

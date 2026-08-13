@@ -85,6 +85,7 @@ export function useNodeFlowGraphController({
       setNodes((current) => syncNodes([...current, node]));
       setSelectedId(node.id);
       fireBorn(node.id);
+      return node.id;
     },
     [fireBorn, setNodes, setSelectedId, syncNodes],
   );
@@ -116,6 +117,7 @@ export function useNodeFlowGraphController({
         syncNodes(appendGroupChild(current, groupId, type, childId).nodes),
       );
       setSelectedId(childId);
+      return childId;
     },
     [setNodes, setSelectedId, syncNodes],
   );

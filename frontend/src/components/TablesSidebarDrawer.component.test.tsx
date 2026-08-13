@@ -1,7 +1,20 @@
 import React, { useState } from "react";
+import { readFileSync } from "fs";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { TablesSidebarDrawer } from "./TablesSidebarDrawer";
+
+const STYLES_CSS = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../styles.css"),
+  "utf8",
+);
+
+function cssRule(selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return STYLES_CSS.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] || "";
+}
 
 function Harness({
   enabled = true,
@@ -506,5 +519,54 @@ describe("TablesSidebarDrawer", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     fireEvent.pointerDown(document.body);
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("marks the drawer pinned so layout can dock it in-flow", () => {
+    const { rerender } = render(
+      <TablesSidebarDrawer
+        enabled
+        open
+        pinned={false}
+        onOpenChange={() => {}}
+        width={280}
+        onResizePointerDown={() => {}}
+      >
+        <div>tables</div>
+      </TablesSidebarDrawer>,
+    );
+    const drawer = screen.getByTestId("tables-sidebar-drawer");
+    expect(drawer).toHaveAttribute("data-pinned", "0");
+    expect(drawer.className).not.toContain("is-pinned");
+
+    rerender(
+      <TablesSidebarDrawer
+        enabled
+        open
+        pinned
+        onOpenChange={() => {}}
+        width={280}
+        onResizePointerDown={() => {}}
+      >
+        <div>tables</div>
+      </TablesSidebarDrawer>,
+    );
+    expect(drawer).toHaveAttribute("data-pinned", "1");
+    expect(drawer.className).toContain("is-pinned");
+    expect(drawer.className).toContain("is-open");
+  });
+
+  it("docks a pinned drawer in the body flex row instead of overlaying .main", () => {
+    const overlay = cssRule(".tables-sidebar-drawer");
+    expect(overlay).toMatch(/position:\s*absolute/);
+
+    const pinned = cssRule(".tables-sidebar-drawer.is-pinned");
+    expect(pinned).toMatch(/position:\s*relative/);
+    expect(pinned).toMatch(/flex:\s*0\s+0\s+var\(--tables-sidebar-w/);
+    expect(pinned).toMatch(/width:\s*var\(--tables-sidebar-w/);
+
+    const pinnedPanel = cssRule(".tables-sidebar-drawer.is-pinned .tables-sidebar-panel");
+    expect(pinnedPanel).toMatch(/position:\s*relative/);
+    expect(pinnedPanel).toMatch(/transform:\s*none/);
+    expect(pinnedPanel).toMatch(/width:\s*100%/);
   });
 });

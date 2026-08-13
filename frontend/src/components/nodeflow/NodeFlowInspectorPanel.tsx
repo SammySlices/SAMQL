@@ -49,9 +49,9 @@ function NodeFlowInspectorPanelImpl({
   const selectedNode =
     topLevelSelection || (childSelection ? childSelection.child : null);
 
-  // Opening the docked inspector is owned by a quick-click (see
-  // onInspectorOpen in canvas interactions). Auto-opening on every
-  // selectedId change would force the tables drawer open during node drags.
+  // selectedId here is already click-gated by NodeFlow (inspectorNodeId).
+  // Canvas pointerdown still selects for drag, but this panel only receives
+  // an id after a click, add, or highlight — not during a move.
   useEffect(() => {
     if (!selectedNode) onSelectionChange?.(false);
   }, [onSelectionChange, selectedNode]);

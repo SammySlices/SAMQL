@@ -175,6 +175,11 @@ export const NodeFlow: React.FC<{
   // the chain. Never blocks the run; just a gentle nudge.
   const [nodeWarnings, setNodeWarnings] = useState<Record<string, string>>({});
   const [selId, setSelId] = useState<string | null>(null);
+  const selIdRef = useRef<string | null>(null);
+  selIdRef.current = selId;
+  // Configure panel is click-gated: pointerdown selects for drag, but the
+  // inspector only mounts after a click (or an explicit add / highlight).
+  const [inspectorNodeId, setInspectorNodeId] = useState<string | null>(null);
   // the single currently-selected connection (click a wire to select+highlight,
   // then Delete/Backspace removes it -- no confirm for links)
   const [selEdge, setSelEdge] = useState<string | null>(null);
@@ -274,6 +279,19 @@ export const NodeFlow: React.FC<{
     return () => registerActiveNodeFlowGraphGetter(null);
   }, []);
 
+  const openInspector = useCallback(
+    (nodeId: string | null) => {
+      if (!nodeId) return;
+      setInspectorNodeId(nodeId);
+      onSelectionChange?.(true);
+    },
+    [onSelectionChange],
+  );
+  const closeInspector = useCallback(() => {
+    setInspectorNodeId(null);
+    onSelectionChange?.(false);
+  }, [onSelectionChange]);
+
   const highlightNode = useCallback(
     (nodeId: string) => {
       if (!nodeId) return;
@@ -283,12 +301,13 @@ export const NodeFlow: React.FC<{
         null;
       setSelId(nodeId);
       setSelIds([nodeId]);
+      openInspector(nodeId);
       fireLineageFlash(nodeId);
       if (node && typeof node.x === "number" && typeof node.y === "number") {
         panTo(node.x + 90, node.y + 40);
       }
     },
-    [fireLineageFlash, panTo],
+    [fireLineageFlash, openInspector, panTo],
   );
 
   const lastSelectCmd = useRef(0);
@@ -299,12 +318,13 @@ export const NodeFlow: React.FC<{
       setSelId(null);
       setSelIds([]);
       setSelEdge(null);
+      closeInspector();
       return;
     }
     if (command.action !== "selectNode" || !command.nodeId) return;
     lastSelectCmd.current = command.id;
     highlightNode(command.nodeId);
-  }, [command, highlightNode]);
+  }, [closeInspector, command, highlightNode]);
 
   useEffect(() => {
     const onUpdated = (event: Event) => {
@@ -399,6 +419,32 @@ export const NodeFlow: React.FC<{
     fireBorn,
     withImplosion,
   });
+
+  const addNodeAtAndInspect = useCallback(
+    (
+      type: Parameters<typeof addNodeAt>[0],
+      x: number,
+      y: number,
+      config?: Parameters<typeof addNodeAt>[3],
+    ) => {
+      const id = addNodeAt(type, x, y, config);
+      openInspector(id);
+      return id;
+    },
+    [addNodeAt, openInspector],
+  );
+  const groupAddChildAndInspect = useCallback(
+    (groupId: string, type: Parameters<typeof groupAddChild>[1]) => {
+      const id = groupAddChild(groupId, type);
+      if (id) openInspector(id);
+      return id;
+    },
+    [groupAddChild, openInspector],
+  );
+
+  useEffect(() => {
+    if (!selId) closeInspector();
+  }, [closeInspector, selId]);
 
   const onDeleteEdge = useCallback(
     (id: string) => {
@@ -539,8 +585,8 @@ export const NodeFlow: React.FC<{
     patchNode,
     onToast,
     snap,
-    onInspectorOpen: () => onSelectionChange?.(true),
-    onInspectorClose: () => onSelectionChange?.(false),
+    onInspectorOpen: (nodeId) => openInspector(nodeId || selIdRef.current),
+    onInspectorClose: closeInspector,
   });
 
   useNodeFlowKeyboardShortcuts({
@@ -587,8 +633,8 @@ export const NodeFlow: React.FC<{
   // Keep the memoized canvas scene insulated from inspector, palette, preview,
   // and menu renders while still dispatching every event to the latest graph
   // and execution-controller implementation.
-  const sceneAddNodeAt = useStableEvent(addNodeAt);
-  const sceneGroupAddChild = useStableEvent(groupAddChild);
+  const sceneAddNodeAt = useStableEvent(addNodeAtAndInspect);
+  const sceneGroupAddChild = useStableEvent(groupAddChildAndInspect);
   const scenePatchNode = useStableEvent(patchNode);
   const sceneEnsureChartFor = useStableEvent(ensureChartFor);
   const sceneUpstreamChartNode = useStableEvent(upstreamChartNode);
@@ -706,6 +752,7 @@ export const NodeFlow: React.FC<{
           startWire={startWire}
           setHoveredInput={setHoveredInput}
           setNodeMenu={setNodeMenu}
+          openInspector={openInspector}
           denseMode={denseMode}
           sphereMode={sphereMode}
         />
@@ -716,7 +763,7 @@ export const NodeFlow: React.FC<{
           scopeKey={activeTabId}
           nodes={nodes}
           edges={edges}
-          selectedId={selId}
+          selectedId={inspectorNodeId}
           graphSig={graphSig}
           graphForApi={graphForApi}
           childCtx={childCtx}
@@ -880,10 +927,10 @@ export const NodeFlow: React.FC<{
             type !== "iterator" &&
             type !== "usernode"
           ) {
-            groupAddChild(group.id, type);
+            groupAddChildAndInspect(group.id, type);
           } else {
             const origin = nodeSpawnOrigin(type, point.x, point.y, sphereMode);
-            addNodeAt(type, origin.x, origin.y);
+            addNodeAtAndInspect(type, origin.x, origin.y);
           }
         }}
       />

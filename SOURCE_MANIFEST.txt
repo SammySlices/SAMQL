@@ -81,6 +81,7 @@ frontend/e2e/nodeflow-stability.spec.ts
 frontend/e2e/persistence-stability.spec.ts
 frontend/e2e/run-playwright-edge.mjs
 frontend/e2e/security-smoke.spec.ts
+frontend/e2e/tables-pin-layout.spec.ts
 frontend/e2e/workflow-smoke.spec.ts
 frontend/eslint.config.js
 frontend/index.html
@@ -202,6 +203,7 @@ frontend/src/components/nodeflow/nodeFlowRenderModel.ts
 frontend/src/components/nodeflow/runAllWriteContinuation.component.test.tsx
 frontend/src/components/nodeflow/useNodeFlowAnimations.ts
 frontend/src/components/nodeflow/useNodeFlowAutosave.ts
+frontend/src/components/nodeflow/useNodeFlowCanvasInteractions.inspector.component.test.tsx
 frontend/src/components/nodeflow/useNodeFlowCanvasInteractions.ts
 frontend/src/components/nodeflow/useNodeFlowChartHydration.ts
 frontend/src/components/nodeflow/useNodeFlowClipboard.ts
