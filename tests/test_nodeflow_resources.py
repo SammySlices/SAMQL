@@ -557,6 +557,76 @@ def test_npm_integrity_recovery():
          and not (root / "frontend" / "src" / "test" / "server.ts").exists(),
          "component tests still initialize the unused MSW server")
 
+def test_preview_seed_keeps_shared_input_whole():
+    """A preview-limited batch (the post-Run-all seed pass) requests every
+    ancestor as a row-limited target. The truncated copy built for the Input
+    must never become the relation its sibling consumers read: a Filter that
+    shares the Input with a Summarize used to be evaluated over the Input's
+    first N rows only and previewed 0 rows."""
+    if not HAS_DUCKDB:
+        print("SKIP preview seed shared input (duckdb not installed)")
+        return
+    s = Session()
+    s.adaptive_resources = False
+    d = s.get_duckdb()
+    # only the last 100 of 1000 rows pass the filter, i.e. none of the
+    # first 200 the seed pass reads for the Input's own preview
+    d.execute("CREATE TABLE seedsrc AS SELECT i AS id, i % 2 AS grp, "
+              "CASE WHEN i >= 900 THEN 100 ELSE 10 END AS score "
+              "FROM range(0, 1000) t(i)")
+    d.table_columns["seedsrc"] = ["id", "grp", "score"]
+    graph = {
+        "nodes": [
+            {"id": "in1", "type": "input", "config": {"table": "seedsrc"}},
+            {"id": "flt", "type": "filter",
+             "config": {"condition": "score > 50"}},
+            {"id": "sum", "type": "summarize", "config": {
+                "group_by": ["grp"],
+                "aggs": [{"col": "id", "func": "count", "name": "n"}]}},
+        ],
+        "edges": [
+            {"from": {"node": "in1", "port": "out"},
+             "to": {"node": "flt", "port": "in"}},
+            {"from": {"node": "in1", "port": "out"},
+             "to": {"node": "sum", "port": "in"}},
+        ],
+    }
+    # The frontend seeds in ancestor-closure order: the Input's own limited
+    # target lands BEFORE the Filter whenever a second branch exists.
+    for flow_cache in (True, False):
+        s.flow_cache = flow_cache
+        for order in (
+            [("sum", "out"), ("in1", "out"), ("flt", "true"), ("flt", "false")],
+            [("in1", "out"), ("flt", "true"), ("flt", "false")],
+            [("flt", "true"), ("flt", "false"), ("in1", "out")],
+        ):
+            res = s.run_nodeflows(
+                graph, [{"node": n, "port": p} for n, p in order],
+                query_id="seed-%s" % flow_cache, preview=True, preview_limit=200)
+            need(res.get("ok") and not res.get("error"),
+                 "seed batch failed: %s" % res.get("error"))
+            rows = {(r["node"], r["port"]): r for r in res["results"]}
+            for key, r in rows.items():
+                need(not r.get("error"), "%s errored: %s" % (key, r.get("error")))
+            need(rows[("flt", "true")]["total_rows"] == 100,
+                 "filter True previewed %s rows over a truncated Input "
+                 "(order %s, flow_cache=%s)" % (
+                     rows[("flt", "true")]["total_rows"], order, flow_cache))
+            need(rows[("in1", "out")]["total_rows"] == 200
+                 and rows[("in1", "out")].get("preview_limited"),
+                 "the Input's own preview must stay row-limited")
+            if ("sum", "out") in rows:
+                counts = {row[0]: row[1] for row in rows[("sum", "out")]["rows"]}
+                need(counts == {0: 500, 1: 500},
+                     "summarize previewed a truncated Input: %s" % counts)
+    # A full (non-preview) run of the same terminals is unaffected.
+    res = s.run_nodeflows(
+        graph, [{"node": "flt", "port": "true"}, {"node": "sum", "port": "out"}],
+        query_id="full")
+    rows = {(r["node"], r["port"]): r for r in res["results"]}
+    need(rows[("flt", "true")]["total_rows"] == 100, "full run filter rows")
+
+
 def main():
     tests = [
         ("adaptive resource budgets", test_adaptive_budget),
@@ -565,6 +635,7 @@ def main():
         ("nondeterministic NodeFlow graphs stay session-only", test_persistent_rejects_nondeterministic_graphs),
         ("persistent cache pinning and budget safety", test_persistent_registry_safety),
         ("independent NodeFlow branches execute in parallel", test_parallel_independent_branches),
+        ("preview seed keeps a shared Input whole", test_preview_seed_keeps_shared_input_whole),
         ("one-command dependency bootstrap covers every suite", test_one_command_runner_contract),
         ("npm integrity recovery and dependency pruning", test_npm_integrity_recovery),
     ]

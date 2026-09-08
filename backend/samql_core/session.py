@@ -5382,6 +5382,9 @@ class Session:
 
         def run_pass(fuse):
             built = {}
+            # Row-limited preview targets: (node, port) -> truncated copy.
+            # Kept apart from ``built`` on purpose -- see build().
+            limited = {}
 
             def node_sql(nid, prt, stack):
                 node = nodes.get(nid)
@@ -5485,7 +5488,7 @@ class Session:
                         "This flow has a loop -- remove the cycle.")
                 return "(%s)" % node_sql(nid, prt, stack + [key])
 
-            def build(nid, prt, stack):
+            def build(nid, prt, stack, as_target=False):
                 def _exec_create(nm, q):
                     # per-node heartbeat (.410 journal/node audit): long
                     # multi-node flows were a SILENT op -- no beats, so
@@ -5523,6 +5526,40 @@ class Session:
                             node_id=nid, node_type=nd.get("type")) from e
 
                 key = (nid, prt)
+                # A row-limited preview target is a truncated copy meant only
+                # for that target's own result envelope. It must never stand
+                # in for the node's relation: the post-run seed pass requests
+                # EVERY ancestor as a limited target, and registering the copy
+                # under ``built`` handed the truncation to each consumer built
+                # after it -- a Filter sharing its Input with a second branch
+                # (the Input is built first) was evaluated over the Input's
+                # first N rows and previewed 0 rows. Limited copies live in
+                # their own map, are derived from the full relation when one
+                # already exists, and never enter either full-result cache.
+                row_limit = target_limits.get(key) if as_target else None
+                if row_limit:
+                    if key in limited:
+                        return limited[key]
+                    if key in built:
+                        src = 'SELECT * FROM "%s" AS _full' % built[key]
+                    else:
+                        fz_hit = frozen_hits.get(nid)
+                        if fz_hit is not None and (
+                                frozen_map.get(nid) or (None, None))[0] == prt:
+                            # A user-pinned output is reused whole, as before.
+                            return build(nid, prt, stack)
+                        if key in stack:
+                            raise nodeflow.NodeflowError(
+                                "This flow has a loop -- remove the cycle.")
+                        src = node_sql(nid, prt, stack + [key])
+                    name = tmp_for(nid, prt) + "_preview"
+                    _exec_create(
+                        name, "SELECT * FROM (%s) AS _preview LIMIT %d"
+                        % (src, max(1, int(row_limit))))
+                    limited[key] = name
+                    if collect is not None:
+                        collect.append(name)
+                    return name
                 if key in built:
                     return built[key]
                 if key in stack:
@@ -5530,13 +5567,6 @@ class Session:
                         "This flow has a loop -- remove the cycle.")
                 fp = fps.get(nid)
                 persistent_fp = persistent_fps.get(nid)
-                # A row-limited preview target is intentionally incomplete and
-                # must never enter either full-result cache. Its upstream
-                # checkpoints may still be reused.
-                row_limit = target_limits.get(key)
-                if row_limit:
-                    fp = None
-                    persistent_fp = None
                 port_key = _re.sub(r"[^A-Za-z0-9]", "", str(prt))
                 if fp:
                     # Multi-output nodes have one node fingerprint but distinct
@@ -5586,9 +5616,6 @@ class Session:
                             collect.append(restored)
                         return restored
                 sql = node_sql(nid, prt, stack + [key])
-                if row_limit:
-                    sql = "SELECT * FROM (%s) AS _preview LIMIT %d" % (
-                        sql, max(1, int(row_limit)))
                 # Frozen miss: build into a kept table and pin it for later
                 # runs (off the per-pass drop list, epoch-independent).
                 fz = frozen_map.get(nid)
@@ -5630,7 +5657,7 @@ class Session:
 
             out = {}
             for (nid, prt) in targets:
-                out[(nid, prt)] = build(nid, prt, [])
+                out[(nid, prt)] = build(nid, prt, [], as_target=True)
             return out
 
         first = bool(getattr(self, "fuse_flows", True))
