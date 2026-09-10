@@ -72,6 +72,10 @@ interface Props {
     created?: number;
     cancelled?: boolean;
   }>;
+  /** Bumped by every "open" gesture (Settings menu, command palette). An
+   *  open while already open must still bring the window back: expand a
+   *  minimized pill and pull an off-screen position into view. */
+  revealNonce?: number;
 }
 
 type ShredInfo = {
@@ -93,6 +97,27 @@ function loadChrome(): StoredChrome {
   } catch {
     return {};
   }
+}
+
+/** Keep the drag handle inside the viewport. The position is restored from
+ *  localStorage, so a window last placed on a wider/taller screen (or dragged
+ *  to the far edge before a resize) came back with left/top past the
+ *  viewport: it "opened" invisibly and the menu item looked dead. */
+const DEFAULT_POS = { x: 120, y: 90 };
+export function clampToViewport(p: { x: number; y: number }): {
+  x: number;
+  y: number;
+} {
+  const x = Number.isFinite(p.x) ? p.x : DEFAULT_POS.x;
+  const y = Number.isFinite(p.y) ? p.y : DEFAULT_POS.y;
+  const vw = typeof window !== "undefined" ? window.innerWidth : 0;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 0;
+  if (!vw || !vh) return { x: Math.max(0, x), y: Math.max(0, y) };
+  // enough of the head bar stays reachable to drag it back
+  return {
+    x: Math.min(Math.max(0, x), Math.max(0, vw - 160)),
+    y: Math.min(Math.max(0, y), Math.max(0, vh - 80)),
+  };
 }
 
 function saveChrome(patch: StoredChrome) {
@@ -163,6 +188,7 @@ export const FieldExplorer: React.FC<Props> = ({
   onTablesChanged,
   onShred,
   onFlatten,
+  revealNonce = 0,
 }) => {
   // One source per loaded table that has nested content (not one per column).
   // Flatten-off JSON is a single catalog table with several nested columns —
@@ -323,11 +349,27 @@ export const FieldExplorer: React.FC<Props> = ({
       stopDiscovery(engine, table);
     };
   };
-  const initPos = {
-    x: typeof saved.x === "number" ? saved.x : 120,
-    y: typeof saved.y === "number" ? saved.y : 90,
-  };
-  const { pos, startDrag, dragging, settled, winRef } = useWinDrag(initPos);
+  const initPos = clampToViewport({
+    x: typeof saved.x === "number" ? saved.x : DEFAULT_POS.x,
+    y: typeof saved.y === "number" ? saved.y : DEFAULT_POS.y,
+  });
+  const { pos, setPos, startDrag, dragging, settled, winRef } =
+    useWinDrag(initPos);
+  const posRef = useRef(pos);
+  posRef.current = pos;
+
+  // Every open gesture must end with the window on screen: expand a
+  // minimized pill and clamp the (persisted) position into the viewport.
+  // Keyed on revealNonce too, so re-choosing "JSON Field Explorer" while it
+  // is already open still brings it back.
+  useEffect(() => {
+    if (!open) return;
+    setMinimized(false);
+    const next = clampToViewport(posRef.current);
+    if (next.x !== posRef.current.x || next.y !== posRef.current.y) {
+      setPos(next);
+    }
+  }, [open, revealNonce, setPos]);
 
   // auto-pick the only source
   useEffect(() => {

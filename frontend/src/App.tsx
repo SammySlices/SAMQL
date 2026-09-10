@@ -462,6 +462,9 @@ export default function App() {
   };
   // floating field-access explorer; stays open across IDE / Journal / Node
   const [fieldExplorerOpen, setFieldExplorerOpen] = useState(false);
+  // Counts open gestures so the explorer can re-reveal itself (expand a
+  // minimized pill, pull an off-screen window back) even when already open.
+  const [fieldExplorerReveal, setFieldExplorerReveal] = useState(0);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // Tools & Tables is NodeFlow-only; open flag lives here so Ctrl+K can open it
   // and it reappears when returning to NodeFlow (hidden in IDE/Journal).
@@ -2071,7 +2074,10 @@ export default function App() {
         label: "Open JSON Field Explorer",
         group: "Tools",
         keywords: "json nested fields shred flatten",
-        run: () => setFieldExplorerOpen(true),
+        run: () => {
+          setFieldExplorerOpen(true);
+          setFieldExplorerReveal((n) => n + 1);
+        },
       },
       {
         id: "activity",
@@ -3203,6 +3209,7 @@ export default function App() {
                   title="Browse nested JSON fields and build SELECT snippets"
                   onClick={() => {
                     setFieldExplorerOpen(true);
+                    setFieldExplorerReveal((n) => n + 1);
                     setSettingsOpen(false);
                   }}
                 >
@@ -3632,6 +3639,7 @@ export default function App() {
           </div>
           <FieldExplorer
             open={fieldExplorerOpen}
+            revealNonce={fieldExplorerReveal}
             onClose={() => setFieldExplorerOpen(false)}
             tables={tables}
             dataEpoch={dataEpoch}

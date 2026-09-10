@@ -979,3 +979,66 @@ describe("FieldExplorer minimize", () => {
     expect(screen.queryByTestId("field-explorer-mini")).toBeNull();
   });
 });
+
+describe("FieldExplorer always opens on screen", () => {
+  beforeEach(() => {
+    localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
+    vi.mocked(api.tableFields).mockResolvedValue({ fields: [] } as any);
+    vi.mocked(api.columnAccessPreview).mockResolvedValue({ ok: false } as any);
+  });
+
+  it("pulls a position saved beyond the viewport back into view", () => {
+    // A window last placed on a wider screen (or dragged off the edge)
+    // used to reopen at left/top past the viewport: invisible, so the
+    // Settings menu item looked like it did nothing.
+    localStorage.setItem(
+      FIELD_EXPLORER_STORE_KEY,
+      JSON.stringify({ x: window.innerWidth + 900, y: window.innerHeight + 400 }),
+    );
+    render(
+      <FieldExplorer open onClose={vi.fn()} tables={[]} onToast={vi.fn()} />,
+    );
+    const panel = screen.getByTestId("field-explorer-panel");
+    const left = parseFloat(panel.style.left);
+    const top = parseFloat(panel.style.top);
+    expect(left).toBeLessThanOrEqual(window.innerWidth - 160);
+    expect(top).toBeLessThanOrEqual(window.innerHeight - 80);
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(top).toBeGreaterThanOrEqual(0);
+    // the corrected position is what gets persisted
+    const saved = JSON.parse(localStorage.getItem(FIELD_EXPLORER_STORE_KEY) || "{}");
+    expect(saved.x).toBe(left);
+    expect(saved.y).toBe(top);
+  });
+
+  it("expands a persisted minimized pill when opened, and again on a repeat open", () => {
+    localStorage.setItem(
+      FIELD_EXPLORER_STORE_KEY,
+      JSON.stringify({ x: 10, y: 10, minimized: true }),
+    );
+    const { rerender } = render(
+      <FieldExplorer
+        open={false}
+        revealNonce={0}
+        onClose={vi.fn()}
+        tables={[]}
+        onToast={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("field-explorer-panel")).toBeNull();
+    // Settings → JSON Field Explorer: the full panel, not the old pill.
+    rerender(
+      <FieldExplorer open revealNonce={1} onClose={vi.fn()} tables={[]} onToast={vi.fn()} />,
+    );
+    expect(screen.getByTestId("field-explorer-panel")).toBeTruthy();
+    expect(screen.queryByTestId("field-explorer-mini")).toBeNull();
+    // Minimize, then choose the menu item again while still open.
+    fireEvent.click(screen.getByTestId("field-explorer-minimize"));
+    expect(screen.getByTestId("field-explorer-mini")).toBeTruthy();
+    rerender(
+      <FieldExplorer open revealNonce={2} onClose={vi.fn()} tables={[]} onToast={vi.fn()} />,
+    );
+    expect(screen.getByTestId("field-explorer-panel")).toBeTruthy();
+    expect(screen.queryByTestId("field-explorer-mini")).toBeNull();
+  });
+});
