@@ -253,6 +253,33 @@ def _pick_llama_asset_or_none(
     return None  # unreachable
 
 
+def _pick_from_recent_releases(
+    recent, plat: str, *, skip_tag: str = ""
+) -> tuple[tuple[str, str, str], str] | None:
+    """Newest recent release carrying a usable ``plat`` archive, as
+    ``(picked, tag)``; None when none does. ``recent`` is the GitHub
+    releases listing (newest first).
+
+    Pre-releases are NOT skipped. Since 2026-09 llama.cpp marks every
+    ``bNNNNN`` binary build as a pre-release and keeps the only
+    non-prerelease entry (``v0.4.0``) as a tag pointer with no binaries, so
+    honouring the flag left nothing to pick and the AppWindow build died
+    with "no usable win-cpu archive". Drafts are still skipped: their
+    assets are not downloadable."""
+    if not isinstance(recent, list):
+        return None
+    for rel in recent:
+        if not isinstance(rel, dict) or rel.get("draft"):
+            continue
+        rel_tag = rel.get("tag_name") or ""
+        if skip_tag and rel_tag == skip_tag:
+            continue
+        picked = _pick_llama_asset_or_none(rel.get("assets") or [], plat)
+        if picked is not None:
+            return picked, (rel_tag or "?")
+    return None
+
+
 def _pick_llama_asset(assets: list[dict], plat: str) -> tuple[str, str, str]:
     """Return (name, browser_download_url, binary_name)."""
     names = [a.get("name") or "" for a in assets]
@@ -359,15 +386,9 @@ def fetch_llama(out_dir: Path, plat: str, *, force: bool) -> Path:
         recent = _http_json(
             f"https://api.github.com/repos/{LLAMA_REPO}/releases?per_page=12"
         )
-        for rel in recent if isinstance(recent, list) else []:
-            if rel.get("draft") or rel.get("prerelease"):
-                continue
-            if (rel.get("tag_name") or "") == tag:
-                continue
-            picked = _pick_llama_asset_or_none(rel.get("assets") or [], plat)
-            if picked is not None:
-                tag = rel.get("tag_name") or "?"
-                break
+        picked_tag = _pick_from_recent_releases(recent, plat, skip_tag=tag)
+        if picked_tag is not None:
+            picked, tag = picked_tag
     if picked is None:
         # Reproduce the exact single-release error (message + asset list).
         picked = _pick_llama_asset(assets, plat)

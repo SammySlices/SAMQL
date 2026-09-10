@@ -151,5 +151,61 @@ class LlamaAssetPickerTests(unittest.TestCase):
         self.assertEqual(got[0], "llama-b6000-bin-macos-arm64.tar.gz")
 
 
+class RecentReleaseWalkBackTests(unittest.TestCase):
+    """The 2026-09-10 shape: llama.cpp marks every bNNNNN binary build as a
+    pre-release and the only non-prerelease entry (v0.4.0) is a tag pointer
+    with no binaries. Skipping pre-releases left nothing to pick and the
+    AppWindow release build died ("no usable win-cpu archive")."""
+
+    @staticmethod
+    def _rel(tag, names, *, prerelease=False, draft=False):
+        return {
+            "tag_name": tag,
+            "prerelease": prerelease,
+            "draft": draft,
+            "assets": [
+                {"name": n, "browser_download_url": f"https://dl/{tag}/{n}"}
+                for n in names
+            ],
+        }
+
+    def test_prerelease_binary_builds_are_eligible(self):
+        from fetch_assistant_pack import _pick_from_recent_releases
+        recent = [
+            self._rel("v0.4.0", ["nightly-tag.txt"]),
+            self._rel("b10896", [
+                "llama-b10896-bin-win-cuda-12.4-x64.zip",
+                "llama-b10896-bin-win-cpu-x64.zip",
+                "llama-b10896-bin-win-cpu-arm64.zip",
+            ], prerelease=True),
+            self._rel("b10894", [
+                "llama-b10894-bin-win-cpu-x64.zip",
+            ], prerelease=True),
+        ]
+        got = _pick_from_recent_releases(recent, "win-cpu", skip_tag="v0.4.0")
+        self.assertIsNotNone(got)
+        picked, tag = got
+        self.assertEqual(tag, "b10896")
+        self.assertEqual(picked[0], "llama-b10896-bin-win-cpu-x64.zip")
+        self.assertEqual(picked[2], "llama-server.exe")
+
+    def test_drafts_and_skip_tag_are_ignored(self):
+        from fetch_assistant_pack import _pick_from_recent_releases
+        recent = [
+            self._rel("b10897", ["llama-b10897-bin-win-cpu-x64.zip"],
+                      prerelease=True, draft=True),
+            self._rel("b10896", ["llama-b10896-bin-win-cpu-x64.zip"],
+                      prerelease=True),
+            self._rel("b10895", ["llama-b10895-bin-win-cpu-x64.zip"],
+                      prerelease=True),
+        ]
+        got = _pick_from_recent_releases(recent, "win-cpu", skip_tag="b10896")
+        self.assertEqual(got[1], "b10895")
+        self.assertIsNone(_pick_from_recent_releases(
+            [self._rel("b1", ["llama-b1-bin-win-cuda-12.4-x64.zip"], prerelease=True)],
+            "win-cpu"))
+        self.assertIsNone(_pick_from_recent_releases({"message": "rate limited"}, "win-cpu"))
+
+
 if __name__ == "__main__":
     unittest.main()
