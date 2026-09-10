@@ -2,12 +2,38 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-08-13.700
+Current build:   2026-09-10.701
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-09-10.701  (v2.16.4)
+
+NODEFLOW FILTER SHARING AN INPUT WITH A SECOND BRANCH PREVIEWS ITS
+REAL ROWS; JSON FIELD EXPLORER ALWAYS OPENS ON SCREEN.
+
+A Filter wired to the same Input as a Summarize showed no results
+after Run all. The post-run seed pass requests every ancestor as a
+200-row preview target, and the flow builder registered that
+truncated Input copy as the node's relation, so a Filter built after
+it was evaluated over the Input's first 200 rows only (0 matches when
+the matching rows sit later in the file). That seed then overwrote
+the correct full-run result in the preview cache. Row-limited preview
+copies now live apart from the node's relation, are derived from the
+full relation when one exists, and never enter the flow caches. A
+backend test covers every seed order with the flow cache on and off.
+
+Settings -> JSON Field Explorer could look dead: the floating window
+restored its last position from localStorage without viewport
+clamping, so a position saved on a wider screen (or dragged to the
+edge before a resize) reopened off screen. A persisted minimized
+pill had the same effect, and re-choosing the menu item while the
+explorer was already open changed nothing. Every open gesture now
+clamps the window into the viewport, expands a minimized pill, and
+re-reveals an already-open window (Settings menu + command palette).
 
 ----------------------------------------------------------------------
 build 2026-08-13.700  (v2.16.4)
