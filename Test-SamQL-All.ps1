@@ -230,6 +230,9 @@ Invoke-Python "dual-engine optimizations" @("tests\test_optimizations_dual_engin
 Step "Running adaptive resources, parallel branches and persistent-cache suite"
 Invoke-Python "nodeflow resources" @("tests\test_nodeflow_resources.py")
 
+Step "Running NodeFlow data-flow isolation, accuracy and cross-surface freshness suite"
+Invoke-Python "nodeflow data flow" @("tests\test_nodeflow_data_flow.py")
+
 Step "Running benchmark harness self-test"
 Invoke-Python "benchmark self-test" @("tests\benchmark_workloads.py", "--self-test")
 

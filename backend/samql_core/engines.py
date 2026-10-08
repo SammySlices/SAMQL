@@ -1043,12 +1043,32 @@ class DBManager:
             n = 0
             batch = []
             coerce_all = [False]
+            # Typed numeric columns: a blank CSV/JSON cell must land as NULL,
+            # never as ''. SQLite's INTEGER/REAL affinity cannot convert an
+            # empty string, so it would be stored as TEXT -- and TEXT sorts
+            # ABOVE every number, so ``qty > 2`` matched blank rows, COUNT(qty)
+            # counted them and SUM/AVG treated them as 0. The DuckDB streaming
+            # path already does this (_coerce -> _empty_to_null); mirror it.
+            typed_idx = tuple(i for i, c in enumerate(columns) if affin.get(c))
+
+            def _null_blanks(rows):
+                if not typed_idx:
+                    return rows
+                out = []
+                for r in rows:
+                    r = list(r)
+                    for i in typed_idx:
+                        if i < len(r):
+                            r[i] = _empty_to_null(r[i])
+                    out.append(tuple(r))
+                return out
 
             def _flush(rows):
                 # Try the fast path; on a bind failure (e.g. an int wider
                 # than 64-bit, or a Decimal), undo the partially-inserted
                 # batch with a savepoint, coerce values to a text-safe form,
                 # and retry -- then keep coercing the rest of the load.
+                rows = _null_blanks(rows)
                 if coerce_all[0]:
                     cur.executemany(
                         insert_sql,

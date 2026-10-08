@@ -39,6 +39,8 @@ jobs:
         run: python tests/test_optimizations_dual_engine.py
       - name: Run resource, parallel-branch, and persistent-cache suite
         run: python tests/test_nodeflow_resources.py
+      - name: Run NodeFlow data-flow isolation, accuracy, and freshness suite
+        run: python tests/test_nodeflow_data_flow.py
       - name: Run benchmark harness self-test
         run: python tests/benchmark_workloads.py --self-test
 
