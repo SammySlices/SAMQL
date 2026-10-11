@@ -166,7 +166,7 @@ def build_transport_text(
         "",
         "Decode this file with:",
         "  python tools/aphex_transport.py decode <transport> -o <bundle>",
-        "After decoding, expand the restored full-source bundle with Expand-SamQL[.]ps1.",
+        "After decoding, expand the restored full-source bundle with Expand-SamQL[.]" "ps1.",
         "",
         BEGIN,
     ]

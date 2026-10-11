@@ -179,7 +179,7 @@ def build_bundle_bytes(root: Path) -> tuple[bytes, list[str], str]:
         f"#   sha256:    {body_sha}  (of the section body below)\n"
         f"#   generated: {generated}\n"
         "#   contents:  complete source + tests + UI (Test-SamQL-All ready)\n"
-        "#   reconstruct with Expand-SamQL[.]ps1 (this header is ignored)\n"
+        "#   reconstruct with Expand-SamQL[.]" "ps1 (this header is ignored)\n"
         "############################################################\n"
     ).encode("utf-8")
     return header + body, entries, body_sha
