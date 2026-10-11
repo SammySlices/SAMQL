@@ -16073,6 +16073,9 @@ def backend_tests(datadir, csv_path, json_path):
              "every palette node has a flow test (uncovered: %r)"
              % uncovered)
         sess = _fresh_session()
+        # The untyped CREATE below is SQLite DDL; the default always-DuckDB
+        # engine preference would route "auto" to DuckDB and fail the setup.
+        sess.engine_mode = "dual"
         try:
             sess.run_query(
                 "CREATE TABLE d(id, cat, val); INSERT INTO d VALUES "
@@ -43316,6 +43319,8 @@ def backend_tests(datadir, csv_path, json_path):
     cases.extend(_flatten_integrity_cases(ROOT, CSV, skip))
     from test_reconcile_integrity import backend_cases as _recon_integrity_cases
     cases.extend(_recon_integrity_cases(ROOT, CSV, skip))
+    from test_nodeflow_isolation import backend_cases as _isolation_cases
+    cases.extend(_isolation_cases(ROOT, CSV, skip))
     _only = os.environ.get("SAMQL_ONLY")
     _skip = os.environ.get("SAMQL_SKIP")
     if os.environ.get("SAMQL_GROUP") not in (None, "", "backend"):

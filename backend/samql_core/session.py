@@ -4943,9 +4943,32 @@ class Session:
             return "sqlite"
         return None
 
-    def _flow_pinned_engine(self, graph):
+    @staticmethod
+    def _ancestor_node_ids(graph, target_node_ids):
+        """Node ids reachable upstream (via edges) from ``target_node_ids``,
+        including the targets themselves."""
+        back = {}
+        for edge in (graph.get("edges") or []):
+            src = (edge.get("from") or {}).get("node")
+            dst = (edge.get("to") or {}).get("node")
+            if src is not None and dst is not None:
+                back.setdefault(dst, set()).add(src)
+        seen, stack = set(), list(target_node_ids or ())
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(back.get(cur, ()))
+        return seen
+
+    def _flow_pinned_engine(self, graph, target_node_ids=None):
         """Return ``\"duckdb\"``, ``\"sqlite\"``, or ``None`` if no input pins
-        an engine. Shared by flow targeting and Write-node destination."""
+        an engine. Shared by flow targeting and Write-node destination.
+
+        With ``target_node_ids`` only the targets' ancestor closure is
+        scanned, so a disconnected component on another engine does not
+        poison the run; ``None`` scans every node on the canvas."""
         from . import nodeflow
         eng = None
 
@@ -4994,14 +5017,20 @@ class Session:
                     # in DuckDB ("no such table __nbapi_...").
                     _scan(cfg.get("children"))
 
-        _scan(graph.get("nodes"))
+        nodes = graph.get("nodes")
+        if target_node_ids is not None:
+            keep = self._ancestor_node_ids(graph, target_node_ids)
+            nodes = [n for n in (nodes or [])
+                     if isinstance(n, dict) and n.get("id") in keep]
+        _scan(nodes)
         return eng
 
-    def _flow_engine_target(self, graph):
+    def _flow_engine_target(self, graph, target_node_ids=None):
         """The single engine a flow runs on, derived from its input tables and
         any loaded tables referenced by SQL nodes. Unpinned flows follow the
-        engine preference (always-DuckDB mode) instead of defaulting local."""
-        eng = self._flow_pinned_engine(graph)
+        engine preference (always-DuckDB mode) instead of defaulting local.
+        ``target_node_ids`` restricts the scan to the targets' ancestors."""
+        eng = self._flow_pinned_engine(graph, target_node_ids)
         if eng:
             return DUCKDB_TARGET if eng == "duckdb" else LOCAL_TARGET
         return DUCKDB_TARGET if self._duckdb_only() else LOCAL_TARGET
@@ -5266,7 +5295,8 @@ class Session:
             # (LOCAL pre-fetch -> DuckDB hidden source table). An unpinned
             # flow keeps the caller's chosen target -- run_nodeflow_to_table
             # deliberately materialises on the write destination.
-            pin = self._flow_pinned_engine(graph)
+            pin = self._flow_pinned_engine(
+                graph, [nid for nid, _port in targets])
             if pin == "duckdb" and engine_target != DUCKDB_TARGET:
                 new_eng, _ = self._engine_obj(DUCKDB_TARGET)
                 self._rebind_run_engine(query_id, new_eng)
@@ -6304,7 +6334,7 @@ class Session:
                     preview_limit = DISPLAY_LIMIT
             else:
                 preview_limit = None
-            et = self._flow_engine_target(graph)
+            et = self._flow_engine_target(graph, [node_id])
             eng, _kind = self._engine_obj(et)
             # Clear a sticky engine cancel left SET by a prior Stop/stall so the
             # BeatDaemon does not auto-interrupt this run's materialization (a
@@ -6414,7 +6444,8 @@ class Session:
         created = []
         et = LOCAL_TARGET
         try:
-            et = self._flow_engine_target(graph)
+            et = self._flow_engine_target(
+                graph, [nid for nid, _port in norm])
             eng, _kind = self._engine_obj(et)
             # Clear a sticky engine cancel left SET by a prior Stop/stall so the
             # BeatDaemon does not auto-interrupt this batch's materialization
