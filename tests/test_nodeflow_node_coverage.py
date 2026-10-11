@@ -136,6 +136,11 @@ def t_date_trunc():
         assert not r.get("error"), "date trunc: %r" % r.get("error")
         assert r.get("total_rows") == 2, \
             "expected 2 rows, got %r" % r.get("total_rows")
+        # Both rows should truncate to 2024-06-01 (first of month)
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        assert any("2024-06-01" in v or "2024-06" in v for v in flat), \
+            "expected truncated date 2024-06-01 in %r" % flat
     finally:
         s.shutdown()
 
@@ -157,6 +162,10 @@ def t_dedupe_basic():
         assert not r.get("error"), "dedupe basic: %r" % r.get("error")
         assert r.get("total_rows") == 2, \
             "dedupe should keep 2 distinct names, got %r" % r.get("total_rows")
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        assert "alice" in flat and "bob" in flat, \
+            "dedupe must keep alice and bob: %r" % flat
     finally:
         s.shutdown()
 
@@ -175,6 +184,11 @@ def t_dedupe_multi_key():
         assert not r.get("error"), "dedupe multi-key: %r" % r.get("error")
         assert r.get("total_rows") == 3, \
             "dedupe (cat,sub) should yield 3 rows, got %r" % r.get("total_rows")
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        # 'A'-1 deduped to 1, 'A'-2 and 'B'-1 are unique — 'A' and 'B' must appear
+        assert "A" in flat and "B" in flat, \
+            "dedupe multi-key: expected A and B in rows: %r" % flat
     finally:
         s.shutdown()
 
@@ -195,6 +209,10 @@ def t_explode_delim():
         assert not r.get("error"), "explode delim: %r" % r.get("error")
         assert r.get("total_rows") == 5, \
             "explode delim should produce 5 rows, got %r" % r.get("total_rows")
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        assert "a" in flat and "b" in flat and "c" in flat, \
+            "explode delim: expected a,b,c values in %r" % flat
     finally:
         s.shutdown()
 
@@ -213,6 +231,10 @@ def t_explode_json():
         # 2 items from row 1 + 1 from row 2 = 3 total
         assert r.get("total_rows") == 3, \
             "explode json should produce 3 rows, got %r" % r.get("total_rows")
+        rows = r.get("rows") or []
+        flat = [str(v).strip('"') for row in rows for v in row]
+        assert "apple" in flat and "banana" in flat and "cat" in flat, \
+            "explode json: expected apple,banana,cat in %r" % flat
     finally:
         s.shutdown()
 
@@ -260,13 +282,27 @@ def t_fill_avg():
         r = _run(s, g, "fa")
         assert not r.get("error"), "fill avg: %r" % r.get("error")
         assert r.get("total_rows") == 3
+        # NULLs should be replaced with avg(10, 20) = 15.0
+        rows = r.get("rows") or []
+        cols = r.get("columns") or []
+        score_idx = next(
+            (i for i, c in enumerate(cols)
+             if (c if isinstance(c, str) else c.get("name", "")) == "score"),
+            None)
+        if score_idx is not None:
+            vals = [row[score_idx] for row in rows]
+            assert all(v is not None for v in vals), \
+                "fill avg left NULLs: %r" % vals
+            # avg of 10 and 20 is 15 — the filled value should be 15 or 15.0
+            assert any(str(v) in ("15", "15.0") for v in vals), \
+                "fill avg: expected 15.0 in %r" % vals
     finally:
         s.shutdown()
 
 
 # ---------------------------------------------------------------------------
 # jsonextract
-# ---------------------------------------------------------------------------
+
 
 def t_jsonextract_single_field():
     s = _fresh_session()
@@ -285,6 +321,10 @@ def t_jsonextract_single_field():
                 for c in (r.get("columns") or [])]
         assert "person_name" in cols, \
             "expected person_name in columns: %r" % cols
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        assert "alice" in flat and "bob" in flat, \
+            "jsonextract: expected alice and bob in person_name: %r" % flat
     finally:
         s.shutdown()
 
@@ -373,6 +413,19 @@ def t_parse_number():
         r = _run(s, g, "pn")
         assert not r.get("error"), "parse number: %r" % r.get("error")
         assert r.get("total_rows") == 2
+        rows = r.get("rows") or []
+        cols = r.get("columns") or []
+        amt_idx = next(
+            (i for i, c in enumerate(cols)
+             if (c if isinstance(c, str) else c.get("name", "")) == "amount"),
+            None)
+        if amt_idx is not None:
+            vals = [row[amt_idx] for row in rows]
+            # 1,234.56 → 1234.56  and  2,000.00 → 2000.0
+            assert any(str(v) in ("1234.56", "1234.5600000000", "1234.56") or
+                       float(str(v)) == 1234.56 if v else False
+                       for v in vals), \
+                "parse number: expected 1234.56 in %r" % vals
     finally:
         s.shutdown()
 
@@ -388,6 +441,11 @@ def t_parse_date():
         r = _run(s, g, "pd")
         assert not r.get("error"), "parse date: %r" % r.get("error")
         assert r.get("total_rows") == 2
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        # Parsed dates should contain 2024-01-15 or 2024-03-20
+        assert any("2024-01-15" in v or "2024-01" in v for v in flat), \
+            "parse date: expected 2024-01-15 in %r" % flat
     finally:
         s.shutdown()
 
@@ -403,6 +461,10 @@ def t_parse_integer():
         r = _run(s, g, "pi")
         assert not r.get("error"), "parse integer: %r" % r.get("error")
         assert r.get("total_rows") == 2
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        assert "42" in flat and "100" in flat, \
+            "parse integer: expected 42 and 100 in %r" % flat
     finally:
         s.shutdown()
 
@@ -427,6 +489,12 @@ def t_perioddelta_absolute():
         cols = [c if isinstance(c, str) else c.get("name", "")
                 for c in (r.get("columns") or [])]
         assert "chg" in cols, "expected 'chg' column in %r" % cols
+        rows = r.get("rows") or []
+        chg_idx = cols.index("chg")
+        chg_vals = [row[chg_idx] for row in rows if row[chg_idx] is not None]
+        # period 2-1 = +20.0; period 3-2 = -10.0
+        nums = [float(v) for v in chg_vals]
+        assert 20.0 in nums, "perioddelta absolute: expected +20.0 delta in %r" % nums
     finally:
         s.shutdown()
 
@@ -443,6 +511,16 @@ def t_perioddelta_percent():
         r = _run(s, g, "pdp")
         assert not r.get("error"), "perioddelta percent: %r" % r.get("error")
         assert r.get("total_rows") == 2
+        rows = r.get("rows") or []
+        cols = [c if isinstance(c, str) else c.get("name", "")
+                for c in (r.get("columns") or [])]
+        assert "pct_chg" in cols, "expected 'pct_chg' column in %r" % cols
+        pct_idx = cols.index("pct_chg")
+        pct_vals = [row[pct_idx] for row in rows if row[pct_idx] is not None]
+        # 100→150 = +50% change
+        nums = [float(v) for v in pct_vals]
+        assert any(abs(n - 50.0) < 0.01 for n in nums), \
+            "perioddelta percent: expected 50.0 pct in %r" % nums
     finally:
         s.shutdown()
 
@@ -464,6 +542,13 @@ def t_perioddelta_running_total():
         cols = [c if isinstance(c, str) else c.get("name", "")
                 for c in (r.get("columns") or [])]
         assert "cumsum" in cols, "expected 'cumsum' column in %r" % cols
+        rows = r.get("rows") or []
+        cs_idx = cols.index("cumsum")
+        cs_vals = [row[cs_idx] for row in rows if row[cs_idx] is not None]
+        # running totals: 10, 30, 35
+        nums = sorted([float(v) for v in cs_vals])
+        assert nums == [10.0, 30.0, 35.0], \
+            "perioddelta running_total: expected [10,30,35] in %r" % nums
     finally:
         s.shutdown()
 
@@ -550,6 +635,10 @@ def t_validate_passthrough():
         assert not r.get("error"), "validate passthrough: %r" % r.get("error")
         assert r.get("total_rows") == 3, \
             "validate passthrough must keep all rows, got %r" % r.get("total_rows")
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        assert "alice" in flat and "bob" in flat and "carol" in flat, \
+            "validate passthrough: expected alice, bob, carol in %r" % flat
     finally:
         s.shutdown()
 
@@ -568,6 +657,11 @@ def t_validate_passthrough_columns_intact():
         for col in ("x", "y", "z"):
             assert col in cols, \
                 "validate lost column %r: cols=%r" % (col, cols)
+        rows = r.get("rows") or []
+        flat = [str(v) for row in rows for v in row]
+        # Single row: 10, 20, 30
+        assert "10" in flat and "20" in flat and "30" in flat, \
+            "validate columns: expected values 10,20,30 in %r" % flat
     finally:
         s.shutdown()
 
@@ -627,6 +721,12 @@ def t_while_bounded():
             "run_while must complete at least 1 iteration: %r" % result
         assert result.get("rows", 0) >= 3, \
             "accumulator must have >= 3 rows after 1 iteration: %r" % result
+        # Query the accumulator directly to verify actual values were appended
+        qr = s.run_query("SELECT n FROM nc_while_acc ORDER BY n", target=_LOCAL)
+        assert not qr.get("error"), "query accum: %r" % qr.get("error")
+        acc_flat = [str(v) for row in (qr.get("rows") or []) for v in row]
+        assert "1" in acc_flat and "2" in acc_flat and "3" in acc_flat, \
+            "while: accumulator must contain 1,2,3 from source: %r" % acc_flat
     finally:
         s.shutdown()
 
