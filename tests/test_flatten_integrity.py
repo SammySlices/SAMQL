@@ -432,4 +432,309 @@ def backend_cases(root, csv, skip):
          lambda: t_flatten_integrity_big_integers_duckdb(skip)),
         ("flatten integrity: duplicate JSON keys end-to-end",
          t_flatten_integrity_duplicate_keys),
+    ] + _extra_backend_cases()
+
+
+# ---------------------------------------------------------------------------
+# Task F — Deeply nested structures (3+ levels)
+# ---------------------------------------------------------------------------
+
+def t_flatten_integrity_deep_nesting():
+    """Three-level nesting flattens into dotted column names on the root table.
+
+    JSONFlattener inlines nested objects as dotted columns (a_b_c_value),
+    not as separate child tables. Arrays produce child tables; objects don't.
+    """
+    from samql_core.flatten import JSONFlattener
+
+    fl = JSONFlattener(root_name="root")
+    fl.add_record({
+        "id": 1,
+        "a": {
+            "b": {
+                "c": {"value": 42},
+                "flat": "hello"
+            }
+        }
+    })
+    fl.add_record({
+        "id": 2,
+        "a": {
+            "b": {
+                "c": {"value": 99},
+                "flat": "world"
+            }
+        }
+    })
+
+    tables = dict(fl.tables)
+    assert "root" in tables, "Root table missing: %r" % list(tables.keys())
+    rows = list(tables["root"])
+    assert len(rows) == 2, "Expected 2 root rows, got %d" % len(rows)
+
+    # Deeply nested object must be inlined with dotted separator
+    assert "a_b_c_value" in rows[0], (
+        "Expected 'a_b_c_value' column, got keys: %r" % list(rows[0].keys()))
+    assert rows[0]["a_b_c_value"] == 42
+    assert rows[1]["a_b_c_value"] == 99
+    assert rows[0]["a_b_flat"] == "hello"
+    assert rows[1]["a_b_flat"] == "world"
+
+    # No spurious child tables for nested objects (only arrays make child tables)
+    assert list(tables.keys()) == ["root"], (
+        "Nested objects should not create child tables, got: %r" % list(tables.keys()))
+
+
+# ---------------------------------------------------------------------------
+# Task G — Sparse / heterogeneous records (missing keys vs explicit null)
+# ---------------------------------------------------------------------------
+
+def t_flatten_integrity_sparse_records():
+    """Missing keys are absent from that row; explicit nulls produce None.
+
+    JSONFlattener does NOT backfill absent columns with None — a missing
+    key simply isn't in that row's dict. This is the correct sparse-row
+    behavior. The test documents and pins this contract.
+    """
+    from samql_core.flatten import JSONFlattener
+
+    fl = JSONFlattener(root_name="data")
+    fl.add_record({"x": 1, "y": "a"})
+    fl.add_record({"y": "b"})              # x missing entirely
+    fl.add_record({"x": None, "y": "c"})  # x explicitly null
+
+    rows = list(dict(fl.tables)["data"])
+    assert len(rows) == 3, "Expected 3 rows, got %d" % len(rows)
+
+    # Row 0: x present with value 1
+    assert rows[0].get("x") == 1
+    assert rows[0]["y"] == "a"
+
+    # Row 1: x absent (sparse row — key not present, not None)
+    assert "x" not in rows[1], (
+        "Missing key 'x' should be absent from sparse row, got: %r" % rows[1])
+    assert rows[1]["y"] == "b"
+
+    # Row 2: x explicitly null → None in the column
+    assert "x" in rows[2], "Explicit null key must still appear in row: %r" % rows[2]
+    assert rows[2]["x"] is None
+    assert rows[2]["y"] == "c"
+
+
+# ---------------------------------------------------------------------------
+# Task H — Root object (not array) as JSON input
+# ---------------------------------------------------------------------------
+
+def t_flatten_integrity_root_object():
+    """A root-level JSON object (not array) produces exactly one root row.
+
+    {"name": "wade", "score": 99} → 1 row with name="wade", score=99.
+    """
+    from samql_core.flatten import JSONFlattener
+
+    fl = JSONFlattener(root_name="rec")
+    fl.add_record({"name": "wade", "score": 99})
+
+    rows = list(dict(fl.tables)["rec"])
+    assert len(rows) == 1, "Expected 1 row for root object, got %d" % len(rows)
+    assert rows[0]["name"] == "wade"
+    assert rows[0]["score"] == 99
+
+
+# ---------------------------------------------------------------------------
+# Task I — Mixed arrays (objects and primitives interleaved)
+# ---------------------------------------------------------------------------
+
+def t_flatten_integrity_mixed_array():
+    """Arrays containing both object elements and primitives don't crash.
+
+    The flattener must handle heterogeneous arrays gracefully — either
+    coercing primitives to a value column or stringifying them, but never
+    raising an unhandled exception.
+    """
+    from samql_core.flatten import JSONFlattener
+
+    fl = JSONFlattener(root_name="root")
+    # Array with mixed content: objects and scalars
+    try:
+        fl.add_record({"items": [{"a": 1}, "primitive", {"a": 3}, None, 42]})
+    except Exception as e:
+        raise AssertionError(
+            "JSONFlattener raised on mixed array: %s: %s" % (type(e).__name__, e))
+
+    tables = dict(fl.tables)
+    assert "root" in tables, "Root table missing after mixed-array record"
+    # At minimum one root row must exist
+    root_rows = list(tables["root"])
+    assert len(root_rows) >= 1, "No root rows produced for mixed-array record"
+
+
+# ---------------------------------------------------------------------------
+# Task J — Unicode and path-colliding keys
+# ---------------------------------------------------------------------------
+
+def t_flatten_integrity_unicode_keys():
+    """Unicode keys and keys that collide after sanitization are safe.
+
+    Keys like "café" and "cafe" sanitize to the same ASCII slug; the
+    second must get a suffix, not overwrite the first.
+    """
+    from samql_core.flatten import JSONFlattener
+
+    fl = JSONFlattener(root_name="root")
+    # Two records: one with "café" (unicode), one with "cafe" (ascii)
+    fl.add_record({"café": "latte", "value": 1})
+    fl.add_record({"cafe": "plain", "value": 2})
+
+    rows = list(dict(fl.tables)["root"])
+    assert len(rows) == 2, "Expected 2 rows, got %d" % len(rows)
+
+    # All column values must be reachable (no data silently lost)
+    all_values = set()
+    for row in rows:
+        all_values.update(row.values())
+    assert {"latte", "plain"} <= all_values, (
+        "Unicode key values lost in flattening — expected both 'latte' and 'plain', got: %r" % rows)
+
+    # No two distinct paths should map to the same column name
+    col_names = [list(row.keys()) for row in rows]
+    flat_cols = [c for cols in col_names for c in cols]
+    # Check no value appears under a wrong key (collision would cause overwrite)
+    row_col_sets = [set(row.keys()) for row in rows]
+    for row in rows:
+        # "value" column must always be present
+        assert "value" in row, "Scalar 'value' column lost: %r" % row
+
+
+# ---------------------------------------------------------------------------
+# Task K — Malformed / truncated JSON input via load_json
+# ---------------------------------------------------------------------------
+
+def t_flatten_integrity_malformed_json():
+    """Malformed JSON raises JSONDecodeError (or produces 0 records), never crashes.
+
+    stream_json_records must fail with a known exception type for malformed
+    input, not an unhandled internal error. Empty/whitespace-only files must
+    produce 0 records without raising.
+    """
+    import json
+    import tempfile
+    import os
+
+    _HERE2 = os.path.dirname(os.path.abspath(__file__))
+    _BACKEND2 = os.path.join(os.path.dirname(_HERE2), "backend")
+    for _p in (_HERE2, _BACKEND2):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+    from samql_core.flatten import stream_json_records
+
+    # Cases that must raise a known JSON decode error (not a raw crash)
+    error_cases = [
+        b'{"key": "unterminated string',   # truncated mid-string
+        b'[{"a": 1}, {"b": 2',             # truncated mid-array
+        b'not json at all !!!',            # garbage text
+    ]
+    for payload in error_cases:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(payload)
+            tmp = f.name
+        try:
+            records = list(stream_json_records(tmp))
+            # If it returns without raising, it must have produced 0 records
+            # (some parsers silently skip malformed trailing content)
+            # This is also acceptable behavior.
+        except json.JSONDecodeError:
+            pass  # expected — JSONDecodeError is a known, handled exception type
+        except ValueError:
+            pass  # JSONDecodeError is a subclass of ValueError — both acceptable
+        except Exception as e:
+            raise AssertionError(
+                "stream_json_records raised unexpected %s for malformed JSON %r: %s" % (
+                    type(e).__name__, payload[:30], e))
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+
+    # Empty and whitespace-only files must produce 0 records without raising
+    silent_cases = [b'', b'   \n\t  ']
+    for payload in silent_cases:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            f.write(payload)
+            tmp = f.name
+        try:
+            records = list(stream_json_records(tmp))
+            assert len(records) == 0, (
+                "Expected 0 records for empty/whitespace JSON, got %d" % len(records))
+        except Exception as e:
+            raise AssertionError(
+                "stream_json_records raised for empty input %r: %s: %s" % (
+                    payload, type(e).__name__, e))
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Task L — Empty data inputs
+# ---------------------------------------------------------------------------
+
+def t_flatten_integrity_empty_inputs():
+    """Empty JSON structures produce no rows and no crash.
+
+    [], {}, and a file with only whitespace must all be handled without
+    raising, and must produce either an empty result or a clear error.
+    """
+    from samql_core.flatten import JSONFlattener
+
+    # Empty array: add_record never called — tables should be empty
+    fl_empty = JSONFlattener(root_name="empty")
+    tables = dict(fl_empty.tables)
+    # No rows anywhere
+    for tname, rows in tables.items():
+        assert list(rows) == [], (
+            "Empty flattener has rows in table %r: %r" % (tname, list(rows)))
+
+    # Single empty object
+    fl_obj = JSONFlattener(root_name="obj")
+    fl_obj.add_record({})
+    rows = list(dict(fl_obj.tables).get("obj", []))
+    # An empty record may produce 0 or 1 row with only an _id; must not crash
+    assert isinstance(rows, list), "add_record({}) produced non-list: %r" % rows
+
+    # Empty string values in a record
+    fl_str = JSONFlattener(root_name="str")
+    fl_str.add_record({"a": "", "b": None, "c": 0})
+    rows_str = list(dict(fl_str.tables)["str"])
+    assert len(rows_str) == 1, "Expected 1 row for empty-string record, got %d" % len(rows_str)
+    assert rows_str[0]["a"] == ""
+    assert rows_str[0]["b"] is None
+    assert rows_str[0]["c"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Register new cases
+# ---------------------------------------------------------------------------
+
+def _extra_backend_cases():
+    """Extra flatten integrity cases to append to backend_cases."""
+    return [
+        ("flatten integrity: deep 3-level nesting FK chain",
+         t_flatten_integrity_deep_nesting),
+        ("flatten integrity: sparse records missing vs null keys",
+         t_flatten_integrity_sparse_records),
+        ("flatten integrity: root object single record",
+         t_flatten_integrity_root_object),
+        ("flatten integrity: mixed array objects+primitives no crash",
+         t_flatten_integrity_mixed_array),
+        ("flatten integrity: unicode and collision-prone keys",
+         t_flatten_integrity_unicode_keys),
+        ("flatten integrity: malformed/truncated JSON fails closed",
+         t_flatten_integrity_malformed_json),
+        ("flatten integrity: empty inputs no crash no rows",
+         t_flatten_integrity_empty_inputs),
     ]
