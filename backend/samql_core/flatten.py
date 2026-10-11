@@ -664,22 +664,47 @@ def _iter_stream_records(f, on_read=None):
             return
         if buf[0][pos[0]] == "[":
             pos[0] += 1               # enter this array
+            # State machine: WANT_VALUE_OR_CLOSE -> WANT_SEP_OR_CLOSE -> ...
+            # Enforces legal separators; rejects leading, double, trailing
+            # commas and adjacent elements without a comma.
+            _WANT_VALUE_OR_CLOSE = 0   # just entered [ or just consumed ','
+            _WANT_SEP_OR_CLOSE   = 1   # just yielded a value
+            _WANT_VALUE          = 2   # consumed ','; value is mandatory
+            _state = _WANT_VALUE_OR_CLOSE
             while True:
                 if not _skip_ws():
-                    return            # unterminated array: stop gracefully
+                    raise ValueError(
+                        "truncated JSON array: EOF before closing ']'")
                 c = buf[0][pos[0]]
                 if c == ",":
+                    if _state == _WANT_VALUE_OR_CLOSE:
+                        raise ValueError(
+                            "malformed JSON array: leading or double comma")
+                    if _state == _WANT_VALUE:
+                        raise ValueError(
+                            "malformed JSON array: double comma")
+                    # _WANT_SEP_OR_CLOSE -> consumed the separator
                     pos[0] += 1
+                    _state = _WANT_VALUE
                     continue
                 if c == "]":
+                    if _state == _WANT_VALUE:
+                        raise ValueError(
+                            "malformed JSON array: trailing comma before ']'")
                     pos[0] += 1       # end of this array; resume outer scan
                     break
+                # Must be a value. Reject if we expected a separator.
+                if _state == _WANT_SEP_OR_CLOSE:
+                    raise ValueError(
+                        "malformed JSON array: missing ',' between elements")
                 got = _decode_value()
                 if got is None:
-                    return            # cannot complete the final element
+                    raise ValueError(
+                        "truncated JSON array: EOF inside final element")
                 obj, end = got
                 pos[0] = end
                 produced[0] += 1
+                _state = _WANT_SEP_OR_CLOSE
                 yield obj
         else:
             # A bare top-level value (object / scalar): NDJSON, concatenated
@@ -687,7 +712,14 @@ def _iter_stream_records(f, on_read=None):
             got = _decode_value()
             if got is None:
                 if produced[0]:
-                    return            # truncated tail after valid records: stop
+                    # Non-whitespace content after valid records that cannot
+                    # complete as a JSON value is truncated/corrupt input.
+                    tail = buf[0][pos[0]:].strip()
+                    if tail:
+                        raise ValueError(
+                            "truncated or malformed JSON: non-whitespace "
+                            "garbage after %d valid record(s)" % produced[0])
+                    return            # trailing whitespace only -> clean EOF
                 tail = buf[0][pos[0]:].strip()
                 if not tail:
                     return            # genuinely empty -> no records (not error)
