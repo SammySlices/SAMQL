@@ -27,7 +27,7 @@ from tools.package_release import (  # noqa: E402
     verify_bundle,
 )
 import tools.release_preflight as release_preflight  # noqa: E402
-from tools.release_preflight import load_manifest, run_preflight  # noqa: E402
+from tools.release_preflight import Checks, load_manifest, run_preflight  # noqa: E402
 
 
 def require(condition: bool, message: str) -> None:
@@ -139,8 +139,34 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
     require(not duplicate_push.ok, "preflight accepted duplicate push mappings")
 
 
+def _assert_golden_flow_fixture_omission_detected() -> None:
+    """Focused regression: dropping one golden-flow fixture from the manifest
+    must cause the 'complete test extract trees' check to fail."""
+    full_manifest = load_manifest(ROOT / "SOURCE_MANIFEST.txt")
+    omit = "tests/fixtures/golden_flows/expected.json"
+    reduced_manifest = [e for e in full_manifest if e != omit]
+    require(
+        len(reduced_manifest) == len(full_manifest) - 1,
+        f"{omit!r} was not present in the manifest being tested; "
+        "this regression is only meaningful when the fixture is manifested",
+    )
+    checks = Checks()
+    release_preflight._check_complete_test_extract(ROOT, {}, checks, reduced_manifest)
+    tree_check = next(
+        (item for item in checks.items if item.name == "complete test extract trees"),
+        None,
+    )
+    require(tree_check is not None, "run did not emit 'complete test extract trees' check")
+    require(
+        not tree_check.ok,
+        f"preflight accepted a manifest with {omit!r} omitted; "
+        f"check detail: {tree_check.detail!r}",
+    )
+
+
 def main() -> int:
     _assert_windows_workflow_requires_unambiguous_master()
+    _assert_golden_flow_fixture_omission_detected()
     failures = [item for item in run_preflight(ROOT) if not item.ok]
     require(
         not failures,

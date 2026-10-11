@@ -1,4 +1,3 @@
-
 .gitattributes
 .github/RELEASE_NOTES.md
 .github/workflows/release-appwindow.yml
@@ -114,6 +113,7 @@ frontend/src/components/CreatedNodesSettings.tsx
 frontend/src/components/Dashboard.tsx
 frontend/src/components/DashboardSettings.tsx
 frontend/src/components/DataGrid.component.test.tsx
+frontend/src/components/DataGrid.copyAll.component.test.tsx
 frontend/src/components/DataGrid.tsx
 frontend/src/components/DiagnosticsModal.tsx
 frontend/src/components/DocsModal.tsx
@@ -122,6 +122,8 @@ frontend/src/components/ErrorLogModal.tsx
 frontend/src/components/ExportResultsMenu.tsx
 frontend/src/components/FieldExplorer.component.test.tsx
 frontend/src/components/FieldExplorer.tsx
+frontend/src/components/FindReplaceDialog.component.test.tsx
+frontend/src/components/FindReplaceDialog.tsx
 frontend/src/components/FlattenUidModal.component.test.tsx
 frontend/src/components/FlattenUidModal.tsx
 frontend/src/components/FloatingPanel.tsx
@@ -142,6 +144,7 @@ frontend/src/components/NotebookCell.component.test.tsx
 frontend/src/components/NotebookCell.tsx
 frontend/src/components/PivotPanel.audit.component.test.tsx
 frontend/src/components/PivotPanel.cancel.component.test.tsx
+frontend/src/components/PivotPanel.export.component.test.tsx
 frontend/src/components/PivotPanel.tsx
 frontend/src/components/PivotPanel.typed.component.test.tsx
 frontend/src/components/Profiler.cancel.component.test.tsx
@@ -193,6 +196,7 @@ frontend/src/components/nodeflow/NodeFlowScene.tsx
 frontend/src/components/nodeflow/NodeFlowStatusBar.tsx
 frontend/src/components/nodeflow/NodeFlowTabBar.tsx
 frontend/src/components/nodeflow/Phase10Remediation.component.test.tsx
+frontend/src/components/nodeflow/SqlJoinIdeWindow.tsx
 frontend/src/components/nodeflow/nodeDefinitions.component.test.ts
 frontend/src/components/nodeflow/nodeDefinitions.ts
 frontend/src/components/nodeflow/nodeDragInspector.component.test.ts
@@ -201,6 +205,8 @@ frontend/src/components/nodeflow/nodeFlowGraphCommands.ts
 frontend/src/components/nodeflow/nodeFlowRenderModel.component.test.ts
 frontend/src/components/nodeflow/nodeFlowRenderModel.ts
 frontend/src/components/nodeflow/runAllWriteContinuation.component.test.tsx
+frontend/src/components/nodeflow/sqlJoinTableNames.component.test.ts
+frontend/src/components/nodeflow/sqlJoinTableNames.ts
 frontend/src/components/nodeflow/useNodeFlowAnimations.ts
 frontend/src/components/nodeflow/useNodeFlowAutosave.ts
 frontend/src/components/nodeflow/useNodeFlowCanvasInteractions.inspector.component.test.tsx
@@ -248,11 +254,14 @@ frontend/src/lib/canvasColor.component.test.ts
 frontend/src/lib/canvasColor.ts
 frontend/src/lib/chartOption.component.test.ts
 frontend/src/lib/chartOption.ts
+frontend/src/lib/chartSpec.ts
 frontend/src/lib/columnLineage.component.test.ts
 frontend/src/lib/columnLineage.ts
 frontend/src/lib/commandPaletteTools.component.test.tsx
 frontend/src/lib/connectionProfiles.component.test.ts
 frontend/src/lib/connectionProfiles.ts
+frontend/src/lib/createTablePaste.component.test.ts
+frontend/src/lib/createTablePaste.ts
 frontend/src/lib/createdNodes.component.test.ts
 frontend/src/lib/createdNodes.ts
 frontend/src/lib/dashboardModel.component.test.ts
@@ -270,8 +279,13 @@ frontend/src/lib/fieldRoles.component.test.ts
 frontend/src/lib/fieldRoles.ts
 frontend/src/lib/fieldTreeDiscovery.component.test.ts
 frontend/src/lib/fieldTreeDiscovery.ts
+frontend/src/lib/findReplace.component.test.ts
+frontend/src/lib/findReplace.ts
 frontend/src/lib/format.ts
 frontend/src/lib/ids.ts
+frontend/src/lib/journalFindReveal.component.test.ts
+frontend/src/lib/journalFindReveal.ts
+frontend/src/lib/journalMalformed.component.test.ts
 frontend/src/lib/loadForm.ts
 frontend/src/lib/menuPos.ts
 frontend/src/lib/migrations.ts
@@ -292,6 +306,8 @@ frontend/src/lib/nodeflowColumnsCache.ts
 frontend/src/lib/nodegraph.ts
 frontend/src/lib/notebook.ts
 frontend/src/lib/notebookOptimization.component.test.ts
+frontend/src/lib/pivotExport.component.test.ts
+frontend/src/lib/pivotExport.ts
 frontend/src/lib/pivotFields.component.test.ts
 frontend/src/lib/pivotFields.ts
 frontend/src/lib/pointerDrag.ts
@@ -318,10 +334,13 @@ frontend/src/lib/settingsViewToggles.component.test.tsx
 frontend/src/lib/sql.ts
 frontend/src/lib/sqlFunctions.ts
 frontend/src/lib/sqlProfiles.ts
+frontend/src/lib/sqlStrLiteral.component.test.ts
 frontend/src/lib/staleNodeflowColumnRefs.component.test.ts
 frontend/src/lib/staleNodeflowColumnRefs.ts
 frontend/src/lib/tableCaps.ts
+frontend/src/lib/tablesPanelPin.ts
 frontend/src/lib/types.ts
+frontend/src/lib/useFindReplace.ts
 frontend/src/lib/usePagedResult.component.test.tsx
 frontend/src/lib/usePagedResult.ts
 frontend/src/lib/useRunProgress.ts
@@ -350,6 +369,10 @@ tests/benchmark_perf_high_fixes.py
 tests/benchmark_perf_medium_fixes.py
 tests/benchmark_workloads.py
 tests/fixtures.py
+tests/fixtures/golden_flows/expected.json
+tests/fixtures/golden_flows/filter_summarize.samql
+tests/fixtures/golden_flows/join_lookup.samql
+tests/fixtures/golden_flows/params_filter.samql
 tests/fixtures/highly_nested_trades.json
 tests/generate_cache_pressure_workload.py
 tests/generate_hostile_nested_ndjson.py
