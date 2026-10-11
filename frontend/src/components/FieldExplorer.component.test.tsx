@@ -1042,3 +1042,81 @@ describe("FieldExplorer always opens on screen", () => {
     expect(screen.queryByTestId("field-explorer-mini")).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// New: chunked discovery, abort, empty-state, epoch refresh, cancelled
+// ---------------------------------------------------------------------------
+
+describe("FieldExplorer discovery behaviours", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.removeItem(FIELD_EXPLORER_STORE_KEY);
+  });
+
+  const jsonTable = (): TableInfo[] => [
+    {
+      engine: "duckdb",
+      name: "events",
+      source: "events.json",
+      row_count: 5,
+      columns: [{ name: "payload", type: "JSON", hint: "json" }],
+    },
+  ];
+
+  /** Select a source by table name in the FieldExplorer source picker. */
+  async function selectSource(tableName: string, engine = "duckdb") {
+    const sel = await screen.findByTitle("Pick a loaded table to explore");
+    fireEvent.change(sel, { target: { value: `${engine}\u0000${tableName}` } });
+  }
+
+  it("accumulates fields across two chunks", async () => {
+    vi.mocked(api.tableFields)
+      .mockResolvedValueOnce({ fields: [{ depth: 1, name: "id", type: "INTEGER", kind: "scalar", column: "payload", path: "payload.id", access: { first: '"payload"', sel: '"payload"', unnests: [] } }], partial: true, next_after: "cursor-1" } as any)
+      .mockResolvedValueOnce({ fields: [{ depth: 1, name: "ts", type: "TEXT", kind: "scalar", column: "payload", path: "payload.ts", access: { first: '"payload"', sel: '"payload"', unnests: [] } }], partial: false } as any);
+    render(<FieldExplorer open tables={jsonTable()} onClose={vi.fn()} onToast={vi.fn()} dataEpoch={1} />);
+    await selectSource("events");
+    await waitFor(() => expect(screen.queryByText("ts")).toBeTruthy(), { timeout: 3000 });
+    expect(screen.queryByText("id")).toBeTruthy();
+    expect(vi.mocked(api.tableFields)).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders empty state without crashing when no fields returned", async () => {
+    vi.mocked(api.tableFields).mockResolvedValue({ fields: [], partial: false } as any);
+    render(<FieldExplorer open tables={jsonTable()} onClose={vi.fn()} onToast={vi.fn()} dataEpoch={1} />);
+    await selectSource("events");
+    await waitFor(() => expect(vi.mocked(api.tableFields)).toHaveBeenCalled(), { timeout: 3000 });
+    expect(screen.getByTestId("field-explorer-panel")).toBeTruthy();
+  });
+
+  it("stops looping after a cancelled discovery response", async () => {
+    vi.mocked(api.tableFields).mockResolvedValue({ fields: [{ depth: 1, name: "name", type: "TEXT", kind: "scalar", column: "payload", path: "payload.name", access: { first: '"payload"', sel: '"payload"', unnests: [] } }], partial: false, cancelled: true } as any);
+    render(<FieldExplorer open tables={jsonTable()} onClose={vi.fn()} onToast={vi.fn()} dataEpoch={1} />);
+    await selectSource("events");
+    await waitFor(() => expect(screen.queryByText("name")).toBeTruthy(), { timeout: 3000 });
+    expect(vi.mocked(api.tableFields)).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls tableFields again when dataEpoch prop increments", async () => {
+    vi.mocked(api.tableFields).mockResolvedValue({ fields: [{ depth: 1, name: "amt", type: "DOUBLE", kind: "scalar", column: "payload", path: "payload.amt", access: { first: '"payload"', sel: '"payload"', unnests: [] } }], partial: false } as any);
+    const { rerender } = render(<FieldExplorer open tables={jsonTable()} onClose={vi.fn()} onToast={vi.fn()} dataEpoch={1} />);
+    await selectSource("events");
+    await waitFor(() => expect(vi.mocked(api.tableFields)).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    rerender(<FieldExplorer open tables={jsonTable()} onClose={vi.fn()} onToast={vi.fn()} dataEpoch={2} />);
+    await waitFor(() => expect(vi.mocked(api.tableFields)).toHaveBeenCalledTimes(2), { timeout: 3000 });
+  });
+
+  it("does not show stale fields from first source after a source switch", async () => {
+    const table2: TableInfo[] = [...jsonTable(), { engine: "duckdb", name: "orders", source: "orders.json", row_count: 2, columns: [{ name: "data", type: "JSON", hint: "json" }] }];
+    vi.mocked(api.tableFields).mockImplementation((_engine: string, table: string) => {
+      if (table === "events") return new Promise((resolve) => setTimeout(() => resolve({ fields: [{ depth: 1, name: "user_id", type: "TEXT", kind: "scalar", column: "payload", path: "payload.user_id", access: { first: '"payload"', sel: '"payload"', unnests: [] } }], partial: false } as any), 50));
+      return Promise.resolve({ fields: [{ depth: 1, name: "order_id", type: "INTEGER", kind: "scalar", column: "data", path: "data.order_id", access: { first: '"data"', sel: '"data"', unnests: [] } }], partial: false } as any);
+    });
+    render(<FieldExplorer open tables={table2} onClose={vi.fn()} onToast={vi.fn()} dataEpoch={1} />);
+    const sel = await screen.findByTitle("Pick a loaded table to explore");
+    fireEvent.change(sel, { target: { value: "duckdb\u0000events" } });
+    // Immediately switch to orders before events resolves
+    fireEvent.change(sel, { target: { value: "duckdb\u0000orders" } });
+    await waitFor(() => expect(screen.queryByText("order_id")).toBeTruthy(), { timeout: 3000 });
+    expect(screen.queryByText("user_id")).toBeNull();
+  });
+});
