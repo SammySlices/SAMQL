@@ -43314,6 +43314,8 @@ def backend_tests(datadir, csv_path, json_path):
     cases.extend(_nullkey_cases(ROOT, CSV, skip))
     from test_flatten_integrity import backend_cases as _flatten_integrity_cases
     cases.extend(_flatten_integrity_cases(ROOT, CSV, skip))
+    from test_reconcile_integrity import backend_cases as _recon_integrity_cases
+    cases.extend(_recon_integrity_cases(ROOT, CSV, skip))
     _only = os.environ.get("SAMQL_ONLY")
     _skip = os.environ.get("SAMQL_SKIP")
     if os.environ.get("SAMQL_GROUP") not in (None, "", "backend"):
