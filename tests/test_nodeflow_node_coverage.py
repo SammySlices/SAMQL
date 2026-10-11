@@ -232,11 +232,60 @@ def t_explode_json():
         assert r.get("total_rows") == 3, \
             "explode json should produce 3 rows, got %r" % r.get("total_rows")
         rows = r.get("rows") or []
-        flat = [str(v).strip('"') for row in rows for v in row]
+        # Explode-json must return unquoted strings; no .strip('"') workaround.
+        flat = [str(v) for row in rows for v in row]
         assert "apple" in flat and "banana" in flat and "cat" in flat, \
             "explode json: expected apple,banana,cat in %r" % flat
+        # No value should carry surrounding JSON quotes.
+        assert '"apple"' not in flat and '"banana"' not in flat \
+            and '"cat"' not in flat, \
+            "explode json leaked JSON quotes: %r" % flat
     finally:
         s.shutdown()
+
+
+def t_explode_json_string_unquoted():
+    """Explode (JSON mode) strips JSON quotes from string elements on both
+    the SQLite and DuckDB engines.  Regression test for the explode-json
+    quoted-strings bug: ``'["apple","banana"]'`` must unnest to ``apple``,
+    ``banana`` -- never ``'"apple"'``, ``'"banana"'``."""
+    from samql_core import Session
+
+    def _run_on(target, tag):
+        s = Session()
+        s.fresh_run = False
+        s.fresh_load = False
+        try:
+            tname = "nc_explode_jsn_unq_%s" % tag
+            r = s.run_query(
+                "CREATE TABLE %s AS "
+                "SELECT 1 AS id, '[\"apple\",\"banana\"]' AS items "
+                "UNION ALL SELECT 2, '[\"cat\"]'" % tname,
+                target=target)
+            assert not r.get("error"), \
+                "%s create: %r" % (tag, r.get("error"))
+            g = _simple_graph(tname, "exj", "explode",
+                              {"col": "items", "mode": "json",
+                               "name": "item"})
+            res = s.run_nodeflow(g, "exj", "out")
+            assert not res.get("error"), \
+                "%s explode: %r" % (tag, res.get("error"))
+            assert res.get("total_rows") == 3, \
+                "%s expected 3 rows, got %r" % (tag, res.get("total_rows"))
+            rows = res.get("rows") or []
+            flat = [str(v) for row in rows for v in row]
+            # Unquoted strings must appear directly.
+            assert "apple" in flat and "banana" in flat and "cat" in flat, \
+                "%s: expected apple,banana,cat in %r" % (tag, flat)
+            # And JSON-quoted forms must NOT.
+            for bad in ('"apple"', '"banana"', '"cat"'):
+                assert bad not in flat, \
+                    "%s leaked JSON-quoted value %r in %r" % (tag, bad, flat)
+        finally:
+            s.shutdown()
+
+    _run_on("__local__",  "sqlite")
+    _run_on("__duckdb__", "duckdb")
 
 
 # ---------------------------------------------------------------------------
@@ -746,6 +795,7 @@ _CASES = [
     # explode
     ("node coverage: explode delim",       t_explode_delim),
     ("node coverage: explode json array",  t_explode_json),
+    ("node coverage: explode json string unquoted", t_explode_json_string_unquoted),
     # fill
     ("node coverage: fill value",          t_fill_value),
     ("node coverage: fill avg",            t_fill_avg),

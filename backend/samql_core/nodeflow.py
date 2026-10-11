@@ -1681,17 +1681,27 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         if engine == "duckdb":
             others = [c for c in cols if c != name]
             keep = "".join("_ex." + _q(c) + ", " for c in others)
-            return ("SELECT %sunnest(from_json(_ex.%s, '[\"json\"]')) AS %s "
+            # Elements are coerced to VARCHAR by from_json's schema so string
+            # values round-trip without surrounding JSON quotes (``apple``, not
+            # ``"apple"``). Numbers/booleans/null are stringified consistently
+            # with the column's text type, matching the SQLite path's intent.
+            return ("SELECT %sunnest(from_json(_ex.%s, '[\"VARCHAR\"]')) AS %s "
                     "FROM (%s) AS _ex" % (keep, _q(col), _q(name), src))
-        # SQLite: json_each expands a JSON array into rows
+        # SQLite: json_each expands a JSON array into rows.
+        # Use json_extract(... '$[' || _je.key || ']') instead of _je.value so
+        # string elements are returned unquoted (SQLite's json_extract strips
+        # the JSON quoting for TEXT; numbers/booleans/null round-trip as
+        # their native Python/SQL types).
         proj = []
         for c in cols:
             if c == name:
-                proj.append("_je.value AS %s" % _q(c))
+                proj.append("json_extract(_ex.%s, '$[' || _je.key || ']') AS %s"
+                            % (_q(col), _q(c)))
             else:
                 proj.append("_ex.%s AS %s" % (_q(c), _q(c)))
         if name not in cols:
-            proj.append("_je.value AS %s" % _q(name))
+            proj.append("json_extract(_ex.%s, '$[' || _je.key || ']') AS %s"
+                        % (_q(col), _q(name)))
         return ("SELECT %s FROM (%s) AS _ex, json_each(_ex.%s) AS _je"
                 % (", ".join(proj), src, _q(col)))
 
