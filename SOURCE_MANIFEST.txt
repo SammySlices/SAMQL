@@ -395,6 +395,7 @@ tests/test_fetch_assistant_pack.py
 tests/test_flatten_integrity.py
 tests/test_json_integrity.py
 tests/test_nodeflow_isolation.py
+tests/test_nodeflow_node_coverage.py
 tests/test_nodeflow_nullkey.py
 tests/test_nodeflow_resources.py
 tests/test_nodeflow_stability.py
