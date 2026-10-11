@@ -179,10 +179,11 @@ def build_bundle_bytes(root: Path) -> tuple[bytes, list[str], str]:
         f"#   sha256:    {body_sha}  (of the section body below)\n"
         f"#   generated: {generated}\n"
         "#   contents:  complete source + tests + UI (Test-SamQL-All ready)\n"
-        # KEEP SPLIT: adjacent literals concatenate to "[.]ps1" at runtime but the
-        # refang regex (\[\.\]ps1) cannot match across the literal boundary in
-        # source text, so round-trip reconstruction cannot introduce a bare .ps1
-        # token into this bundle header.  Do not merge into a single "[.]ps1" string.
+        # KEEP SPLIT: the two adjacent string literals are concatenated by Python
+        # at compile time into the mail-safe form of the script name, but keeping
+        # the marker and extension fragments noncontiguous in source prevents the
+        # refang pass from rewriting this literal and inserting an unsafe token
+        # into the emitted bundle header.  Do not merge the two literals.
         "#   reconstruct with Expand-SamQL[.]" "ps1 (this header is ignored)\n"
         "############################################################\n"
     ).encode("utf-8")

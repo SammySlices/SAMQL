@@ -166,10 +166,11 @@ def build_transport_text(
         "",
         "Decode this file with:",
         "  python tools/aphex_transport.py decode <transport> -o <bundle>",
-        # KEEP SPLIT: adjacent literals concatenate to "[.]ps1" at runtime but the
-        # refang regex (\[\.\]ps1) cannot match across the literal boundary in
-        # source text, so round-trip reconstruction cannot introduce a bare .ps1
-        # token into this APHEX preamble.  Do not merge into a single "[.]ps1" string.
+        # KEEP SPLIT: the two adjacent string literals are concatenated by Python
+        # at compile time into the mail-safe form of the script name, but keeping
+        # the marker and extension fragments noncontiguous in source prevents the
+        # refang pass from rewriting this literal and inserting an unsafe token
+        # into the emitted APHEX preamble.  Do not merge the two literals.
         "After decoding, expand the restored full-source bundle with Expand-SamQL[.]" "ps1.",
         "",
         BEGIN,
