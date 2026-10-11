@@ -511,13 +511,19 @@ def read_json_any_format(path):
 def _detect_first_char(path, enc):
     """Return the first non-whitespace character of the file (decoded with
     ``enc``), or '' if the file is empty/all-whitespace. Raises
-    UnicodeDecodeError if the bytes aren't valid for ``enc``."""
+    UnicodeDecodeError if the bytes aren't valid for ``enc``.
+
+    Whitespace is EXACTLY the four JSON characters (space, tab, LF, CR).
+    str.lstrip() with no argument also strips VT, FF, U+001C-U+001F and Unicode
+    spaces, which would classify a file holding only such a byte as empty and
+    let it succeed before any parser runs. Those characters are returned here
+    so the parser rejects them."""
     with open(path, "r", encoding=enc) as f:
         while True:
             chunk = f.read(4096)
             if not chunk:
                 return ""
-            s = chunk.lstrip()
+            s = chunk.lstrip(" \t\r\n")
             if s:
                 return s[0]
 
@@ -542,6 +548,17 @@ def _text_chunks(f, size=65536):
 _READ_BASE = 1 << 20    # 1 MB first read for a value
 _READ_CAP = 1 << 24     # grow up to 16 MB while completing one very large value
 
+# Raw bytes that are never legal anywhere in JSON text (RFC 8259 §2, §7): every
+# C0 control except tab 0x09, LF 0x0A and CR 0x0D -- inside a quoted string they
+# must be escaped, between tokens they are not whitespace. yajl (ijson's
+# backend) accepts some of them (e.g. VT as whitespace), so the ijson path
+# validates every byte it consumes inline in _CountingReader.read().
+_ILLEGAL_CTRL_BYTES_RE = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+class _IllegalControlError(ValueError):
+    """A raw illegal control byte was found in the JSON byte stream."""
+
 
 def _iter_concat_values(f, on_read=None):
     """Stream JSON values from a single object, NDJSON/JSONL, or concatenated
@@ -556,7 +573,7 @@ def _iter_concat_values(f, on_read=None):
     pos = 0
     while True:
         L = len(buf)
-        while pos < L and buf[pos] <= " ":       # skip inter-value whitespace
+        while pos < L and buf[pos] in " \t\r\n":   # skip inter-value whitespace
             pos += 1
         if pos >= L:                             # buffer drained -> read more
             buf = ""
@@ -581,7 +598,7 @@ def _iter_concat_values(f, on_read=None):
                 if on_read is not None:
                     on_read()
                 if not chunk:                    # EOF mid-value
-                    tail = buf.strip()
+                    tail = buf.strip(" \t\r\n")
                     if not tail:
                         return
                     obj, end = scan(tail, 0)     # raises on a malformed tail
@@ -632,13 +649,18 @@ def _iter_stream_records(f, on_read=None):
         return True
 
     def _skip_ws():
-        # advance past whitespace between values; read more if the buffer ends
-        # mid-whitespace. Returns False at EOF.
+        # advance past legal JSON whitespace between values; read more if the
+        # buffer ends mid-whitespace.  Returns False at EOF.
+        # JSON RFC 8259 §2 defines exactly four legal whitespace characters:
+        #   U+0020 space, U+0009 tab, U+000A LF, U+000D CR.
+        # The previous b[p] <= " " was too broad: it also consumed illegal
+        # control characters such as NUL (U+0000), VT (U+000B), and FF
+        # (U+000C).  Those must raise, not silently pass through.
         while True:
             b = buf[0]
             p = pos[0]
             L = len(b)
-            while p < L and b[p] <= " ":
+            while p < L and b[p] in " \t\r\n":
                 p += 1
             pos[0] = p
             if p < L:
@@ -664,22 +686,47 @@ def _iter_stream_records(f, on_read=None):
             return
         if buf[0][pos[0]] == "[":
             pos[0] += 1               # enter this array
+            # State machine: WANT_VALUE_OR_CLOSE -> WANT_SEP_OR_CLOSE -> ...
+            # Enforces legal separators; rejects leading, double, trailing
+            # commas and adjacent elements without a comma.
+            _WANT_VALUE_OR_CLOSE = 0   # just entered [ or just consumed ','
+            _WANT_SEP_OR_CLOSE   = 1   # just yielded a value
+            _WANT_VALUE          = 2   # consumed ','; value is mandatory
+            _state = _WANT_VALUE_OR_CLOSE
             while True:
                 if not _skip_ws():
-                    return            # unterminated array: stop gracefully
+                    raise ValueError(
+                        "truncated JSON array: EOF before closing ']'")
                 c = buf[0][pos[0]]
                 if c == ",":
+                    if _state == _WANT_VALUE_OR_CLOSE:
+                        raise ValueError(
+                            "malformed JSON array: leading or double comma")
+                    if _state == _WANT_VALUE:
+                        raise ValueError(
+                            "malformed JSON array: double comma")
+                    # _WANT_SEP_OR_CLOSE -> consumed the separator
                     pos[0] += 1
+                    _state = _WANT_VALUE
                     continue
                 if c == "]":
+                    if _state == _WANT_VALUE:
+                        raise ValueError(
+                            "malformed JSON array: trailing comma before ']'")
                     pos[0] += 1       # end of this array; resume outer scan
                     break
+                # Must be a value. Reject if we expected a separator.
+                if _state == _WANT_SEP_OR_CLOSE:
+                    raise ValueError(
+                        "malformed JSON array: missing ',' between elements")
                 got = _decode_value()
                 if got is None:
-                    return            # cannot complete the final element
+                    raise ValueError(
+                        "truncated JSON array: EOF inside final element")
                 obj, end = got
                 pos[0] = end
                 produced[0] += 1
+                _state = _WANT_SEP_OR_CLOSE
                 yield obj
         else:
             # A bare top-level value (object / scalar): NDJSON, concatenated
@@ -687,8 +734,15 @@ def _iter_stream_records(f, on_read=None):
             got = _decode_value()
             if got is None:
                 if produced[0]:
-                    return            # truncated tail after valid records: stop
-                tail = buf[0][pos[0]:].strip()
+                    # Non-whitespace content after valid records that cannot
+                    # complete as a JSON value is truncated/corrupt input.
+                    tail = buf[0][pos[0]:].strip(" \t\r\n")
+                    if tail:
+                        raise ValueError(
+                            "truncated or malformed JSON: non-whitespace "
+                            "garbage after %d valid record(s)" % produced[0])
+                    return            # trailing whitespace only -> clean EOF
+                tail = buf[0][pos[0]:].strip(" \t\r\n")
                 if not tail:
                     return            # genuinely empty -> no records (not error)
                 # Nothing decoded and the content is not JSON (e.g. an HTML login
@@ -780,6 +834,14 @@ class _CountingReader:
             raise InterruptedError("cancelled during JSON read")
         first = self._count == 0
         chunk = self._fb.read(size)
+        # Fail closed on any raw illegal control byte, wherever it lies in the
+        # file: every chunk ijson consumes passes through here exactly once, so
+        # this is a single pass with no extra memory.
+        bad = _ILLEGAL_CTRL_BYTES_RE.search(chunk)
+        if bad is not None:
+            raise _IllegalControlError(
+                "illegal control character 0x%02x at byte offset %d in JSON "
+                "input" % (chunk[bad.start()], self._count + bad.start()))
         self._count += len(chunk)
         self._since += len(chunk)
         # Heartbeat on the first read and then every ~256 KB, so even a modest
@@ -913,10 +975,12 @@ def stream_json_records(path, progress=None, should_cancel=None):
                 if progress and total:
                     progress(total, total)
                 return
-            except InterruptedError:
+            except (InterruptedError, _IllegalControlError):
                 # A cancel during the ijson read must abort, NOT fall through to
                 # the stdlib recovery (which would re-read the file from scratch
-                # and ignore the Stop).
+                # and ignore the Stop). Likewise an illegal control byte is a
+                # definitive rejection: surface it directly rather than letting
+                # the fallback re-parse (and possibly mask or replace) the error.
                 raise
             except Exception:
                 # ijson (yajl) is stricter than Python's json and rejects some

@@ -43308,6 +43308,8 @@ def backend_tests(datadir, csv_path, json_path):
     cases.extend(_wave3_backend_cases(ROOT, CSV, skip))
     from test_refactor_phase2 import backend_cases as _phase2_backend_cases
     cases.extend(_phase2_backend_cases(ROOT, CSV, skip))
+    from test_json_integrity import backend_cases as _json_integrity_cases
+    cases.extend(_json_integrity_cases(ROOT, CSV, skip))
     _only = os.environ.get("SAMQL_ONLY")
     _skip = os.environ.get("SAMQL_SKIP")
     if os.environ.get("SAMQL_GROUP") not in (None, "", "backend"):
