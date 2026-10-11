@@ -504,6 +504,80 @@ def _check_saved_data(root: Path, release: dict[str, Any], checks: Checks) -> No
         )
 
 
+def _yaml_without_comment(line: str) -> str:
+    """Remove YAML comments while preserving hashes inside quoted scalars."""
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if quote == '"' and char == "\\":
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if char == "#" and quote is None:
+            return line[:index]
+    return line
+
+
+def _yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _workflow_push_branches(source: str) -> set[str]:
+    """Read the small YAML path ``on.push.branches`` without matching prose."""
+    stack: list[tuple[int, str]] = []
+    branches: set[str] = set()
+    branches_indent: int | None = None
+
+    for raw_line in source.splitlines():
+        code = _yaml_without_comment(raw_line).rstrip()
+        if not code.strip():
+            continue
+        indent = len(code) - len(code.lstrip(" "))
+        content = code.strip()
+
+        if branches_indent is not None:
+            if indent > branches_indent and content.startswith("-"):
+                branch = _yaml_scalar(content[1:])
+                if branch:
+                    branches.add(branch)
+                continue
+            if indent <= branches_indent:
+                branches_indent = None
+
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        key_match = re.fullmatch(r"([^:\s]+)\s*:\s*(.*)", content)
+        if not key_match:
+            continue
+        key = _yaml_scalar(key_match.group(1))
+        value = key_match.group(2).strip()
+        path = [item[1] for item in stack] + [key]
+        stack.append((indent, key))
+
+        if path != ["on", "push", "branches"]:
+            continue
+        if value.startswith("[") and value.endswith("]"):
+            for item in value[1:-1].split(","):
+                branch = _yaml_scalar(item)
+                if branch:
+                    branches.add(branch)
+        elif not value:
+            branches_indent = indent
+
+    return branches
+
+
 def _check_quality_and_ci(root: Path, release: dict[str, Any], checks: Checks) -> None:
     gates = release.get("qualityGates") or {}
     component_count = _count_component_tests(root)
@@ -527,6 +601,12 @@ def _check_quality_and_ci(root: Path, release: dict[str, Any], checks: Checks) -
     )
 
     workflow = _read(root / ".github/workflows/windows-browser.yml")
+    push_branches = _workflow_push_branches(workflow)
+    checks.add(
+        "Windows release workflow trigger",
+        "master" in push_branches,
+        "push branches: " + (", ".join(sorted(push_branches)) or "none"),
+    )
     required_channel = str(gates.get("requiredBrowserChannel") or "msedge")
     workflow_tokens = (
         "runs-on: windows-latest",

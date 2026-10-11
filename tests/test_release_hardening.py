@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -58,7 +59,39 @@ def _refang_transport_text(value: str) -> str:
     return refang_transport_text(value, _transport_extensions())
 
 
+def _assert_windows_workflow_requires_master() -> None:
+    with tempfile.TemporaryDirectory(prefix="samql-release-preflight-") as tmp:
+        fixture = Path(tmp) / "samql"
+        shutil.copytree(
+            ROOT,
+            fixture,
+            ignore=shutil.ignore_patterns(".git", "node_modules", "release"),
+        )
+        workflow_path = fixture / ".github/workflows/windows-browser.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        mutated_workflow, substitutions = re.subn(
+            r"(?m)^(\s*branches:\s*)\[[^\]]*\]\s*$",
+            r"\1[main]",
+            workflow,
+            count=1,
+        )
+        require(substitutions == 1, "test fixture has no push branches list to mutate")
+        workflow_path.write_text(
+            mutated_workflow
+            + "\n# branches: [master] must not satisfy the trigger check\n"
+            + "env:\n  DOCUMENTED_STABLE_BRANCH: master\n",
+            encoding="utf-8",
+        )
+
+        failures = [item for item in run_preflight(fixture) if not item.ok]
+        require(
+            any(item.name == "Windows release workflow trigger" for item in failures),
+            "preflight accepted a Windows release workflow without a master push trigger",
+        )
+
+
 def main() -> int:
+    _assert_windows_workflow_requires_master()
     failures = [item for item in run_preflight(ROOT) if not item.ok]
     require(
         not failures,
