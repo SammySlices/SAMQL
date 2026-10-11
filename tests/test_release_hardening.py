@@ -844,6 +844,75 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
     require(_err5 is None, f"direct parser error for supported \\\\ escape: {_err5!r}")
     require(_br5 == {"master", "mas\\ter"}, f"wrong branch set for \\\\ escape: {_br5!r}")
 
+    # ── New finding: malformed/nonmapping content inside on.push subtree ─────
+    # All five cases below were silently swallowed at 9a0a4d8; now must error.
+
+    # Bare word (no colon) structurally inside on.push.
+    _f6a_br, _f6a_err = _parse_branches_direct(
+        "on:\n  push:\n    malformed child\n    branches: [master]\n"
+    )
+    require(
+        _f6a_err is not None,
+        f"direct parser accepted bare word inside on.push: branches={_f6a_br!r}",
+    )
+    _r6a = _workflow_trigger_result(
+        "on:\n  push:\n    malformed child\n    branches: [master]\n"
+    )
+    require(not _r6a.ok, f"preflight accepted bare word inside on.push: {_r6a.detail!r}")
+
+    # Alias line (*defaults) structurally inside on.push.
+    _f6b_br, _f6b_err = _parse_branches_direct(
+        "on:\n  push:\n    *defaults\n    branches: [master]\n"
+    )
+    require(
+        _f6b_err is not None,
+        f"direct parser accepted alias inside on.push: branches={_f6b_br!r}",
+    )
+    _r6b = _workflow_trigger_result(
+        "on:\n  push:\n    *defaults\n    branches: [master]\n"
+    )
+    require(not _r6b.ok, f"preflight accepted alias inside on.push: {_r6b.detail!r}")
+
+    # Sequence item (- item) structurally inside on.push.
+    _f6c_br, _f6c_err = _parse_branches_direct(
+        "on:\n  push:\n    - malformed\n    branches: [master]\n"
+    )
+    require(
+        _f6c_err is not None,
+        f"direct parser accepted sequence item inside on.push: branches={_f6c_br!r}",
+    )
+    _r6c = _workflow_trigger_result(
+        "on:\n  push:\n    - malformed\n    branches: [master]\n"
+    )
+    require(not _r6c.ok, f"preflight accepted sequence item inside on.push: {_r6c.detail!r}")
+
+    # Malformed mapping key (space in key part) inside on.push.
+    _f6d_br, _f6d_err = _parse_branches_direct(
+        "on:\n  push:\n    bad key: nope\n    branches: [master]\n"
+    )
+    require(
+        _f6d_err is not None,
+        f"direct parser accepted malformed key inside on.push: branches={_f6d_br!r}",
+    )
+    _r6d = _workflow_trigger_result(
+        "on:\n  push:\n    bad key: nope\n    branches: [master]\n"
+    )
+    require(not _r6d.ok, f"preflight accepted malformed key inside on.push: {_r6d.detail!r}")
+
+    # Deeper mapping after an inline branches: scalar.
+    _f6e_br, _f6e_err = _parse_branches_direct(
+        "on:\n  push:\n    branches: [master]\n      bad: nope\n"
+    )
+    require(
+        _f6e_err is not None,
+        f"direct parser accepted deeper content after inline branches: branches={_f6e_br!r}",
+    )
+    _r6e = _workflow_trigger_result(
+        "on:\n  push:\n    branches: [master]\n      bad: nope\n"
+    )
+    require(not _r6e.ok, f"preflight accepted deeper content after inline branches: {_r6e.detail!r}")
+
+
 
 def _assert_golden_flow_fixture_omission_detected() -> None:
     """Focused regression: dropping one golden-flow fixture from the manifest
@@ -952,9 +1021,10 @@ def main() -> int:
     import subprocess
 
     # Child-mode guard: when SAMQL_CHILD_HARDENING is set this process is a
-    # subprocess reconstruction run invoked by its parent.  Run only the
-    # behavioural checks (parser assertions + preflight) and skip the
-    # transport-packaging section to prevent unbounded recursion.
+    # subprocess reconstruction run invoked by its parent.  Children run the
+    # full local hardening suite (packaging, APHEX, manifest, safety, receipt,
+    # tamper tests) but skip only the reconstructed-tree subprocess section to
+    # prevent unbounded recursion.  One generation deep, no further.
     _CHILD_ENV_VAR = "SAMQL_CHILD_HARDENING"
     is_child = os.environ.get(_CHILD_ENV_VAR) == "1"
 
@@ -967,12 +1037,7 @@ def main() -> int:
         + "; ".join(f"{item.name}: {item.detail}" for item in failures),
     )
 
-    if is_child:
-        # Abbreviated child mode: parser + preflight pass; skip transport.
-        print("Phase 10 release hardening PASS (child mode — transport skipped).")
-        return 0
-
-    # ── Full transport and packaging verification (top-level run only) ────────
+    # ── Transport, packaging, and integrity verification (all modes) ──────────
 
     with (
         tempfile.TemporaryDirectory(prefix="samql-release-a-") as first_tmp,
@@ -1063,7 +1128,20 @@ def main() -> int:
             "targeted transport refang changed a literal marker",
         )
 
-        # ── Reconstructed-tree subprocess verification ────────────────────────
+        # ── Reconstructed-tree subprocess section (parent only) ─────────────
+        # Recursion fence: children have run the full local hardening suite
+        # above; they stop here to prevent creating further reconstructed trees.
+        # Observable boundary: child-mode output carries "(child mode)" marker.
+        if is_child:
+            print(
+                "Phase 10 release hardening PASS (child mode): "
+                f"{first.file_count} files, "
+                f"bundle {first.bundle_bytes} bytes ({first.bundle_sha256}), "
+                f"APHEX {first.aphex_bytes} bytes ({first.aphex_sha256}), "
+                f"receipt {first.receipt_bytes} bytes ({first.receipt_sha256})."
+            )
+            return 0
+
         # NOTE: Expand-SamQL.ps1 PowerShell gate is explicitly waived by Samuel
         # ("Don't worry about the expand script.").  Python fallback reconstruction
         # is used here to materialise the decoded source tree.  Waived — not passed.
@@ -1086,8 +1164,9 @@ def main() -> int:
                 )
 
         def _run_subprocess(cmd: list[str], cwd: Path, extra_env: dict | None = None,
-                            timeout: int = 300, label: str = "") -> None:
-            """Run a subprocess rooted in the reconstructed tree and require exit 0."""
+                            timeout: int = 300, label: str = "") -> str:
+            """Run a subprocess rooted in the reconstructed tree and require exit 0.
+            Returns stdout so the caller can inspect output (e.g. child-mode marker)."""
             env = {**os.environ, _CHILD_ENV_VAR: "1"}
             if extra_env:
                 env.update(extra_env)
@@ -1105,6 +1184,7 @@ def main() -> int:
                     f"STDOUT: {result.stdout[-2000:]}\n"
                     f"STDERR: {result.stderr[-2000:]}"
                 )
+            return result.stdout
 
         # Reconstruct from decoded bundle.
         bundle_root = Path(bundle_root_tmp) / "samql"
@@ -1129,15 +1209,25 @@ def main() -> int:
         )
 
         # Subprocess hardening on bundle-reconstructed tree (child mode).
-        _run_subprocess(
+        # Boundary assertion: child output must carry "(child mode)" — proving
+        # it ran full local hardening but did NOT create further child trees.
+        bundle_child_out = _run_subprocess(
             [sys.executable, "tests/test_release_hardening.py"],
             cwd=bundle_root, timeout=300, label="hardening/bundle-tree",
         )
+        require(
+            "(child mode)" in bundle_child_out,
+            f"bundle-tree child did not print child-mode marker; output: {bundle_child_out!r}",
+        )
 
         # Subprocess hardening on APHEX-reconstructed tree (child mode).
-        _run_subprocess(
+        aphex_child_out = _run_subprocess(
             [sys.executable, "tests/test_release_hardening.py"],
             cwd=aphex_root, timeout=300, label="hardening/aphex-tree",
+        )
+        require(
+            "(child mode)" in aphex_child_out,
+            f"aphex-tree child did not print child-mode marker; output: {aphex_child_out!r}",
         )
 
         # Repackage each reconstructed tree using that tree's own shipped

@@ -941,6 +941,15 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
             stack.pop()
         key_match = re.fullmatch(r"([^:\s]+)\s*:\s*(.*)", content)
         if not key_match:
+            # Any non-mapping, non-blank line structurally inside on.push fails
+            # closed: aliases (*), bare scalars, sequence items (- …), and any
+            # other unsupported content are all rejected here.
+            if (
+                len(stack) >= 2
+                and stack[-2][1] == "on"
+                and stack[-1][1] == "push"
+            ):
+                return branches, f"unsupported content inside on.push: {content!r}"
             continue
         key = _yaml_scalar(key_match.group(1))
         value = key_match.group(2).strip()
@@ -957,9 +966,12 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
         if path_key in _STRUCTURAL_KEYS and value:
             return branches, f"unsupported value on structural key {'.'.join(path_key)!r}: {value!r}"
 
-        # Under on.push, only 'branches' is a known/accepted child.
-        if len(path) == 3 and path[:2] == ["on", "push"] and path[2] != "branches":
+        # Under on.push, only 'branches' is a known/accepted child key (len==3).
+        # Any deeper nesting under on.push or on.push.branches also fails closed.
+        if len(path) >= 3 and path[:2] == ["on", "push"] and path[2] != "branches":
             return branches, f"unexpected key under on.push: {path[2]!r}"
+        if len(path) >= 4 and path[:3] == ["on", "push", "branches"]:
+            return branches, f"unexpected nested content under on.push.branches: {path[3]!r}"
 
         if path != ["on", "push", "branches"]:
             continue
