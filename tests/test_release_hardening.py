@@ -27,7 +27,7 @@ from tools.package_release import (  # noqa: E402
     verify_bundle,
 )
 import tools.release_preflight as release_preflight  # noqa: E402
-from tools.release_preflight import Checks, load_manifest, run_preflight  # noqa: E402
+from tools.release_preflight import load_manifest, run_preflight  # noqa: E402
 
 
 def require(condition: bool, message: str) -> None:
@@ -141,26 +141,103 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
 
 def _assert_golden_flow_fixture_omission_detected() -> None:
     """Focused regression: dropping one golden-flow fixture from the manifest
-    must cause the 'complete test extract trees' check to fail."""
-    full_manifest = load_manifest(ROOT / "SOURCE_MANIFEST.txt")
+    must cause run_preflight() to report 'complete test extract trees' failed
+    and identify the missing fixture by exact path.
+
+    Approach: build a minimal temporary root that contains the real fixture
+    file on disk but lists a SOURCE_MANIFEST.txt that omits it.  Patch away
+    every unrelated preflight section so the complete-test-tree check and the
+    manifest load run against the real implementation.
+    """
     omit = "tests/fixtures/golden_flows/expected.json"
-    reduced_manifest = [e for e in full_manifest if e != omit]
-    require(
-        len(reduced_manifest) == len(full_manifest) - 1,
-        f"{omit!r} was not present in the manifest being tested; "
-        "this regression is only meaningful when the fixture is manifested",
-    )
-    checks = Checks()
-    release_preflight._check_complete_test_extract(ROOT, {}, checks, reduced_manifest)
+
+    with tempfile.TemporaryDirectory(prefix="samql-release-preflight-") as tmp:
+        fixture = Path(tmp)
+
+        # --- minimal directory structure required by the check ---
+        (fixture / "tests/fixtures/golden_flows").mkdir(parents=True)
+        (fixture / "tools").mkdir()
+        (fixture / "frontend/e2e").mkdir(parents=True)
+
+        # The fixture file must exist on disk so _iter_test_tree_files picks
+        # it up; the manifest omits it, which is what the regression proves.
+        (fixture / omit).write_text("{}\n", encoding="utf-8")
+
+        # A minimal SOURCE_MANIFEST.txt: real 413-entry manifest minus the
+        # one omitted fixture so this regression is independent of the repo's
+        # manifest changing in future.
+        full_manifest = load_manifest(ROOT / "SOURCE_MANIFEST.txt")
+        reduced = [e for e in full_manifest if e != omit]
+        require(
+            len(reduced) == len(full_manifest) - 1,
+            f"{omit!r} was not present in the production manifest; "
+            "this regression is only meaningful when the fixture is manifested",
+        )
+        (fixture / "SOURCE_MANIFEST.txt").write_text(
+            "\n".join(reduced) + "\n", encoding="utf-8"
+        )
+
+        # Minimal RELEASE_MANIFEST.json — enough for run_preflight() to parse
+        # and pass through to _check_complete_test_extract.
+        (fixture / "RELEASE_MANIFEST.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "product": "SamQL",
+                    "phase": 10,
+                    "sourceManifest": "SOURCE_MANIFEST.txt",
+                    "sourceFileCount": len(reduced),
+                    "generatedAt": "2026-10-11T00:00:00Z",
+                    "qualityGates": {
+                        "componentTestsMinimum": 0,
+                        "edgeE2eTestsMinimum": 0,
+                        "nodeFlowShellMaximumLines": 1,
+                        "requiredBrowserChannel": "msedge",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # _check_complete_test_extract reads several files after recording the
+        # tree check.  Provide minimal stubs so it can complete without
+        # crashing; their content makes those subsidiary checks fail, which is
+        # fine — only the tree check result is asserted below.
+        (fixture / "Test-SamQL-All[.]ps1").write_text("# focused preflight fixture\n", encoding="utf-8")
+        (fixture / "Expand-SamQL[.]ps1").write_text("# focused preflight fixture\n", encoding="utf-8")
+        (fixture / "frontend").mkdir(exist_ok=True)
+        (fixture / "frontend/package.json").write_text(
+            json.dumps({"scripts": {}}), encoding="utf-8"
+        )
+        (fixture / "frontend/vitest.config.ts").write_text(
+            "// focused preflight fixture\n", encoding="utf-8"
+        )
+
+        # Patch away every section except _check_complete_test_extract and
+        # _check_manifest (which loads the manifest entries passed downstream).
+        no_check = lambda *_args: None
+        with (
+            patch.object(release_preflight, "_check_identity", no_check),
+            patch.object(release_preflight, "_check_saved_data", no_check),
+            patch.object(release_preflight, "_check_quality_and_ci", no_check),
+            patch.object(release_preflight, "_check_docs_and_transport", no_check),
+        ):
+            results = run_preflight(fixture)
+
     tree_check = next(
-        (item for item in checks.items if item.name == "complete test extract trees"),
+        (item for item in results if item.name == "complete test extract trees"),
         None,
     )
-    require(tree_check is not None, "run did not emit 'complete test extract trees' check")
+    require(tree_check is not None, "run_preflight did not emit 'complete test extract trees' check")
     require(
         not tree_check.ok,
         f"preflight accepted a manifest with {omit!r} omitted; "
         f"check detail: {tree_check.detail!r}",
+    )
+    require(
+        omit in tree_check.detail,
+        f"'complete test extract trees' detail did not identify {omit!r}; "
+        f"got: {tree_check.detail!r}",
     )
 
 
