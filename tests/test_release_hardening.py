@@ -1140,37 +1140,70 @@ def main() -> int:
             cwd=aphex_root, timeout=300, label="hardening/aphex-tree",
         )
 
-        # Repackage reconstructed trees and compare bytes to source-built artifact.
-        # Note: package_release CLI must accept --no-preflight or equivalent.
-        # We use the subprocess approach with preflight=False equivalent.
-        # Actually compare via in-process repackage from the reconstructed root
-        # (imports the reconstructed tree's own tools — done via subprocess above).
-        # For byte comparison we do a final in-process package call from each root
-        # using the source checkout's package_release (acceptable here because we
-        # already proved via subprocess that the reconstructed tree's own copy works).
-        from tools.package_release import package_release as pkg_rel
-        with (
-            tempfile.TemporaryDirectory(prefix="samql-bundle-repkg-") as brepkg_tmp,
-            tempfile.TemporaryDirectory(prefix="samql-aphex-repkg-") as arepkg_tmp,
-        ):
-            bundle_repkg = pkg_rel(bundle_root, Path(brepkg_tmp), preflight=False)
-            aphex_repkg = pkg_rel(aphex_root, Path(arepkg_tmp), preflight=False)
-            require(
-                bundle_repkg.bundle_path.read_bytes() == first_bundle,
-                "bundle-reconstructed tree repackaging changed canonical decoded bytes",
-            )
-            require(
-                bundle_repkg.aphex_path.read_bytes() == first_aphex,
-                "bundle-reconstructed tree repackaging changed canonical APHEX bytes",
-            )
-            require(
-                aphex_repkg.bundle_path.read_bytes() == first_bundle,
-                "APHEX-reconstructed tree repackaging changed canonical decoded bytes",
-            )
-            require(
-                aphex_repkg.aphex_path.read_bytes() == first_aphex,
-                "APHEX-reconstructed tree repackaging changed canonical APHEX bytes",
-            )
+        # Repackage each reconstructed tree using that tree's own shipped
+        # tools/package_release.py, invoked as a fresh subprocess with cwd
+        # at the reconstructed root.  No source-checkout module imports.
+        def _repackage_via_subprocess(tree: Path, label: str) -> tuple[bytes, bytes, bytes]:
+            """Run the tree's own package_release CLI; return (bundle, aphex, receipt)."""
+            with tempfile.TemporaryDirectory(prefix=f"samql-repkg-{label}-") as repkg_tmp:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "tools/package_release.py",
+                        "--root", ".",
+                        "--output-dir", repkg_tmp,
+                        "--skip-preflight",
+                        "--json",
+                    ],
+                    cwd=str(tree),
+                    env={**os.environ, _CHILD_ENV_VAR: "1"},
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if result.returncode != 0:
+                    raise AssertionError(
+                        f"repackage subprocess [{label}] exited {result.returncode}:\n"
+                        f"STDOUT: {result.stdout[-2000:]}\n"
+                        f"STDERR: {result.stderr[-2000:]}"
+                    )
+                meta = json.loads(result.stdout)
+                bundle_bytes_out = Path(meta["bundle"]).read_bytes()
+                aphex_bytes_out  = Path(meta["aphex"]).read_bytes()
+                receipt_bytes_out = Path(meta["receipt"]).read_bytes()
+            return bundle_bytes_out, aphex_bytes_out, receipt_bytes_out
+
+        bundle_repkg_b, bundle_repkg_a, bundle_repkg_r = _repackage_via_subprocess(
+            bundle_root, "bundle-tree"
+        )
+        aphex_repkg_b, aphex_repkg_a, aphex_repkg_r = _repackage_via_subprocess(
+            aphex_root, "aphex-tree"
+        )
+
+        require(
+            bundle_repkg_b == first_bundle,
+            "bundle-reconstructed tree repackaging changed canonical decoded bytes",
+        )
+        require(
+            bundle_repkg_a == first_aphex,
+            "bundle-reconstructed tree repackaging changed canonical APHEX bytes",
+        )
+        require(
+            bundle_repkg_r == first_receipt,
+            "bundle-reconstructed tree repackaging changed canonical receipt bytes",
+        )
+        require(
+            aphex_repkg_b == first_bundle,
+            "APHEX-reconstructed tree repackaging changed canonical decoded bytes",
+        )
+        require(
+            aphex_repkg_a == first_aphex,
+            "APHEX-reconstructed tree repackaging changed canonical APHEX bytes",
+        )
+        require(
+            aphex_repkg_r == first_receipt,
+            "APHEX-reconstructed tree repackaging changed canonical receipt bytes",
+        )
 
         # Tamper tests.
         tampered_bundle = bytearray(first_bundle)
