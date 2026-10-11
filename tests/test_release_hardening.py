@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -26,6 +26,7 @@ from tools.package_release import (  # noqa: E402
     refang_transport_text,
     verify_bundle,
 )
+import tools.release_preflight as release_preflight  # noqa: E402
 from tools.release_preflight import load_manifest, run_preflight  # noqa: E402
 
 
@@ -59,39 +60,87 @@ def _refang_transport_text(value: str) -> str:
     return refang_transport_text(value, _transport_extensions())
 
 
-def _assert_windows_workflow_requires_master() -> None:
+def _workflow_trigger_result(source: str) -> release_preflight.Check:
     with tempfile.TemporaryDirectory(prefix="samql-release-preflight-") as tmp:
-        fixture = Path(tmp) / "samql"
-        shutil.copytree(
-            ROOT,
-            fixture,
-            ignore=shutil.ignore_patterns(".git", "node_modules", "release"),
-        )
-        workflow_path = fixture / ".github/workflows/windows-browser.yml"
-        workflow = workflow_path.read_text(encoding="utf-8")
-        mutated_workflow, substitutions = re.subn(
-            r"(?m)^(\s*branches:\s*)\[[^\]]*\]\s*$",
-            r"\1[main]",
-            workflow,
-            count=1,
-        )
-        require(substitutions == 1, "test fixture has no push branches list to mutate")
-        workflow_path.write_text(
-            mutated_workflow
-            + "\n# branches: [master] must not satisfy the trigger check\n"
-            + "env:\n  DOCUMENTED_STABLE_BRANCH: master\n",
+        fixture = Path(tmp)
+        (fixture / ".github/workflows").mkdir(parents=True)
+        (fixture / "frontend/src/components").mkdir(parents=True)
+        (fixture / "frontend/e2e").mkdir(parents=True)
+        (fixture / "RELEASE_MANIFEST.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "product": "SamQL",
+                    "phase": 10,
+                    "sourceManifest": "SOURCE_MANIFEST.txt",
+                    "generatedAt": "2026-10-11T00:00:00Z",
+                    "qualityGates": {
+                        "componentTestsMinimum": 0,
+                        "edgeE2eTestsMinimum": 0,
+                        "nodeFlowShellMaximumLines": 1,
+                        "requiredBrowserChannel": "msedge",
+                    },
+                }
+            ),
             encoding="utf-8",
         )
-
-        failures = [item for item in run_preflight(fixture) if not item.ok]
-        require(
-            any(item.name == "Windows release workflow trigger" for item in failures),
-            "preflight accepted a Windows release workflow without a master push trigger",
+        (fixture / "frontend/src/components/NodeFlow.tsx").write_text(
+            "// focused preflight fixture\n", encoding="utf-8"
         )
+        (fixture / "frontend/package.json").write_text(
+            json.dumps({"scripts": {}}), encoding="utf-8"
+        )
+        workflow_path = fixture / ".github/workflows/windows-browser.yml"
+        workflow_path.write_text(source, encoding="utf-8")
+
+        no_check = lambda *_args: None
+        with (
+            patch.object(release_preflight, "_check_identity", no_check),
+            patch.object(release_preflight, "_check_manifest", lambda *_args: []),
+            patch.object(release_preflight, "_check_saved_data", no_check),
+            patch.object(release_preflight, "_check_complete_test_extract", no_check),
+            patch.object(release_preflight, "_check_docs_and_transport", no_check),
+        ):
+            results = run_preflight(fixture)
+        matches = [
+            item for item in results if item.name == "Windows release workflow trigger"
+        ]
+        require(
+            len(matches) == 1,
+            "run_preflight did not emit exactly one Windows workflow trigger check",
+        )
+        return matches[0]
+
+
+def _assert_windows_workflow_requires_unambiguous_master() -> None:
+    valid = _workflow_trigger_result("on:\n  push:\n    branches: [master, beta]\n")
+    require(valid.ok, "preflight rejected [master, beta]")
+
+    beta_only = _workflow_trigger_result("on:\n  push:\n    branches: [beta]\n")
+    require(not beta_only.ok, "preflight accepted beta without master")
+
+    duplicate_on = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [master]\n"
+        "on:\n"
+        "  push:\n"
+        "    branches: [main]\n"
+    )
+    require(not duplicate_on.ok, "preflight accepted duplicate on mappings")
+
+    duplicate_push = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [master]\n"
+        "  push:\n"
+        "    branches: [main]\n"
+    )
+    require(not duplicate_push.ok, "preflight accepted duplicate push mappings")
 
 
 def main() -> int:
-    _assert_windows_workflow_requires_master()
+    _assert_windows_workflow_requires_unambiguous_master()
     failures = [item for item in run_preflight(ROOT) if not item.ok]
     require(
         not failures,

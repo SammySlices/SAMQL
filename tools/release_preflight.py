@@ -533,11 +533,13 @@ def _yaml_scalar(value: str) -> str:
     return value
 
 
-def _workflow_push_branches(source: str) -> set[str]:
-    """Read the small YAML path ``on.push.branches`` without matching prose."""
+def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
+    """Read one unambiguous ``on.push.branches`` mapping."""
     stack: list[tuple[int, str]] = []
     branches: set[str] = set()
     branches_indent: int | None = None
+    seen_paths: set[tuple[str, ...]] = set()
+    trigger_paths = {("on",), ("on", "push"), ("on", "push", "branches")}
 
     for raw_line in source.splitlines():
         code = _yaml_without_comment(raw_line).rstrip()
@@ -565,6 +567,12 @@ def _workflow_push_branches(source: str) -> set[str]:
         path = [item[1] for item in stack] + [key]
         stack.append((indent, key))
 
+        path_key = tuple(path)
+        if path_key in trigger_paths:
+            if path_key in seen_paths:
+                return branches, "duplicate mapping: " + ".".join(path)
+            seen_paths.add(path_key)
+
         if path != ["on", "push", "branches"]:
             continue
         if value.startswith("[") and value.endswith("]"):
@@ -574,8 +582,10 @@ def _workflow_push_branches(source: str) -> set[str]:
                     branches.add(branch)
         elif not value:
             branches_indent = indent
+        else:
+            return branches, "branches must be an inline or block list"
 
-    return branches
+    return branches, None
 
 
 def _check_quality_and_ci(root: Path, release: dict[str, Any], checks: Checks) -> None:
@@ -601,11 +611,12 @@ def _check_quality_and_ci(root: Path, release: dict[str, Any], checks: Checks) -
     )
 
     workflow = _read(root / ".github/workflows/windows-browser.yml")
-    push_branches = _workflow_push_branches(workflow)
+    push_branches, trigger_error = _workflow_push_branches(workflow)
     checks.add(
         "Windows release workflow trigger",
-        "master" in push_branches,
-        "push branches: " + (", ".join(sorted(push_branches)) or "none"),
+        trigger_error is None and "master" in push_branches,
+        trigger_error
+        or "push branches: " + (", ".join(sorted(push_branches)) or "none"),
     )
     required_channel = str(gates.get("requiredBrowserChannel") or "msedge")
     workflow_tokens = (
