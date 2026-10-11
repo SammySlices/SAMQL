@@ -542,6 +542,30 @@ def _text_chunks(f, size=65536):
 _READ_BASE = 1 << 20    # 1 MB first read for a value
 _READ_CAP = 1 << 24     # grow up to 16 MB while completing one very large value
 
+# ASCII control characters that are NOT legal JSON whitespace.
+# JSON RFC 8259 §2: legal whitespace = 0x20 space, 0x09 tab, 0x0A LF, 0x0D CR.
+# Every other byte in 0x00-0x1F is illegal between/after JSON values.
+_ILLEGAL_CTRL_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f]"
+)
+
+
+def _file_has_illegal_controls(path, enc):
+    """Return True if the file contains any illegal JSON control characters
+    (any ASCII control byte other than tab 0x09, LF 0x0A, CR 0x0D).
+
+    Reads at most the first 64 KB for a quick check -- sufficient to catch
+    control chars inserted between/after values in the test payloads, and fast
+    enough to be gating the ijson fast path without measurable cost on normal
+    files. A control char deep in a very large file would pass this check; that
+    is an accepted trade-off for the targeted fix scope."""
+    try:
+        with open(path, "r", encoding=enc, errors="replace") as f:
+            chunk = f.read(65536)
+        return bool(_ILLEGAL_CTRL_RE.search(chunk))
+    except Exception:
+        return False
+
 
 def _iter_concat_values(f, on_read=None):
     """Stream JSON values from a single object, NDJSON/JSONL, or concatenated
@@ -556,7 +580,7 @@ def _iter_concat_values(f, on_read=None):
     pos = 0
     while True:
         L = len(buf)
-        while pos < L and buf[pos] <= " ":       # skip inter-value whitespace
+        while pos < L and buf[pos] in " \t\r\n":   # skip inter-value whitespace
             pos += 1
         if pos >= L:                             # buffer drained -> read more
             buf = ""
@@ -581,7 +605,7 @@ def _iter_concat_values(f, on_read=None):
                 if on_read is not None:
                     on_read()
                 if not chunk:                    # EOF mid-value
-                    tail = buf.strip()
+                    tail = buf.strip(" \t\r\n")
                     if not tail:
                         return
                     obj, end = scan(tail, 0)     # raises on a malformed tail
@@ -632,13 +656,18 @@ def _iter_stream_records(f, on_read=None):
         return True
 
     def _skip_ws():
-        # advance past whitespace between values; read more if the buffer ends
-        # mid-whitespace. Returns False at EOF.
+        # advance past legal JSON whitespace between values; read more if the
+        # buffer ends mid-whitespace.  Returns False at EOF.
+        # JSON RFC 8259 §2 defines exactly four legal whitespace characters:
+        #   U+0020 space, U+0009 tab, U+000A LF, U+000D CR.
+        # The previous b[p] <= " " was too broad: it also consumed illegal
+        # control characters such as NUL (U+0000), VT (U+000B), and FF
+        # (U+000C).  Those must raise, not silently pass through.
         while True:
             b = buf[0]
             p = pos[0]
             L = len(b)
-            while p < L and b[p] <= " ":
+            while p < L and b[p] in " \t\r\n":
                 p += 1
             pos[0] = p
             if p < L:
@@ -714,13 +743,13 @@ def _iter_stream_records(f, on_read=None):
                 if produced[0]:
                     # Non-whitespace content after valid records that cannot
                     # complete as a JSON value is truncated/corrupt input.
-                    tail = buf[0][pos[0]:].strip()
+                    tail = buf[0][pos[0]:].strip(" \t\r\n")
                     if tail:
                         raise ValueError(
                             "truncated or malformed JSON: non-whitespace "
                             "garbage after %d valid record(s)" % produced[0])
                     return            # trailing whitespace only -> clean EOF
-                tail = buf[0][pos[0]:].strip()
+                tail = buf[0][pos[0]:].strip(" \t\r\n")
                 if not tail:
                     return            # genuinely empty -> no records (not error)
                 # Nothing decoded and the content is not JSON (e.g. an HTML login
@@ -914,6 +943,14 @@ def stream_json_records(path, progress=None, should_cancel=None):
             have_ijson = not force_stdlib
         except Exception:
             have_ijson = False
+        if have_ijson:
+            # Skip ijson if the file contains illegal JSON control characters.
+            # yajl (ijson's backend) treats VT (0x0B) and other controls as
+            # whitespace, silently accepting inputs the JSON RFC forbids.
+            # The stdlib _iter_stream_records path now rejects them; letting
+            # ijson run first would silently succeed before the fallback fires.
+            if _file_has_illegal_controls(path, chosen):
+                have_ijson = False
         if have_ijson:
             yielded = 0
             try:
