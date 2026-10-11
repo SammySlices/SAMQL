@@ -339,29 +339,39 @@ def t_flatten_integrity_big_integers_duckdb(skip):
         assert rows, "Query returned no rows"
         got_raw = rows[0][0]
         got_str = str(got_raw)
-        # DuckDB float64 precision loss is expected for values > ~9e15.
-        # If the value round-trips exactly, record that as a pass.
-        # If it differs, assert it's at least in the right order of magnitude
-        # (ruling out total corruption or wrong row), and skip rather than fail
-        # because this is a known engine limitation, not a SAMQL code defect.
+
+        # Determine the SQL column type DuckDB inferred for 'acct'.
+        # This is required before deciding whether a mismatch is a known
+        # float64 limitation or an unexpected data corruption.
+        duck = s.get_duckdb()
+        type_rows = duck.conn.execute(
+            "SELECT typeof(acct) FROM bi_duck LIMIT 1").fetchall()
+        acct_sql_type = (type_rows[0][0] if type_rows else "UNKNOWN").upper()
+        is_float_type = any(t in acct_sql_type for t in ("DOUBLE", "FLOAT", "REAL"))
+
         if got_str != str(big):
-            import math
+            # Any mismatch on a non-float type is unexpected data corruption.
+            assert is_float_type, (
+                "DuckDB stored 'acct' as %r (not a float type) but the value "
+                "does not match: got %r, expected %r — unexpected data "
+                "corruption" % (acct_sql_type, got_str, str(big)))
+            # Float type: verify magnitude before accepting as a known limitation.
             try:
                 got_f = float(got_raw)
                 expected_f = float(big)
                 ratio = got_f / expected_f if expected_f != 0 else float("inf")
                 assert 0.5 < ratio < 2.0, (
                     "DuckDB big-integer value %r is far from expected %r "
-                    "(ratio=%.3f) — possible total corruption" % (
-                        got_str, str(big), ratio))
+                    "(ratio=%.3f, type=%s) — possible total corruption" % (
+                        got_str, str(big), ratio, acct_sql_type))
             except (TypeError, ValueError):
                 assert False, (
                     "DuckDB returned non-numeric big-integer value %r "
-                    "(expected ~%s)" % (got_raw, str(big)))
-            # Known limitation — skip so CI does not red-mark a DuckDB defect
-            skip("DuckDB stores big integers as float64; precision loss "
-                 "is a known engine limitation (got %r, expected %r)"
-                 % (got_str, str(big)))
+                    "(type=%s, expected ~%s)" % (got_raw, acct_sql_type, str(big)))
+            # Confirmed float64 precision loss — skip as a known engine limitation
+            skip("DuckDB inferred %s for big integers; precision loss is a "
+                 "known engine limitation (got %r, expected %r)"
+                 % (acct_sql_type, got_str, str(big)))
         # else: exact round-trip — better than expected, test passes
     finally:
         s.shutdown()
