@@ -2062,7 +2062,8 @@ class Session:
         except Exception:
             pass
         return {"type": raw_type, "fields": nodes,
-                "sampled": ft.get("sampled"), "source": "sampled-values"}
+                "sampled": ft.get("sampled"), "source": "sampled-values",
+                "truncated": not ft.get("complete", True)}
 
     def preview_column_access(self, engine, table, column, field_idx=None,
                               field_path=None):
