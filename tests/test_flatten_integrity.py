@@ -259,21 +259,35 @@ def t_flatten_integrity_field_tree_source_label():
         return  # skip — DuckDB not installed in this environment
 
     # DuckDB path: load JSON with flatten=False so the column stays opaque JSON,
-    # then call column_field_tree and verify source and truncated appear.
-    from samql_core.session import DUCKDB_TARGET
+    # then call column_field_tree and verify source, truncated, and fields are
+    # semantically correct — not just that the keys exist.
     dd = tempfile.mkdtemp()
     p = os.path.join(dd, "nested.json")
     with open(p, "w", encoding="utf-8") as f:
-        json.dump([{"id": i, "meta": {"k": i}} for i in range(10)], f)
+        json.dump([{"id": i, "meta": {"k": i, "label": "x"}} for i in range(20)], f)
     s2 = _session()
     try:
-        s2.load_file(p, destination="duckdb", base_name="nested", flatten=False)
-        cft = s2.column_field_tree("duckdb", "nested", "meta")
-        assert cft is not None, "column_field_tree returned None"
+        s2.load_file(p, destination="duckdb", base_name="nested_ft", flatten=False)
+        cft = s2.column_field_tree("duckdb", "nested_ft", "meta")
+        assert cft is not None, "column_field_tree returned None for DuckDB JSON column"
         assert "truncated" in cft, (
             "column_field_tree result missing 'truncated': %r" % list(cft.keys()))
         assert "source" in cft, (
             "column_field_tree result missing 'source': %r" % list(cft.keys()))
+        assert cft["source"] == "sampled-values", (
+            "Expected source='sampled-values', got %r" % cft["source"])
+        fields = cft.get("fields") or []
+        assert fields, (
+            "column_field_tree returned empty fields list for known-nested JSON: %r" % cft)
+        fnames = [f.get("name") for f in fields]
+        assert "k" in fnames, (
+            "Expected nested key 'k' in field tree, got %r" % fnames)
+        assert "label" in fnames, (
+            "Expected nested key 'label' in field tree, got %r" % fnames)
+        # 20 rows < _FIELD_TREE_SAMPLE_MAX_ROWS (400) -> truncated must be False
+        assert cft["truncated"] is False, (
+            "Expected truncated=False for 20-row table (below sample cap), got %r"
+            % cft["truncated"])
     finally:
         s2.shutdown()
         shutil.rmtree(dd, ignore_errors=True)
@@ -284,15 +298,24 @@ def t_flatten_integrity_field_tree_source_label():
 # ---------------------------------------------------------------------------
 
 def t_flatten_integrity_big_integers_duckdb(skip):
-    """Big integers (> 2^63) survive a DuckDB round-trip without precision loss.
+    """Big integers (> 2^63) DuckDB path: documents known float64 precision loss.
 
-    The SQLite path is already covered by t_json_big_integers (backend.py).
-    This test extends coverage to the DuckDB path.
+    DuckDB infers INTEGER columns from JSON but falls back to DOUBLE for values
+    that exceed BIGINT range (~9.2e18).  Values such as 99999999999999999999
+    (≈1e20) are stored as float64 and come back as '1e+20', silently losing
+    precision.  This is a known DuckDB type-inference limitation.
+
+    This test:
+      - Confirms the load succeeds (no crash, no silent row loss).
+      - Documents the float64 boundary explicitly: if the returned value equals
+        the input exactly, the engine preserved precision (better than expected);
+        if it differs, it must at least be within the correct order of magnitude
+        to rule out total corruption.
+      - The SQLite path is already covered by t_json_big_integers (backend.py),
+        which asserts exact text preservation.  DuckDB users need to be aware
+        of this limitation.
 
     If DuckDB is not installed this test is skipped.
-    If DuckDB silently loses precision (stores as float), the discrepancy is
-    noted via assertion so it becomes a known failing boundary rather than
-    silent data corruption.
     """
     from samql_core.engines import HAS_DUCKDB
     if not HAS_DUCKDB:
@@ -300,7 +323,7 @@ def t_flatten_integrity_big_integers_duckdb(skip):
 
     from samql_core.session import DUCKDB_TARGET
 
-    big = 99999999999999999999  # > 2^63; well outside float64 safe range
+    big = 99999999999999999999  # > 2^63; well outside float64 safe integer range
     dd = tempfile.mkdtemp()
     p = os.path.join(dd, "bi_duck.json")
     with open(p, "w", encoding="utf-8") as f:
@@ -308,28 +331,38 @@ def t_flatten_integrity_big_integers_duckdb(skip):
     s = _session()
     try:
         result = s.load_file(p, destination="duckdb", base_name="bi_duck")
-        assert result, "load_file returned empty result"
+        assert result, "load_file returned empty result — load failed"
+        assert result[0]["rows"] == 1, (
+            "Expected 1 row, got %d — rows were lost" % result[0]["rows"])
         rows = s.run_query(
-            'SELECT acct FROM bi_duck ORDER BY id', target=DUCKDB_TARGET)["rows"]
+            "SELECT acct FROM bi_duck ORDER BY id", target=DUCKDB_TARGET)["rows"]
         assert rows, "Query returned no rows"
-        got = str(rows[0][0])
-        # NOTE: DuckDB stores integers as DOUBLE (float64) when they exceed the
-        # safe integer range (~9e15).  A value of 99999999999999999999 (≈1e20)
-        # therefore loses precision and comes back as '1e+20'.  This is a known
-        # DuckDB type-inference limitation, not a SAMQL defect.  We document the
-        # behaviour rather than asserting equality, so this test is informational.
-        if got != str(big):
-            # Precision was lost — verify at minimum that the magnitude is right
-            # (within 1 order of magnitude) rather than a total corruption.
+        got_raw = rows[0][0]
+        got_str = str(got_raw)
+        # DuckDB float64 precision loss is expected for values > ~9e15.
+        # If the value round-trips exactly, record that as a pass.
+        # If it differs, assert it's at least in the right order of magnitude
+        # (ruling out total corruption or wrong row), and skip rather than fail
+        # because this is a known engine limitation, not a SAMQL code defect.
+        if got_str != str(big):
             import math
-            got_f = float(got)
-            expected_f = float(big)
-            ratio = got_f / expected_f if expected_f != 0 else float('inf')
-            assert 0.5 < ratio < 2.0, (
-                "DuckDB big-integer stored value %r is far from expected %r "
-                "(ratio %.3f) — possible total corruption" % (got, str(big), ratio))
-            # Informational: DuckDB lost precision (expected behaviour for DOUBLE)
-        # else: precision preserved — better than expected; test passes normally
+            try:
+                got_f = float(got_raw)
+                expected_f = float(big)
+                ratio = got_f / expected_f if expected_f != 0 else float("inf")
+                assert 0.5 < ratio < 2.0, (
+                    "DuckDB big-integer value %r is far from expected %r "
+                    "(ratio=%.3f) — possible total corruption" % (
+                        got_str, str(big), ratio))
+            except (TypeError, ValueError):
+                assert False, (
+                    "DuckDB returned non-numeric big-integer value %r "
+                    "(expected ~%s)" % (got_raw, str(big)))
+            # Known limitation — skip so CI does not red-mark a DuckDB defect
+            skip("DuckDB stores big integers as float64; precision loss "
+                 "is a known engine limitation (got %r, expected %r)"
+                 % (got_str, str(big)))
+        # else: exact round-trip — better than expected, test passes
     finally:
         s.shutdown()
         shutil.rmtree(dd, ignore_errors=True)

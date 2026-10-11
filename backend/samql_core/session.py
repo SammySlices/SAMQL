@@ -2015,10 +2015,15 @@ class Session:
         """Sample live values and build a field tree for opaque JSON columns."""
         from .diagnostics import json_values_to_field_tree, access_recipes
         from .sqlutil import quote_ident as _qid
+        max_rows = Session._FIELD_TREE_SAMPLE_MAX_ROWS
         values = self._fetch_shape_sample_values(
             mgr, table, _qid(column), cancel=cancel, deadline=deadline)
         if not values:
             return None
+        # truncated = we hit the sample cap, meaning more rows exist beyond what
+        # was inspected.  json_values_to_field_tree.complete refers to whether
+        # the field-tree walk finished cleanly, not whether all rows were seen.
+        _sampled_truncated = len(values) >= max_rows
         # Sidebar `path` tooltips: STRUCT shells keep dotted labels; pure
         # JSON / JSON[] use ->>. Field Explorer *queries* always need JSON
         # recipes here — STRUCT-style UNNEST fails on opaque JSON arrays.
@@ -2063,7 +2068,7 @@ class Session:
             pass
         return {"type": raw_type, "fields": nodes,
                 "sampled": ft.get("sampled"), "source": "sampled-values",
-                "truncated": not ft.get("complete", True)}
+                "truncated": _sampled_truncated}
 
     def preview_column_access(self, engine, table, column, field_idx=None,
                               field_path=None):
