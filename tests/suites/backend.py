@@ -43321,6 +43321,8 @@ def backend_tests(datadir, csv_path, json_path):
     cases.extend(_recon_integrity_cases(ROOT, CSV, skip))
     from test_nodeflow_isolation import backend_cases as _isolation_cases
     cases.extend(_isolation_cases(ROOT, CSV, skip))
+    from test_nodeflow_stability import backend_cases as _stability_cases
+    cases.extend(_stability_cases(ROOT, CSV, skip))
     _only = os.environ.get("SAMQL_ONLY")
     _skip = os.environ.get("SAMQL_SKIP")
     if os.environ.get("SAMQL_GROUP") not in (None, "", "backend"):

@@ -397,6 +397,7 @@ tests/test_json_integrity.py
 tests/test_nodeflow_isolation.py
 tests/test_nodeflow_nullkey.py
 tests/test_nodeflow_resources.py
+tests/test_nodeflow_stability.py
 tests/test_optimizations_dual_engine.py
 tests/test_reconcile_integrity.py
 tests/test_refactor_phase2.py
