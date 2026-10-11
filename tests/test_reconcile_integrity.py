@@ -42,13 +42,22 @@ def _fresh_session(**kw):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _invariant(t):
-    """Assert a_only + b_only + matched == total for a totals dict."""
+def _invariant(t, matched_expected=None):
+    """Assert exact accounting invariants for a totals dict.
+
+    - a_only + b_only + matched == total  (no rows lost or double-counted)
+    - matching + non_matching == matched  (field-level sums cover exactly matched rows)
+    - If matched_expected is given, also assert matched == matched_expected independently.
+    """
     matched = t["matching"] + t["non_matching"]
     assert t["a_only"] + t["b_only"] + matched == t["total"], (
         "invariant violated: a_only=%d b_only=%d matching=%d non_matching=%d "
         "total=%d" % (t["a_only"], t["b_only"], t["matching"], t["non_matching"],
                       t["total"]))
+    if matched_expected is not None:
+        assert matched == matched_expected, (
+            "matched expected %d, got %d (matching=%d non_matching=%d)"
+            % (matched_expected, matched, t["matching"], t["non_matching"]))
 
 
 def _page_rows_as_dicts(s, result_id, limit=50):
@@ -86,7 +95,7 @@ def t_reconcile_integrity_all_match():
 
 
 def t_reconcile_integrity_all_left_only():
-    """A1b: all left-only — a_only=3, b_only=0, total=3, invariant holds."""
+    """A1b: no overlap — left and right each have distinct keys (all left-only + all right-only)."""
     s = _fresh_session()
     try:
         s.db.add_table_streaming("al_L", ["id", "val"],
@@ -98,17 +107,18 @@ def t_reconcile_integrity_all_left_only():
                            "keys": ["id"], "compare": ["val"]})
         assert not rec.get("error"), rec.get("error")
         t = rec["totals"]
-        _invariant(t)
-        assert t["a_only"] == 3, "a_only"
-        assert t["b_only"] == 3, "b_only"
-        assert t["matching"] + t["non_matching"] == 0, "no matched rows"
-        assert t["total"] == 6, "total"
+        _invariant(t, matched_expected=0)
+        assert t["a_only"] == 3, "a_only == 3 (all left keys unique)"
+        assert t["b_only"] == 3, "b_only == 3 (all right keys unique)"
+        assert t["matching"] == 0, "no matched rows"
+        assert t["non_matching"] == 0, "no matched rows to differ"
+        assert t["total"] == 6, "total == 6"
     finally:
         s.shutdown()
 
 
 def t_reconcile_integrity_all_right_only():
-    """A1c: no overlap — right rows are all b_only, invariant holds."""
+    """A1c: no overlap — 2 left-only rows, 3 right-only rows, invariant holds."""
     s = _fresh_session()
     try:
         s.db.add_table_streaming("ar_L", ["id", "val"],
@@ -167,16 +177,15 @@ def t_reconcile_integrity_field_sum():
                            "keys": ["id"], "compare": ["name"]})
         assert not rec.get("error"), rec.get("error")
         t = rec["totals"]
-        _invariant(t)
+        _invariant(t, matched_expected=3)
         assert t["total"] == 3, "total"
         assert t["a_only"] == 0, "a_only"
         assert t["b_only"] == 0, "b_only"
-        # field-level: matching + non_matching == matched
+        # field-level: matching + non_matching == matched independently verified
         f = rec["fields"][0]
         assert f["field"] == "name"
-        matched = t["matching"] + t["non_matching"]
-        assert f["matching"] + f["non_matching"] == matched, (
-            "field matching+non_matching should equal matched rows")
+        assert f["matching"] + f["non_matching"] == 3, (
+            "field matching+non_matching should equal matched rows (3)")
         assert f["matching"] == 2, "field matching"
         assert f["non_matching"] == 1, "field non_matching"
     finally:
@@ -198,14 +207,17 @@ def t_reconcile_integrity_null_keys_excluded():
                            "keys": ["id"], "compare": ["val"]})
         assert not rec.get("error"), rec.get("error")
         t = rec["totals"]
-        _invariant(t)
-        # null rows must be reported
+        _invariant(t, matched_expected=2)
+        # null rows must be reported separately
         assert t["null_keys"]["a"] == 1, "null_keys.a"
         assert t["null_keys"]["b"] == 1, "null_keys.b"
-        # null rows must NOT inflate the bucket totals
-        # only 2 non-null keys per side can contribute to buckets
-        assert t["a_only"] + t["b_only"] + t["matching"] + t["non_matching"] <= 2, (
-            "null rows must not appear in bucket totals")
+        # null rows must NOT appear in any bucket — exact counts, not just <= 2
+        assert t["a_only"] == 0, "a_only must be 0 (null rows excluded)"
+        assert t["b_only"] == 0, "b_only must be 0 (null rows excluded)"
+        # 2 non-null keys per side: id=1 (val differs: a vs x) and id=2 (c vs z)
+        assert t["non_matching"] == 2, "non_matching must be 2 (both non-null keys differ)"
+        assert t["matching"] == 0, "matching must be 0 (all non-null rows differ on val)"
+        assert t["total"] == 2, "total == 2 (only non-null keyed rows counted)"
         assert t["a_total"] == 3, "a_total includes null-key row"
         assert t["b_total"] == 3, "b_total includes null-key row"
     finally:
@@ -260,17 +272,23 @@ def t_reconcile_integrity_mixed_type_key():
                            "keys": ["id"]})
         assert not rec.get("error"), rec.get("error")
         t = rec["totals"]
-        # The core invariant must always hold regardless of how SQLite resolves
-        # type affinity — no rows may be lost from the accounting.
+        # The core invariant must always hold.
         _invariant(t)
-        # Document observed behavior: SQLite int/text affinity can produce
-        # a_only=1, b_only=1, matched=1, total=3 (invariant satisfied at 1+1+1=3).
-        # Either that or a_only=1, b_only=1, matched=0, total=2 (no affinity match).
-        # Both are acceptable engine behaviors; the invariant is what we require.
+        # SQLite's = operator uses NUMERIC affinity: integer 1 equals text '1'
+        # in a JOIN, but EXCEPT is type-strict and sees them as distinct.
+        # Observed result: a_only=1, b_only=1, matched=1, total=3.
+        # This is the documented engine behavior for this boundary case.
+        assert t["a_only"] == 1, (
+            "mixed-type key: expected a_only=1 (EXCEPT sees int≠str), got %s" % t)
+        assert t["b_only"] == 1, (
+            "mixed-type key: expected b_only=1 (EXCEPT sees int≠str), got %s" % t)
         matched = t["matching"] + t["non_matching"]
-        assert t["total"] in (2, 3), (
-            "mixed-type key: total should be 2 or 3, got %s" % t)
-        assert t["a_only"] + t["b_only"] + matched == t["total"], "invariant"
+        assert matched == 1, (
+            "mixed-type key: expected matched=1 (JOIN sees int=str via affinity), "
+            "got %s" % t)
+        assert t["total"] == 3, (
+            "mixed-type key: expected total=3 (a_only+b_only+matched=1+1+1), "
+            "got %s" % t)
     finally:
         s.shutdown()
 
@@ -460,6 +478,10 @@ def t_reconcile_integrity_balance_currency():
         assert smb is not None, "sum_matching_balance should not be None for currency"
         assert abs(smb - 1234.56) < 1e-6, (
             "currency '$1,234.56' expected parsed to 1234.56, got %s" % smb)
+        snmb = byf["name"]["sum_non_matching_balance"]
+        assert snmb is not None, "sum_non_matching_balance should not be None"
+        assert abs(snmb) < 1e-6, (
+            "no non-matching rows, sum_non_matching_balance expected 0.0, got %s" % snmb)
     finally:
         s.shutdown()
 
@@ -479,10 +501,13 @@ def t_reconcile_integrity_balance_nonnumeric():
         assert not rec.get("error"), rec.get("error")
         byf = {f["field"]: f for f in rec["fields"]}
         smb = byf["name"]["sum_matching_balance"]
-        # SQLite: CAST('N/A' AS REAL) => 0.0; None is also acceptable (treated as 0)
-        if smb is not None:
-            assert abs(smb) < 1e-6, (
-                "non-numeric balance should sum to 0, got %s" % smb)
+        # SQLite: CAST('N/A' AS REAL) => 0.0 (non-numeric string coerces to 0)
+        # The result must be exactly 0.0, not None — the REPLACE+CAST chain
+        # always produces a numeric result (0.0 for non-parseable strings).
+        assert smb is not None, (
+            "sum_matching_balance must be 0.0 for non-numeric 'N/A', not None")
+        assert abs(smb) < 1e-6, (
+            "non-numeric balance 'N/A' should sum to 0.0, got %s" % smb)
     finally:
         s.shutdown()
 
