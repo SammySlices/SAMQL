@@ -2728,6 +2728,7 @@ NODE_PORTS = {
               "out": ["out"]},
     "pivot": {"in": ["in"], "out": ["out"]},
     "chart": {"in": ["in"], "out": ["out"]},
+    "png": {"in": ["in"], "out": ["out"]},
     "reconcile": {"in": ["left", "right"], "out": ["out"]},
     "createtable": {"in": [], "out": ["out"]},
     "text": {"in": [], "out": []},
