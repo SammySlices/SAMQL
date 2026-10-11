@@ -43327,6 +43327,8 @@ def backend_tests(datadir, csv_path, json_path):
     cases.extend(_node_coverage_cases(ROOT, CSV, skip))
     from test_concurrency import backend_cases as _concurrency_cases
     cases.extend(_concurrency_cases(ROOT, CSV, skip))
+    from test_ui_freshness import backend_cases as _ui_freshness_cases
+    cases.extend(_ui_freshness_cases(ROOT, CSV, skip))
     _only = os.environ.get("SAMQL_ONLY")
     _skip = os.environ.get("SAMQL_SKIP")
     if os.environ.get("SAMQL_GROUP") not in (None, "", "backend"):

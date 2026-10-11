@@ -405,6 +405,7 @@ tests/test_reconcile_integrity.py
 tests/test_refactor_phase2.py
 tests/test_release_hardening.py
 tests/test_select_omits_missing_output.py
+tests/test_ui_freshness.py
 tests/test_wave3_stabilization.py
 tools/aphex_transport.py
 tools/assistant_build_pack.py

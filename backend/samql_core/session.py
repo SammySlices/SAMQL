@@ -15553,6 +15553,7 @@ class Session:
                 "total": a_only + b_only + matched,
             },
             "fields": fields,
+            "data_epoch": int(getattr(self, "_data_epoch", 0) or 0),
         }
         self._schedule_cleanup(full=False)
         return out
