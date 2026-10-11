@@ -533,27 +533,146 @@ def _yaml_scalar(value: str) -> str:
     return value
 
 
-# YAML null spellings that must never be treated as valid branch names.
+# Unquoted YAML null spellings — invalid as branch names unless quoted.
 _YAML_NULL = frozenset({"null", "Null", "NULL", "~"})
+
+# Characters that are never allowed in an unquoted plain branch-name scalar.
+# Colon, braces, brackets, anchors, aliases, tags, whitespace, comma.
+_PLAIN_BRANCH_RX = re.compile(r"^[A-Za-z0-9._/\-*]+$")
+
+
+def _decode_branch_scalar(token: str) -> tuple[str, bool, str | None]:
+    """Decode one branch-name scalar token.
+
+    ``token`` is the raw text of a single scalar, *already stripped of leading
+    and trailing whitespace*.  It may be unquoted, single-quoted, or
+    double-quoted.
+
+    Returns ``(value, was_quoted, error)``:
+
+    - ``value`` — the decoded branch name (empty string on error).
+    - ``was_quoted`` — ``True`` when the token used single or double quotes.
+    - ``error`` — a descriptive string on failure, ``None`` on success.
+
+    Strict subset supported:
+
+    **Plain scalars**
+        Must match ``[A-Za-z0-9._/\\-*]+``.  Colons, braces, brackets,
+        anchors (``&``), aliases (``*``), tags (``!``), whitespace, and any
+        other structural character are rejected.
+
+    **Single-quoted scalars** (``'...'``)
+        Only the ``''`` doubled-apostrophe escape is recognised.  No other
+        escape sequences.  Balanced closing quote required.  Trailing garbage
+        after the closing quote is rejected.
+
+    **Double-quoted scalars** (``"..."``)
+        Only ``\\"`` and ``\\\\`` escapes are supported; any other ``\\``
+        sequence is rejected (fail closed — this is a narrow gate validator,
+        not a full YAML implementation).  Balanced closing quote required.
+        Trailing garbage after the closing quote is rejected.
+
+    Null provenance: ``_YAML_NULL`` spellings are rejected only when the
+    scalar is *unquoted* (``was_quoted=False``).  A quoted ``"null"`` or
+    ``'~'`` is a valid branch name.
+    """
+    if not token:
+        return "", False, "empty branch scalar"
+
+    ch = token[0]
+
+    if ch == "'":
+        # Single-quoted scalar.
+        buf: list[str] = []
+        i = 1
+        n = len(token)
+        while i < n:
+            c = token[i]
+            if c == "'":
+                if i + 1 < n and token[i + 1] == "'":
+                    buf.append("'")
+                    i += 2
+                else:
+                    i += 1
+                    # Trailing garbage after closing quote?
+                    rest = token[i:].strip()
+                    if rest:
+                        return "", True, (
+                            f"trailing garbage after single-quoted scalar: {rest!r}"
+                        )
+                    value = "".join(buf)
+                    if not value:
+                        return "", True, "empty single-quoted branch scalar"
+                    return value, True, None
+            else:
+                buf.append(c)
+                i += 1
+        return "", True, "unbalanced single quote in branch scalar"
+
+    if ch == '"':
+        # Double-quoted scalar.
+        buf = []
+        i = 1
+        n = len(token)
+        while i < n:
+            c = token[i]
+            if c == "\\":
+                i += 1
+                if i >= n:
+                    return "", True, "unbalanced double quote in branch scalar"
+                esc = token[i]
+                if esc == '"':
+                    buf.append('"')
+                elif esc == "\\":
+                    buf.append("\\")
+                else:
+                    return "", True, (
+                        f"unsupported escape sequence \\{esc!r} in double-quoted branch scalar"
+                    )
+                i += 1
+            elif c == '"':
+                i += 1
+                rest = token[i:].strip()
+                if rest:
+                    return "", True, (
+                        f"trailing garbage after double-quoted scalar: {rest!r}"
+                    )
+                value = "".join(buf)
+                if not value:
+                    return "", True, "empty double-quoted branch scalar"
+                return value, True, None
+            else:
+                buf.append(c)
+                i += 1
+        return "", True, "unbalanced double quote in branch scalar"
+
+    # Plain scalar.
+    if not _PLAIN_BRANCH_RX.fullmatch(token):
+        # Diagnose the first illegal character for a clearer error.
+        bad = next((c for c in token if not re.match(r"[A-Za-z0-9._/\-*]", c)), "?")
+        return "", False, (
+            f"invalid character {bad!r} in plain branch scalar {token!r}"
+        )
+    if token in _YAML_NULL:
+        return "", False, f"null entry {token!r} in branch list"
+    return token, False, None
 
 
 def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
     """Parse a YAML flow-sequence string (contents between ``[`` and ``]``).
 
-    Supported subset:
-    - Unquoted plain scalars (no spaces — branch names are token-clean).
-    - Single-quoted scalars (``'...'``); no escape sequences in YAML single
-      quotes other than the doubled-apostrophe ``''``.
-    - Double-quoted scalars (``"..."``); honours ``\\"`` and ``\\\\`` escape
-      sequences.
-    - Whitespace and ``#``-comments *outside* scalars are ignored.
+    Strict dependency-free subset: plain scalars matching
+    ``[A-Za-z0-9._/\\-*]+``, single-quoted scalars (``''`` escape only),
+    and double-quoted scalars (``\\"`` and ``\\\\`` only).
 
-    Rejects and returns an error string for:
+    Rejects:
     - Unbalanced or unclosed quotes.
-    - Nested mappings (``{``) or nested sequences (``[``).
-    - Anchors/aliases (``&``, ``*``), tags (``!``).
-    - Empty entries (``[master, ]``, ``[, master]``, ``[a,,b]``).
-    - YAML null spellings (``null``, ``Null``, ``NULL``, ``~``).
+    - Unsupported YAML constructs at the start of a slot (``{``, ``[``).
+    - Invalid characters in plain scalars (colon, structural chars, etc.).
+    - Trailing garbage after a quoted scalar before the next comma or end.
+    - Unsupported double-quoted escape sequences.
+    - Empty entries (leading/trailing/double comma).
+    - Unquoted YAML null spellings; quoted null-like names are accepted.
 
     Returns ``(items, None)`` on success or ``([], error_str)`` on failure.
     """
@@ -566,8 +685,13 @@ def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
         while i < n and raw[i] in " \t":
             i += 1
 
-    def read_scalar() -> tuple[str, str | None]:
-        """Return (scalar_text, error) starting at current position."""
+    def read_one_scalar() -> tuple[str, str | None]:
+        """Read and decode the next scalar from the stream.
+
+        Advances ``i`` past the scalar content (and closing quote when
+        quoted).  Trailing garbage after a quoted scalar is detected here
+        before returning.
+        """
         nonlocal i
         if i >= n:
             return "", None
@@ -577,25 +701,35 @@ def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
             return "", f"unsupported YAML construct {ch!r} in flow sequence"
 
         if ch == "'":
-            # Single-quoted scalar.
+            # Single-quoted: stream version (consume chars one-by-one).
             i += 1
             buf: list[str] = []
             while i < n:
                 c = raw[i]
-                if c == "'" :
+                if c == "'":
                     if i + 1 < n and raw[i + 1] == "'":
                         buf.append("'")
                         i += 2
                     else:
-                        i += 1
-                        return "".join(buf), None
+                        i += 1  # consume closing quote
+                        # Trailing garbage check: only ws/,/] allowed next.
+                        skip_ws()
+                        if i < n and raw[i] not in (",", "]", "#"):
+                            return "", (
+                                f"trailing garbage after single-quoted scalar: "
+                                f"{raw[i:i+8]!r}"
+                            )
+                        value = "".join(buf)
+                        if not value:
+                            return "", "empty single-quoted branch scalar"
+                        return value, None
                 else:
                     buf.append(c)
                     i += 1
             return "", "unbalanced single quote in flow sequence"
 
         if ch == '"':
-            # Double-quoted scalar.
+            # Double-quoted: stream version.
             i += 1
             buf = []
             while i < n:
@@ -610,46 +744,61 @@ def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
                     elif esc == "\\":
                         buf.append("\\")
                     else:
-                        buf.append("\\" + esc)
+                        return "", (
+                            f"unsupported escape sequence \\{esc!r} "
+                            f"in double-quoted branch scalar"
+                        )
                     i += 1
                 elif c == '"':
-                    i += 1
-                    return "".join(buf), None
+                    i += 1  # consume closing quote
+                    # Trailing garbage check.
+                    skip_ws()
+                    if i < n and raw[i] not in (",", "]", "#"):
+                        return "", (
+                            f"trailing garbage after double-quoted scalar: "
+                            f"{raw[i:i+8]!r}"
+                        )
+                    value = "".join(buf)
+                    if not value:
+                        return "", "empty double-quoted branch scalar"
+                    return value, None
                 else:
                     buf.append(c)
                     i += 1
             return "", "unbalanced double quote in flow sequence"
 
-        # Plain scalar — read until comma, closing bracket, or comment hash.
+        # Plain scalar: read until delimiter, then validate grammar.
         start = i
         while i < n and raw[i] not in (",", "]", "#"):
             i += 1
-        return raw[start:i].strip(), None
+        token = raw[start:i].strip()
+        if not token:
+            return "", None  # empty — caller checks
+        if not _PLAIN_BRANCH_RX.fullmatch(token):
+            bad = next((c for c in token if not re.match(r"[A-Za-z0-9._/\-*]", c)), "?")
+            return "", f"invalid character {bad!r} in plain branch scalar {token!r}"
+        if token in _YAML_NULL:
+            return "", f"null entry {token!r} in inline branch list"
+        return token, None
 
-    # Expect at least one entry or nothing (empty list is handled by caller).
-    # We always enter here with the content between [ and ].
+    # Main loop.
     skip_ws()
     if i >= n or raw[i:].strip() == "":
-        # Empty inline list — no items, no error; caller handles empty-set case.
-        return [], None
+        return [], None  # empty list
 
     while i < n:
         skip_ws()
         if i >= n:
             break
         if raw[i] == "#":
-            break  # comment — rest is irrelevant
+            break
 
-        scalar, err = read_scalar()
+        scalar, err = read_one_scalar()
         if err:
             return [], err
-        skip_ws()
 
         if scalar == "":
             return [], "empty entry in inline branch list"
-
-        if scalar in _YAML_NULL:
-            return [], f"null entry {scalar!r} in inline branch list"
 
         items.append(scalar)
 
@@ -658,12 +807,13 @@ def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
             break
         if raw[i] == ",":
             i += 1
-            # Check for empty slot after comma (trailing comma or double comma).
             skip_ws()
             if i >= n or raw[i] in ("#",):
                 return [], "empty trailing entry in inline branch list"
             if raw[i] == ",":
                 return [], "empty entry (double comma) in inline branch list"
+            if raw[i] == "]":
+                return [], "empty trailing entry in inline branch list"
         else:
             break
 
@@ -682,6 +832,9 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
     Indentless block sequences (items at the same column as the ``branches:``
     key) are accepted when all items share that same column; mixing indentless
     and indented items fails closed.
+
+    Block items are decoded through ``_decode_branch_scalar`` for strict
+    validation; quoted null-like names are accepted (provenance preserved).
     """
     stack: list[tuple[int, str]] = []
     branches: set[str] = set()
@@ -706,50 +859,44 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
                 branches_item_indent = None
                 # Fall through to normal mapping parser for this line.
             elif indent == branches_indent:
-                # Either an indentless list item or we've left the block for a
-                # sibling key.  Only a leading "-" is valid here.
+                # Either an indentless list item or a sibling key at same level.
                 if not content.startswith("-"):
-                    # Sibling key at same level — exit block mode, reparse.
+                    # Sibling key — exit block mode, reparse this line.
                     branches_indent = None
                     branches_item_indent = None
                     # Fall through to the mapping parser below.
                 else:
                     # Indentless list item.
                     if branches_item_indent is None:
-                        branches_item_indent = indent  # lock at branches_indent
+                        branches_item_indent = indent
                     elif branches_item_indent != indent:
                         return branches, "inconsistent list indentation under block branches"
-                    branch = _yaml_scalar(content[1:])
-                    if not branch:
-                        return branches, "empty entry in block branch list"
-                    if branch in _YAML_NULL:
-                        return branches, f"null entry {branch!r} in block branch list"
-                    branches.add(branch)
+                    raw_item = content[1:].strip()
+                    value, was_quoted, err = _decode_branch_scalar(raw_item)
+                    if err:
+                        return branches, err
+                    if not was_quoted and value in _YAML_NULL:
+                        return branches, f"null entry {value!r} in block branch list"
+                    branches.add(value)
                     continue
             else:
                 # indent > branches_indent — strictly inside the block.
                 if not content.startswith("-"):
-                    # A non-list child (mapping key or nested sequence anchor)
-                    # makes the branch list ambiguous.
                     return branches, "non-list child under block branches"
-                # Lock in the item indentation on the first list item seen.
                 if branches_item_indent is None:
                     branches_item_indent = indent
                 elif indent != branches_item_indent:
-                    # Deeper or shallower than the established item indent —
-                    # inconsistent structure.
                     return branches, "inconsistent list indentation under block branches"
-                branch = _yaml_scalar(content[1:])
-                if not branch:
-                    return branches, "empty entry in block branch list"
-                if branch in _YAML_NULL:
-                    return branches, f"null entry {branch!r} in block branch list"
-                branches.add(branch)
+                raw_item = content[1:].strip()
+                value, was_quoted, err = _decode_branch_scalar(raw_item)
+                if err:
+                    return branches, err
+                if not was_quoted and value in _YAML_NULL:
+                    return branches, f"null entry {value!r} in block branch list"
+                branches.add(value)
                 continue
 
             if branches_indent is not None:
-                # Still in block mode after the indent checks above; already
-                # handled with `continue`.  Only reachable if we exited above.
                 pass  # pragma: no cover
 
         while stack and stack[-1][0] >= indent:

@@ -112,6 +112,12 @@ def _workflow_trigger_result(source: str) -> release_preflight.Check:
         return matches[0]
 
 
+def _parse_branches_direct(source: str) -> tuple[set[str], str | None]:
+    """Call the internal parser directly for unit-level assertion."""
+    import tools.release_preflight as _rp
+    return _rp._workflow_push_branches(source)
+
+
 def _assert_windows_workflow_requires_unambiguous_master() -> None:
     # ── valid cases ──────────────────────────────────────────────────────────
 
@@ -121,6 +127,10 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         bool("master" in valid_inline.detail),
         f"trigger detail did not mention master for valid inline: {valid_inline.detail!r}",
     )
+    # Exact branch-set assertion via direct parser call.
+    _br, _err = _parse_branches_direct("on:\n  push:\n    branches: [master, beta]\n")
+    require(_err is None, f"direct parser error for valid inline: {_err!r}")
+    require(_br == {"master", "beta"}, f"direct parser wrong branches for valid inline: {_br!r}")
 
     valid_block = _workflow_trigger_result(
         "on:\n"
@@ -134,6 +144,11 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         bool("master" in valid_block.detail),
         f"trigger detail did not mention master for valid block: {valid_block.detail!r}",
     )
+    _br, _err = _parse_branches_direct(
+        "on:\n  push:\n    branches:\n      - beta\n      - master\n"
+    )
+    require(_err is None, f"direct parser error for valid block: {_err!r}")
+    require(_br == {"master", "beta"}, f"direct parser wrong branches for valid block: {_br!r}")
 
     # ── failure cases — each must produce a named check that is not ok ───────
 
@@ -265,9 +280,8 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         "trigger check detail was empty for malformed-inline failure",
     )
 
-    # ── Finding 1: quoted inline scalar ─────────────────────────────────────
-    # A valid single scalar that happens to contain a comma must not manufacture
-    # standalone branch names from its interior.
+    # ── Finding 1 (round 1): quoted inline scalar (already fixed) ────────────
+
     quoted_comma_scalar = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -281,8 +295,16 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         bool(quoted_comma_scalar.detail),
         "trigger check detail was empty for quoted-comma-scalar failure",
     )
+    # Exact branch-set: the quoted token is one value, not three.
+    _br, _err = _parse_branches_direct(
+        'on:\n  push:\n    branches: ["release, master, sentinel"]\n'
+    )
+    require(
+        _err is not None or "master" not in _br,
+        f"direct parser manufactured standalone master from quoted comma scalar: "
+        f"branches={_br!r} err={_err!r}",
+    )
 
-    # A properly quoted simple branch name must still pass.
     valid_quoted_master = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -298,8 +320,10 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         f"trigger detail did not mention master for valid quoted master: "
         f"{valid_quoted_master.detail!r}",
     )
+    _br, _err = _parse_branches_direct('on:\n  push:\n    branches: ["master"]\n')
+    require(_err is None, f"direct parser error for quoted master: {_err!r}")
+    require(_br == {"master"}, f"direct parser wrong branches for quoted master: {_br!r}")
 
-    # Unbalanced / malformed quoting must fail closed.
     malformed_quoted = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -314,8 +338,8 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         "trigger check detail was empty for malformed-quoted failure",
     )
 
-    # ── Finding 2: empty / null list entries ─────────────────────────────────
-    # Block empty items — bare `-`, `- ""`, `- ''`
+    # ── Finding 2 (round 1): empty / null list entries (already fixed) ───────
+
     block_bare_dash = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -355,7 +379,6 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
     )
     require(bool(block_empty_sq.detail), "detail empty for block - '' failure")
 
-    # Inline trailing empty slot: [master, ]
     inline_trailing_empty = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -367,7 +390,6 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
     )
     require(bool(inline_trailing_empty.detail), "detail empty for inline trailing-empty failure")
 
-    # Inline leading empty slot: [, master]
     inline_leading_empty = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -379,7 +401,6 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
     )
     require(bool(inline_leading_empty.detail), "detail empty for inline leading-empty failure")
 
-    # Inline double-comma: [master,,beta]
     inline_double_comma = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -391,7 +412,6 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
     )
     require(bool(inline_double_comma.detail), "detail empty for inline double-comma failure")
 
-    # Inline null spellings: null, Null, NULL, ~
     for null_spell in ("null", "Null", "NULL", "~"):
         null_inline = _workflow_trigger_result(
             "on:\n"
@@ -406,9 +426,17 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
             bool(null_inline.detail),
             f"detail empty for inline null spelling {null_spell!r} failure",
         )
+        # Exact parser assertion: unquoted null must produce an error.
+        _br, _err = _parse_branches_direct(
+            f"on:\n  push:\n    branches: [master, {null_spell}]\n"
+        )
+        require(
+            _err is not None,
+            f"direct parser accepted unquoted null spelling {null_spell!r}: branches={_br!r}",
+        )
 
-    # ── Finding 3: valid indentless block sequence ────────────────────────────
-    # branches: at indent 4 with items also at indent 4 (YAML indentless style).
+    # ── Finding 3 (round 1): valid indentless block sequence ─────────────────
+
     valid_indentless = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -426,8 +454,12 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         f"trigger detail did not mention master for valid indentless block: "
         f"{valid_indentless.detail!r}",
     )
+    _br, _err = _parse_branches_direct(
+        "on:\n  push:\n    branches:\n    - beta\n    - master\n"
+    )
+    require(_err is None, f"direct parser error for valid indentless: {_err!r}")
+    require(_br == {"master", "beta"}, f"direct parser wrong branches for indentless: {_br!r}")
 
-    # Mixed indented and indentless block style must fail.
     mixed_indent_style = _workflow_trigger_result(
         "on:\n"
         "  push:\n"
@@ -440,6 +472,237 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         "preflight accepted mixed indented/indentless block branch style",
     )
     require(bool(mixed_indent_style.detail), "detail empty for mixed-indent-style failure")
+
+    # ── Sibling mapping transition after indentless list ─────────────────────
+    # branches at indent 4 with indentless items, then a sibling key at indent 4
+    # (pull_request) must exit block mode cleanly; master must NOT be found.
+    sibling_after_indentless = _parse_branches_direct(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "    - beta\n"
+        "    pull_request:\n"
+        "      branches: [main]\n"
+    )
+    _br, _err = sibling_after_indentless
+    require(
+        _err is None or "master" not in _br,
+        f"sibling transition after indentless list leaked state: branches={_br!r} err={_err!r}",
+    )
+    require(
+        "master" not in _br,
+        f"sibling transition after indentless incorrectly included master: {_br!r}",
+    )
+
+    # Sibling mapping transition after indented list must also exit cleanly.
+    _br, _err = _parse_branches_direct(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      - beta\n"
+        "    pull_request:\n"
+        "      branches: [main]\n"
+    )
+    require(
+        _err is None,
+        f"sibling transition after indented list produced error: {_err!r}",
+    )
+    require(
+        "master" not in _br,
+        f"sibling transition after indented list incorrectly included master: {_br!r}",
+    )
+
+    # ── Round-2 findings: trailing garbage, plain grammar, block strict decode ─
+
+    # CRITICAL-1: trailing garbage after quoted scalar must fail.
+    trailing_garbage_inline = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        '    branches: ["master" garbage]\n'
+    )
+    require(
+        not trailing_garbage_inline.ok,
+        "preflight accepted trailing garbage after quoted inline scalar",
+    )
+    require(
+        bool(trailing_garbage_inline.detail),
+        "detail empty for trailing-garbage-after-quoted failure",
+    )
+    _br, _err = _parse_branches_direct(
+        'on:\n  push:\n    branches: ["master" garbage]\n'
+    )
+    require(
+        _err is not None,
+        f"direct parser accepted trailing garbage after quoted scalar: branches={_br!r}",
+    )
+
+    # CRITICAL-2a: mapping colon inside plain flow item must fail.
+    plain_with_colon = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [master, beta: sentinel]\n"
+    )
+    require(
+        not plain_with_colon.ok,
+        "preflight accepted plain flow item containing mapping colon [master, beta: sentinel]",
+    )
+    require(bool(plain_with_colon.detail), "detail empty for plain-colon failure")
+    _br, _err = _parse_branches_direct(
+        "on:\n  push:\n    branches: [master, beta: sentinel]\n"
+    )
+    require(
+        _err is not None,
+        f"direct parser accepted colon in plain flow item: branches={_br!r}",
+    )
+
+    # CRITICAL-2b: structural chars { [ & * ! mid-token alongside master must fail.
+    for bad_char, label in (("{", "brace"), ("[", "bracket"), ("&", "amp"), ("*", "star"), ("!", "bang")):
+        src = f"on:\n  push:\n    branches: [master, {bad_char}beta]\n"
+        r = _workflow_trigger_result(src)
+        require(
+            not r.ok,
+            f"preflight accepted plain flow item starting with {bad_char!r} [{label}]: "
+            f"detail={r.detail!r}",
+        )
+        _br, _err = _parse_branches_direct(src)
+        require(
+            _err is not None,
+            f"direct parser accepted {bad_char!r} in plain flow item [{label}]: branches={_br!r}",
+        )
+
+    # CRITICAL-3: malformed block quote alongside master must fail.
+    block_malformed_quote = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        '      - "master\n'
+        "      - beta\n"
+    )
+    require(
+        not block_malformed_quote.ok,
+        "preflight accepted block item with unbalanced double quote alongside master",
+    )
+    require(bool(block_malformed_quote.detail), "detail empty for block-malformed-quote failure")
+    _br, _err = _parse_branches_direct(
+        "on:\n  push:\n    branches:\n      - \"master\n      - beta\n"
+    )
+    require(
+        _err is not None,
+        f"direct parser accepted block item with unbalanced double quote: branches={_br!r}",
+    )
+
+    # IMPORTANT-4: unsupported double-quoted escape must fail.
+    unsupported_escape = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        '    branches: ["mas\\nter"]\n'
+    )
+    require(
+        not unsupported_escape.ok,
+        "preflight accepted double-quoted branch name with unsupported \\n escape",
+    )
+    require(bool(unsupported_escape.detail), "detail empty for unsupported-escape failure")
+    _br, _err = _parse_branches_direct('on:\n  push:\n    branches: ["mas\\nter"]\n')
+    require(
+        _err is not None,
+        f"direct parser accepted unsupported \\n escape: branches={_br!r}",
+    )
+
+    # Supported escapes \" and \\ must still work.
+    supported_escape_dq = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        '    branches: ["mas\\"ter", master]\n'
+    )
+    # mas"ter is a valid (if unusual) branch name and is not "master"
+    _br, _err = _parse_branches_direct('on:\n  push:\n    branches: ["mas\\"ter", master]\n')
+    require(_err is None, f"direct parser error for supported \\\" escape: {_err!r}")
+    require("master" in _br, f"direct parser lost master with supported escape: {_br!r}")
+
+    supported_escape_bs = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        '    branches: ["mas\\\\ter", master]\n'
+    )
+    _br, _err = _parse_branches_direct('on:\n  push:\n    branches: ["mas\\\\ter", master]\n')
+    require(_err is None, f"direct parser error for supported \\\\ escape: {_err!r}")
+    require("master" in _br, f"direct parser lost master with \\\\ escape: {_br!r}")
+
+    # IMPORTANT-5: quoted null-like names are valid branch names.
+    for quoted_null in ('"null"', '"NULL"', '"Null"', '"~"'):
+        src = f"on:\n  push:\n    branches: [{quoted_null}, master]\n"
+        r = _workflow_trigger_result(src)
+        require(
+            r.ok,
+            f"preflight rejected quoted null-like branch name {quoted_null}: "
+            f"detail={r.detail!r}",
+        )
+        _br, _err = _parse_branches_direct(src)
+        require(_err is None, f"direct parser error for quoted null {quoted_null!r}: {_err!r}")
+        require("master" in _br, f"direct parser lost master with quoted null {quoted_null!r}: {_br!r}")
+
+    # Same for single-quoted.
+    for quoted_null in ("'null'", "'NULL'", "'Null'", "'~'"):
+        src = f"on:\n  push:\n    branches: [{quoted_null}, master]\n"
+        r = _workflow_trigger_result(src)
+        require(
+            r.ok,
+            f"preflight rejected single-quoted null-like branch name {quoted_null}: "
+            f"detail={r.detail!r}",
+        )
+        _br, _err = _parse_branches_direct(src)
+        require(_err is None, f"direct parser error for sq quoted null {quoted_null!r}: {_err!r}")
+        require("master" in _br, f"direct parser lost master with sq null {quoted_null!r}: {_br!r}")
+
+    # Unquoted null remains rejected (regression from round 1).
+    for null_spell in ("null", "Null", "NULL", "~"):
+        _br, _err = _parse_branches_direct(
+            f"on:\n  push:\n    branches: [{null_spell}, master]\n"
+        )
+        require(
+            _err is not None,
+            f"direct parser accepted unquoted null {null_spell!r} as branch: branches={_br!r}",
+        )
+
+    # IMPORTANT-5 block: quoted null-like names in block form must be accepted.
+    block_quoted_null = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        '      - "null"\n'
+        "      - master\n"
+    )
+    require(
+        block_quoted_null.ok,
+        f"preflight rejected block item with quoted null-like name \"null\": "
+        f"detail={block_quoted_null.detail!r}",
+    )
+    _br, _err = _parse_branches_direct(
+        'on:\n  push:\n    branches:\n      - "null"\n      - master\n'
+    )
+    require(_err is None, f"direct parser error for block quoted null: {_err!r}")
+    require("master" in _br, f"direct parser lost master for block quoted null: {_br!r}")
+    require("null" in _br, f"direct parser lost 'null' branch for block quoted null: {_br!r}")
+
+    # Block unquoted null must be rejected.
+    block_unquoted_null = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      - null\n"
+        "      - master\n"
+    )
+    require(
+        not block_unquoted_null.ok,
+        "preflight accepted block branches list with unquoted null entry",
+    )
+    _br, _err = _parse_branches_direct(
+        "on:\n  push:\n    branches:\n      - null\n      - master\n"
+    )
+    require(
+        _err is not None,
+        f"direct parser accepted block unquoted null: branches={_br!r}",
+    )
 
 
 def _assert_golden_flow_fixture_omission_detected() -> None:
