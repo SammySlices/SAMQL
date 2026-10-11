@@ -533,6 +533,143 @@ def _yaml_scalar(value: str) -> str:
     return value
 
 
+# YAML null spellings that must never be treated as valid branch names.
+_YAML_NULL = frozenset({"null", "Null", "NULL", "~"})
+
+
+def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
+    """Parse a YAML flow-sequence string (contents between ``[`` and ``]``).
+
+    Supported subset:
+    - Unquoted plain scalars (no spaces — branch names are token-clean).
+    - Single-quoted scalars (``'...'``); no escape sequences in YAML single
+      quotes other than the doubled-apostrophe ``''``.
+    - Double-quoted scalars (``"..."``); honours ``\\"`` and ``\\\\`` escape
+      sequences.
+    - Whitespace and ``#``-comments *outside* scalars are ignored.
+
+    Rejects and returns an error string for:
+    - Unbalanced or unclosed quotes.
+    - Nested mappings (``{``) or nested sequences (``[``).
+    - Anchors/aliases (``&``, ``*``), tags (``!``).
+    - Empty entries (``[master, ]``, ``[, master]``, ``[a,,b]``).
+    - YAML null spellings (``null``, ``Null``, ``NULL``, ``~``).
+
+    Returns ``(items, None)`` on success or ``([], error_str)`` on failure.
+    """
+    items: list[str] = []
+    i = 0
+    n = len(raw)
+
+    def skip_ws() -> None:
+        nonlocal i
+        while i < n and raw[i] in " \t":
+            i += 1
+
+    def read_scalar() -> tuple[str, str | None]:
+        """Return (scalar_text, error) starting at current position."""
+        nonlocal i
+        if i >= n:
+            return "", None
+        ch = raw[i]
+
+        if ch in ("&", "*", "!", "{", "["):
+            return "", f"unsupported YAML construct {ch!r} in flow sequence"
+
+        if ch == "'":
+            # Single-quoted scalar.
+            i += 1
+            buf: list[str] = []
+            while i < n:
+                c = raw[i]
+                if c == "'" :
+                    if i + 1 < n and raw[i + 1] == "'":
+                        buf.append("'")
+                        i += 2
+                    else:
+                        i += 1
+                        return "".join(buf), None
+                else:
+                    buf.append(c)
+                    i += 1
+            return "", "unbalanced single quote in flow sequence"
+
+        if ch == '"':
+            # Double-quoted scalar.
+            i += 1
+            buf = []
+            while i < n:
+                c = raw[i]
+                if c == "\\":
+                    i += 1
+                    if i >= n:
+                        return "", "unbalanced double quote in flow sequence"
+                    esc = raw[i]
+                    if esc == '"':
+                        buf.append('"')
+                    elif esc == "\\":
+                        buf.append("\\")
+                    else:
+                        buf.append("\\" + esc)
+                    i += 1
+                elif c == '"':
+                    i += 1
+                    return "".join(buf), None
+                else:
+                    buf.append(c)
+                    i += 1
+            return "", "unbalanced double quote in flow sequence"
+
+        # Plain scalar — read until comma, closing bracket, or comment hash.
+        start = i
+        while i < n and raw[i] not in (",", "]", "#"):
+            i += 1
+        return raw[start:i].strip(), None
+
+    # Expect at least one entry or nothing (empty list is handled by caller).
+    # We always enter here with the content between [ and ].
+    skip_ws()
+    if i >= n or raw[i:].strip() == "":
+        # Empty inline list — no items, no error; caller handles empty-set case.
+        return [], None
+
+    while i < n:
+        skip_ws()
+        if i >= n:
+            break
+        if raw[i] == "#":
+            break  # comment — rest is irrelevant
+
+        scalar, err = read_scalar()
+        if err:
+            return [], err
+        skip_ws()
+
+        if scalar == "":
+            return [], "empty entry in inline branch list"
+
+        if scalar in _YAML_NULL:
+            return [], f"null entry {scalar!r} in inline branch list"
+
+        items.append(scalar)
+
+        skip_ws()
+        if i >= n or raw[i] == "#":
+            break
+        if raw[i] == ",":
+            i += 1
+            # Check for empty slot after comma (trailing comma or double comma).
+            skip_ws()
+            if i >= n or raw[i] in ("#",):
+                return [], "empty trailing entry in inline branch list"
+            if raw[i] == ",":
+                return [], "empty entry (double comma) in inline branch list"
+        else:
+            break
+
+    return items, None
+
+
 def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
     """Read one unambiguous ``on.push.branches`` mapping.
 
@@ -541,6 +678,10 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
     inconsistent list indentation, deeper list indentation introduced by a
     nested structure, empty block, malformed inline list, or duplicate relevant
     mapping causes an immediate fail-closed return.
+
+    Indentless block sequences (items at the same column as the ``branches:``
+    key) are accepted when all items share that same column; mixing indentless
+    and indented items fails closed.
     """
     stack: list[tuple[int, str]] = []
     branches: set[str] = set()
@@ -557,12 +698,36 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
         content = code.strip()
 
         if branches_indent is not None:
-            if indent <= branches_indent:
+            # Indentless items sit at exactly branches_indent and start with "-".
+            # Indented items sit strictly deeper than branches_indent.
+            if indent < branches_indent:
                 # Exiting the block — stop collecting, continue normal parsing.
                 branches_indent = None
                 branches_item_indent = None
+                # Fall through to normal mapping parser for this line.
+            elif indent == branches_indent:
+                # Either an indentless list item or we've left the block for a
+                # sibling key.  Only a leading "-" is valid here.
+                if not content.startswith("-"):
+                    # Sibling key at same level — exit block mode, reparse.
+                    branches_indent = None
+                    branches_item_indent = None
+                    # Fall through to the mapping parser below.
+                else:
+                    # Indentless list item.
+                    if branches_item_indent is None:
+                        branches_item_indent = indent  # lock at branches_indent
+                    elif branches_item_indent != indent:
+                        return branches, "inconsistent list indentation under block branches"
+                    branch = _yaml_scalar(content[1:])
+                    if not branch:
+                        return branches, "empty entry in block branch list"
+                    if branch in _YAML_NULL:
+                        return branches, f"null entry {branch!r} in block branch list"
+                    branches.add(branch)
+                    continue
             else:
-                # Still inside the block — only accept direct list items.
+                # indent > branches_indent — strictly inside the block.
                 if not content.startswith("-"):
                     # A non-list child (mapping key or nested sequence anchor)
                     # makes the branch list ambiguous.
@@ -575,9 +740,17 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
                     # inconsistent structure.
                     return branches, "inconsistent list indentation under block branches"
                 branch = _yaml_scalar(content[1:])
-                if branch:
-                    branches.add(branch)
+                if not branch:
+                    return branches, "empty entry in block branch list"
+                if branch in _YAML_NULL:
+                    return branches, f"null entry {branch!r} in block branch list"
+                branches.add(branch)
                 continue
+
+            if branches_indent is not None:
+                # Still in block mode after the indent checks above; already
+                # handled with `continue`.  Only reachable if we exited above.
+                pass  # pragma: no cover
 
         while stack and stack[-1][0] >= indent:
             stack.pop()
@@ -598,10 +771,11 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
         if path != ["on", "push", "branches"]:
             continue
         if value.startswith("[") and value.endswith("]"):
-            for item in value[1:-1].split(","):
-                branch = _yaml_scalar(item)
-                if branch:
-                    branches.add(branch)
+            items, err = _parse_flow_sequence(value[1:-1])
+            if err:
+                return branches, err
+            for item in items:
+                branches.add(item)
         elif value.startswith("["):
             return branches, "malformed inline branch list (missing closing bracket)"
         elif not value:

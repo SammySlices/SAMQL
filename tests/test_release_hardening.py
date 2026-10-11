@@ -265,6 +265,182 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         "trigger check detail was empty for malformed-inline failure",
     )
 
+    # ── Finding 1: quoted inline scalar ─────────────────────────────────────
+    # A valid single scalar that happens to contain a comma must not manufacture
+    # standalone branch names from its interior.
+    quoted_comma_scalar = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        '    branches: ["release, master, sentinel"]\n'
+    )
+    require(
+        not quoted_comma_scalar.ok,
+        "preflight accepted quoted comma-containing scalar as if it listed standalone master",
+    )
+    require(
+        bool(quoted_comma_scalar.detail),
+        "trigger check detail was empty for quoted-comma-scalar failure",
+    )
+
+    # A properly quoted simple branch name must still pass.
+    valid_quoted_master = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        '    branches: ["master"]\n'
+    )
+    require(
+        valid_quoted_master.ok,
+        f"preflight rejected valid quoted simple branch name \"master\": "
+        f"{valid_quoted_master.detail!r}",
+    )
+    require(
+        "master" in valid_quoted_master.detail,
+        f"trigger detail did not mention master for valid quoted master: "
+        f"{valid_quoted_master.detail!r}",
+    )
+
+    # Unbalanced / malformed quoting must fail closed.
+    malformed_quoted = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        '    branches: ["master, beta]\n'
+    )
+    require(
+        not malformed_quoted.ok,
+        "preflight accepted malformed/unbalanced quoted inline form",
+    )
+    require(
+        bool(malformed_quoted.detail),
+        "trigger check detail was empty for malformed-quoted failure",
+    )
+
+    # ── Finding 2: empty / null list entries ─────────────────────────────────
+    # Block empty items — bare `-`, `- ""`, `- ''`
+    block_bare_dash = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      - master\n"
+        "      -\n"
+    )
+    require(
+        not block_bare_dash.ok,
+        "preflight accepted block branches list with bare empty `-` entry",
+    )
+    require(bool(block_bare_dash.detail), "detail empty for block bare-dash failure")
+
+    block_empty_dq = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        '      - ""\n'
+        "      - master\n"
+    )
+    require(
+        not block_empty_dq.ok,
+        'preflight accepted block branches list with `- ""` empty entry',
+    )
+    require(bool(block_empty_dq.detail), 'detail empty for block - "" failure')
+
+    block_empty_sq = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      - ''\n"
+        "      - master\n"
+    )
+    require(
+        not block_empty_sq.ok,
+        "preflight accepted block branches list with `- ''` empty entry",
+    )
+    require(bool(block_empty_sq.detail), "detail empty for block - '' failure")
+
+    # Inline trailing empty slot: [master, ]
+    inline_trailing_empty = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [master, ]\n"
+    )
+    require(
+        not inline_trailing_empty.ok,
+        "preflight accepted inline branches list with trailing empty slot [master, ]",
+    )
+    require(bool(inline_trailing_empty.detail), "detail empty for inline trailing-empty failure")
+
+    # Inline leading empty slot: [, master]
+    inline_leading_empty = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [, master]\n"
+    )
+    require(
+        not inline_leading_empty.ok,
+        "preflight accepted inline branches list with leading empty slot [, master]",
+    )
+    require(bool(inline_leading_empty.detail), "detail empty for inline leading-empty failure")
+
+    # Inline double-comma: [master,,beta]
+    inline_double_comma = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [master,,beta]\n"
+    )
+    require(
+        not inline_double_comma.ok,
+        "preflight accepted inline branches list with double-comma empty slot [master,,beta]",
+    )
+    require(bool(inline_double_comma.detail), "detail empty for inline double-comma failure")
+
+    # Inline null spellings: null, Null, NULL, ~
+    for null_spell in ("null", "Null", "NULL", "~"):
+        null_inline = _workflow_trigger_result(
+            "on:\n"
+            "  push:\n"
+            f"    branches: [master, {null_spell}]\n"
+        )
+        require(
+            not null_inline.ok,
+            f"preflight accepted inline branches list with null spelling {null_spell!r}",
+        )
+        require(
+            bool(null_inline.detail),
+            f"detail empty for inline null spelling {null_spell!r} failure",
+        )
+
+    # ── Finding 3: valid indentless block sequence ────────────────────────────
+    # branches: at indent 4 with items also at indent 4 (YAML indentless style).
+    valid_indentless = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "    - beta\n"
+        "    - master\n"
+    )
+    require(
+        valid_indentless.ok,
+        f"preflight rejected valid indentless block sequence for branches: "
+        f"{valid_indentless.detail!r}",
+    )
+    require(
+        "master" in valid_indentless.detail,
+        f"trigger detail did not mention master for valid indentless block: "
+        f"{valid_indentless.detail!r}",
+    )
+
+    # Mixed indented and indentless block style must fail.
+    mixed_indent_style = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "    - beta\n"
+        "      - master\n"
+    )
+    require(
+        not mixed_indent_style.ok,
+        "preflight accepted mixed indented/indentless block branch style",
+    )
+    require(bool(mixed_indent_style.detail), "detail empty for mixed-indent-style failure")
+
 
 def _assert_golden_flow_fixture_omission_detected() -> None:
     """Focused regression: dropping one golden-flow fixture from the manifest
