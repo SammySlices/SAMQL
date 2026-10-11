@@ -50,3 +50,4 @@ samql_full_source_all_tests_ui_*.txt
 _full_test_out.txt
 _npm_ci_out.txt
 _build_*.txt
+frontend/node_modules
