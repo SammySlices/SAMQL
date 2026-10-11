@@ -31795,12 +31795,151 @@ def backend_tests(datadir, csv_path, json_path):
                 {"id": "gc", "type": "groupconcat", "config": {
                     "col": "v", "name": "d", "distinct": True}})
             got = r3["rows"][0][r3["columns"].index("d")]
-            eq(sorted(got.split(",")), ["1", "2"], "distinct removes duplicates")
+            # Default delimiter is ", " (comma-space); split on ", " for accuracy.
+            eq(sorted(got.split(", ")), ["1", "2"], "distinct removes duplicates")
+            # SQLite distinct + custom delimiter regression: see
+            # t_groupconcat_sqlite_backend_suite() below, which explicitly
+            # invokes node_output_sql(engine="sqlite") and executes via
+            # stdlib sqlite3 so every case is provably on the SQLite branch.
             need(_sql_flow(s, "SELECT 1 AS v", {
                 "id": "gc", "type": "groupconcat",
                 "config": {}}).get("error"), "groupconcat needs a column")
         finally:
             s.shutdown()
+
+    def t_groupconcat_sqlite_backend_suite():
+        # Backend-suite regression for the SQLite groupconcat compiler branch.
+        #
+        # RED evidence (production compiler before this fix):
+        #   node_output_sql with engine="sqlite", distinct=True, delim="|"
+        #   emitted:
+        #     SELECT group_concat(DISTINCT CAST("v" AS TEXT)) AS "joined"
+        #                                                        FROM _src AS _gc
+        #   SQLite's group_concat(DISTINCT x) accepts no separator argument;
+        #   it ALWAYS uses a comma.  Running that SQL against rows ("a,x",
+        #   "a,x", "b") returns "a,x,b" -- the custom pipe delimiter is
+        #   silently ignored AND comma-containing values are split incorrectly.
+        #
+        # This test directly invokes node_output_sql(engine="sqlite") and
+        # then executes the resulting SQL through stdlib sqlite3, so there is
+        # no routing ambiguity: the SQLite branch is exercised regardless of
+        # whether DuckDB is installed.  DuckDB behaviour is covered by the
+        # standard t_groupconcat_node() above, which runs through Session and
+        # exercises the DuckDB path where duckdb is available.
+        import sqlite3 as _sl3
+        from samql_core import nodeflow as _NF
+
+        def _exec_sqlite(ddl_rows, sql):
+            """Run sql against an in-memory SQLite DB seeded from ddl_rows.
+
+            ddl_rows: list of tuples; first row is the column-name header,
+            subsequent rows are data.  All columns are TEXT.
+            """
+            con = _sl3.connect(":memory:")
+            try:
+                header = ddl_rows[0]
+                data   = ddl_rows[1:]
+                col_defs = ", ".join("%s TEXT" % c for c in header)
+                con.execute("CREATE TABLE _src (%s)" % col_defs)
+                con.executemany(
+                    "INSERT INTO _src VALUES (%s)" % ",".join("?" * len(header)),
+                    data)
+                cur = con.execute(sql)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                return cols, rows, None
+            except Exception as _e:
+                return None, None, str(_e)
+            finally:
+                con.close()
+
+        def _nf_sql(col, name, delim, distinct, groups=None):
+            """Generate SQLite groupconcat SQL via the production compiler."""
+            cfg = {"col": col, "name": name, "delim": delim,
+                   "distinct": distinct}
+            if groups:
+                cfg["group"] = groups
+            node = {"id": "gc", "type": "groupconcat", "config": cfg}
+            return _NF.node_output_sql(
+                node, "out",
+                lambda _p: "_src",
+                lambda _q: list(groups or []) + ["v"],
+                engine="sqlite",
+            )
+
+        # Case A: ungrouped, distinct, custom delimiter, values containing comma.
+        # RED: old compiler produced group_concat(DISTINCT ...) with no sep arg,
+        #      ignoring | and splitting on , inside values.
+        sqA = _nf_sql("v", "joined", "|", True, [])
+        cA, rA, errA = _exec_sqlite(
+            [("v",), ("a,x",), ("a,x",), ("b",), (None,)], sqA)
+        need(errA is None,
+             "A ungrouped distinct+pipe: SQL error: %s  sql=%r" % (errA, sqA))
+        need(len(rA) == 1, "A: expected 1 row, got %r" % rA)
+        gotA = rA[0][cA.index("joined")]
+        eq(sorted(gotA.split("|")), ["a,x", "b"],
+           "A ungrouped distinct+pipe: must use pipe; comma inside value survives"
+           "  val=%r  sql=%r" % (gotA, sqA))
+
+        # Case B: grouped, distinct, custom delimiter, comma-containing values.
+        sqB = _nf_sql("v", "joined", "|", True, ["grp"])
+        cB, rB, errB = _exec_sqlite(
+            [("grp", "v"),
+             ("g1", "a,x"), ("g1", "a,x"), ("g1", "b"),
+             ("g2", "c"),   ("g2", "c")],
+            sqB)
+        need(errB is None,
+             "B grouped distinct+pipe: SQL error: %s  sql=%r" % (errB, sqB))
+        byB = {row[cB.index("grp")]: row[cB.index("joined")]
+               for row in rB}
+        eq(sorted(byB["g1"].split("|")), ["a,x", "b"],
+           "B g1 must have two distinct pipe-sep values, comma inside value "
+           "intact  val=%r  sql=%r" % (byB.get("g1"), sqB))
+        eq(byB["g2"], "c",
+           "B g2 single distinct value  val=%r  sql=%r" % (byB.get("g2"), sqB))
+
+        # Case C: a real group key named like the internal value helper must
+        # remain visible while the helper alias is collision-bumped.
+        sqC = _nf_sql("v", "joined", "|", True, ["_gc_v"])
+        cC, rC, errC = _exec_sqlite(
+            [("_gc_v", "v"),
+             ("g1", "a,x"), ("g1", "a,x"), ("g1", "b")], sqC)
+        need(errC is None,
+             "C alias-collision: SQL error: %s  sql=%r" % (errC, sqC))
+        need('AS "_gc_v2"' in sqC,
+             "C: generated SQL must contain collision-bumped value alias  sql=%r"
+             % sqC)
+        need(len(rC) == 1, "C: expected 1 row, got %r" % rC)
+        eq(rC[0][cC.index("_gc_v")], "g1",
+           "C alias-collision: group key survives")
+        gotC = rC[0][cC.index("joined")]
+        eq(sorted(gotC.split("|")), ["a,x", "b"],
+           "C alias-collision: helper alias does not corrupt values  val=%r  sql=%r"
+           % (gotC, sqC))
+
+        # Case D: ungrouped, no distinct -- existing non-distinct path,
+        # confirm it still uses the custom delimiter (not a regression).
+        sqD = _nf_sql("v", "all_vals", "|", False, [])
+        cD, rD, errD = _exec_sqlite(
+            [("v",), ("x",), ("y",), ("x",)], sqD)
+        need(errD is None,
+             "D no-distinct: SQL error: %s  sql=%r" % (errD, sqD))
+        gotD = rD[0][cD.index("all_vals")]
+        need(gotD is not None and "|" in gotD,
+             "D no-distinct non-grouped: pipe delimiter used  val=%r" % gotD)
+
+        # Case E: NULL handling -- SQLite group_concat skips NULL values.
+        sqE = _nf_sql("v", "result", "|", False, [])
+        cE, rE, errE = _exec_sqlite(
+            [("v",), (None,), ("a",), ("b",)], sqE)
+        need(errE is None,
+             "E NULL handling: SQL error: %s  sql=%r" % (errE, sqE))
+        gotE = rE[0][cE.index("result")]
+        need(gotE is not None,
+             "E NULL handling: result is None (all nulls?)  sql=%r" % sqE)
+        eq(sorted(gotE.split("|")), ["a", "b"],
+           "E NULL handling: NULL rows are excluded from the concat"
+           "  val=%r  sql=%r" % (gotE, sqE))
 
     def t_date_node():
         s = Session()
@@ -41990,6 +42129,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_connected_columns_batch),
         ("anti / semi join node", t_antijoin_node),
         ("group-concat node (inverse of explode)", t_groupconcat_node),
+        ("group-concat SQLite backend suite (explicit engine=sqlite + stdlib sqlite3)",
+         t_groupconcat_sqlite_backend_suite),
         ("date node (part / truncate / diff)", t_date_node),
         ("map / recode values node", t_maprecode_node),
         ("parse / cast node (number + integer)", t_parse_node),

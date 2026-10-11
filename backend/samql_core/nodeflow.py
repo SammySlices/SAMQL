@@ -1839,9 +1839,50 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
         else:
             inner = "CAST(%s AS TEXT)" % _q(col)
             if distinct:
-                # SQLite group_concat(DISTINCT x) only supports a comma
-                # separator, so the custom delimiter is ignored when distinct
-                agg = "group_concat(DISTINCT %s) AS %s" % (inner, _q(name))
+                # SQLite's group_concat(DISTINCT x) accepts no separator
+                # argument, so it always uses a comma and ignores any custom
+                # delimiter.  Work around by pre-deduplicating with a DISTINCT
+                # relational subquery and then running group_concat(x, sep) on
+                # the already-unique rows -- semantically identical and legal.
+                #
+                # The subquery alias and the value-column alias must not
+                # collide with the user-chosen output name or any group-by key.
+                taken = {name.lower()} | {g.lower() for g in groups}
+                _gc_alias = "_gc_d"
+                _sfx = 2
+                while _gc_alias.lower() in taken:
+                    _gc_alias = "_gc_d%d" % _sfx
+                    _sfx += 1
+                # Internal value-column alias inside the subquery.
+                _vc = "_gc_v"
+                _vsfx = 2
+                while _vc.lower() in taken:
+                    _vc = "_gc_v%d" % _vsfx
+                    _vsfx += 1
+                if groups:
+                    gq = ", ".join(_q(g) for g in groups)
+                    dedup = (
+                        "SELECT %s, %s AS %s FROM %s AS _gc GROUP BY %s"
+                        % (gq, inner, _q(_vc), src,
+                           gq + ", " + inner)
+                    )
+                    agg = "group_concat(%s, %s) AS %s" % (
+                        _q(_vc), _strlit(delim), _q(name))
+                    return (
+                        "SELECT %s, %s FROM (%s) AS %s GROUP BY %s"
+                        % (gq, agg, dedup, _q(_gc_alias), gq)
+                    )
+                else:
+                    dedup = (
+                        "SELECT DISTINCT %s AS %s FROM %s AS _gc"
+                        % (inner, _q(_vc), src)
+                    )
+                    agg = "group_concat(%s, %s) AS %s" % (
+                        _q(_vc), _strlit(delim), _q(name))
+                    return (
+                        "SELECT %s FROM (%s) AS %s"
+                        % (agg, dedup, _q(_gc_alias))
+                    )
             else:
                 agg = "group_concat(%s, %s) AS %s" % (
                     inner, _strlit(delim), _q(name))
