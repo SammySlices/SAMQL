@@ -536,9 +536,12 @@ def _yaml_scalar(value: str) -> str:
 # Unquoted YAML null spellings — invalid as branch names unless quoted.
 _YAML_NULL = frozenset({"null", "Null", "NULL", "~"})
 
-# Characters that are never allowed in an unquoted plain branch-name scalar.
-# Colon, braces, brackets, anchors, aliases, tags, whitespace, comma.
-_PLAIN_BRANCH_RX = re.compile(r"^[A-Za-z0-9._/\-*]+$")
+# Strict allowed character set for unquoted plain branch-name scalars.
+# Excludes *, which is a YAML alias marker and structural character.
+_PLAIN_BRANCH_RX = re.compile(r"^[A-Za-z0-9._/\-]+$")
+
+# Structural trigger-path keys that must have an empty (block-mapping) value.
+_STRUCTURAL_KEYS = {("on",), ("on", "push")}
 
 
 def _decode_branch_scalar(token: str) -> tuple[str, bool, str | None]:
@@ -557,8 +560,8 @@ def _decode_branch_scalar(token: str) -> tuple[str, bool, str | None]:
     Strict subset supported:
 
     **Plain scalars**
-        Must match ``[A-Za-z0-9._/\\-*]+``.  Colons, braces, brackets,
-        anchors (``&``), aliases (``*``), tags (``!``), whitespace, and any
+        Must match ``[A-Za-z0-9._/\\-]+``.  Asterisks (``*``), colons,
+        braces, brackets, anchors (``&``), tags (``!``), whitespace, and any
         other structural character are rejected.
 
     **Single-quoted scalars** (``'...'``)
@@ -594,7 +597,6 @@ def _decode_branch_scalar(token: str) -> tuple[str, bool, str | None]:
                     i += 2
                 else:
                     i += 1
-                    # Trailing garbage after closing quote?
                     rest = token[i:].strip()
                     if rest:
                         return "", True, (
@@ -648,8 +650,7 @@ def _decode_branch_scalar(token: str) -> tuple[str, bool, str | None]:
 
     # Plain scalar.
     if not _PLAIN_BRANCH_RX.fullmatch(token):
-        # Diagnose the first illegal character for a clearer error.
-        bad = next((c for c in token if not re.match(r"[A-Za-z0-9._/\-*]", c)), "?")
+        bad = next((c for c in token if not re.match(r"[A-Za-z0-9._/\-]", c)), "?")
         return "", False, (
             f"invalid character {bad!r} in plain branch scalar {token!r}"
         )
@@ -658,18 +659,77 @@ def _decode_branch_scalar(token: str) -> tuple[str, bool, str | None]:
     return token, False, None
 
 
+def _parse_inline_list_value(value: str) -> tuple[list[str], str | None]:
+    """Parse an inline branch-list YAML value that starts and ends with ``[``/``]``.
+
+    Wraps ``_parse_flow_sequence`` but first verifies complete consumption:
+    the outermost ``[...]`` must account for the full ``value`` string with no
+    trailing characters outside the closing bracket.
+
+    ``value`` is the raw YAML value string from the ``branches:`` line, after
+    stripping leading/trailing whitespace.  It must start with ``[``.
+
+    Returns ``(items, None)`` on success or ``([], error_str)`` on failure.
+    """
+    # Find the first balanced ']' that closes the opening '['.
+    depth = 0
+    close_pos = -1
+    i = 0
+    in_sq = False
+    in_dq = False
+    esc = False
+    while i < len(value):
+        c = value[i]
+        if esc:
+            esc = False
+        elif in_dq:
+            if c == "\\":
+                esc = True
+            elif c == '"':
+                in_dq = False
+        elif in_sq:
+            if c == "'" and i + 1 < len(value) and value[i + 1] == "'":
+                i += 2
+                continue
+            elif c == "'":
+                in_sq = False
+        else:
+            if c == '"':
+                in_dq = True
+            elif c == "'":
+                in_sq = True
+            elif c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+                if depth == 0:
+                    close_pos = i
+                    break
+        i += 1
+
+    if close_pos == -1:
+        return [], "malformed inline branch list (missing closing bracket)"
+
+    # Anything after the closing ] is illegal.
+    tail = value[close_pos + 1:].strip()
+    if tail:
+        return [], f"trailing content after inline branch list: {tail!r}"
+
+    inner = value[1:close_pos]
+    return _parse_flow_sequence(inner)
+
+
 def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
     """Parse a YAML flow-sequence string (contents between ``[`` and ``]``).
 
-    Strict dependency-free subset: plain scalars matching
-    ``[A-Za-z0-9._/\\-*]+``, single-quoted scalars (``''`` escape only),
-    and double-quoted scalars (``\\"`` and ``\\\\`` only).
+    Strict dependency-free subset.  Uses ``_decode_branch_scalar`` for all
+    scalar validation — quote/escape/plain-char logic lives there only.
 
     Rejects:
-    - Unbalanced or unclosed quotes.
-    - Unsupported YAML constructs at the start of a slot (``{``, ``[``).
-    - Invalid characters in plain scalars (colon, structural chars, etc.).
-    - Trailing garbage after a quoted scalar before the next comma or end.
+    - Unsupported YAML constructs at the start of a slot (``{``, ``[``,
+      ``&``, ``*``, ``!``).
+    - Invalid characters in plain scalars (colon, ``*``, structural chars).
+    - Trailing garbage after a quoted scalar before the next comma/end.
     - Unsupported double-quoted escape sequences.
     - Empty entries (leading/trailing/double comma).
     - Unquoted YAML null spellings; quoted null-like names are accepted.
@@ -685,12 +745,14 @@ def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
         while i < n and raw[i] in " \t":
             i += 1
 
-    def read_one_scalar() -> tuple[str, str | None]:
-        """Read and decode the next scalar from the stream.
+    def read_raw_token() -> tuple[str, str | None]:
+        """Extract the raw token text starting at ``i`` and advance past it.
 
-        Advances ``i`` past the scalar content (and closing quote when
-        quoted).  Trailing garbage after a quoted scalar is detected here
-        before returning.
+        For quoted scalars: returns the full ``'...'`` or ``"..."`` string
+        (the caller checks for trailing garbage at the stream level).
+        For plain scalars: returns the stripped content up to the delimiter.
+        Leading structural characters (``{``, ``[``, ``&``, ``*``, ``!``)
+        are rejected immediately.
         """
         nonlocal i
         if i >= n:
@@ -701,87 +763,40 @@ def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
             return "", f"unsupported YAML construct {ch!r} in flow sequence"
 
         if ch == "'":
-            # Single-quoted: stream version (consume chars one-by-one).
+            start = i
             i += 1
-            buf: list[str] = []
             while i < n:
                 c = raw[i]
                 if c == "'":
                     if i + 1 < n and raw[i + 1] == "'":
-                        buf.append("'")
                         i += 2
                     else:
-                        i += 1  # consume closing quote
-                        # Trailing garbage check: only ws/,/] allowed next.
-                        skip_ws()
-                        if i < n and raw[i] not in (",", "]", "#"):
-                            return "", (
-                                f"trailing garbage after single-quoted scalar: "
-                                f"{raw[i:i+8]!r}"
-                            )
-                        value = "".join(buf)
-                        if not value:
-                            return "", "empty single-quoted branch scalar"
-                        return value, None
+                        i += 1
+                        return raw[start:i], None
                 else:
-                    buf.append(c)
                     i += 1
             return "", "unbalanced single quote in flow sequence"
 
         if ch == '"':
-            # Double-quoted: stream version.
+            start = i
             i += 1
-            buf = []
             while i < n:
                 c = raw[i]
                 if c == "\\":
-                    i += 1
-                    if i >= n:
-                        return "", "unbalanced double quote in flow sequence"
-                    esc = raw[i]
-                    if esc == '"':
-                        buf.append('"')
-                    elif esc == "\\":
-                        buf.append("\\")
-                    else:
-                        return "", (
-                            f"unsupported escape sequence \\{esc!r} "
-                            f"in double-quoted branch scalar"
-                        )
-                    i += 1
+                    i += 2  # skip escape pair
                 elif c == '"':
-                    i += 1  # consume closing quote
-                    # Trailing garbage check.
-                    skip_ws()
-                    if i < n and raw[i] not in (",", "]", "#"):
-                        return "", (
-                            f"trailing garbage after double-quoted scalar: "
-                            f"{raw[i:i+8]!r}"
-                        )
-                    value = "".join(buf)
-                    if not value:
-                        return "", "empty double-quoted branch scalar"
-                    return value, None
+                    i += 1
+                    return raw[start:i], None
                 else:
-                    buf.append(c)
                     i += 1
             return "", "unbalanced double quote in flow sequence"
 
-        # Plain scalar: read until delimiter, then validate grammar.
+        # Plain scalar: read until delimiter.
         start = i
         while i < n and raw[i] not in (",", "]", "#"):
             i += 1
-        token = raw[start:i].strip()
-        if not token:
-            return "", None  # empty — caller checks
-        if not _PLAIN_BRANCH_RX.fullmatch(token):
-            bad = next((c for c in token if not re.match(r"[A-Za-z0-9._/\-*]", c)), "?")
-            return "", f"invalid character {bad!r} in plain branch scalar {token!r}"
-        if token in _YAML_NULL:
-            return "", f"null entry {token!r} in inline branch list"
-        return token, None
+        return raw[start:i], None  # may be empty string; caller checks
 
-    # Main loop.
     skip_ws()
     if i >= n or raw[i:].strip() == "":
         return [], None  # empty list
@@ -793,14 +808,30 @@ def _parse_flow_sequence(raw: str) -> tuple[list[str], str | None]:
         if raw[i] == "#":
             break
 
-        scalar, err = read_one_scalar()
+        raw_tok, err = read_raw_token()
         if err:
             return [], err
 
-        if scalar == "":
+        # After consuming the raw token, check for trailing garbage before
+        # the next delimiter (only relevant for quoted scalars — plain scalars
+        # already stop at the delimiter).
+        skip_ws()
+        if raw_tok and raw_tok[0] in ("'", '"'):
+            if i < n and raw[i] not in (",", "]", "#"):
+                return [], (
+                    f"trailing garbage after quoted scalar: {raw[i:i+8]!r}"
+                )
+
+        # Decode through the shared scalar decoder.
+        decoded_tok = raw_tok.strip()
+        if not decoded_tok:
             return [], "empty entry in inline branch list"
 
-        items.append(scalar)
+        value, was_quoted, decode_err = _decode_branch_scalar(decoded_tok)
+        if decode_err:
+            return [], decode_err
+
+        items.append(value)
 
         skip_ws()
         if i >= n or raw[i] == "#":
@@ -835,6 +866,15 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
 
     Block items are decoded through ``_decode_branch_scalar`` for strict
     validation; quoted null-like names are accepted (provenance preserved).
+
+    Structural keys ``on:`` and ``push:`` must have no inline value (they
+    introduce block mappings only).  Any nonempty value on these keys — anchors,
+    aliases, tags, plain words — is rejected immediately.
+
+    Tabs anywhere in the leading whitespace of any line are rejected.
+
+    Only known children are permitted under ``on.push``: ``branches`` is the
+    one accepted child; any other key at that level is rejected.
     """
     stack: list[tuple[int, str]] = []
     branches: set[str] = set()
@@ -844,6 +884,13 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
     trigger_paths = {("on",), ("on", "push"), ("on", "push", "branches")}
 
     for raw_line in source.splitlines():
+        # Reject tabs anywhere in leading whitespace of any line.
+        for _ch in raw_line:
+            if _ch == "\t":
+                return branches, "tab character in workflow indentation"
+            if _ch != " ":
+                break
+
         code = _yaml_without_comment(raw_line).rstrip()
         if not code.strip():
             continue
@@ -851,22 +898,14 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
         content = code.strip()
 
         if branches_indent is not None:
-            # Indentless items sit at exactly branches_indent and start with "-".
-            # Indented items sit strictly deeper than branches_indent.
             if indent < branches_indent:
-                # Exiting the block — stop collecting, continue normal parsing.
                 branches_indent = None
                 branches_item_indent = None
-                # Fall through to normal mapping parser for this line.
             elif indent == branches_indent:
-                # Either an indentless list item or a sibling key at same level.
                 if not content.startswith("-"):
-                    # Sibling key — exit block mode, reparse this line.
                     branches_indent = None
                     branches_item_indent = None
-                    # Fall through to the mapping parser below.
                 else:
-                    # Indentless list item.
                     if branches_item_indent is None:
                         branches_item_indent = indent
                     elif branches_item_indent != indent:
@@ -880,7 +919,6 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
                     branches.add(value)
                     continue
             else:
-                # indent > branches_indent — strictly inside the block.
                 if not content.startswith("-"):
                     return branches, "non-list child under block branches"
                 if branches_item_indent is None:
@@ -915,16 +953,23 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
                 return branches, "duplicate mapping: " + ".".join(path)
             seen_paths.add(path_key)
 
+        # Structural keys on: and on.push: must have no inline value.
+        if path_key in _STRUCTURAL_KEYS and value:
+            return branches, f"unsupported value on structural key {'.'.join(path_key)!r}: {value!r}"
+
+        # Under on.push, only 'branches' is a known/accepted child.
+        if len(path) == 3 and path[:2] == ["on", "push"] and path[2] != "branches":
+            return branches, f"unexpected key under on.push: {path[2]!r}"
+
         if path != ["on", "push", "branches"]:
             continue
-        if value.startswith("[") and value.endswith("]"):
-            items, err = _parse_flow_sequence(value[1:-1])
+
+        if value.startswith("["):
+            items, err = _parse_inline_list_value(value)
             if err:
                 return branches, err
             for item in items:
                 branches.add(item)
-        elif value.startswith("["):
-            return branches, "malformed inline branch list (missing closing bracket)"
         elif not value:
             branches_indent = indent
             branches_item_indent = None
