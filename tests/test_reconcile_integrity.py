@@ -476,12 +476,12 @@ def t_reconcile_integrity_balance_currency():
         byf = {f["field"]: f for f in rec["fields"]}
         smb = byf["name"]["sum_matching_balance"]
         assert smb is not None, "sum_matching_balance should not be None for currency"
-        assert abs(smb - 1234.56) < 1e-6, (
-            "currency '$1,234.56' expected parsed to 1234.56, got %s" % smb)
+        assert smb == 1234.56, (
+            "currency '$1,234.56' expected parsed to exactly 1234.56, got %s" % smb)
         snmb = byf["name"]["sum_non_matching_balance"]
         assert snmb is not None, "sum_non_matching_balance should not be None"
-        assert abs(snmb) < 1e-6, (
-            "no non-matching rows, sum_non_matching_balance expected 0.0, got %s" % snmb)
+        assert snmb == 0.0, (
+            "no non-matching rows, sum_non_matching_balance expected exactly 0.0, got %s" % snmb)
     finally:
         s.shutdown()
 
@@ -506,8 +506,8 @@ def t_reconcile_integrity_balance_nonnumeric():
         # always produces a numeric result (0.0 for non-parseable strings).
         assert smb is not None, (
             "sum_matching_balance must be 0.0 for non-numeric 'N/A', not None")
-        assert abs(smb) < 1e-6, (
-            "non-numeric balance 'N/A' should sum to 0.0, got %s" % smb)
+        assert smb == 0.0, (
+            "non-numeric balance 'N/A' should sum to exactly 0.0, got %s" % smb)
     finally:
         s.shutdown()
 
