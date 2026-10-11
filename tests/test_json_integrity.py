@@ -7,6 +7,8 @@ Issues fixed:
 - _skip_ws() used b[p] <= " " which silently consumed illegal control
   characters (NUL U+0000, VT U+000B, FF U+000C) as if they were legal JSON
   whitespace. Legal JSON whitespace is ONLY: space, tab, LF, CR.
+- _detect_first_char() used str.lstrip(), which also strips VT/FF/U+001C-1F, so
+  a file of legal whitespace plus one such control was classified as empty.
 
 Run focused:
   SAMQL_ONLY="json integrity" SAMQL_GROUP=backend \\
@@ -58,6 +60,34 @@ _MISSING = object()
 _PARSER_EXC = (ValueError, json.JSONDecodeError)
 
 
+def _ijson_route():
+    """True when stream_json_records currently routes '[' files through ijson
+    (installed and not forced to stdlib)."""
+    if os.environ.get("SAMQL_JSON_READER", "").lower() == "stdlib":
+        return False
+    try:
+        import ijson  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+# Parser-origin message fragments, per route and malformation kind. Under ijson
+# the inline byte validator in _CountingReader rejects every raw illegal control;
+# under the strict stdlib parser the rejection surfaces as one of its own
+# truncated/garbage errors. An unrelated ValueError (loader, database, ...)
+# matches neither, so it fails the test.
+_CTL_FRAG_STDLIB = {
+    "tail": "non-whitespace garbage",
+    "sep": "truncated JSON array",
+    "instr": "truncated JSON array",
+}
+
+
+def _ctl_frag(kind):
+    return "illegal control character" if _ijson_route() else _CTL_FRAG_STDLIB[kind]
+
+
 def _expect_error(path, label, exc_types=None, msg_fragment=None):
     """stream_json_records must raise on *path*; return None (pass) or a failure string.
 
@@ -80,8 +110,48 @@ def _expect_error(path, label, exc_types=None, msg_fragment=None):
         return None  # raised the expected kind of error
 
 
+def _exact_eq(got, want, path="$"):
+    """Strict ordered deep equality. Returns None if equal, else a string
+    locating the first difference. Dict key SETS must match (extra keys fail),
+    lists must match in length and order, scalar TYPES must match (so True is
+    not 1 and 1 is not 1.0), and NaN equals NaN (the only intended leniency)."""
+    if isinstance(want, dict):
+        if not isinstance(got, dict):
+            return "%s: got %s, want dict" % (path, type(got).__name__)
+        if set(got) != set(want):
+            return ("%s: key set differs: unexpected=%r missing=%r"
+                    % (path, sorted(set(got) - set(want), key=str),
+                       sorted(set(want) - set(got), key=str)))
+        if list(got) != list(want):
+            return "%s: key order differs: %r vs %r" % (path, list(got), list(want))
+        for k in want:
+            d = _exact_eq(got[k], want[k], "%s[%r]" % (path, k))
+            if d:
+                return d
+        return None
+    if isinstance(want, list):
+        if not isinstance(got, list):
+            return "%s: got %s, want list" % (path, type(got).__name__)
+        if len(got) != len(want):
+            return "%s: length %d, want %d" % (path, len(got), len(want))
+        for i, (g, w) in enumerate(zip(got, want)):
+            d = _exact_eq(g, w, "%s[%d]" % (path, i))
+            if d:
+                return d
+        return None
+    if type(got) is not type(want):
+        return "%s: type %s (%r), want %s (%r)" % (
+            path, type(got).__name__, got, type(want).__name__, want)
+    if isinstance(want, float) and math.isnan(want):
+        return None if math.isnan(got) else "%s: got %r, want NaN" % (path, got)
+    if got != want:
+        return "%s: got %r, want %r" % (path, got, want)
+    return None
+
+
 def _expect_ok(path, label, expected_count=None, expected_records=None):
-    """stream_json_records must succeed; optionally assert count and/or exact ordered values."""
+    """stream_json_records must succeed; optionally assert the count and/or
+    EXACT ordered equality of the whole record list (see _exact_eq)."""
     try:
         recs = list(stream_json_records(path))
     except Exception as e:
@@ -89,31 +159,9 @@ def _expect_ok(path, label, expected_count=None, expected_records=None):
     if expected_count is not None and len(recs) != expected_count:
         return "WRONG COUNT for %s: got %d, want %d" % (label, len(recs), expected_count)
     if expected_records is not None:
-        if len(recs) != len(expected_records):
-            return ("WRONG COUNT for %s: got %d records, want %d"
-                    % (label, len(recs), len(expected_records)))
-        for i, (got, want) in enumerate(zip(recs, expected_records)):
-            if isinstance(want, dict) and isinstance(got, dict):
-                for k, wv in want.items():
-                    gv = got.get(k, _MISSING)
-                    if gv is _MISSING:
-                        return "MISSING KEY %r in record %d for %s" % (k, i, label)
-                    if isinstance(wv, float) and math.isnan(wv):
-                        if not (isinstance(gv, float) and math.isnan(gv)):
-                            return ("WRONG VALUE record[%d][%r] for %s: got %r want NaN"
-                                    % (i, k, label, gv))
-                    elif isinstance(wv, float) and math.isinf(wv):
-                        if gv != wv:
-                            return ("WRONG VALUE record[%d][%r] for %s: got %r want %r"
-                                    % (i, k, label, gv, wv))
-                    elif gv != wv:
-                        return ("WRONG VALUE record[%d][%r] for %s: got %r want %r"
-                                % (i, k, label, gv, wv))
-            elif isinstance(want, float) and math.isnan(want):
-                if not (isinstance(got, float) and math.isnan(got)):
-                    return "WRONG VALUE record[%d] for %s: got %r want NaN" % (i, label, got)
-            elif got != want:
-                return "WRONG VALUE record[%d] for %s: got %r want %r" % (i, label, got, want)
+        diff = _exact_eq(recs, expected_records)
+        if diff:
+            return "NOT EXACT for %s: %s" % (label, diff)
     return None
 
 
@@ -313,14 +361,14 @@ def run_tests():
                      expected_records=[{"id": 1}, {"id": 2}, {"id": 3}]))
 
     # B2: empty array
-    check("B2 empty array",
+    check("B2 empty array (exact records)",
           _expect_ok(_write("b2.json", '[]', dd), "empty array",
-                     expected_count=0))
+                     expected_records=[]))
 
     # B3: empty file
-    check("B3 empty file",
+    check("B3 empty file (exact records)",
           _expect_ok(_write("b3.json", '', dd), "empty file",
-                     expected_count=0))
+                     expected_records=[]))
 
     # B4: valid NDJSON -- assert exact ordered records
     check("B4 NDJSON (exact records)",
@@ -333,9 +381,9 @@ def run_tests():
                      expected_records=[{"id": 1}, {"id": 2}, {"id": 3}]))
 
     # B6: concatenated arrays
-    check("B6 concat arrays",
+    check("B6 concat arrays (exact records)",
           _expect_ok(_write("b6.json", '[{"id":1}][{"id":2}]', dd), "concat arrays",
-                     expected_count=2))
+                     expected_records=[{"id": 1}, {"id": 2}]))
 
     # B7: mixed -- object then array, exact records
     check("B7 mixed obj+array (exact records)",
@@ -348,9 +396,9 @@ def run_tests():
                      expected_records=[{"only": True}]))
 
     # B9: bare scalar (integer)
-    check("B9 bare scalar int",
+    check("B9 bare scalar int (exact records)",
           _expect_ok(_write("b9.json", '42', dd), "bare scalar",
-                     expected_count=1))
+                     expected_records=[42]))
 
     # B10: NaN / Infinity tolerant literals -- assert exact ordered values
     # including the second record's -Infinity.
@@ -367,9 +415,36 @@ def run_tests():
               ]))
 
     # B11: array with single element
-    check("B11 single-element array",
+    check("B11 single-element array (exact records)",
           _expect_ok(_write("b11.json", '[{"x":99}]', dd), "single element array",
-                     expected_count=1))
+                     expected_records=[{"x": 99}]))
+
+    # B12: nested values compared exactly (key set, order, list contents, types)
+    check("B12 nested values (exact records)",
+          _expect_ok(_write("b12.json",
+                            '[{"a":{"b":[1,2.5,null,true,"s"],"c":{}},"d":[]},{"e":-0.5}]', dd),
+                     "nested values",
+                     expected_records=[
+                         {"a": {"b": [1, 2.5, None, True, "s"], "c": {}}, "d": []},
+                         {"e": -0.5}]))
+
+    # B13: the exact-equality helper itself must reject extras / type drift
+    # (guards against the comparator silently going lenient again).
+    _neg = [
+        ("extra key", [{"id": 1, "x": 2}], [{"id": 1}]),
+        ("missing key", [{"id": 1}], [{"id": 1, "x": 2}]),
+        ("nested extra key", [{"a": {"b": 1, "z": 0}}], [{"a": {"b": 1}}]),
+        ("nested list item", [{"a": [1, 2]}], [{"a": [1, 3]}]),
+        ("bool vs int", [{"a": True}], [{"a": 1}]),
+        ("int vs float", [{"a": 1.0}], [{"a": 1}]),
+        ("order", [{"id": 2}, {"id": 1}], [{"id": 1}, {"id": 2}]),
+        ("length", [{"id": 1}], [{"id": 1}, {"id": 2}]),
+    ]
+    _bad = [n for n, g, w in _neg if _exact_eq(g, w) is None]
+    check("B13 comparator rejects extra keys/type drift/order",
+          ("comparator accepted: %s" % ", ".join(_bad)) if _bad else None)
+    check("B13b comparator treats NaN as equal",
+          _exact_eq([{"a": float("nan")}], [{"a": float("nan")}]))
 
     # -----------------------------------------------------------------------
     # C. PUBLIC PATH: Session.load_file must not leave partial tables
@@ -393,9 +468,12 @@ def run_tests():
                 s1.load_file(p, destination="sqlite", base_name="c1_table")
                 failures.append("  FAIL: C1 truncated load returned success, should raise")
                 print("  FAIL: C1 truncated load returned success (should raise)")
-            except _PARSER_EXC:
+            except _PARSER_EXC as e:
                 names = [t["name"] for t in s1.tables_tree()]
-                if "c1_table" in names:
+                if "truncated JSON array" not in str(e):
+                    failures.append("  FAIL: C1 wrong provenance: %s" % e)
+                    print("  FAIL: C1 wrong provenance:", e)
+                elif "c1_table" in names:
                     failures.append("  FAIL: C1 partial table 'c1_table' was created after error")
                     print("  FAIL: C1 partial table 'c1_table' exists after error")
                 else:
@@ -419,9 +497,12 @@ def run_tests():
                 s2.load_file(p2, destination="sqlite", base_name="c2_table")
                 failures.append("  FAIL: C2 garbage-after load returned success")
                 print("  FAIL: C2 garbage-after load returned success")
-            except _PARSER_EXC:
+            except _PARSER_EXC as e:
                 names = [t["name"] for t in s2.tables_tree()]
-                if "c2_table" in names:
+                if "non-whitespace garbage" not in str(e):
+                    failures.append("  FAIL: C2 wrong provenance: %s" % e)
+                    print("  FAIL: C2 wrong provenance:", e)
+                elif "c2_table" in names:
                     failures.append("  FAIL: C2 partial table 'c2_table' was created after error")
                     print("  FAIL: C2 partial table 'c2_table' exists after error")
                 else:
@@ -447,14 +528,14 @@ def run_tests():
                 failures.append("  FAIL: C3 valid load: 'c3_table' not found in %r" % names)
                 print("  FAIL: C3 valid load did not create table")
             else:
-                r = s3.run_query("SELECT COUNT(*) AS n FROM c3_table", target="__local__")
-                n = r["rows"][0][0]
-                if n != 3:
-                    failures.append("  FAIL: C3 valid load: got %d rows, want 3" % n)
-                    print("  FAIL: C3 valid load: wrong row count %d" % n)
+                r = s3.run_query("SELECT * FROM c3_table ORDER BY id", target="__local__")
+                if r["columns"] != ["_id", "id"] or r["rows"] != [[1, 1], [2, 2], [3, 3]]:
+                    failures.append("  FAIL: C3 valid load: columns=%r rows=%r"
+                                    % (r["columns"], r["rows"]))
+                    print("  FAIL: C3 valid load: wrong columns/rows", r["columns"], r["rows"])
                 else:
                     passes_count[0] += 1
-                    print("  PASS: C3 valid JSON load through public path")
+                    print("  PASS: C3 valid JSON load through public path (exact columns/rows)")
         finally:
             try:
                 s3.shutdown()
@@ -469,9 +550,12 @@ def run_tests():
                 s4.load_file(p4, destination="sqlite", base_name="c4_table")
                 failures.append("  FAIL: C4 leading-comma load returned success")
                 print("  FAIL: C4 leading-comma load returned success")
-            except _PARSER_EXC:
+            except _PARSER_EXC as e:
                 names = [t["name"] for t in s4.tables_tree()]
-                if "c4_table" in names:
+                if "leading or double comma" not in str(e):
+                    failures.append("  FAIL: C4 wrong provenance: %s" % e)
+                    print("  FAIL: C4 wrong provenance:", e)
+                elif "c4_table" in names:
                     failures.append("  FAIL: C4 partial table 'c4_table' created after error")
                     print("  FAIL: C4 partial table 'c4_table' exists after error")
                 else:
@@ -496,7 +580,7 @@ def run_tests():
             bad_content='[{"id":2}]\x00',
             dest_name="c5_table",
             exc_types=_PARSER_EXC,
-            msg_fragment=None,
+            msg_fragment=_ctl_frag("tail"),
             passes_list=passes_labels,
             failures_list=failures,
         )
@@ -514,7 +598,7 @@ def run_tests():
             bad_content='[{"id":2},\x0b{"id":3}]',
             dest_name="c6_table",
             exc_types=_PARSER_EXC,
-            msg_fragment=None,
+            msg_fragment=_ctl_frag("sep"),
             passes_list=passes_labels,
             failures_list=failures,
         )
@@ -532,7 +616,7 @@ def run_tests():
             bad_content='[{"id":2}]\x0c',
             dest_name="c7_table",
             exc_types=_PARSER_EXC,
-            msg_fragment=None,
+            msg_fragment=_ctl_frag("tail"),
             passes_list=passes_labels,
             failures_list=failures,
         )
@@ -550,9 +634,12 @@ def run_tests():
                 s8.load_file(p8, destination="sqlite", base_name="c8_table")
                 failures.append("  FAIL: C8 NUL-separator load returned success")
                 print("  FAIL: C8 NUL-separator load returned success")
-            except _PARSER_EXC:
+            except _PARSER_EXC as e:
                 names = [t["name"] for t in s8.tables_tree()]
-                if "c8_table" in names:
+                if _ctl_frag("sep") not in str(e):
+                    failures.append("  FAIL: C8 wrong provenance: %s" % e)
+                    print("  FAIL: C8 wrong provenance:", e)
+                elif "c8_table" in names:
                     failures.append(
                         "  FAIL: C8 partial table 'c8_table' created after NUL-sep error")
                     print("  FAIL: C8 partial table 'c8_table' exists after error")
@@ -698,13 +785,12 @@ def run_tests():
         else:
             _os.environ.pop("SAMQL_JSON_READER", None)
             route_label = "(normal/ijson)"
-        # Only the ijson route is gated by the inline validator, whose message is
-        # asserted so the rejection provably comes from it, not an incidental
-        # downstream failure.
-        frag = "illegal control" if reader == "ijson" else None
-
+        # Route-appropriate parser provenance: the ijson route's rejection must
+        # come from the inline byte validator, the stdlib route's from the strict
+        # stdlib parser -- never from an incidental downstream failure.
         for fname, txt, off, desc in _deep_cases:
             label = "E %s %s %s" % (reader, desc, route_label)
+            frag = _ctl_frag(fname.rsplit("_", 1)[1])
             check(label,
                   _expect_error(_write("e_%s_%s.json" % (fname, reader), txt, dd),
                                  label, exc_types=_PARSER_EXC, msg_fragment=frag))
@@ -714,6 +800,7 @@ def run_tests():
                                       _deep_cases[5], _deep_cases[8]):
             label = "E %s Session.load_file %s %s" % (reader, desc, route_label)
             dest = "e_%s_%s" % (fname, reader)
+            frag = _ctl_frag(fname.rsplit("_", 1)[1])
             ok = _session_load_file_test(
                 label, dd,
                 prior_content='[{"id":1,"pad":"keep"}]',
@@ -791,6 +878,110 @@ def run_tests():
     except InterruptedError:
         check("E CountingReader still polls cancel", None)
 
+
+    # -----------------------------------------------------------------------
+    # F. LEGAL-WHITESPACE PREFIX FOLLOWED ONLY BY AN ILLEGAL CONTROL
+    # The first-character probe must strip EXACT JSON whitespace (space, tab,
+    # LF, CR) only. Python's str.lstrip() also strips VT, FF and U+001C-U+001F
+    # (and Unicode spaces), which classified such a file as EMPTY and returned
+    # success before any parser or validator ran. The offending byte must be
+    # surfaced as the first non-whitespace character and then rejected.
+    # Genuinely empty / legal-whitespace-only files must stay successful.
+    # -----------------------------------------------------------------------
+    print("\n=== F. Whitespace prefix + lone illegal control (never 'empty') ===")
+
+    _WS72 = " " * (72 * 1024)
+    _WSMIX = (" \t\r\n" * (18 * 1024))[:72 * 1024]
+    assert len(_WS72) > _DEEP and len(_WSMIX) > _DEEP
+    _lead_cases = []
+    for byte in (0x00, 0x01, 0x0b, 0x0c, 0x1c, 0x1d, 0x1e, 0x1f):
+        _lead_cases.append(("ws72_%02x" % byte, _WS72 + chr(byte),
+                            "72KiB spaces + 0x%02x" % byte))
+    for byte in (0x0b, 0x1f):
+        _lead_cases.append(("wsmix_%02x" % byte, _WSMIX + chr(byte),
+                            "72KiB mixed tab/LF/CR/space + 0x%02x" % byte))
+    _lead_cases.append(("ws72_nbsp", _WS72 + "\u00a0", "72KiB spaces + U+00A0"))
+    _lead_cases.append(("ws72_nel", _WS72 + "\u0085", "72KiB spaces + U+0085"))
+
+    # Both routes classify these identically (first char is not '['), so the
+    # decisive rejection is the stdlib parser's own "Expecting value" error.
+    _LEAD_EXC = (json.JSONDecodeError,)
+    _LEAD_FRAG = "Expecting value"
+
+    for reader in ("stdlib", "ijson"):
+        if reader == "stdlib":
+            _os.environ["SAMQL_JSON_READER"] = "stdlib"
+            route_label = "(forced stdlib)"
+        else:
+            _os.environ.pop("SAMQL_JSON_READER", None)
+            route_label = "(normal/ijson)"
+
+        for fname, txt, desc in _lead_cases:
+            label = "F %s %s %s" % (reader, desc, route_label)
+            check(label,
+                  _expect_error(_write("f_%s_%s.json" % (fname, reader), txt, dd),
+                                 label, exc_types=_LEAD_EXC,
+                                 msg_fragment=_LEAD_FRAG))
+
+        # Public path: existing destination preserved, parser-origin error,
+        # exact rows/catalog, no new or suffixed table.
+        for fname, txt, desc in (_lead_cases[2], _lead_cases[3], _lead_cases[5],
+                                 _lead_cases[7], _lead_cases[9], _lead_cases[10]):
+            label = "F %s Session.load_file %s %s" % (reader, desc, route_label)
+            ok = _session_load_file_test(
+                label, dd,
+                prior_content='[{"id":1,"pad":"keep"}]',
+                bad_content=txt,
+                dest_name="f_%s_%s" % (fname, reader),
+                exc_types=_LEAD_EXC,
+                msg_fragment=_LEAD_FRAG,
+                passes_list=passes_labels,
+                failures_list=failures,
+            )
+            if ok:
+                passes_count[0] += 1
+                print("  PASS:", label)
+            else:
+                print("  FAIL:", label, "->", failures[-1])
+
+        # Genuinely empty / legal-whitespace-only input stays a successful empty
+        # load (stream level and public level).
+        for fname, txt, desc in (("empty", "", "empty file"),
+                                 ("ws72", _WS72, "72KiB spaces only"),
+                                 ("wsmix", _WSMIX, "72KiB mixed legal whitespace only"),
+                                 ("crlf", "\r\n\t \n", "short CR/LF/tab/space only")):
+            pe = os.path.join(dd, "f_ok_%s_%s.json" % (fname, reader))
+            with open(pe, "w", encoding="utf-8", newline="") as f:
+                f.write(txt)
+            label = "F %s %s -> successful empty %s" % (reader, desc, route_label)
+            check(label, _expect_ok(pe, label, expected_records=[]))
+
+            try:
+                from samql_core import Session
+                se = Session()
+                se.fresh_run = False
+                se.fresh_load = False
+                try:
+                    before = sorted(t["name"] for t in se.tables_tree())
+                    se.load_file(pe, destination="sqlite",
+                                 base_name="f_ok_%s_%s" % (fname, reader))
+                    after = sorted(t["name"] for t in se.tables_tree())
+                    check("F %s Session.load_file %s -> success, no table %s"
+                          % (reader, desc, route_label),
+                          None if after == before
+                          else "empty load created table(s): %r" % (
+                              [t for t in after if t not in before],))
+                finally:
+                    try:
+                        se.shutdown()
+                    except Exception:
+                        pass
+            except Exception as e:
+                check("F %s Session.load_file %s -> success %s"
+                      % (reader, desc, route_label),
+                      "empty load raised %s: %s" % (type(e).__name__, e))
+
+    _restore_reader()
 
     # -----------------------------------------------------------------------
     # Summary

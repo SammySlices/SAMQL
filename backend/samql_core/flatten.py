@@ -511,13 +511,19 @@ def read_json_any_format(path):
 def _detect_first_char(path, enc):
     """Return the first non-whitespace character of the file (decoded with
     ``enc``), or '' if the file is empty/all-whitespace. Raises
-    UnicodeDecodeError if the bytes aren't valid for ``enc``."""
+    UnicodeDecodeError if the bytes aren't valid for ``enc``.
+
+    Whitespace is EXACTLY the four JSON characters (space, tab, LF, CR).
+    str.lstrip() with no argument also strips VT, FF, U+001C-U+001F and Unicode
+    spaces, which would classify a file holding only such a byte as empty and
+    let it succeed before any parser runs. Those characters are returned here
+    so the parser rejects them."""
     with open(path, "r", encoding=enc) as f:
         while True:
             chunk = f.read(4096)
             if not chunk:
                 return ""
-            s = chunk.lstrip()
+            s = chunk.lstrip(" \t\r\n")
             if s:
                 return s[0]
 
