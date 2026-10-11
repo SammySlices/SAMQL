@@ -2226,9 +2226,17 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                 ", ".join(cols), subq, ksel)
 
         LA, RA = _agg(L0), _agg(R0)
-        on = " AND ".join("LA.%s = RA.%s" % (_q(k), _q(k)) for k in keys)
-        on_l = " AND ".join("LA.%s = R.%s" % (_q(k), _q(k)) for k in keys)
-        on_r = " AND ".join("RA.%s = L.%s" % (_q(k), _q(k)) for k in keys)
+        def _null_safe(a, b):
+            # NULL keys must match each other: plain = yields NULL for NULLs.
+            if engine == "duckdb":
+                return "%s IS NOT DISTINCT FROM %s" % (a, b)
+            return "%s IS %s" % (a, b)
+        on = " AND ".join(_null_safe("LA.%s" % _q(k), "RA.%s" % _q(k))
+                          for k in keys)
+        on_l = " AND ".join(_null_safe("LA.%s" % _q(k), "R.%s" % _q(k))
+                            for k in keys)
+        on_r = " AND ".join(_null_safe("RA.%s" % _q(k), "L.%s" % _q(k))
+                            for k in keys)
         kL = ", ".join("LA.%s AS %s" % (_q(k), _q(k)) for k in keys)
         kR = ", ".join("RA.%s AS %s" % (_q(k), _q(k)) for k in keys)
         if bal:

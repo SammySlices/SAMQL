@@ -393,6 +393,7 @@ tests/test_assistant.py
 tests/test_assistant_build_pack.py
 tests/test_fetch_assistant_pack.py
 tests/test_json_integrity.py
+tests/test_nodeflow_nullkey.py
 tests/test_nodeflow_resources.py
 tests/test_optimizations_dual_engine.py
 tests/test_refactor_phase2.py
