@@ -946,8 +946,8 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
             # other unsupported content are all rejected here.
             if (
                 len(stack) >= 2
-                and stack[-2][1] == "on"
-                and stack[-1][1] == "push"
+                and stack[0][1] == "on"
+                and stack[1][1] == "push"
             ):
                 return branches, f"unsupported content inside on.push: {content!r}"
             continue

@@ -845,7 +845,7 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
     require(_br5 == {"master", "mas\\ter"}, f"wrong branch set for \\\\ escape: {_br5!r}")
 
     # ── New finding: malformed/nonmapping content inside on.push subtree ─────
-    # All five cases below were silently swallowed at 9a0a4d8; now must error.
+    # All six cases below were silently swallowed before remediation; now must error.
 
     # Bare word (no colon) structurally inside on.push.
     _f6a_br, _f6a_err = _parse_branches_direct(
@@ -911,6 +911,22 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         "on:\n  push:\n    branches: [master]\n      bad: nope\n"
     )
     require(not _r6e.ok, f"preflight accepted deeper content after inline branches: {_r6e.detail!r}")
+
+    # Deeper non-mapping content after an inline branches scalar.
+    _f6f_br, _f6f_err = _parse_branches_direct(
+        "on:\n  push:\n    branches: [master]\n      malformed child\n"
+    )
+    require(
+        _f6f_err is not None,
+        f"direct parser accepted deeper non-mapping content after inline branches: branches={_f6f_br!r}",
+    )
+    _r6f = _workflow_trigger_result(
+        "on:\n  push:\n    branches: [master]\n      malformed child\n"
+    )
+    require(
+        not _r6f.ok,
+        f"preflight accepted deeper non-mapping content after inline branches: {_r6f.detail!r}",
+    )
 
 
 
@@ -1022,8 +1038,8 @@ def main() -> int:
 
     # Child-mode guard: when SAMQL_CHILD_HARDENING is set this process is a
     # subprocess reconstruction run invoked by its parent.  Children run the
-    # full local hardening suite (packaging, APHEX, manifest, safety, receipt,
-    # tamper tests) but skip only the reconstructed-tree subprocess section to
+    # local packaging/APHEX/manifest/safety/receipt checks, then skip the
+    # reconstructed-tree subprocess section (including parent-level tamper tests) to
     # prevent unbounded recursion.  One generation deep, no further.
     _CHILD_ENV_VAR = "SAMQL_CHILD_HARDENING"
     is_child = os.environ.get(_CHILD_ENV_VAR) == "1"
