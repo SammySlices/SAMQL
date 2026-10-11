@@ -113,11 +113,84 @@ def _workflow_trigger_result(source: str) -> release_preflight.Check:
 
 
 def _assert_windows_workflow_requires_unambiguous_master() -> None:
-    valid = _workflow_trigger_result("on:\n  push:\n    branches: [master, beta]\n")
-    require(valid.ok, "preflight rejected [master, beta]")
+    # ── valid cases ──────────────────────────────────────────────────────────
+
+    valid_inline = _workflow_trigger_result("on:\n  push:\n    branches: [master, beta]\n")
+    require(valid_inline.ok, "preflight rejected valid inline [master, beta]")
+    require(
+        bool("master" in valid_inline.detail),
+        f"trigger detail did not mention master for valid inline: {valid_inline.detail!r}",
+    )
+
+    valid_block = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      - beta\n"
+        "      - master\n"
+    )
+    require(valid_block.ok, "preflight rejected valid block list with beta and master")
+    require(
+        bool("master" in valid_block.detail),
+        f"trigger detail did not mention master for valid block: {valid_block.detail!r}",
+    )
+
+    # ── failure cases — each must produce a named check that is not ok ───────
 
     beta_only = _workflow_trigger_result("on:\n  push:\n    branches: [beta]\n")
     require(not beta_only.ok, "preflight accepted beta without master")
+    require(
+        bool(beta_only.detail),
+        "trigger check detail was empty for beta-only failure",
+    )
+
+    master_in_comment = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [main]  # master is stable but we use main\n"
+    )
+    require(
+        not master_in_comment.ok,
+        "preflight accepted [main] where master only appeared in a comment",
+    )
+    require(
+        bool(master_in_comment.detail),
+        "trigger check detail was empty for master-in-comment failure",
+    )
+
+    master_under_pull_request = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [main]\n"
+        "  pull_request:\n"
+        "    branches: [master]\n"
+    )
+    require(
+        not master_under_pull_request.ok,
+        "preflight accepted master only under pull_request.branches",
+    )
+    require(
+        bool(master_under_pull_request.detail),
+        "trigger check detail was empty for master-under-pull_request failure",
+    )
+
+    master_in_env = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [main]\n"
+        "jobs:\n"
+        "  build:\n"
+        "    env:\n"
+        "      TARGET_BRANCH: master\n"
+    )
+    require(
+        not master_in_env.ok,
+        "preflight accepted master only in an unrelated environment value",
+    )
+    require(
+        bool(master_in_env.detail),
+        "trigger check detail was empty for master-in-env failure",
+    )
 
     duplicate_on = _workflow_trigger_result(
         "on:\n"
@@ -128,6 +201,10 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         "    branches: [main]\n"
     )
     require(not duplicate_on.ok, "preflight accepted duplicate on mappings")
+    require(
+        bool(duplicate_on.detail),
+        "trigger check detail was empty for duplicate-on failure",
+    )
 
     duplicate_push = _workflow_trigger_result(
         "on:\n"
@@ -137,6 +214,56 @@ def _assert_windows_workflow_requires_unambiguous_master() -> None:
         "    branches: [main]\n"
     )
     require(not duplicate_push.ok, "preflight accepted duplicate push mappings")
+    require(
+        bool(duplicate_push.detail),
+        "trigger check detail was empty for duplicate-push failure",
+    )
+
+    nested_mapping_under_block_branches = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      aliases:\n"
+        "        - master\n"
+    )
+    require(
+        not nested_mapping_under_block_branches.ok,
+        "preflight accepted nested mapping under block branches (nested aliases: - master)",
+    )
+    require(
+        bool(nested_mapping_under_block_branches.detail),
+        "trigger check detail was empty for nested-mapping-under-block-branches failure",
+    )
+
+    inconsistent_indent = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches:\n"
+        "      - beta\n"
+        "        - master\n"
+    )
+    require(
+        not inconsistent_indent.ok,
+        "preflight accepted block branches list with inconsistent/deeper list indentation",
+    )
+    require(
+        bool(inconsistent_indent.detail),
+        "trigger check detail was empty for inconsistent-indent failure",
+    )
+
+    malformed_inline = _workflow_trigger_result(
+        "on:\n"
+        "  push:\n"
+        "    branches: [master\n"
+    )
+    require(
+        not malformed_inline.ok,
+        "preflight accepted malformed inline list (missing closing bracket)",
+    )
+    require(
+        bool(malformed_inline.detail),
+        "trigger check detail was empty for malformed-inline failure",
+    )
 
 
 def _assert_golden_flow_fixture_omission_detected() -> None:

@@ -534,10 +534,18 @@ def _yaml_scalar(value: str) -> str:
 
 
 def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
-    """Read one unambiguous ``on.push.branches`` mapping."""
+    """Read one unambiguous ``on.push.branches`` mapping.
+
+    In block form, only direct-child list items at one consistent indentation
+    are accepted.  Any non-list child (nested mapping or sequence key),
+    inconsistent list indentation, deeper list indentation introduced by a
+    nested structure, empty block, malformed inline list, or duplicate relevant
+    mapping causes an immediate fail-closed return.
+    """
     stack: list[tuple[int, str]] = []
     branches: set[str] = set()
     branches_indent: int | None = None
+    branches_item_indent: int | None = None  # locked on first block list item
     seen_paths: set[tuple[str, ...]] = set()
     trigger_paths = {("on",), ("on", "push"), ("on", "push", "branches")}
 
@@ -549,13 +557,27 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
         content = code.strip()
 
         if branches_indent is not None:
-            if indent > branches_indent and content.startswith("-"):
+            if indent <= branches_indent:
+                # Exiting the block — stop collecting, continue normal parsing.
+                branches_indent = None
+                branches_item_indent = None
+            else:
+                # Still inside the block — only accept direct list items.
+                if not content.startswith("-"):
+                    # A non-list child (mapping key or nested sequence anchor)
+                    # makes the branch list ambiguous.
+                    return branches, "non-list child under block branches"
+                # Lock in the item indentation on the first list item seen.
+                if branches_item_indent is None:
+                    branches_item_indent = indent
+                elif indent != branches_item_indent:
+                    # Deeper or shallower than the established item indent —
+                    # inconsistent structure.
+                    return branches, "inconsistent list indentation under block branches"
                 branch = _yaml_scalar(content[1:])
                 if branch:
                     branches.add(branch)
                 continue
-            if indent <= branches_indent:
-                branches_indent = None
 
         while stack and stack[-1][0] >= indent:
             stack.pop()
@@ -580,8 +602,11 @@ def _workflow_push_branches(source: str) -> tuple[set[str], str | None]:
                 branch = _yaml_scalar(item)
                 if branch:
                     branches.add(branch)
+        elif value.startswith("["):
+            return branches, "malformed inline branch list (missing closing bracket)"
         elif not value:
             branches_indent = indent
+            branches_item_indent = None
         else:
             return branches, "branches must be an inline or block list"
 
