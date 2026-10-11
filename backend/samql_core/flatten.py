@@ -542,29 +542,16 @@ def _text_chunks(f, size=65536):
 _READ_BASE = 1 << 20    # 1 MB first read for a value
 _READ_CAP = 1 << 24     # grow up to 16 MB while completing one very large value
 
-# ASCII control characters that are NOT legal JSON whitespace.
-# JSON RFC 8259 §2: legal whitespace = 0x20 space, 0x09 tab, 0x0A LF, 0x0D CR.
-# Every other byte in 0x00-0x1F is illegal between/after JSON values.
-_ILLEGAL_CTRL_RE = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f]"
-)
+# Raw bytes that are never legal anywhere in JSON text (RFC 8259 §2, §7): every
+# C0 control except tab 0x09, LF 0x0A and CR 0x0D -- inside a quoted string they
+# must be escaped, between tokens they are not whitespace. yajl (ijson's
+# backend) accepts some of them (e.g. VT as whitespace), so the ijson path
+# validates every byte it consumes inline in _CountingReader.read().
+_ILLEGAL_CTRL_BYTES_RE = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
-def _file_has_illegal_controls(path, enc):
-    """Return True if the file contains any illegal JSON control characters
-    (any ASCII control byte other than tab 0x09, LF 0x0A, CR 0x0D).
-
-    Reads at most the first 64 KB for a quick check -- sufficient to catch
-    control chars inserted between/after values in the test payloads, and fast
-    enough to be gating the ijson fast path without measurable cost on normal
-    files. A control char deep in a very large file would pass this check; that
-    is an accepted trade-off for the targeted fix scope."""
-    try:
-        with open(path, "r", encoding=enc, errors="replace") as f:
-            chunk = f.read(65536)
-        return bool(_ILLEGAL_CTRL_RE.search(chunk))
-    except Exception:
-        return False
+class _IllegalControlError(ValueError):
+    """A raw illegal control byte was found in the JSON byte stream."""
 
 
 def _iter_concat_values(f, on_read=None):
@@ -841,6 +828,14 @@ class _CountingReader:
             raise InterruptedError("cancelled during JSON read")
         first = self._count == 0
         chunk = self._fb.read(size)
+        # Fail closed on any raw illegal control byte, wherever it lies in the
+        # file: every chunk ijson consumes passes through here exactly once, so
+        # this is a single pass with no extra memory.
+        bad = _ILLEGAL_CTRL_BYTES_RE.search(chunk)
+        if bad is not None:
+            raise _IllegalControlError(
+                "illegal control character 0x%02x at byte offset %d in JSON "
+                "input" % (chunk[bad.start()], self._count + bad.start()))
         self._count += len(chunk)
         self._since += len(chunk)
         # Heartbeat on the first read and then every ~256 KB, so even a modest
@@ -944,14 +939,6 @@ def stream_json_records(path, progress=None, should_cancel=None):
         except Exception:
             have_ijson = False
         if have_ijson:
-            # Skip ijson if the file contains illegal JSON control characters.
-            # yajl (ijson's backend) treats VT (0x0B) and other controls as
-            # whitespace, silently accepting inputs the JSON RFC forbids.
-            # The stdlib _iter_stream_records path now rejects them; letting
-            # ijson run first would silently succeed before the fallback fires.
-            if _file_has_illegal_controls(path, chosen):
-                have_ijson = False
-        if have_ijson:
             yielded = 0
             try:
                 with open(path, "rb") as fb:
@@ -982,10 +969,12 @@ def stream_json_records(path, progress=None, should_cancel=None):
                 if progress and total:
                     progress(total, total)
                 return
-            except InterruptedError:
+            except (InterruptedError, _IllegalControlError):
                 # A cancel during the ijson read must abort, NOT fall through to
                 # the stdlib recovery (which would re-read the file from scratch
-                # and ignore the Stop).
+                # and ignore the Stop). Likewise an illegal control byte is a
+                # definitive rejection: surface it directly rather than letting
+                # the fallback re-parse (and possibly mask or replace) the error.
                 raise
             except Exception:
                 # ijson (yajl) is stricter than Python's json and rejects some

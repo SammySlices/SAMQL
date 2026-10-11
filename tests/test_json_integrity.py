@@ -580,8 +580,8 @@ def run_tests():
     # must be rejected, not silently consumed.
     #
     # These tests exercise BOTH forced-stdlib routing AND normal installed-ijson
-    # routing.  The ijson path falls back to stdlib on any exception, so the
-    # stdlib parser's control-char rejection is the decisive gate for both routes.
+    # routing.  On the ijson route the inline byte validator in _CountingReader
+    # rejects the control byte; on the stdlib route the strict parser does.
     # -----------------------------------------------------------------------
     print("\n=== D. Control-character rejection (stdlib + ijson routes) ===")
 
@@ -595,6 +595,14 @@ def run_tests():
     ]
 
     import os as _os
+
+    _orig_reader = _os.environ.get("SAMQL_JSON_READER")
+
+    def _restore_reader():
+        if _orig_reader is None:
+            _os.environ.pop("SAMQL_JSON_READER", None)
+        else:
+            _os.environ["SAMQL_JSON_READER"] = _orig_reader
 
     for reader in ("stdlib", "ijson"):
         if reader == "stdlib":
@@ -611,8 +619,178 @@ def run_tests():
                                  label,
                                  exc_types=_PARSER_EXC))
 
-    # Restore environment
-    _os.environ.pop("SAMQL_JSON_READER", None)
+    _restore_reader()
+
+    # -----------------------------------------------------------------------
+    # E. DEEP CONTROL CHARACTERS (>= 70 KB into the file)
+    # A raw illegal control byte anywhere in the stream must be rejected, not
+    # just in the first 64 KB. Exercised through BOTH routes, directly and via
+    # the public Session.load_file path. A valid >70 KB Unicode / escaped-control
+    # fixture proves the validator does not reject ordinary UTF-8, legal
+    # whitespace (tab/LF/CR) or JSON-escaped controls.
+    # -----------------------------------------------------------------------
+    print("\n=== E. Deep control characters (>=70 KB) ===")
+
+    _DEEP = 70 * 1024
+    _PAD = "x" * 1024
+
+    def _deep_array(n, bad_at, bad_text, start_id=1, tail=""):
+        """Array of n ~1 KB records; ``bad_text`` is inserted raw as a separator
+        before record index ``bad_at`` (so the offending byte lies > _DEEP bytes in).
+        Returns (text, offset_of_bad_text)."""
+        parts = []
+        off = 1                                   # leading '['
+        bad_off = None
+        for i in range(n):
+            rec = json.dumps({"id": start_id + i, "pad": _PAD})
+            if i == bad_at:
+                bad_off = off
+                parts.append(bad_text)
+                off += len(bad_text)
+            parts.append(rec)
+            off += len(rec)
+            if i != n - 1:
+                parts.append(",")
+                off += 1
+        return "[" + "".join(parts) + "]" + tail, bad_off
+
+    def _deep_string(n, bad_at, ch, start_id=1):
+        """Like _deep_array but ``ch`` sits raw INSIDE a quoted string value."""
+        recs = []
+        bad_off = None
+        off = 1
+        for i in range(n):
+            rec = json.dumps({"id": start_id + i, "pad": _PAD})
+            if i == bad_at:
+                # json.dumps would escape the control, so splice it in raw.
+                cut = rec.index(_PAD) + 100
+                rec = rec[:cut] + ch + rec[cut:]
+                bad_off = off + cut
+            recs.append(rec)
+            off += len(rec) + 1
+        return "[" + ",".join(recs) + "]", bad_off
+
+    _N = 100                                    # ~104 KB per fixture
+    _AT = 80                                    # ~83 KB into the file
+    _deep_cases = []
+    for nm, ch in (("NUL", "\x00"), ("VT", "\x0b"), ("FF", "\x0c"),
+                   ("SOH", "\x01"), ("US", "\x1f")):
+        txt, off = _deep_array(_N, _AT, ch)
+        _deep_cases.append(("deep_%s_sep" % nm.lower(), txt, off,
+                            "%s between elements @%d" % (nm, off)))
+    for nm, ch in (("NUL", "\x00"), ("VT", "\x0b"), ("FF", "\x0c")):
+        txt, _ = _deep_array(_N, -1, "", tail=ch)
+        off = len(txt) - 1
+        _deep_cases.append(("deep_%s_tail" % nm.lower(), txt, off,
+                            "%s tail after array @%d" % (nm, off)))
+    for nm, ch in (("NUL", "\x00"), ("VT", "\x0b"), ("FF", "\x0c"),
+                   ("SOH", "\x01")):
+        txt, off = _deep_string(_N, _AT, ch)
+        _deep_cases.append(("deep_%s_instr" % nm.lower(), txt, off,
+                            "raw %s inside string @%d" % (nm, off)))
+    for fname, txt, off, desc in _deep_cases:
+        assert off >= _DEEP, (fname, off)       # fixture really is past 70 KB
+
+    for reader in ("stdlib", "ijson"):
+        if reader == "stdlib":
+            _os.environ["SAMQL_JSON_READER"] = "stdlib"
+            route_label = "(forced stdlib)"
+        else:
+            _os.environ.pop("SAMQL_JSON_READER", None)
+            route_label = "(normal/ijson)"
+        # Only the ijson route is gated by the inline validator, whose message is
+        # asserted so the rejection provably comes from it, not an incidental
+        # downstream failure.
+        frag = "illegal control" if reader == "ijson" else None
+
+        for fname, txt, off, desc in _deep_cases:
+            label = "E %s %s %s" % (reader, desc, route_label)
+            check(label,
+                  _expect_error(_write("e_%s_%s.json" % (fname, reader), txt, dd),
+                                 label, exc_types=_PARSER_EXC, msg_fragment=frag))
+
+        # Public path: existing destination table + catalog must be untouched.
+        for fname, txt, off, desc in (_deep_cases[0], _deep_cases[2],
+                                      _deep_cases[5], _deep_cases[8]):
+            label = "E %s Session.load_file %s %s" % (reader, desc, route_label)
+            dest = "e_%s_%s" % (fname, reader)
+            ok = _session_load_file_test(
+                label, dd,
+                prior_content='[{"id":1,"pad":"keep"}]',
+                bad_content=txt,
+                dest_name=dest,
+                exc_types=_PARSER_EXC,
+                msg_fragment=frag,
+                passes_list=passes_labels,
+                failures_list=failures,
+            )
+            if ok:
+                passes_count[0] += 1
+                print("  PASS:", label)
+            else:
+                print("  FAIL:", label, "->", failures[-1])
+
+        # Valid >70 KB Unicode + legal whitespace + escaped controls.
+        uni = "caf\u00e9 \u4e2d\u6587 \U0001F600 \u0416"
+        recs = [{"id": i, "u": uni * 20, "esc": "a\x00b\x0bc\x0cd\x01e\tf\ng\rh"}
+                for i in range(200)]
+        seps = [",", ",\t", ",\n", ",\r\n", " , "]
+        body = "".join(
+            json.dumps(r, ensure_ascii=(i % 2 == 0)) + (seps[i % 5] if i != 199 else "")
+            for i, r in enumerate(recs))
+        txt = "[\t\n" + body + "\r\n ]\n"
+        pv = os.path.join(dd, "e_valid_%s.json" % reader)
+        with open(pv, "w", encoding="utf-8", newline="") as f:
+            f.write(txt)
+        assert os.path.getsize(pv) > _DEEP
+        label = "E %s valid >70KB unicode/escaped controls %s" % (reader, route_label)
+        check(label, _expect_ok(pv, label, expected_records=recs))
+
+    _restore_reader()
+
+    # Reader-level: _CountingReader validates every chunk it returns and keeps
+    # its byte count / cancel polling.
+    import io
+    from samql_core import flatten as _F
+
+    good = (b'[' + b",".join(b'{"i":%d,"p":"%s"}' % (i, b"y" * 100)
+                              for i in range(1500)) + b']')
+    assert len(good) > _DEEP
+    cr = _F._CountingReader(io.BytesIO(good), None, None, lambda: False)
+    got = b""
+    while True:
+        c = cr.read(4096)
+        if not c:
+            break
+        got += c
+    check("E CountingReader passes valid stream unchanged, counts bytes",
+          None if (got == good and cr._count == len(good))
+          else "valid stream altered or miscounted (%d vs %d)" % (cr._count, len(good)))
+
+    for ctl in (b"\x00", b"\x08", b"\x0b", b"\x0c", b"\x0e", b"\x1f"):
+        for size in (4096, 65536, -1):
+            at = 90000                           # straddles / lies past chunk 1
+            data = good[:at] + ctl + good[at:]
+            cr = _F._CountingReader(io.BytesIO(data), None, None, lambda: False)
+            err = None
+            try:
+                while cr.read(size):
+                    pass
+                err = "no error for %r @%d read(%d)" % (ctl, at, size)
+            except ValueError as e:
+                if "illegal control" not in str(e) or str(at) not in str(e):
+                    err = "bad message (want offset %d): %s" % (at, e)
+            except Exception as e:
+                err = "wrong exception %s: %s" % (type(e).__name__, e)
+            check("E CountingReader rejects %r @%d read(%d)" % (ctl, at, size), err)
+
+    cr = _F._CountingReader(io.BytesIO(good), None, None, lambda: True)
+    try:
+        cr.read(10)
+        check("E CountingReader still polls cancel", "cancel not honoured")
+    except InterruptedError:
+        check("E CountingReader still polls cancel", None)
+
 
     # -----------------------------------------------------------------------
     # Summary
