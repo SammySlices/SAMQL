@@ -115,10 +115,11 @@ def _engine_slot_queues_cleanly_under_contention():
         "engine slot allowed >1 owner concurrently"
     assert sorted(owners_seen) == [j["id"] for j in jobs], \
         "every job must run exactly once; got %r" % owners_seen
-    # FIFO: the first job launched should be the first to own the slot.
-    assert owners_seen[0] == jobs[0]["id"], \
-        "FIFO broken: first owner was %r, want %r" % (
-            owners_seen[0], jobs[0]["id"])
+    # FIFO: full ownership order must match launch order.
+    # (We stagger thread starts with 10ms gaps above to make launch order stable.)
+    assert owners_seen == [j["id"] for j in jobs], \
+        "FIFO broken: ownership order %r != launch order %r" % (
+            owners_seen, [j["id"] for j in jobs])
     # Every job's final state should reflect release (not stuck in 'queued'
     # or 'error'); _with_engine_slot leaves state untouched on success so
     # it stays "pending" unless run_inner changed it. Just verify no job
@@ -287,6 +288,21 @@ def _parallel_nodeflow_components_do_not_bleed():
                 "A columns round %d = %r (want ['x'])" % (round_i, cols_a)
             assert "y" in cols_b and "x" not in cols_b, \
                 "B columns round %d = %r (want ['y'])" % (round_i, cols_b)
+            # Cell-value isolation: A must contain 1,2,3; B must contain 10,20,30,40.
+            rows_a = ra.get("rows") or []
+            rows_b = rb.get("rows") or []
+            flat_a = [str(v) for row in rows_a for v in row]
+            flat_b = [str(v) for row in rows_b for v in row]
+            assert "1" in flat_a and "2" in flat_a and "3" in flat_a, \
+                "A values round %d missing 1/2/3: %r" % (round_i, flat_a)
+            assert "10" in flat_b and "20" in flat_b and "30" in flat_b \
+                   and "40" in flat_b, \
+                "B values round %d missing 10/20/30/40: %r" % (round_i, flat_b)
+            # No cross-bleed: A must not contain B's values and vice-versa.
+            assert "10" not in flat_a, \
+                "A result contains B value 10 (bleed) round %d: %r" % (round_i, flat_a)
+            assert "1" not in flat_b or set(flat_b) - {"1", "2", "3", "10", "20", "30", "40"}, \
+                "B result unexpectedly contains A-only value: %r" % flat_b
     finally:
         for name in ("conc_a", "conc_b"):
             try:
