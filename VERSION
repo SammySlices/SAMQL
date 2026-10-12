@@ -27,7 +27,7 @@ returning NULL; documented ISO formats continue to work.
 
 JSON Field Explorer now marks field trees incomplete when backend discovery is
 cancelled after returning a partial result, and clears that state when a fresh
-discovery begins.
+discovery begins. Fix implementation: `e82a008`.
 
 ----------------------------------------------------------------------
 build 2026-09-10.701  (v2.16.4)

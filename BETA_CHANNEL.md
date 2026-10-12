@@ -37,4 +37,4 @@ Confirm `/api/health` (or the AppWindow top bar) shows the expected `build`.
 
 ## What’s on beta today
 
-Build **2026-10-12.702** (v2.16.4): reconcile headline/drill-down parity on duplicate keys, deterministic duplicate representatives, visible NULL-key exclusions, SQLite/DuckDB delimiter-explode parity, explicit SQLite custom-date-format errors, and incomplete-state labeling for cancelled Field Explorer discovery. See `VERSION` for the detailed build log.
+Build **2026-10-12.702** (v2.16.4, fix commit `e82a008`): reconcile headline/drill-down parity on duplicate keys, deterministic duplicate representatives, visible NULL-key exclusions, SQLite/DuckDB delimiter-explode parity, explicit SQLite custom-date-format errors, and incomplete-state labeling for cancelled Field Explorer discovery. See `VERSION` for the detailed build log.
