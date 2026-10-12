@@ -102,15 +102,25 @@ def pid_alive(pid):
 
 
 def instance_dir():
-    """The current process's temp directory (created on first use)."""
-    global _made
-    if not _made:
+    """The current process's temp directory (created on first use).
+
+    Cleanup can remove the directory while this module remains imported (for
+    example an embedded server restart or an in-process test run).  Treat a
+    missing directory as not made instead of trusting the cached flag forever.
+    If the configured system temp root is unusable, keep the same per-process
+    layout under SamQL's user directory rather than leaking files into the
+    system temp root.
+    """
+    global _ROOT, _INSTANCE, _made
+    if not _made or not os.path.isdir(_INSTANCE):
         with _lock:
-            if not _made:
+            if not _made or not os.path.isdir(_INSTANCE):
                 try:
                     os.makedirs(_INSTANCE, exist_ok=True)
-                except Exception:
-                    pass
+                except OSError:
+                    _ROOT = os.path.join(os.path.expanduser("~"), ".samql", "tmp")
+                    _INSTANCE = os.path.join(_ROOT, str(_PID))
+                    os.makedirs(_INSTANCE, exist_ok=True)
                 _made = True
     return _INSTANCE
 
@@ -120,26 +130,37 @@ def instance_path(name):
 
 
 def new_tempfile(prefix, suffix):
-    """Create a fresh temp file inside this instance's directory and
-    return its path (falls back to the system temp dir on error)."""
+    """Create a fresh temp file inside this instance's directory.
+
+    If the active temp filesystem fails between directory creation and mkstemp,
+    retry in SamQL's user-scoped fallback instance directory.  Never place a
+    fallback artifact directly in the shared system temp root.
+    """
+    global _ROOT, _INSTANCE, _made
     try:
         fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix,
                                     dir=instance_dir())
-        os.close(fd)
-        return path
-    except Exception:
-        fd, path = tempfile.mkstemp(prefix="samql_" + prefix, suffix=suffix,
-                                    dir=None)  # last resort: system temp dir
-        os.close(fd)
-        return path
+    except OSError:
+        with _lock:
+            _ROOT = os.path.join(os.path.expanduser("~"), ".samql", "tmp")
+            _INSTANCE = os.path.join(_ROOT, str(_PID))
+            os.makedirs(_INSTANCE, exist_ok=True)
+            _made = True
+        fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix,
+                                    dir=_INSTANCE)
+    os.close(fd)
+    return path
 
 
 def cleanup_instance():
     """Remove this instance's entire temp directory (clean shutdown)."""
+    global _made
     try:
         _rmtree(_INSTANCE)
-    except Exception:
-        pass
+    finally:
+        # Embedded restarts may keep this module imported and request another
+        # temp file after shutdown; force instance_dir() to recreate the tree.
+        _made = False
 
 
 def reset_instance():

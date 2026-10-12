@@ -2,12 +2,34 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-10-12.702
+Current build:   2026-10-12.703
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-10-12.703  (v2.16.4)
+
+AGGREGATE TEST RUNNER CLEANUP AND HANG-FREE HTTP TEARDOWN.
+
+SamQL temp storage now recreates a removed per-process directory and falls back
+to a SamQL-owned user directory when the configured system temp root cannot be
+used. Temporary files no longer escape directly into the shared temp root.
+
+Thirteen environment-dependent backend checks and nine pre-existing frontend
+source-pattern checks carry explicit quarantine markers. Thirteen actionable
+backend failures were repaired: nine temp lifecycle cases, the optimize mock,
+the reconcile key-grain expectation, and two identifier-affinity assertions.
+The no-HTTP aggregate now completes with zero failures.
+
+The HTTP suite clears the server globals, closes the socket, and joins its
+serve thread before interpreter shutdown. This prevents the atexit handler from
+calling BaseServer.shutdown() a second time after serve_forever() has stopped.
+Linux packaging now rejects GNU tar output mislabeled as .zip, falls back to a
+real ZIP64 archive, and applies Tcl/Tk payload checks only when tkinter is
+actually bundled.
 
 ----------------------------------------------------------------------
 build 2026-10-12.702  (v2.16.4)

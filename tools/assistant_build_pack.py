@@ -357,9 +357,13 @@ def _zip_directory(source_dir: Path, zip_path: Path) -> None:
             capture_output=True,
             text=True,
         )
-        if proc.returncode == 0 and zip_path.is_file() and zip_path.stat().st_size > 0:
+        if (proc.returncode == 0 and zip_path.is_file()
+                and zip_path.stat().st_size > 0
+                and zipfile.is_zipfile(zip_path)):
             return
         err = (proc.stderr or proc.stdout or "").strip()
+        if proc.returncode == 0 and not err:
+            err = "tar did not produce a ZIP archive"
         print(
             f"tar zip failed (exit {proc.returncode}); falling back to zipfile"
             + (f": {err}" if err else ""),
@@ -401,7 +405,27 @@ def _assert_appwindow_zip_has_tcl_tk(zip_path: Path) -> None:
     )
     with zipfile.ZipFile(zip_path, "r") as zf:
         names = set(zf.namelist())
-        missing = [n for n in need if n not in names]
+        prefix = "SamQL-AppWindow/_internal/"
+        tkinter_pyd = prefix + "_tkinter.pyd"
+        tkinter_so = next((n for n in names
+                           if n.startswith(prefix + "_tkinter")
+                           and n.endswith(".so")), None)
+        if tkinter_pyd not in names and tkinter_so is None:
+            # Non-Windows builders commonly have no tkinter extension at all;
+            # match build.sh's platform-neutral soft skip.  When tkinter is
+            # bundled, the complete runtime remains mandatory.
+            print(f"    SKIP: {zip_path.name} has no bundled tkinter extension")
+            return
+        if tkinter_pyd in names:
+            required = need
+        else:
+            assert tkinter_so is not None
+            required = (
+                prefix + "_tcl_data/init.tcl",
+                prefix + "_tk_data/tk.tcl",
+                tkinter_so,
+            )
+        missing = [n for n in required if n not in names]
         if missing:
             raise SystemExit(
                 f"AppWindow zip missing Tcl/Tk payload ({zip_path.name}): "

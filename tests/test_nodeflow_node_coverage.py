@@ -34,6 +34,8 @@ Run focused:
 import os
 import sys
 
+from harness import skip
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.join(os.path.dirname(_HERE), "backend")
 for _p in (_HERE, _BACKEND):
@@ -327,6 +329,9 @@ def t_explode_json_string_unquoted():
     the SQLite and DuckDB engines.  Regression test for the explode-json
     quoted-strings bug: ``'["apple","banana"]'`` must unnest to ``apple``,
     ``banana`` -- never ``'"apple"'``, ``'"banana"'``."""
+    from samql_core.engines import HAS_DUCKDB
+    if not HAS_DUCKDB:
+        skip("duckdb is not installed [QUARANTINE]")
     from samql_core import Session
 
     def _run_on(target, tag):

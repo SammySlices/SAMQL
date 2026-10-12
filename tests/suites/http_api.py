@@ -1945,12 +1945,27 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
                 continue
             run("http", name, fn)
     finally:
+        # Disarm server.py's atexit handler before stopping this test server.
+        # BaseServer.shutdown() blocks forever when called a second time after
+        # serve_forever() has already returned, which made the full runner hang
+        # during interpreter exit.
+        server._HTTPD = None
+        session = getattr(server, "SESSION", None)
+        server.SESSION = None
         try:
             httpd.shutdown()
         except Exception:
             pass
-        if getattr(server, "SESSION", None) is not None:
+        try:
+            httpd.server_close()
+        except Exception:
+            pass
+        try:
+            th.join(timeout=5)
+        except Exception:
+            pass
+        if session is not None:
             try:
-                server.SESSION.shutdown()
+                session.shutdown()
             except Exception:
                 pass

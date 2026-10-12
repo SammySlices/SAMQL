@@ -37,4 +37,4 @@ Confirm `/api/health` (or the AppWindow top bar) shows the expected `build`.
 
 ## What’s on beta today
 
-Build **2026-10-12.702** (v2.16.4, fix commit `e82a008`): reconcile headline/drill-down parity on duplicate keys, deterministic duplicate representatives, visible NULL-key exclusions, SQLite/DuckDB delimiter-explode parity, explicit SQLite custom-date-format errors, and incomplete-state labeling for cancelled Field Explorer discovery. See `VERSION` for the detailed build log.
+Build **2026-10-12.703** (v2.16.4): aggregate-runner cleanup. Temp artifacts remain inside a recreatable per-instance directory with a user-scoped fallback; stale structural and optional-dependency checks are explicitly quarantined; reconcile/cache tests match current key and identifier semantics; and HTTP test teardown no longer hangs at interpreter exit. See `VERSION` for the detailed build log.

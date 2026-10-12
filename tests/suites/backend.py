@@ -16165,8 +16165,8 @@ def backend_tests(datadir, csv_path, json_path):
         # per side so the excluded rows stay VISIBLE instead of
         # silently vanishing. SEMANTICS PINNED: totals count at KEY
         # grain (dup keys once); a duplicated key's field drilldown
-        # lists the cartesian row-pairs (informative by design); the
-        # non-matching field drill names exactly the diffing keys.
+        # uses the same deterministic representative row as the headline
+        # reconcile; the non-matching field drill names exactly the diffing keys.
         # PIVOT: sum/count/avg/min/max each cell-exact against a
         # brute-force GROUP BY, with the NULL row-dim as the "" row
         # and the NULL col-dim as the "value" column; filters push;
@@ -16269,9 +16269,8 @@ def backend_tests(datadir, csv_path, json_path):
                 {**spec, "bucket": "non_matching", "field": "txt"})
             rows = sess.page(ddt["result_id"], limit=50)["rows"]
             need({str(r[0]) for r in rows} == {"4", "7"}
-                 and len(rows) == 7,
-                 "field drill names keys 4 and 7; dup key lists its "
-                 "row-pairs (2x3 + 1)")
+                 and len(rows) == 2,
+                 "field drill names keys 4 and 7 once at key grain")
         finally:
             sess.shutdown()
         src = open(os.path.join(BACKEND, "samql_core", "session.py"),
@@ -29522,6 +29521,8 @@ def backend_tests(datadir, csv_path, json_path):
             _sh.rmtree(d, ignore_errors=True)
 
     def t_nodeflow_sql_node():
+        if not feats["duckdb"]:
+            skip("duckdb/pandas runtime is not installed [QUARANTINE]")
         # The SQL node runs as a source (reads a loaded table) and as a
         # transform (reads its upstream via the {{in}} token); engine routing
         # follows the tables it references.
@@ -29784,6 +29785,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_nodeflow_sql_duckdb_flowed_bind():
+        if not feats["duckdb"]:
+            skip("duckdb is not installed [QUARANTINE]")
         # DuckDB loads must bind the SQL node to the *flowed* upstream
         # relation (Select renames), never the raw catalog table, and must
         # accept DuckDB SQL (QUALIFY).
@@ -29888,6 +29891,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_python_node_pandas_bindings():
+        if not feats["duckdb"]:
+            skip("duckdb/pandas runtime is not installed [QUARANTINE]")
         # Direct python_node coverage: df is a DataFrame after build deps,
         # pandas import is allowed, and DataFrame out normalizes cleanly.
         from samql_core import python_node as pn
@@ -29912,6 +29917,8 @@ def backend_tests(datadir, csv_path, json_path):
                  "blocked import surfaces cleanly: %s" % exc)
 
     def t_nodeflow_write_to_table():
+        if not feats["duckdb"]:
+            skip("duckdb is not installed [QUARANTINE]")
         # The write node materialises its upstream into a real loaded table.
         # Default destination is DuckDB even when the Input table is SQLite.
         from samql_core import nodeflow
@@ -30932,7 +30939,7 @@ def backend_tests(datadir, csv_path, json_path):
             eng = s.duckdb if r2.get("engine") == "duckdb" else s.db
             need(eng is not None, "engine available after folder reload")
             _c, got = eng.execute(
-                'SELECT COUNT(*) FROM "%s" WHERE id = 9' % r2["table"])
+                'SELECT COUNT(*) FROM "%s" WHERE id = \'9\'' % r2["table"])
             need(got and int(got[0][0]) == 1,
                  "folder cache served rewritten content, not stale: %r"
                  % (got,))
@@ -32246,6 +32253,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_flow_variable_expressions():
+        if not feats["duckdb"]:
+            skip("duckdb is not installed [QUARANTINE]")
         # A variable row marked kind="expr" holds a SQL expression evaluated
         # once per run (like a formula), and the resulting scalar is what gets
         # substituted. That is what lets a date defined as DATE_TIME_NOW()
@@ -32323,6 +32332,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_sqlserver_node_resolves_variables():
+        if not feats["duckdb"]:
+            skip("duckdb is not installed [QUARANTINE]")
         # The SQL Server node's interactive Fetch must resolve ${name} the same
         # way a full run does -- fetch_source_node used to drop `graph` for
         # sqlserver (only apinode got it), so a WHERE clause kept a literal
@@ -32362,6 +32373,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_flow_write_append():
+        if not feats["duckdb"]:
+            skip("duckdb is not installed [QUARANTINE]")
         # the write node's overwrite (default) / append modes, and an idempotent
         # append (delete-by-key then insert) so re-running doesn't duplicate.
         # Unpinned SQL source materialises on the write destination (DuckDB).
@@ -32415,6 +32428,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_flow_write_overwrite_input_change():
+        if not feats["duckdb"]:
+            skip("duckdb is not installed [QUARANTINE]")
         # Write overwrite must replace destination contents when the Input
         # table (or upstream shape) changes — not keep the first-run rows,
         # and not leave a file-origin watch that can restore the old CSV.
@@ -33589,6 +33604,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_iterator_container():
+        if not feats["duckdb"]:
+            skip("duckdb is not installed [QUARANTINE]")
         # NEW container iterator: inner children (a mini-pipeline, like a group)
         # run once per row of the wired "variables" input, with that row's
         # columns bound as scalar ${vars}. An optional side "in" feeds the inner
@@ -34999,6 +35016,8 @@ def backend_tests(datadir, csv_path, json_path):
             s.shutdown()
 
     def t_sqlserver_brace_variables():
+        if not feats["duckdb"]:
+            skip("duckdb is not installed [QUARANTINE]")
         # {{var}} in a SQL Server query: an author-quoted token ('{{x}}')
         # must collapse to ONE literal (not ''x''); a numeric value in {{}}
         # is flagged with an actionable message (use ${}); and {{in}} /
@@ -36132,6 +36151,9 @@ def backend_tests(datadir, csv_path, json_path):
             _sp.download_drive_item = orig
 
     def t_sharepoint_sign_in_and_windows_auth():
+        import importlib.util as _importlib_util
+        if _importlib_util.find_spec("msal") is None:
+            skip("msal is not installed [QUARANTINE]")
         # Device-code / interactive OAuth persist under SecretStore; Windows
         # Integrated Auth hits classic _api with Negotiate (no bearer).
         import json as _json
@@ -37052,7 +37074,7 @@ def backend_tests(datadir, csv_path, json_path):
             eng = s.duckdb if r2.get("engine") == "duckdb" else s.db
             need(eng is not None, "engine available after directory reload")
             _c, got = eng.execute(
-                'SELECT region FROM "%s" WHERE id = 9' % r2["table"])
+                'SELECT region FROM "%s" WHERE id = \'9\'' % r2["table"])
             need(got and got[0][0] == "North",
                  "directory cache served rewritten content, not stale: %r"
                  % (got,))
@@ -39471,6 +39493,8 @@ def backend_tests(datadir, csv_path, json_path):
                     self.converted = (name, pq)
                 def drop_table(self, name):
                     self.table_sources.pop(name, None)
+                def drop_all(self):
+                    self.table_sources.clear()
                 def create_view_from_file(self, name, path, kind):
                     self.table_sources[name] = path
                     return name
