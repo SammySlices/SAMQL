@@ -37,4 +37,4 @@ Confirm `/api/health` (or the AppWindow top bar) shows the expected `build`.
 
 ## What’s on beta today
 
-Promoted to master as AppWindow **2026-07-20.673**: NodeFlow Filter leafRunPort + True/False wire colors, Input sphere table caption, Exit → keep-server reconnect (keep_on_close), shred/filebrowser Run-all fixes. See `VERSION` for the detailed build log.
+Build **2026-10-12.702** (v2.16.4): reconcile headline/drill-down parity on duplicate keys, deterministic duplicate representatives, visible NULL-key exclusions, SQLite/DuckDB delimiter-explode parity, explicit SQLite custom-date-format errors, and incomplete-state labeling for cancelled Field Explorer discovery. See `VERSION` for the detailed build log.

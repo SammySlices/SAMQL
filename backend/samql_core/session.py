@@ -15178,6 +15178,29 @@ class Session:
         def bcol(name):
             return q(cmb.get(name, name))
 
+        a_keys = [acol(k) for k in keys]
+        b_keys = [bcol(k) for k in keys]
+        target, _ = self._recon_engine(left, right)
+        recon_eng, _ = self._engine_obj(target)
+
+        def _dedup_drill(table, side_keys, extra_order=None):
+            cols = ", ".join(side_keys)
+            order_cols = cols
+            if extra_order:
+                order_cols += ", " + ", ".join(extra_order)
+            data_cols = list(recon_eng.table_columns.get(table) or [])
+            projection = ", ".join(q(c) for c in data_cols) or "*"
+            return (f"(SELECT {projection} FROM (SELECT *, ROW_NUMBER() OVER "
+                    f"(PARTITION BY {cols} ORDER BY {order_cols}) AS __samql_rn "
+                    f"FROM {q(table)}) _dd WHERE __samql_rn = 1)")
+
+        a_extra = ([acol(field)] if field else [])
+        b_extra = ([bcol(field)] if field else [])
+        if balance and balance != field:
+            a_extra.append(acol(balance))
+            b_extra.append(bcol(balance))
+        ded_l = _dedup_drill(left, a_keys, a_extra)
+        ded_r = _dedup_drill(right, b_keys, b_extra)
         join_on = " AND ".join(f"L.{acol(k)} = R.{bcol(k)}" for k in keys)
 
         # Anti-joins use LEFT JOIN ... IS NULL rather than a correlated NOT
@@ -15195,11 +15218,11 @@ class Session:
         b_notnull = " AND ".join(
             f"R.{bcol(k)} IS NOT NULL" for k in keys)
         if bucket == "a_only":
-            return (f"SELECT L.* FROM {q(left)} L LEFT JOIN {q(right)} R "
+            return (f"SELECT L.* FROM {ded_l} L LEFT JOIN {ded_r} R "
                     f"ON {join_on} WHERE R.{bcol(keys[0])} IS NULL "
                     f"AND {a_notnull}")
         if bucket == "b_only":
-            return (f"SELECT R.* FROM {q(right)} R LEFT JOIN {q(left)} L "
+            return (f"SELECT R.* FROM {ded_r} R LEFT JOIN {ded_l} L "
                     f"ON {join_on} WHERE L.{acol(keys[0])} IS NULL "
                     f"AND {b_notnull}")
         if bucket not in ("matching", "non_matching"):
@@ -15216,7 +15239,7 @@ class Session:
         if balance and balance != field:
             sel += (f", L.{acol(balance)} AS {q('A_' + balance)}, "
                     f"R.{bcol(balance)} AS {q('B_' + balance)}")
-        return (f"SELECT {sel} FROM {q(left)} L JOIN {q(right)} R "
+        return (f"SELECT {sel} FROM {ded_l} L JOIN {ded_r} R "
                 f"ON {join_on} WHERE {pred}")
 
     def reconcile(self, spec):
@@ -15325,14 +15348,22 @@ class Session:
         # before joining. Without this, duplicate keys make ``L JOIN R`` fan
         # out (M*N rows per key), inflating the matched count, every per-field
         # tally, and the balance sum.
-        def _dedup(table, side_keys):
+        def _dedup(table, side_keys, extra_order=None):
             cols = ", ".join(side_keys)
+            order_cols = cols
+            if extra_order:
+                order_cols += ", " + ", ".join(extra_order)
             return (f"(SELECT * FROM (SELECT *, ROW_NUMBER() OVER "
-                    f"(PARTITION BY {cols} ORDER BY {cols}) AS __samql_rn "
+                    f"(PARTITION BY {cols} ORDER BY {order_cols}) AS __samql_rn "
                     f"FROM {q(table)}) _dd WHERE __samql_rn = 1)")
 
-        ded_l = _dedup(left, [acol(k) for k in keys])
-        ded_r = _dedup(right, [bcol(k) for k in keys])
+        a_extra = [acol(f) for f in compare]
+        b_extra = [bcol(f) for f in compare]
+        if balance and balance not in compare:
+            a_extra.append(acol(balance))
+            b_extra.append(bcol(balance))
+        ded_l = _dedup(left, [acol(k) for k in keys], extra_order=a_extra)
+        ded_r = _dedup(right, [bcol(k) for k in keys], extra_order=b_extra)
         join_clause = f"{ded_l} L JOIN {ded_r} R ON {join_on}"
 
         # .413 efficiency: summary counts are pure reads; when BOTH

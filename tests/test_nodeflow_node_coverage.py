@@ -217,6 +217,84 @@ def t_explode_delim():
         s.shutdown()
 
 
+def t_explode_delim_null_cross_engine():
+    """NULL delimiter inputs emit no rows on SQLite, matching DuckDB."""
+    from samql_core import HAS_DUCKDB, Session
+
+    targets = [("__local__", "sqlite")]
+    if HAS_DUCKDB:
+        targets.append(("__duckdb__", "duckdb"))
+    for target, tag in targets:
+        s = Session()
+        s.fresh_run = False
+        s.fresh_load = False
+        try:
+            table = "nc_explode_null_%s" % tag
+            if tag == "sqlite":
+                s.db.add_table_streaming(table, ["id", "tags"],
+                                         iter([(1, "a,b"), (2, None)]))
+                s.db.sync_catalog()
+            else:
+                r = s.run_query(
+                    "CREATE TABLE %s AS SELECT 1 AS id, 'a,b' AS tags "
+                    "UNION ALL SELECT 2, NULL" % table,
+                    target=target)
+                assert not r.get("error"), \
+                    "%s create: %r" % (tag, r.get("error"))
+            g = _simple_graph(table, "ex", "explode",
+                              {"col": "tags", "mode": "delim", "delim": ","})
+            out = _run(s, g, "ex")
+            assert not out.get("error"), "%s explode: %r" % (tag, out.get("error"))
+            assert out.get("total_rows") == 2, \
+                "%s NULL input must emit 0 rows: %r" % (tag, out)
+            cols = [c if isinstance(c, str) else c.get("name", "")
+                    for c in (out.get("columns") or [])]
+            rows = out.get("rows") or []
+            assert sorted(row[cols.index("tags")] for row in rows) == ["a", "b"]
+            assert all(row[cols.index("id")] == 1 for row in rows), \
+                "%s NULL source row leaked into output: %r" % (tag, rows)
+        finally:
+            s.shutdown()
+
+
+def t_explode_delim_trailing_cross_engine():
+    """A trailing delimiter emits its final empty segment on both engines."""
+    from samql_core import HAS_DUCKDB, Session
+
+    targets = [("__local__", "sqlite")]
+    if HAS_DUCKDB:
+        targets.append(("__duckdb__", "duckdb"))
+    for target, tag in targets:
+        s = Session()
+        s.fresh_run = False
+        s.fresh_load = False
+        try:
+            table = "nc_explode_trailing_%s" % tag
+            if tag == "sqlite":
+                s.db.add_table_streaming(table, ["id", "tags"],
+                                         iter([(1, "a,b,")]))
+                s.db.sync_catalog()
+            else:
+                r = s.run_query(
+                    "CREATE TABLE %s AS SELECT 1 AS id, 'a,b,' AS tags" % table,
+                    target=target)
+                assert not r.get("error"), \
+                    "%s create: %r" % (tag, r.get("error"))
+            g = _simple_graph(table, "ex", "explode",
+                              {"col": "tags", "mode": "delim", "delim": ","})
+            out = _run(s, g, "ex")
+            assert not out.get("error"), "%s explode: %r" % (tag, out.get("error"))
+            assert out.get("total_rows") == 3, \
+                "%s trailing delimiter must emit 3 rows: %r" % (tag, out)
+            cols = [c if isinstance(c, str) else c.get("name", "")
+                    for c in (out.get("columns") or [])]
+            vals = [row[cols.index("tags")] for row in (out.get("rows") or [])]
+            assert vals == ["a", "b", ""], \
+                "%s expected exact split values ['a', 'b', ''], got %r" % (tag, vals)
+        finally:
+            s.shutdown()
+
+
 def t_explode_json():
     """Explode a JSON-array column (SQLite json_each path)."""
     s = _fresh_session()
@@ -495,6 +573,42 @@ def t_parse_date():
         # Parsed dates should contain 2024-01-15 or 2024-03-20
         assert any("2024-01-15" in v or "2024-01" in v for v in flat), \
             "parse date: expected 2024-01-15 in %r" % flat
+    finally:
+        s.shutdown()
+
+
+def t_parse_date_custom_format_sqlite_error():
+    s = _fresh_session()
+    try:
+        s.db.add_table_streaming("nc_parse_dt_custom", ["dt", "v"],
+                                 iter([("01/15/2026", 1)]))
+        s.db.sync_catalog()
+        g = _simple_graph("nc_parse_dt_custom", "pd", "parse",
+                          {"cols": ["dt"], "to": "date",
+                           "format": "%m/%d/%Y"})
+        r = _run(s, g, "pd")
+        msg = str(r.get("error") or "")
+        assert msg, "custom SQLite date format must fail instead of returning NULL"
+        assert "SQLite" in msg and "format" in msg, msg
+    finally:
+        s.shutdown()
+
+
+def t_parse_date_iso_format_sqlite():
+    s = _fresh_session()
+    try:
+        s.db.add_table_streaming("nc_parse_dt_iso", ["dt", "v"],
+                                 iter([("2026-01-15", 1)]))
+        s.db.sync_catalog()
+        g = _simple_graph("nc_parse_dt_iso", "pd", "parse",
+                          {"cols": ["dt"], "to": "date",
+                           "format": "%Y-%m-%d"})
+        r = _run(s, g, "pd")
+        assert not r.get("error"), r.get("error")
+        cols = [c if isinstance(c, str) else c.get("name", "")
+                for c in (r.get("columns") or [])]
+        vals = [row[cols.index("dt")] for row in (r.get("rows") or [])]
+        assert vals == ["2026-01-15"], "ISO date parse changed value: %r" % vals
     finally:
         s.shutdown()
 
@@ -794,6 +908,10 @@ _CASES = [
     ("node coverage: dedupe multi-key",    t_dedupe_multi_key),
     # explode
     ("node coverage: explode delim",       t_explode_delim),
+    ("explode delim NULL: sqlite emits 0 rows like duckdb",
+     t_explode_delim_null_cross_engine),
+    ("explode delim trailing: 'a,b,' produces 3 rows on both engines",
+     t_explode_delim_trailing_cross_engine),
     ("node coverage: explode json array",  t_explode_json),
     ("node coverage: explode json string unquoted", t_explode_json_string_unquoted),
     # fill
@@ -808,6 +926,10 @@ _CASES = [
     # parse
     ("node coverage: parse number",              t_parse_number),
     ("node coverage: parse date",                t_parse_date),
+    ("parse date: non-ISO format on SQLite raises NodeflowError",
+     t_parse_date_custom_format_sqlite_error),
+    ("parse date: ISO format on SQLite works",
+     t_parse_date_iso_format_sqlite),
     ("node coverage: parse integer",             t_parse_integer),
     # perioddelta
     ("node coverage: perioddelta absolute",      t_perioddelta_absolute),

@@ -409,6 +409,7 @@ export interface ReconcileTotals {
   a_total: number;
   b_total: number;
   total: number;
+  null_keys?: { a: number; b: number };
 }
 
 export interface ReconcileResult {

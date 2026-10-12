@@ -3981,6 +3981,17 @@ html[data-theme="light"] .btn.ghost.modal-pin-btn.pin-on:hover {
 .rr-tile.t-tot {
   border-top-color: var(--text-faint);
 }
+.null-keys-note {
+  margin: -6px 0 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning, #d9a441);
+  border-left-width: 4px;
+  border-radius: var(--r);
+  background: rgba(217, 164, 65, 0.12);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
 .rr-grid-wrap {
   border: 1px solid var(--border);
   border-radius: var(--r);
@@ -4239,6 +4250,16 @@ html[data-theme="light"] .btn.ghost.modal-pin-btn.pin-on:hover {
   font-size: 11px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 4px;
+}
+.fx-partial-badge {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid var(--warning, #d9a441);
+  border-radius: 999px;
+  background: rgba(217, 164, 65, 0.14);
+  color: var(--warning, #d9a441);
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 .fx-right {
   flex: 1;

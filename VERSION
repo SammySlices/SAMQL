@@ -2,12 +2,32 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-09-10.701
+Current build:   2026-10-12.702
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-10-12.702  (v2.16.4)
+
+RECONCILIATION DRILL-DOWNS AGREE WITH HEADLINE TOTALS; NODEFLOW
+EXPLODE AND DATE-PARSE SEMANTICS ARE EXPLICIT ACROSS ENGINES.
+
+Reconcile now applies the same deterministic one-row-per-key selection to
+headline aggregates and all four drill-down buckets. Duplicate-key joins no
+longer fan out drill rows, and compare/balance columns provide stable tie
+breaking. Reports visibly call out rows excluded because a key contains NULL.
+
+SQLite delimiter explode now matches DuckDB: NULL inputs emit no rows and a
+trailing delimiter emits a final empty segment. SQLite date parsing rejects
+unsupported custom formats instead of silently ignoring the format and
+returning NULL; documented ISO formats continue to work.
+
+JSON Field Explorer now marks field trees incomplete when backend discovery is
+cancelled after returning a partial result, and clears that state when a fresh
+discovery begins.
 
 ----------------------------------------------------------------------
 build 2026-09-10.701  (v2.16.4)

@@ -215,6 +215,7 @@ export const FieldExplorer: React.FC<Props> = ({
   const [srcKey, setSrcKey] = useState("");
   const [fields, setFields] = useState<FieldRow[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [discoveryPartial, setDiscoveryPartial] = useState(false);
   const [selIdx, setSelIdx] = useState<number | null>(null);
   // Multi-select via checkboxes. Order is check order; last checked / click
   // is the "primary" field used for preview / shred CTAs.
@@ -273,6 +274,7 @@ export const FieldExplorer: React.FC<Props> = ({
   const reloadFields = (engine: string, table: string, key: string) => {
     const gen = ++fieldsFetchGen.current;
     setBusy(true);
+    setDiscoveryPartial(false);
     // Clear the tree immediately so a replace/reload cannot show stale
     // nested keys while rediscovery is in flight (latest-data wins).
     setFields(null);
@@ -297,6 +299,7 @@ export const FieldExplorer: React.FC<Props> = ({
       void (async () => {
         let after: string | null | undefined = null;
         let acc: FieldRow[] = [];
+        let wasPartial = false;
         try {
           while (
             !ctrl.signal.aborted &&
@@ -322,7 +325,10 @@ export const FieldExplorer: React.FC<Props> = ({
             const chunk = (r.fields || []) as FieldRow[];
             acc = after ? acc.concat(chunk) : chunk;
             setFields(acc);
-            if (r.cancelled || !r.partial || !r.next_after) break;
+            if (r.cancelled || !r.partial || !r.next_after) {
+              wasPartial = r.cancelled === true;
+              break;
+            }
             after = r.next_after;
           }
         } catch {
@@ -339,6 +345,7 @@ export const FieldExplorer: React.FC<Props> = ({
             discoveryQidRef.current = null;
           }
           if (gen === fieldsFetchGen.current && key === srcKeyRef.current) {
+            setDiscoveryPartial(wasPartial);
             setBusy(false);
           }
         }
@@ -816,6 +823,15 @@ export const FieldExplorer: React.FC<Props> = ({
                       ? `${selIdxs.length} selected`
                       : "Check fields to combine (e.g. id + nested array)"}
                   </span>
+                  {discoveryPartial && (
+                    <span
+                      className="fx-partial-badge"
+                      data-testid="fx-discovery-partial"
+                      title="Field discovery was cancelled — results may be incomplete"
+                    >
+                      incomplete
+                    </span>
+                  )}
                   {selIdxs.length > 0 && (
                     <button
                       type="button"

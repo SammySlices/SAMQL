@@ -617,6 +617,74 @@ def t_reconcile_integrity_drilldown_non_matching():
         s.shutdown()
 
 
+def t_reconcile_drilldown_duplicate_keys_match_headlines():
+    """Duplicate keys are deduped identically in all headline and drill buckets."""
+    s = _fresh_session()
+    try:
+        s.db.add_table_streaming(
+            "ddd_L", ["id", "val"],
+            iter([("x", "same"), ("x", "same"),
+                  ("w", "left-b"), ("w", "left-a"),
+                  ("left", "only-2"), ("left", "only-1")]))
+        s.db.add_table_streaming(
+            "ddd_R", ["id", "val"],
+            iter([("x", "same"), ("x", "same"),
+                  ("w", "right-b"), ("w", "right-a"),
+                  ("right", "only-2"), ("right", "only-1")]))
+        s.db.sync_catalog()
+        base = {"left": "ddd_L", "right": "ddd_R",
+                "keys": ["id"], "compare": ["val"]}
+        rec = s.reconcile(base)
+        assert not rec.get("error"), rec.get("error")
+        totals = rec["totals"]
+        assert totals["matching"] == 1, totals
+        assert totals["non_matching"] == 1, totals
+        assert totals["a_only"] == 1, totals
+        assert totals["b_only"] == 1, totals
+
+        for bucket in ("a_only", "b_only", "matching", "non_matching"):
+            spec = dict(base, bucket=bucket)
+            if bucket in ("matching", "non_matching"):
+                spec["field"] = "val"
+            drill = s.reconcile_drilldown(spec)
+            assert not drill.get("error"), "%s: %s" % (bucket, drill.get("error"))
+            assert drill["count"] == totals[bucket], \
+                "%s drill=%r headline=%r" % (bucket, drill["count"], totals[bucket])
+            assert "__samql_rn" not in drill["columns"], \
+                "%s leaked internal dedup column: %r" % (bucket, drill["columns"])
+    finally:
+        s.shutdown()
+
+
+def t_reconcile_dedup_deterministic_representative():
+    """Compare and balance columns deterministically choose duplicate representatives."""
+    s = _fresh_session()
+    try:
+        # Opposite physical order on each side would mismatch with an arbitrary
+        # first-row representative. Ordering by compare then balance picks alpha/20.
+        s.db.add_table_streaming(
+            "det_L", ["id", "name", "amt"],
+            iter([(1, "beta", 10.0), (1, "alpha", 20.0)]))
+        s.db.add_table_streaming(
+            "det_R", ["id", "name", "amt"],
+            iter([(1, "alpha", 20.0), (1, "beta", 10.0)]))
+        s.db.sync_catalog()
+        spec = {"left": "det_L", "right": "det_R", "keys": ["id"],
+                "compare": ["name"], "balance": "amt"}
+        runs = [s.reconcile(spec), s.reconcile(spec)]
+        for rec in runs:
+            assert not rec.get("error"), rec.get("error")
+            assert rec["totals"]["matching"] == 1, rec["totals"]
+            assert rec["totals"]["non_matching"] == 0, rec["totals"]
+            row = rec["fields"][0]
+            assert row["sum_matching_balance"] == 20.0, row
+            assert row["sum_non_matching_balance"] == 0.0, row
+        assert runs[0]["totals"] == runs[1]["totals"]
+        assert runs[0]["fields"] == runs[1]["fields"]
+    finally:
+        s.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -661,5 +729,9 @@ def backend_cases(root, csv, skip):
          t_reconcile_integrity_drilldown_matching),
         ("reconcile integrity: drilldown non_matching row count",
          t_reconcile_integrity_drilldown_non_matching),
+        ("reconcile drilldown: duplicate keys match headline totals",
+         t_reconcile_drilldown_duplicate_keys_match_headlines),
+        ("reconcile dedup: deterministic representative across repeated runs",
+         t_reconcile_dedup_deterministic_representative),
     ]
     return cases

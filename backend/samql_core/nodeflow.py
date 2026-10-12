@@ -403,14 +403,16 @@ def _sqlite_split_rows(src, col, delim, name, cols):
     seed = (
         "SELECT "
         "CASE WHEN instr(%(c)s, %(d)s)>0 THEN substr(%(c)s, instr(%(c)s,%(d)s)+length(%(d)s)) ELSE '' END AS _rest, "
-        "CASE WHEN instr(%(c)s, %(d)s)>0 THEN substr(%(c)s, 1, instr(%(c)s,%(d)s)-1) ELSE %(c)s END AS _item"
-        "%(carry)s FROM (%(src)s) AS _s"
+        "CASE WHEN instr(%(c)s, %(d)s)>0 THEN substr(%(c)s, 1, instr(%(c)s,%(d)s)-1) ELSE %(c)s END AS _item, "
+        "CASE WHEN instr(%(c)s, %(d)s)>0 THEN 1 ELSE 0 END AS _split"
+        "%(carry)s FROM (%(src)s) AS _s WHERE %(c)s IS NOT NULL"
     ) % {"c": qcol, "d": d, "carry": carry_sel, "src": src}
     rec = (
         "SELECT "
         "CASE WHEN instr(_rest, %(d)s)>0 THEN substr(_rest, instr(_rest,%(d)s)+length(%(d)s)) ELSE '' END AS _rest, "
-        "CASE WHEN instr(_rest, %(d)s)>0 THEN substr(_rest, 1, instr(_rest,%(d)s)-1) ELSE _rest END AS _item"
-        "%(carry)s FROM _ex_rec WHERE _rest <> ''"
+        "CASE WHEN instr(_rest, %(d)s)>0 THEN substr(_rest, 1, instr(_rest,%(d)s)-1) ELSE _rest END AS _item, "
+        "CASE WHEN instr(_rest, %(d)s)>0 THEN 1 ELSE 0 END AS _split"
+        "%(carry)s FROM _ex_rec WHERE _rest <> '' OR _split = 1"
     ) % {"d": d, "carry": carry_sel}
     proj = []
     for c in cols:
@@ -418,7 +420,7 @@ def _sqlite_split_rows(src, col, delim, name, cols):
     if name not in cols:
         proj.append("_item AS %s" % _q(name))
     return (
-        "WITH RECURSIVE _ex_rec(_rest, _item%s) AS (%s UNION ALL %s) "
+        "WITH RECURSIVE _ex_rec(_rest, _item, _split%s) AS (%s UNION ALL %s) "
         "SELECT %s FROM _ex_rec" % (carry_sel, seed, rec, ", ".join(proj))
     )
 
@@ -2037,7 +2039,13 @@ def node_output_sql(node, port, get_input, cols_of, engine=None, needed=None,
                         return "CAST(%s AS DATE)" % e if to == "date" else e
                     return "CAST(%s AS %s)" % (
                         qcol, "DATE" if to == "date" else "TIMESTAMP")
-                # SQLite has no strptime; best-effort ISO parse (format ignored)
+                if fmt and fmt not in (
+                        "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S",
+                        "%Y-%m-%d %H:%M:%S"):
+                    raise NodeflowError(
+                        "SQLite does not support the date format %r. "
+                        "Use ISO 8601 (YYYY-MM-DD) or switch to the "
+                        "DuckDB engine." % fmt)
                 return ("date(%s)" if to == "date" else "datetime(%s)") % qcol
             if to in ("number", "double", "float", "integer", "int"):
                 cleaned = qcol

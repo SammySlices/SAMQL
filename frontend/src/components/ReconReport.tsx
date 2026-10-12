@@ -200,6 +200,14 @@ export const ReconReport: React.FC<Props> = ({
           </div>
         ))}
       </div>
+      {(totals.null_keys?.a ?? 0) > 0 || (totals.null_keys?.b ?? 0) > 0 ? (
+        <div className="null-keys-note" role="alert">
+          <strong>NULL key rows (excluded from match counts):</strong>{" "}
+          {totals.null_keys?.a ?? 0} in A, {totals.null_keys?.b ?? 0} in B — these
+          rows have a NULL value in a key column and cannot be matched. A NULL
+          key vs a non-NULL key is a non-match.
+        </div>
+      ) : null}
 
       {report.fields.length === 0 ? (
         <div className="rr-empty">

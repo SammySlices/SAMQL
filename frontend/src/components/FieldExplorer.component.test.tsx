@@ -1094,6 +1094,9 @@ describe("FieldExplorer discovery behaviours", () => {
     await selectSource("events");
     await waitFor(() => expect(screen.queryByText("name")).toBeTruthy(), { timeout: 3000 });
     expect(vi.mocked(api.tableFields)).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("fx-discovery-partial").textContent).toMatch(
+      /incomplete/i,
+    );
   });
 
   it("calls tableFields again when dataEpoch prop increments", async () => {
