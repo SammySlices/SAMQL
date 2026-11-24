@@ -62,7 +62,19 @@ export function unregisterRun(
 }
 
 export function markCancelled(queryId: string | null | undefined): void {
-  if (queryId) _cancelled.set(queryId, Date.now());
+  if (!queryId) return;
+  // L-4: sweep expired ids here; wasCancelled only forgot an id that was
+  // asked about again, so the rest stayed for the life of the page.
+  const now = Date.now();
+  for (const [id, t] of _cancelled) {
+    if (now - t > CANCEL_MEMORY_MS) _cancelled.delete(id);
+  }
+  _cancelled.set(queryId, now);
+}
+
+/** How many cancelled ids are remembered (tests). */
+export function cancelledIdCount(): number {
+  return _cancelled.size;
 }
 
 export function wasCancelled(queryId: string | null | undefined): boolean {
