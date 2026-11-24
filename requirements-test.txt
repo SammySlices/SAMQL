@@ -1,6 +1,6 @@
 # Complete Python dependency set used by SamQL's deterministic test suites.
 # Test-SamQL-All.ps1 installs this into an isolated .samql-test-venv.
-duckdb>=1.0
+duckdb>=1.0,<2  # L-9: 2.x adds export/NDJSON/UNNEST diffs; lift once fixed
 pyarrow
 sqlglot
 openpyxl

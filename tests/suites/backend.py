@@ -35574,6 +35574,22 @@ def backend_tests(datadir, csv_path, json_path):
         need(r"\[(\.+)\](exe|" in exp,
              "Expand-SamQL un-escapes by dot count, like the packer")
 
+    def t_l9_duckdb_pinned_below_2():
+        # L-9: duckdb 2.x changes export streams, the NDJSON harness and the
+        # UNNEST CTE pipeline (3 more failures). Every requirements file that
+        # installs duckdb caps it below 2 until those diffs are fixed.
+        import re as _re
+        found = 0
+        for name in ("requirements-test.txt", "requirements-optional.txt"):
+            for raw in open(os.path.join(ROOT, name), encoding="utf-8"):
+                line = raw.split("#", 1)[0].strip()
+                if not _re.match(r"(?i)duckdb\b", line):
+                    continue
+                found += 1
+                need(_re.search(r"<\s*2(\.0)*\b", line),
+                     "%s pins duckdb below 2: %r" % (name, line))
+        eq(found, 2, "both requirements files install duckdb")
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43617,6 +43633,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_l7_python_node_input_cap_bounds_the_fetch),
         ("L-8: the mail-safe transport round trip is byte-exact",
          t_l8_transport_round_trip_is_byte_exact),
+        ("L-9: duckdb is pinned below 2 in every requirements file",
+         t_l9_duckdb_pinned_below_2),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
