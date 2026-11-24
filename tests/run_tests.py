@@ -19,9 +19,10 @@ import tempfile
 
 from fixtures import make_csv, make_json
 import harness
-from harness import bold, dim, green, red, section, yellow
+from harness import (bold, dim, green, isolate_user_state, red, section,
+                     yellow)
 from paths import BACKEND, ROOT
-from suites.backend import backend_tests
+from suites.backend import backend_tests, isolation_guard
 from suites.frontend import frontend_tests
 from suites.http_api import http_tests
 
@@ -151,6 +152,7 @@ def main(argv=None):
     do_frontend = not args.backend_only
     do_http = do_backend and not args.no_http
 
+    isolated, real_config, real_snapshot = isolate_user_state()
     _install_temp_canary()
     print(bold("\nSamQL test runner"))
     print(dim(f"  python {sys.version.split()[0]}  |  root: {ROOT}"))
@@ -172,8 +174,11 @@ def main(argv=None):
         if do_frontend:
             section("Frontend  (UI contract, encoding, structure, build)")
             frontend_tests(args.build)
+        if do_backend:
+            isolation_guard(isolated, real_config, real_snapshot)
     finally:
         shutil.rmtree(datadir, ignore_errors=True)
+        shutil.rmtree(isolated, ignore_errors=True)
         count, freed = _sweep_registered(_TEMP_REGISTRY)
         stale = 0
         instance_left = None

@@ -156,3 +156,40 @@ def read_test_sources(root):
         chunks.append(f"\n# ===== {path.name} =====\n")
         chunks.append(path.read_text(encoding="utf-8"))
     return "".join(chunks)
+
+
+def snapshot_tree(path):
+    """Map every file under ``path`` to (size, mtime_ns); {} when absent."""
+    snap = {}
+    if not os.path.isdir(path):
+        return snap
+    for base, _dirs, names in os.walk(path):
+        for name in names:
+            full = os.path.join(base, name)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            snap[os.path.relpath(full, path)] = (st.st_size, st.st_mtime_ns)
+    return snap
+
+
+def isolate_user_state():
+    """Point every SamQL store at a throwaway config dir for this run.
+
+    Without this the suites read and write the developer's real ~/.samql
+    (config.json, history.json, secrets.json, nodeflow_cache/), so a persisted
+    ``engine_mode`` silently changes which engine the tests exercise and the
+    run leaves test keys behind (H-9). ``app_config_dir`` gives
+    SAMQL_CONFIG_DIR precedence over the home directory, so setting it here
+    isolates every Session, HTTP server and store the suites create,
+    including subprocesses, which inherit the environment. Returns the
+    isolated dir, the real config dir and a snapshot of the latter so the run
+    can prove it was left untouched.
+    """
+    import tempfile
+    real = os.path.join(os.path.expanduser("~"), ".samql")
+    snapshot = snapshot_tree(real)
+    isolated = tempfile.mkdtemp(prefix="samql_cfg_")
+    os.environ["SAMQL_CONFIG_DIR"] = isolated
+    return isolated, real, snapshot

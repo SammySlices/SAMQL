@@ -63,6 +63,64 @@ def _nodeflow_source() -> str:
     )
 
 
+def _pinned_engine_mode(mode):
+    """Run a test with every Session it creates defaulting to ``mode``.
+
+    The product default engine became DuckDB (2b6e5f3), but these tests were
+    written against dual-mode routing (SQLite-local tables, '__local__'
+    targets, untyped ``CREATE TABLE t(x)``). They used to pass only on a
+    machine whose real ~/.samql already persisted ``engine_mode: dual``.
+    Pinning makes that dependency explicit: the isolated test config (see
+    run_tests._isolate_user_state) holds the mode for the duration of the
+    test, so in-process Sessions and HTTP servers built inside it see it,
+    and the previous value is restored afterwards. Never touches a real
+    config dir.
+    """
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not (os.environ.get("SAMQL_CONFIG_DIR") or "").strip():
+                raise RuntimeError(
+                    "engine-mode pinning needs the isolated SAMQL_CONFIG_DIR "
+                    "set by tests/run_tests.py")
+            from samql_core.stores import ConfigStore
+            cfg = ConfigStore()
+            had = "engine_mode" in cfg.data
+            prev = cfg.data.get("engine_mode")
+            cfg.set("engine_mode", mode)
+            # server.SESSION is a process-wide singleton an earlier test may
+            # already have built; pin it for the test too, then put it back.
+            srv = sys.modules.get("server")
+            shared = getattr(srv, "SESSION", None) if srv else None
+            shared_prev = getattr(shared, "engine_mode", None)
+            if shared is not None:
+                shared.engine_mode = mode
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                cfg = ConfigStore()
+                if had:
+                    cfg.set("engine_mode", prev)
+                else:
+                    cfg.data.pop("engine_mode", None)
+                    cfg.save()
+                now = getattr(srv, "SESSION", None) if srv else None
+                if now is not None:
+                    if now is shared:
+                        now.engine_mode = shared_prev
+                    else:
+                        # built during the test from the pinned config: give
+                        # it the mode the restored config implies (the
+                        # product default when unset)
+                        now.engine_mode = str(
+                            cfg.data.get("engine_mode") or "duckdb"
+                        ).strip().lower()
+        return wrapper
+    return deco
+
+
 def _fresh_session(**kw):
     from samql_core import Session
     s = Session(**kw)
@@ -77,6 +135,30 @@ def _loaded_session(**kw):
     s = _fresh_session(**kw)
     s.load_file(CSV, destination="sqlite", base_name="data")
     return s
+
+
+def isolation_guard(isolated, real, snapshot):
+    """Register the end-of-run check that no suite escaped the isolated
+    config dir (H-9): SAMQL_CONFIG_DIR still points at the run's temp dir and
+    the real ~/.samql is byte-for-byte as it was before the run. A SamQL
+    instance left running against the same profile during the run can also
+    trip this; close it and rerun."""
+    from harness import snapshot_tree
+
+    def check():
+        current = os.environ.get("SAMQL_CONFIG_DIR") or ""
+        root = os.path.realpath(tempfile.gettempdir())
+        need(current == isolated,
+             "SAMQL_CONFIG_DIR was changed during the run: %r" % current)
+        need(os.path.commonpath([root, os.path.realpath(current)]) == root,
+             "SAMQL_CONFIG_DIR is not under the temp root: %r" % current)
+        after = snapshot_tree(real)
+        changed = sorted(k for k in set(snapshot) | set(after)
+                         if snapshot.get(k) != after.get(k))
+        need(not changed, "the suite modified the real %s: %s"
+             % (real, ", ".join(changed[:10])))
+    run("backend", "test isolation: SAMQL_CONFIG_DIR is a temp dir and the "
+        "real ~/.samql is untouched", check)
 
 
 def backend_tests(datadir, csv_path, json_path):
@@ -3472,6 +3554,7 @@ def backend_tests(datadir, csv_path, json_path):
         need(not missing,
              "reconcile reuse wiring broken: " + "; ".join(missing))
 
+    @_pinned_engine_mode("dual")
     def t_select_skips_table_refresh():
         # #5: a pure read reports stmt_kind="read" and the clients skip the
         # /api/tables recount; writes/DDL still refresh.
@@ -4925,6 +5008,7 @@ def backend_tests(datadir, csv_path, json_path):
         need("(task as any).note" in bg,
              "the completion toast surfaces the note")
 
+    @_pinned_engine_mode("dual")
     def t_shred_node():
         # Wave 2 #4: the shred NODE. The pre-pass runs the flatten before the
         # flow composes (once, upstream-gated); refresh=off reuses an existing
@@ -6210,6 +6294,7 @@ def backend_tests(datadir, csv_path, json_path):
              "NodeFlow keeps a canonical favorites key and an explicit "
              "legacy Nodebook migration key")
 
+    @_pinned_engine_mode("dual")
     def t_per_statement_run_all():
         # .458 FEATURE: per-statement results on Run-all. run_script
         # splits with the audited scanner and runs each statement
@@ -6322,6 +6407,7 @@ def backend_tests(datadir, csv_path, json_path):
              "the IDE requests the ledger, renders the strip, and "
              "every tab-write site stores it")
 
+    @_pinned_engine_mode("dual")
     def t_audit2_464_engines():
         # .464 AUDIT PASS II (1/2): fresh angles on query runs, loads,
         # and reconcile -- nothing here re-proves an old pin. QUERY
@@ -6780,6 +6866,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_audit2_464():
         # AUDIT PASS II (.464), fresh angles across seven domains. THE
         # ONE PRODUCT BUG: _ExecKeepalive wrapped only three DuckDB
@@ -9644,6 +9731,7 @@ def backend_tests(datadir, csv_path, json_path):
                 pass
 
     
+    @_pinned_engine_mode("dual")
     def t_cancel_all_scoped_554():
         # .554: cross-surface Stop must not kill a concurrent query. The
         # NodeFlow Stop (and the Journal Stop, and the Activity tray) call
@@ -9793,6 +9881,7 @@ def backend_tests(datadir, csv_path, json_path):
              "no engine DROP while the cache lock is held")
 
     
+    @_pinned_engine_mode("dual")
     def t_runall_stale_cancel_552():
         # .552, ON-BOX: running a NodeFlow workflow said "Run all
         # cancelled" and produced no results, while the SAME query ran
@@ -10274,6 +10363,7 @@ def backend_tests(datadir, csv_path, json_path):
              % [l for l in logs if "phantom" in l or "reusing" in l])
 
     
+    @_pinned_engine_mode("dual")
     def t_recon_failures_540():
         # .540: "Export failed values" on the reconcile report -- ONE
         # CSV of every mismatching key + field with its left/right
@@ -14760,6 +14850,7 @@ def backend_tests(datadir, csv_path, json_path):
              "the reconcile modal has one Cancel (stop), plus Run and "
              "the X")
 
+    @_pinned_engine_mode("dual")
     def t_speed_and_shadow_472():
         # .472, four on-box reports. RETYPE ROUNDTRIP: change-type was
         # destructive -- strings -> INTEGER nulled the non-numerics IN
@@ -14878,6 +14969,7 @@ def backend_tests(datadir, csv_path, json_path):
              and not _re.search(r"\bheight: \d", blk),
              "no float couples a resize handle with inline size")
 
+    @_pinned_engine_mode("dual")
     def t_cancel_everywhere_471():
         # .471, six on-box reports. FLATTEN-ON-LOAD vs JSON: shredding
         # required a parquet backing, so a nested JSON loaded with
@@ -16154,6 +16246,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             sess.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_plan_pass9_recon_pivot():
         # .452 = AUDIT_PLAN PASS 9 (reconcile + pivot). ONE COHERENCE
         # BUG FIXED: a row whose OWN key is NULL fails the anti-join
@@ -16278,6 +16371,7 @@ def backend_tests(datadir, csv_path, json_path):
         need("AND {a_notnull}" in src and '"null_keys": null_keys'
              in src, "the drill guard and the summary field are wired")
 
+    @_pinned_engine_mode("dual")
     def t_plan_pass8_exports():
         # .451 = AUDIT_PLAN PASS 8 (exports). ONE SECURITY BUG FIXED:
         # the xlsx writer let openpyxl promote any string beginning
@@ -16482,6 +16576,12 @@ def backend_tests(datadir, csv_path, json_path):
                 return _P(*a, **kw)
         real_path = _st.Path
         _st.Path = _FakePath()
+        # app_config_dir gives SAMQL_CONFIG_DIR precedence over Path.home(),
+        # so under the isolated runner the fake home alone would be ignored
+        # and this test would share the run's config dir. Point the env var
+        # at the fake home's store for the duration of the test.
+        prev_cfg_dir = os.environ.get("SAMQL_CONFIG_DIR")
+        os.environ["SAMQL_CONFIG_DIR"] = os.path.join(scratch, ".p7cfg")
         try:
             M = _st.LoadManifestStore
             m = M(dirname=".p7cfg")
@@ -16552,6 +16652,10 @@ def backend_tests(datadir, csv_path, json_path):
             eq(len(M(dirname=".p7cfg").all()), 0, "clear persists")
         finally:
             _st.Path = real_path
+            if prev_cfg_dir is None:
+                os.environ.pop("SAMQL_CONFIG_DIR", None)
+            else:
+                os.environ["SAMQL_CONFIG_DIR"] = prev_cfg_dir
 
     def t_plan_pass6_jobs_watchdog():
         # .449 = AUDIT_PLAN PASS 6 (jobs + progress + watchdog).
@@ -16828,6 +16932,7 @@ def backend_tests(datadir, csv_path, json_path):
              and "if not self._reuse_pins.get(cand):" in src,
              "the count cache and the pin-aware trim are wired")
 
+    @_pinned_engine_mode("dual")
     def t_plan_pass4_exec_cancel():
         # .447 = AUDIT_PLAN PASS 4 (query exec + cancel). TWO SPLITTER
         # BUGS FIXED: (1) dollar-quoted bodies ($$...$$ and
@@ -19236,10 +19341,25 @@ def backend_tests(datadir, csv_path, json_path):
         # functional: the storage path is the per-user SamQL/webview folder
         # and gets created (same folder the real WebView2 data lands in).
         import launcher_app as _LA
-        p = _LA._webview_storage_path()
-        need(p.replace("\\", "/").endswith("SamQL/webview"),
-             "the storage path is the per-user SamQL/webview folder: %s" % p)
-        need(os.path.isdir(p), "the storage path is created on demand")
+        # Resolve under a throwaway LOCALAPPDATA so the check never creates
+        # the folder in the developer's real profile.
+        prev_lad = os.environ.get("LOCALAPPDATA")
+        fake_lad = tempfile.mkdtemp(prefix="samql_lad_")
+        os.environ["LOCALAPPDATA"] = fake_lad
+        try:
+            p = _LA._webview_storage_path()
+            need(p.replace("\\", "/").endswith("SamQL/webview"),
+                 "the storage path is the per-user SamQL/webview folder: %s"
+                 % p)
+            need(os.path.isdir(p), "the storage path is created on demand")
+            need(os.path.realpath(p).startswith(os.path.realpath(fake_lad)),
+                 "the storage path follows LOCALAPPDATA")
+        finally:
+            if prev_lad is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = prev_lad
+            shutil.rmtree(fake_lad, ignore_errors=True)
 
     def t_native_window_icon_493():
         # .493, on-box icon report on the native (pywebview) window:
@@ -24439,6 +24559,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_brace_misuse_guardrail():
         # Build .207 -- {{name}} inserts a quoted SQL string, so it is rejected
         # up front for the two misuses it can't express: a numeric value (wants
@@ -24894,6 +25015,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_keyset_paging():
         # Deep paging over a spilled result must use the keyset index range
         # scan and still return the right rows.
@@ -25561,6 +25683,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_reconcile_drilldown_spills():
         # A big drill-down must spill to a temp store (DiskBackedRows), not
         # the Python heap, and still page correctly at a deep offset.
@@ -26149,6 +26272,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_filter_spilled():
         s = _fresh_session()
         try:
@@ -27538,6 +27662,7 @@ def backend_tests(datadir, csv_path, json_path):
              "raw parser error leaked (empty): " + m2)
         need("empty response" in m2, "no empty-response note: " + m2)
 
+    @_pinned_engine_mode("dual")
     def t_flow_engine_target_apinode_engine():
         # An API node's hidden table lives in whichever engine the fetch loaded
         # it into. The flow must target THAT engine even when the cached catalog
@@ -27563,6 +27688,7 @@ def backend_tests(datadir, csv_path, json_path):
         eq(s._flow_engine_target(g2), LOCAL_TARGET,
            "an un-fetched api node falls back to the local engine")
 
+    @_pinned_engine_mode("dual")
     def t_flow_engine_target_nested_apinode():
         # The container iterator wraps its children in a synthetic "group" node,
         # so an API node nested in that group (or a nested iterator) must still
@@ -30580,6 +30706,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_node_calc_matrix2():
         # Build .210 -- exact-output checks for the remaining transform nodes,
         # numbers and strings, in the same style as the calc matrix. (_sql_flow
@@ -31067,6 +31194,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_jsonextract_node():
         # pull nested fields out of a JSON text column into new columns
         s = Session()
@@ -31622,6 +31750,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_select_cast():
         s = Session()
         try:
@@ -31951,6 +32080,7 @@ def backend_tests(datadir, csv_path, json_path):
            "E NULL handling: NULL rows are excluded from the concat"
            "  val=%r  sql=%r" % (gotE, sqE))
 
+    @_pinned_engine_mode("dual")
     def t_date_node():
         s = Session()
         try:
@@ -34401,6 +34531,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_projection_pushdown():
         # Source nodes read only the columns used downstream. The analysis is
         # conservative (prune only where provably safe) and SOUND (never drop a
@@ -34508,6 +34639,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_pushdown_oddities():
         # user randomness: spaces / SQL keywords / unicode in names, columns
         # differing only by case, and a column name appearing inside a string
@@ -34594,6 +34726,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_pushdown_derived_columns():
         # Nodes whose SQL ALWAYS builds a derived expression (coalesce, rank,
         # perioddelta, unpivot keeps, formula siblings) must declare those
@@ -34738,6 +34871,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_flow_engine_flip_and_variable_paths():
         # Audit fixes: (1) a source fetch that lands on DuckDB flips the flow
         # engine BEFORE compile -- a first run after restart must not die with
@@ -34906,6 +35040,7 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
     def t_node_freeze_and_engine_mode():
         # Node freeze: a node marked config.frozen pins its output across
         # runs -- later runs reuse the pinned table even after the source
@@ -35412,6 +35547,7 @@ def backend_tests(datadir, csv_path, json_path):
         t.join(timeout=15)
         need(not t.is_alive(), "server main() exits after httpd.shutdown")
 
+    @_pinned_engine_mode("dual")
     def t_node_name_collisions():
         # Derived output names that collide with an existing input column must
         # REPLACE it (not emit a duplicate that silently binds the original),
@@ -35642,6 +35778,7 @@ def backend_tests(datadir, csv_path, json_path):
             except Exception:
                 pass
 
+    @_pinned_engine_mode("dual")
     def t_shared_subgraph():
         # A node feeding more than one target is materialised once for the
         # whole batch (the gap that Run all closes), while staying correct.

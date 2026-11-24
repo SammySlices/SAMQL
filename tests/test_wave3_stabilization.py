@@ -80,6 +80,11 @@ def _persistence_corruption_quarantine(root, _csv, _skip):
     )
 
     d = Path(tempfile.mkdtemp(prefix="samql_wave3_store_"))
+    # SAMQL_CONFIG_DIR outranks an explicit dirname in app_config_dir, so the
+    # isolated test runner would otherwise redirect these stores away from
+    # the fixture directory. Point it at the fixture dir for this case.
+    prev_cfg_dir = os.environ.get("SAMQL_CONFIG_DIR")
+    os.environ["SAMQL_CONFIG_DIR"] = str(d)
     try:
         fixtures = [
             ("config.json", b"{bad", ConfigStore, dict),
@@ -124,6 +129,10 @@ def _persistence_corruption_quarantine(root, _csv, _skip):
         _need(len(list(d.glob(cfg.name + ".corrupt-*"))) <= 3,
               "corrupt JSON backup retention is bounded")
     finally:
+        if prev_cfg_dir is None:
+            os.environ.pop("SAMQL_CONFIG_DIR", None)
+        else:
+            os.environ["SAMQL_CONFIG_DIR"] = prev_cfg_dir
         shutil.rmtree(d, ignore_errors=True)
 
 
