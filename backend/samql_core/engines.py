@@ -7,7 +7,6 @@
 Lifted directly from the original single-file application and stripped of
 all GUI references.
 """
-import atexit
 import contextlib
 import time as _time_mod
 import itertools
@@ -823,6 +822,21 @@ def _rewrite_columns_sanitized(exec_conn, table_name, cols, *,
     return new_cols
 
 
+def _drop_sqlite_file(conn_box, path):
+    """Close a dropped disk-backed engine's connection and remove its files."""
+    for c in list(conn_box):
+        try:
+            c.close()
+        except Exception:
+            pass
+    conn_box[:] = []
+    for _ext in ("", "-wal", "-shm", "-journal"):
+        try:
+            os.remove(path + _ext)
+        except Exception:
+            pass
+
+
 class DBManager(_ThreadCancelMixin):
     """SQLite-backed engine. In-memory by default; disk-backed when
     ``disk_backed=True`` (lower peak RAM, spills to a temp file)."""
@@ -867,22 +881,22 @@ class DBManager(_ThreadCancelMixin):
         self.type_inference = True
         self._conn = None
         if self.disk_backed and self.db_path != ":memory:":
-            def _cleanup(_self=self):
-                try:
-                    if _self._conn is not None:
-                        _self._conn.close()
-                except Exception:
-                    pass
-                for _ext in ("", "-wal", "-shm", "-journal"):
-                    try:
-                        os.remove(_self.db_path + _ext)
-                    except Exception:
-                        pass
-            atexit.register(_cleanup)
+            # L-5: a finalizer, not an atexit closure over self -- that held
+            # the manager (file, connection, heartbeat) alive until exit
+            # after an engine reset. It runs when the manager is collected,
+            # or at exit, whichever is first. The box tracks the current
+            # connection without referencing the manager.
+            import weakref
+            self._conn_box = []
+            weakref.finalize(self, _drop_sqlite_file, self._conn_box,
+                             self.db_path)
         self._open()
 
     def _open(self):
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        box = getattr(self, "_conn_box", None)
+        if box is not None:
+            box[:] = [self._conn]
         self._conn.row_factory = sqlite3.Row
         _register_sqlite_functions(self._conn)
         try:

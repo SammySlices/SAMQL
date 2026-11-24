@@ -35431,6 +35431,28 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_l5_engine_reset_frees_old_sqlite_file():
+        # L-5: a disk-backed SQLite engine registered an atexit closure that
+        # held the manager strongly, so after an engine reset the old file,
+        # its connection and its heartbeat thread stayed until exit.
+        import gc as _gc
+        s = _fresh_session(low_memory=True)
+        try:
+            old = s.db.db_path
+            need(old != ":memory:" and os.path.exists(old),
+                 "low-memory mode puts SQLite on disk")
+            s.run_query("CREATE TABLE l5(a); INSERT INTO l5 VALUES (1)",
+                        target="__local__")
+            for which in ("all", "all"):
+                s.reset_engines(which)
+                _gc.collect()
+            need(not os.path.exists(old),
+                 "the old engine's file is removed once it is dropped")
+            need(os.path.exists(s.db.db_path),
+                 "the new engine keeps its own file")
+        finally:
+            s.shutdown()
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43466,6 +43488,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_l2_two_saved_exports_never_overwrite),
         ("L-3: cancelled run ids stay bounded; an inner statement keeps the outer registration",
          t_l3_cancelled_ids_bounded_and_outer_run_kept),
+        ("L-5: an engine reset frees the old SQLite file",
+         t_l5_engine_reset_frees_old_sqlite_file),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
