@@ -265,4 +265,46 @@ describe("ReconcileModal", () => {
     // Settle the pending promise to avoid act() warnings
     resolveRun({ error: "cancelled", cancelled: true });
   });
+
+  // ----- 6. L-9: the progress poll never stacks requests -----
+  it("waits for each progress poll to answer before sending the next", async () => {
+    let resolveRun!: (v: any) => void;
+    vi.mocked(api.reconcile).mockReturnValue(
+      new Promise((res) => { resolveRun = res; }),
+    );
+    // a slow /status: the first poll hangs until we release it
+    let releaseStatus!: (v: any) => void;
+    vi.mocked(api.status).mockClear();
+    vi.mocked(api.status).mockImplementation(
+      () => new Promise((res) => { releaseStatus = res; }) as any,
+    );
+
+    render(
+      <ReconcileModal
+        tables={twoSqliteTables}
+        onClose={vi.fn()}
+        onRun={vi.fn()}
+        onToast={vi.fn()}
+        dataEpoch={1}
+      />,
+    );
+    await selectKeyId();
+    fireEvent.click(screen.getByRole("button", { name: /run reconcile/i }));
+
+    // the poll ticks every 350ms; ~3 ticks pass while the first is pending
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(vi.mocked(api.status)).toHaveBeenCalledTimes(1);
+
+    // once it answers, polling resumes
+    releaseStatus({ operations: [] });
+    await waitFor(
+      () => expect(vi.mocked(api.status).mock.calls.length).toBeGreaterThan(1),
+      { timeout: 2000 },
+    );
+
+    vi.mocked(api.status).mockImplementation(
+      () => Promise.resolve({ operations: [] }) as any,
+    );
+    resolveRun({ error: "cancelled", cancelled: true });
+  });
 });

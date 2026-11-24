@@ -81,17 +81,27 @@ export const ReconcileModal: React.FC<Props> = ({
     setProgress(null);
   };
   React.useEffect(() => stopPoll, []);
+  // L-9: one /status request at a time. On a busy backend a poll can take
+  // longer than the 350ms tick; skip ticks while one is pending, and drop
+  // an answer that lands after the poll stopped (or restarted).
+  const pollBusy = React.useRef(false);
   const startPoll = (qid: string) => {
     setProgress(0);
-    pollTimer.current = window.setInterval(async () => {
+    const id = window.setInterval(async () => {
+      if (pollBusy.current) return;
+      pollBusy.current = true;
       try {
         const st = await api.status();
+        if (pollTimer.current !== id) return;
         const op = (st.operations || []).find((o) => o.id === qid);
         if (op && typeof op.percent === "number") setProgress(op.percent);
       } catch {
         /* best-effort */
+      } finally {
+        pollBusy.current = false;
       }
     }, 350);
+    pollTimer.current = id;
   };
   const fileRef = useRef<HTMLInputElement>(null);
 
