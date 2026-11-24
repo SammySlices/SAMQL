@@ -34325,6 +34325,109 @@ def backend_tests(datadir, csv_path, json_path):
             except Exception:
                 pass
 
+    def t_load_cancel_keeps_unrelated_tables():
+        # H-4: cancelling a load used to drop EVERY table that appeared on
+        # either engine since the request arrived -- including an IDE
+        # CREATE TABLE (or a Write node / flatten / another load) that ran
+        # while the load was queued or reading. A cancel must drop only the
+        # tables the cancelled job itself created.
+        import server as srv
+        import tempfile as _tf
+        from samql_core.loaders import LoadCancelled
+        fd, path = _tf.mkstemp(suffix=".csv", prefix="t_h4_")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("id,v\n")
+            for i in range(200):
+                f.write("%d,%d\n" % (i, i))
+        s = _fresh_session()
+        loaded_evt = threading.Event()
+        gate = threading.Event()
+        real_load = s.load_file
+
+        def slow_load(p, *a, **kw):
+            # the job's own table lands, then the load stalls mid-run until
+            # the test cancels it, then unwinds through its progress probe
+            out = real_load(p, *a, **kw)
+            loaded_evt.set()
+            gate.wait(20)
+            kw["progress"](0)
+            return out
+
+        s.load_file = slow_load
+
+        jid = None
+        try:
+            r = srv.Api.load_start(s, None, {
+                "path": path, "destination": "sqlite"}, None)
+            jid = r["job_id"]
+            need(loaded_evt.wait(20), "the load reached its own table")
+            # meanwhile another surface creates tables on BOTH engines
+            q = s.run_query("CREATE TABLE keep_me AS SELECT 1 AS x")
+            need(not q.get("error"), "IDE DDL ran: %r" % (q,))
+            s.db.add_table_streaming("keep_too", ["x"], iter([(1,)]))
+            s.db.sync_catalog()
+            job_tables = [n for n in s.snapshot_table_names()
+                          if n.startswith("t_h4_")]
+            need(job_tables, "the job created its table")
+            # cooperative cancel (what load_cancel does for a job that is
+            # not mid-statement); no engine interrupt muddies the result
+            srv.JOBS[jid]["cancel"] = True
+            gate.set()
+            deadline = time.time() + 20
+            while (srv.JOBS[jid].get("state") not in ("cancelled", "done",
+                                                       "error")
+                   and time.time() < deadline):
+                time.sleep(0.05)
+            eq(srv.JOBS[jid].get("state"), "cancelled", "job cancelled")
+            names = s.snapshot_table_names()
+            need("keep_me" in names,
+                 "an IDE table created during the load survives its cancel")
+            need("keep_too" in names,
+                 "another surface's SQLite table survives the cancel")
+            need(not any(n in names for n in job_tables),
+                 "the cancelled job's own table is rolled back: %r"
+                 % sorted(names))
+        finally:
+            gate.set()
+            if jid:
+                srv.JOBS.pop(jid, None)
+            s.shutdown()
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    def t_snapshot_table_names_concurrent():
+        # H-4: snapshot_table_names iterated catalog dicts other threads
+        # mutate; it must tolerate concurrent table registration.
+        s = _fresh_session()
+        stop = threading.Event()
+        errors = []
+
+        def churn():
+            i = 0
+            while not stop.is_set():
+                s.db.table_columns["churn_%d" % (i % 500)] = ["x"]
+                s.db.table_columns.pop("churn_%d" % ((i + 250) % 500), None)
+                i += 1
+        th = threading.Thread(target=churn, daemon=True)
+        th.start()
+        try:
+            for _ in range(3000):
+                try:
+                    s.snapshot_table_names()
+                except Exception as e:
+                    errors.append(repr(e))
+                    break
+        finally:
+            stop.set()
+            th.join(5)
+            for k in [k for k in s.db.table_columns if k.startswith("churn_")]:
+                s.db.table_columns.pop(k, None)
+            s.shutdown()
+        eq(errors, [], "snapshot survives concurrent catalog mutation")
+
     def t_load_folder_cancel():
         # A folder load stops cleanly when should_cancel() turns true between
         # files -- the modal's Cancel button sets the job flag this checks.
@@ -39740,7 +39843,7 @@ def backend_tests(datadir, csv_path, json_path):
             ("server.table_optimize_start runs on the load rail + rolls back",
              "def table_optimize_start" in srv and "optimize_to_parquet(" in srv
              and 'job.get("cancel")' in srv
-             and "drop_tables_created_since(before)" in srv),
+             and "drop_tables_created_since(before, owned=" in srv),
             ("the optimize route is registered",
              '"^/api/table/optimize-start$"' in srv
              and "Api.table_optimize_start" in srv),
@@ -40378,8 +40481,10 @@ def backend_tests(datadir, csv_path, json_path):
              "query_cancel (panic) must flag all in-flight jobs + wake the slot")
         need("raise LoadCancelled()" in src,
              "EngineSlot.acquire must cancel a queued job via LoadCancelled")
-        need(src.count("drop_tables_created_since(before)") >= 5,
+        need(src.count("drop_tables_created_since(before, owned=") >= 5,
              "loads/folder/hdfs/api/convert must roll back partial tables")
+        need(src.count("run = _recording_tables(job, run)") >= 5,
+             "every rollback job records the tables it creates (H-4)")
 
     def t_task_dismiss_and_clear():
         # dismissing a finished card removes it from the feed for good (so it
@@ -42212,6 +42317,10 @@ def backend_tests(datadir, csv_path, json_path):
          t_python_node_pandas_bindings),
         ("NodeFlow column-level data lineage export (Excel, 2 tabs)", t_nodeflow_lineage),
         ("cancel an in-flight load: unwind + drop partial table + cleanup helpers", t_load_cancel),
+        ("H-4: load cancel drops only its own tables, never a concurrent "
+         "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
+        ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
+         t_snapshot_table_names_concurrent),
         ("cancel a folder load between files (should_cancel)", t_load_folder_cancel),
         ("NodeFlow write-to-table node", t_nodeflow_write_to_table),
         ("NodeFlow write clears a stale engine cancel (Run-all writes no "

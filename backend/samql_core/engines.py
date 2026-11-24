@@ -940,10 +940,12 @@ class DBManager:
 
     def _unique_name(self, name):
         if name not in self.table_columns:
+            sqlutil.note_created_table(name)
             return name
         i = 2
         while f"{name}_{i}" in self.table_columns:
             i += 1
+        sqlutil.note_created_table(f"{name}_{i}")
         return f"{name}_{i}"
 
     def _create_table(self, name, rows):
@@ -2863,10 +2865,12 @@ class DuckDBManager:
         taken = set(self.table_columns) | getattr(
             self, "_reserved_names", set())
         if name not in taken:
+            sqlutil.note_created_table(name)
             return name
         i = 2
         while f"{name}_{i}" in taken:
             i += 1
+        sqlutil.note_created_table(f"{name}_{i}")
         return f"{name}_{i}"
 
     def reserve_table_name(self, name):

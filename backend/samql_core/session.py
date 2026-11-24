@@ -9677,27 +9677,63 @@ class Session:
             except Exception:
                 pass
 
+    @staticmethod
+    def _catalog_names(eng):
+        """Copy an engine's catalog keys while other threads may mutate it.
+
+        Loads, flattens and IDE DDL update ``table_columns`` from their own
+        threads; iterating it unguarded can raise "dictionary changed size
+        during iteration". Retry the (cheap, C-level) copy until it lands."""
+        cols = getattr(eng, "table_columns", None) or {}
+        for _ in range(50):
+            try:
+                return set(list(cols))
+            except RuntimeError:
+                continue
+        lock = getattr(eng, "write_lock", None)
+        if lock is not None:
+            with lock:
+                return set(list(cols))
+        return set()
+
     def snapshot_table_names(self):
         """The set of all table names across both engines right now -- paired
         with ``drop_tables_created_since`` to undo a cancelled load's partial
         table(s)."""
-        names = set(getattr(self.db, "table_columns", {}) or {})
+        names = self._catalog_names(self.db)
         if self.duckdb is not None:
-            names |= set(getattr(self.duckdb, "table_columns", {}) or {})
+            names |= self._catalog_names(self.duckdb)
         return names
 
-    def drop_tables_created_since(self, before):
-        """Drop any tables that have appeared since the ``before`` snapshot.
+    def recording_created_tables(self, sink):
+        """Context manager: collect into ``sink`` every table name the current
+        thread creates (see sqlutil.recording_created_tables). A cancellable
+        job wraps its run in this and passes the sink as ``owned`` to
+        ``drop_tables_created_since``."""
+        return sqlutil.recording_created_tables(sink)
+
+    def drop_tables_created_since(self, before, owned=None):
+        """Drop tables that appeared since the ``before`` snapshot AND that
+        this operation created (``owned``, from ``recording_created_tables``).
+
         Used to clean up after a cancelled load -- the streaming SQLite insert
         already rolls back its own partial table, but a DuckDB load (or a
-        multi-table JSON load that got part way) may have committed one, so this
-        is the catch-all. Returns the names dropped."""
+        multi-table JSON load that got part way) may have committed one, so
+        this is the catch-all. ``owned`` matters: between the snapshot and the
+        cancel, other threads (an IDE ``CREATE TABLE``, a Write node, another
+        load or flatten) can create tables too, and those are not ours to
+        drop (H-4). ``owned=None`` keeps the legacy everything-new behaviour
+        for direct callers that hold the session exclusively. Returns the
+        names dropped."""
         try:
             after = self.snapshot_table_names()
         except Exception:
             return []
+        candidates = after - set(before or ())
+        if owned is not None:
+            candidates &= set(owned)
         dropped = []
-        for name in (after - set(before or ())):
+        for name in sorted(candidates):
             in_duck = (self.duckdb is not None
                        and name in getattr(self.duckdb, "table_columns", {}))
             try:
@@ -13440,6 +13476,7 @@ class Session:
         # DuckDB dump pre-phase above.
         self._register_run(query_id, mgr, kind="flatten", target=table)
         before = self.snapshot_table_names()
+        created = set()
 
         def _prog(done=0, total=0):
             # Make the flatten cooperatively cancellable: load_json and the
@@ -13462,11 +13499,12 @@ class Session:
         try:
             if self._run_is_cancelled(query_id):
                 return {"cancelled": True}
-            loaded = loaders.load_json(mgr, path, base_name=table,
-                                       progress=_prog, engine=engine)
+            with self.recording_created_tables(created):
+                loaded = loaders.load_json(mgr, path, base_name=table,
+                                           progress=_prog, engine=engine)
         except Exception as e:
             if _is_interrupt(e) or self._run_is_cancelled(query_id):
-                self.drop_tables_created_since(before)
+                self.drop_tables_created_since(before, owned=created)
                 return {"cancelled": True}
             return {"error": err_str(e)}
         finally:

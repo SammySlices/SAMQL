@@ -23,6 +23,7 @@ import re
 import functools
 
 from .diagnostics import _needs_quote
+from .sqlutil import note_created_table
 
 
 # .485: DuckDB reserved keywords that cannot appear as a BARE identifier.
@@ -291,6 +292,7 @@ def plan_shred(column, node, base="rec", max_tables=40, root_ord=None,
             i += 1
         taken.add(n)
         taken_low.add(n.lower())
+        note_created_table(n)
         return n
 
     def fields_of(struct_node):
@@ -991,6 +993,7 @@ def plan_flatten_table(columns, base="rec", reserved=None):
             i += 1
         taken.add(n)
         taken_low.add(n.lower())
+        note_created_table(n)
         return n
 
     def _pathkey(parts):

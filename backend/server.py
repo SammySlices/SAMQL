@@ -1407,6 +1407,19 @@ def _with_engine_slot(job, run_inner):
     return wrapped
 
 
+def _recording_tables(job, run_inner):
+    """Run a job body with a created-table ledger open on its thread, so a
+    cancelled job drops only the tables it created (H-4), never another
+    request's tables that appeared in the meantime."""
+    from samql_core.sqlutil import recording_created_tables
+
+    def wrapped():
+        sink = job.setdefault("created_tables", set())
+        with recording_created_tables(sink):
+            run_inner()
+    return wrapped
+
+
 def _flag_all_jobs():
     """Flag every in-flight background job so its card unwinds as cancelled
     (its partial table rolled back), not a raw interrupt error. Shared by the
@@ -2367,6 +2380,7 @@ class Api:
             JOBS[job_id] = job
 
         before = s.snapshot_table_names()
+        owned = job["created_tables"] = set()
 
         def run():
             job["tid"] = threading.get_ident()
@@ -2423,11 +2437,11 @@ class Api:
                               origin=saved[0][1])
             except LoadCancelled:
                 job["state"] = "cancelled"
-                s.drop_tables_created_since(before)
+                s.drop_tables_created_since(before, owned=owned)
             except Exception as e:
                 if job.get("cancel"):
                     job["state"] = "cancelled"
-                    s.drop_tables_created_since(before)
+                    s.drop_tables_created_since(before, owned=owned)
                 else:
                     _fail_job(job, err_str(e))
             finally:
@@ -2442,6 +2456,7 @@ class Api:
                 job["done_at"] = time.time()
 
         try:
+            run = _recording_tables(job, run)
             threading.Thread(target=_with_engine_slot(job, run),
                              daemon=True).start()
         except Exception:
@@ -2579,6 +2594,7 @@ class Api:
             JOBS[job_id] = job
 
         before = s.snapshot_table_names()
+        owned = job["created_tables"] = set()
 
         def run():
             job["tid"] = threading.get_ident()
@@ -2619,16 +2635,17 @@ class Api:
                               origin=path)
             except LoadCancelled:
                 job["state"] = "cancelled"
-                s.drop_tables_created_since(before)
+                s.drop_tables_created_since(before, owned=owned)
             except Exception as e:
                 if job.get("cancel"):
                     job["state"] = "cancelled"
-                    s.drop_tables_created_since(before)
+                    s.drop_tables_created_since(before, owned=owned)
                 else:
                     _fail_job(job, err_str(e))
             finally:
                 job["done_at"] = time.time()
 
+        run = _recording_tables(job, run)
         threading.Thread(target=_with_engine_slot(job, run), daemon=True).start()
         return {"job_id": job_id, "bytes_total": total, "name": job["name"]}
 
@@ -2674,6 +2691,7 @@ class Api:
             job["name"] = f"{folder_name} ({i + 1}/{count}: {name})"
 
         before = s.snapshot_table_names()
+        owned = job["created_tables"] = set()
 
         def run():
             job["tid"] = threading.get_ident()
@@ -2685,7 +2703,7 @@ class Api:
                                     should_cancel=lambda: job.get("cancel"))
                 if res.get("cancelled") or job.get("cancel"):
                     job["state"] = "cancelled"
-                    s.drop_tables_created_since(before)
+                    s.drop_tables_created_since(before, owned=owned)
                 elif res.get("error"):
                     _fail_job(job, res["error"])
                 else:
@@ -2717,16 +2735,17 @@ class Api:
                                            f"({len(loaded)} table(s))")
             except LoadCancelled:
                 job["state"] = "cancelled"
-                s.drop_tables_created_since(before)
+                s.drop_tables_created_since(before, owned=owned)
             except Exception as e:
                 if job.get("cancel"):
                     job["state"] = "cancelled"
-                    s.drop_tables_created_since(before)
+                    s.drop_tables_created_since(before, owned=owned)
                 else:
                     _fail_job(job, err_str(e))
             finally:
                 job["done_at"] = time.time()
 
+        run = _recording_tables(job, run)
         threading.Thread(target=_with_engine_slot(job, run), daemon=True).start()
         return {"job_id": job_id, "bytes_total": total,
                 "name": job["name"], "files": len(files)}
@@ -4296,6 +4315,7 @@ class Api:
                     JOBS.pop(k, None)
             JOBS[job_id] = job
         before = s.snapshot_table_names()
+        owned = job["created_tables"] = set()
 
         def run():
             job["tid"] = threading.get_ident()
@@ -4326,16 +4346,17 @@ class Api:
                     s.record_load("hdfs", rp, destination)
             except LoadCancelled:
                 job["state"] = "cancelled"
-                s.drop_tables_created_since(before)
+                s.drop_tables_created_since(before, owned=owned)
             except Exception as e:
                 if job.get("cancel"):
                     job["state"] = "cancelled"
-                    s.drop_tables_created_since(before)
+                    s.drop_tables_created_since(before, owned=owned)
                 else:
                     _fail_job(job, err_str(e))
             finally:
                 job["done_at"] = time.time()
 
+        run = _recording_tables(job, run)
         threading.Thread(target=run, daemon=True).start()
         return {"job_id": job_id, "bytes_total": total, "name": nm}
 
@@ -4364,6 +4385,7 @@ class Api:
                     JOBS.pop(k, None)
             JOBS[job_id] = job
         before = s.snapshot_table_names()
+        owned = job["created_tables"] = set()
 
         def run():
             job["tid"] = threading.get_ident()
@@ -4378,16 +4400,17 @@ class Api:
                     job["state"] = "done"
             except LoadCancelled:
                 job["state"] = "cancelled"
-                s.drop_tables_created_since(before)
+                s.drop_tables_created_since(before, owned=owned)
             except Exception as e:
                 if job.get("cancel"):
                     job["state"] = "cancelled"
-                    s.drop_tables_created_since(before)
+                    s.drop_tables_created_since(before, owned=owned)
                 else:
                     _fail_job(job, err_str(e))
             finally:
                 job["done_at"] = time.time()
 
+        run = _recording_tables(job, run)
         threading.Thread(target=_with_engine_slot(job, run), daemon=True).start()
         return {"job_id": job_id, "bytes_total": 0, "name": name}
 

@@ -647,3 +647,46 @@ def sql_str_literal(value):
     else:
         s = unwrap_sql_quoted_temporal(value)
     return "'" + str(s).replace("'", "''") + "'"
+
+
+# ---------------------------------------------------------------------------
+# Created-table ledger (H-4)
+# ---------------------------------------------------------------------------
+# A cancelled load must roll back only the tables IT created. Diffing the
+# catalog before/after cannot tell a load's partial table from one an IDE
+# query, a Write node, a flatten or another load created meanwhile on another
+# thread. Engines therefore report every fresh table name they pick (the
+# uniquifiers every load path goes through) to the sinks the CURRENT thread has
+# opened with ``recording_created_tables``; a job opens one around its run and
+# drops only what landed in it.
+import contextlib as _contextlib
+import threading as _threading
+
+_CREATED_LEDGER = _threading.local()
+
+
+@_contextlib.contextmanager
+def recording_created_tables(sink):
+    """Record table names created on this thread into ``sink`` (a set)."""
+    stack = getattr(_CREATED_LEDGER, "stack", None)
+    if stack is None:
+        stack = _CREATED_LEDGER.stack = []
+    stack.append(sink)
+    try:
+        yield sink
+    finally:
+        for i in range(len(stack) - 1, -1, -1):
+            if stack[i] is sink:
+                del stack[i]
+                break
+
+
+def note_created_table(name):
+    """Report that this thread picked ``name`` for a table it is creating."""
+    if not name:
+        return
+    for sink in getattr(_CREATED_LEDGER, "stack", None) or ():
+        try:
+            sink.add(name)
+        except Exception:
+            pass
