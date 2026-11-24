@@ -3379,7 +3379,10 @@ class Api:
             import datetime as _dt
             dl = _downloads_dir()  # .539: the one shared ladder
             stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            out = os.path.join(dl, "samql_export_%s.%s" % (stamp, ext))
+            # L-2: collision-safe -- two exports in the same second used
+            # to share one name and the first file was overwritten.
+            out = _downloads_filename(
+                dl, "samql_export_%s.%s" % (stamp, ext))
             _sh.copyfile(res["path"], out)
             try:
                 if res.get("cleanup", True):

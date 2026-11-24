@@ -35366,6 +35366,41 @@ def backend_tests(datadir, csv_path, json_path):
             "sql_flagged": set()}, p3)
         eq(formulas(p3), [], "lineage workbook cells stay text")
 
+    def t_l2_two_saved_exports_never_overwrite():
+        # L-2: a saved export was named samql_export_<YYYYmmdd_HHMMSS> and
+        # copied with copyfile, so two exports in the same second wrote
+        # one file and the first export was silently lost.
+        import server as srv
+        import tempfile as _tf
+
+        class _M:
+            def __init__(self, rid):
+                self.rid = rid
+
+            def group(self, _k):
+                return self.rid
+
+        dl = _tf.mkdtemp(prefix="t_l2_dl_")
+        orig = srv._downloads_dir
+        srv._downloads_dir = lambda: dl
+        s = _fresh_session()
+        try:
+            r1 = s.run_query("SELECT 1 AS a", target="auto")["result_id"]
+            r2 = s.run_query("SELECT 2 AS a", target="auto")["result_id"]
+            o1 = srv.Api.result_export(s, _M(r1), {"fmt": "csv",
+                                                    "save": True}, None)
+            o2 = srv.Api.result_export(s, _M(r2), {"fmt": "csv",
+                                                    "save": True}, None)
+            need(o1.get("ok") and o2.get("ok"), "both exports saved")
+            need(o1["path"] != o2["path"],
+                 "the second export got its own file: %r" % o2["path"])
+            eq(len(os.listdir(dl)), 2, "two files in Downloads")
+            with open(o1["path"], encoding="utf-8-sig") as f:
+                need("1" in f.read(), "the first export kept its rows")
+        finally:
+            srv._downloads_dir = orig
+            s.shutdown()
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43397,6 +43432,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_m4_python_node_is_gated_and_narrower),
         ("L-1: xlsx headers and the lineage workbook never hold formulas",
          t_l1_xlsx_headers_and_lineage_stay_text),
+        ("L-2: two saved exports in the same second keep both files",
+         t_l2_two_saved_exports_never_overwrite),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
