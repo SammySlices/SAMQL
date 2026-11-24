@@ -226,11 +226,16 @@ class _ThreadCancelMixin:
                 pass
             return True
 
-    def interrupt_thread(self, tid):
+    def interrupt_thread(self, tid, pending=True):
         """Cancel the run executing on thread ``tid`` and nothing else.
-        Returns "native", "main" or "pending" (flagged for its next call)."""
-        with self._tids_lock():
-            self._cancel_tids.add(tid)
+        Returns "native", "main" or "pending" (flagged for its next call).
+
+        ``pending=False`` (H-3, background jobs, which unwind on their own
+        job flag): only interrupt a statement that thread is executing
+        right now; flag nothing and return None when it is idle."""
+        if pending:
+            with self._tids_lock():
+                self._cancel_tids.add(tid)
         ops = getattr(self, "_native_ops", None)
         if ops:
             lk = getattr(self, "_native_ops_lock", None)
@@ -247,7 +252,7 @@ class _ThreadCancelMixin:
                 return "native"
         if self._interrupt_main_if_owned(tid):
             return "main"
-        return "pending"
+        return "pending" if pending else None
 
 
 # Opening a fresh, empty on-disk DuckDB file is sub-second; a wait much longer

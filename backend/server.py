@@ -2943,22 +2943,12 @@ class Api:
             qid = job.get("query_id")
             if qid:
                 s.flag_run_cancelled(qid)   # a run-job's loop stops between passes
-            tid = job.get("tid")
-            duck = getattr(s, "duckdb", None)
-            hit = False
-            if tid is not None and duck is not None:
-                try:
-                    with duck._native_ops_lock:
-                        h = duck._native_ops.get(tid)
-                    if h is not None:
-                        h.interrupt()
-                        hit = True
-                except Exception:
-                    pass
-            if not hit and ENGINE_SLOT.owner() == job_id:
-                # no own-cursor statement to hit: the old slot-holder
-                # interrupt (main-connection load) still applies
-                s.interrupt_loads()
+            # H-3: interrupt only the statement THIS job's thread is
+            # executing, on its own engine. The old fallback
+            # (slot owner -> interrupt_loads) hit BOTH engines and every
+            # cursor, killing a foreground DuckDB query on a SQLite load
+            # cancel, and its owner check could race the slot's hand-over.
+            s.interrupt_job(job.get("tid"), job.get("engine"))
             ENGINE_SLOT.wake()   # nudge a queued job to unwind at once
         except Exception:
             pass
@@ -3303,32 +3293,15 @@ class Api:
         """
         _flag_all_jobs()
         try:
-            owner = ENGINE_SLOT.owner()
-            if owner:
-                with JOBS_LOCK:
-                    job = JOBS.get(owner)
-                # only the slot owner's in-flight statement is interrupted;
-                # prefer its own-cursor handle, else the main-connection
-                # load interrupt (still scoped: it IS the running load).
-                tid = (job or {}).get("tid")
-                duck = getattr(s, "duckdb", None)
-                hit = False
-                if tid is not None and duck is not None:
-                    try:
-                        with duck._native_ops_lock:
-                            h = duck._native_ops.get(tid)
-                        if h is not None:
-                            h.interrupt()
-                            hit = True
-                    except Exception:
-                        pass
-                if not hit:
-                    # the slot owner is a main-connection load with no
-                    # own-cursor handle: interrupting the engine aborts
-                    # exactly that load (it holds the slot), which is what
-                    # we want -- no concurrent foreground query can hold
-                    # the slot at the same time.
-                    s.interrupt_loads()
+            # H-3: every flagged job's OWN in-flight statement, and nothing
+            # else -- never interrupt_loads(), which hit both engines and
+            # every cursor (a concurrent IDE query or Journal cell).
+            with JOBS_LOCK:
+                live = [j for j in JOBS.values()
+                        if j.get("state") not in ("done", "error",
+                                                  "cancelled")]
+            for job in live:
+                s.interrupt_job(job.get("tid"), job.get("engine"))
         except Exception:
             pass
         ENGINE_SLOT.wake()

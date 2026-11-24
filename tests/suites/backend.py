@@ -9753,24 +9753,18 @@ def backend_tests(datadir, csv_path, json_path):
             "def result_page", 1)[0]
         need("_flag_all_jobs()" in ca,
              "cancel-all still flags background jobs cooperatively")
-        need("ENGINE_SLOT.owner()" in ca,
-             "cancel-all interrupts only the engine-slot OWNER")
-        # the ONLY interrupt_loads() inside cancel_all must be gated behind
-        # the owner check (its `if not hit:` fallback for a load that owns
-        # the slot) -- never an unconditional top-level hammer.
         # look at the CODE, not the explanatory docstring (which
         # mentions interrupt_loads() to describe the old behavior).
         ca_code = ca.split('"""', 2)[-1] if ca.count('"""') >= 2 else ca
-        need("owner = ENGINE_SLOT.owner()" in ca_code
-             and ca_code.index("ENGINE_SLOT.owner()")
-                 < ca_code.index("interrupt_loads()"),
-             "any engine interrupt in cancel-all is inside the owner "
-             "branch, not a blanket call")
-        # and there is exactly ONE interrupt_loads() in the code body --
-        # the owner-branch fallback, never a top-level hammer
-        need(ca_code.count("interrupt_loads()") == 1,
-             "cancel-all has a single, owner-gated engine interrupt: %d"
-             % ca_code.count("interrupt_loads()"))
+        # H-3 tightened .554: no engine-wide interrupt at all -- each
+        # flagged job's OWN in-flight statement, via interrupt_job (the old
+        # owner-gated interrupt_loads() fallback hit both engines).
+        code_only = "\n".join(ln for ln in ca_code.splitlines()
+                              if not ln.strip().startswith("#"))
+        need("interrupt_loads()" not in code_only,
+             "cancel-all never calls the both-engines interrupt_loads()")
+        need("s.interrupt_job(" in code_only,
+             "cancel-all interrupts each job's own statement only")
 
         # the blanket hammer still exists where it SHOULD: nuclear reset
         need("def nuclear_reset" in open(
@@ -19188,10 +19182,10 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         need(srv.count('job["tid"] = threading.get_ident()') == 5,
              "every job thread records its tid")
-        need("duck._native_ops.get(tid)" in srv
-             and srv.index("duck._native_ops.get(tid)")
-             < srv.index("s.interrupt_loads()"),
-             "per-card load cancel tries the job's own statement first")
+        # H-3: the per-card load cancel interrupts only the job's own
+        # statement (its thread, its engine) -- no engine-wide fallback.
+        need("s.interrupt_job(job.get(\"tid\"), job.get(\"engine\"))" in srv,
+             "per-card load cancel interrupts only the job's own statement")
         need('scope = (body or {}).get("scope") or "run"' in srv,
              "the qid route is per-run by default")
 
@@ -34733,6 +34727,118 @@ def backend_tests(datadir, csv_path, json_path):
         need(ca.hits == 2 and cb.hits == 1,
              "Stop-everything still re-nudges every executing connection")
 
+    def t_h3_load_cancel_spares_the_other_engine():
+        # H-3: load_cancel fell back to interrupt_loads() for the slot
+        # owner, which interrupted BOTH engines and every cursor -- so
+        # cancelling a SQLite load killed a concurrent DuckDB IDE query.
+        import server as srv
+        import threading as _th
+        import time as _tm
+        from samql_core import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        duck = s.get_duckdb()
+        out = {}
+        job = {"id": "h3-load", "kind": "load", "state": "loading",
+               "engine": "sqlite", "cancel": False}
+        in_load, in_duck = _th.Event(), _th.Event()
+
+        def load():
+            job["tid"] = _th.get_ident()
+            try:
+                with s.db.write_lock:
+                    in_load.set()
+                    out["load"] = s.db.execute(
+                        "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL "
+                        "SELECT x+1 FROM r WHERE x<40000000) "
+                        "SELECT count(*) FROM r")
+            except Exception as e:
+                out["load_err"] = repr(e)
+
+        def ide_query():
+            in_duck.set()
+            try:
+                out["duck"] = duck.execute(
+                    "SELECT count(*) FROM range(300000000) t(x) "
+                    "WHERE (x*7919) % 1000003 = 5")
+            except Exception as e:
+                out["duck_err"] = repr(e)
+
+        with srv.JOBS_LOCK:
+            srv.JOBS[job["id"]] = job
+        srv.ENGINE_SLOT.acquire(job)
+        try:
+            tl = _th.Thread(target=load, daemon=True)
+            td = _th.Thread(target=ide_query, daemon=True)
+            tl.start()
+            td.start()
+            in_load.wait(10)
+            in_duck.wait(10)
+            _tm.sleep(0.4)
+            t0 = _tm.time()
+            r = srv.Api.load_cancel(
+                s, re.match(r"(?P<job>.+)", job["id"]), {}, None)
+            need(r.get("cancelled") is True, "the cancel was accepted")
+            tl.join(30)
+            need(_tm.time() - t0 < 10 and "load_err" in out,
+                 "the load's own statement is interrupted: %r" % out)
+            td.join(60)
+        finally:
+            srv.ENGINE_SLOT.release(job)
+            with srv.JOBS_LOCK:
+                srv.JOBS.pop(job["id"], None)
+        need("duck_err" not in out and out.get("duck") is not None,
+             "the concurrent DuckDB query survives a SQLite load cancel: %r"
+             % out.get("duck_err"))
+        need(not duck._cancel.is_set(),
+             "no engine-wide sticky cancel is left behind")
+
+    def t_h3_cancel_all_spares_queries_while_owner_is_idle():
+        # H-3: the slot owner can be between statements (reading a file)
+        # while a foreground query holds the engine. cancel_all used to
+        # interrupt the engine anyway ("the owner is the running load"),
+        # aborting that query; it must reach only the job's own thread.
+        import server as srv
+        import threading as _th
+        import time as _tm
+        s = _fresh_session()
+        out = {}
+        job = {"id": "h3-idle", "kind": "load", "state": "reading",
+               "engine": "sqlite", "cancel": False,
+               "tid": -1}  # a thread that is executing nothing
+        in_q = _th.Event()
+
+        def ide_query():
+            try:
+                with s.db.write_lock:
+                    in_q.set()
+                    out["q"] = s.db.execute(
+                        "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL "
+                        "SELECT x+1 FROM r WHERE x<4000000) "
+                        "SELECT count(*) FROM r")
+            except Exception as e:
+                out["q_err"] = repr(e)
+
+        with srv.JOBS_LOCK:
+            srv.JOBS[job["id"]] = job
+        srv.ENGINE_SLOT.acquire(job)
+        try:
+            tq = _th.Thread(target=ide_query, daemon=True)
+            tq.start()
+            in_q.wait(10)
+            _tm.sleep(0.2)
+            srv.Api.cancel_all(s, None, {}, None)
+            tq.join(60)
+        finally:
+            srv.ENGINE_SLOT.release(job)
+            with srv.JOBS_LOCK:
+                srv.JOBS.pop(job["id"], None)
+        need(job.get("cancel") is True, "the job itself is flagged")
+        need("q_err" not in out and out.get("q") is not None,
+             "a foreground query is not aborted by cancel_all: %r"
+             % out.get("q_err"))
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -40755,8 +40861,9 @@ def backend_tests(datadir, csv_path, json_path):
             need("threading.Thread(target=run," in r
                  and "_with_engine_slot" not in r,
                  "%s is not gated on the engine slot" % h)
-        need("ENGINE_SLOT.owner() == job_id" in region("load_cancel"),
-             "load_cancel interrupts only the slot owner (scoped cancel)")
+        need("s.interrupt_job(" in region("load_cancel")
+             and "interrupt_loads()" not in region("load_cancel"),
+             "load_cancel interrupts only the job's own statement (H-3)")
         need("class EngineSlot" in srv and "self._queue" in srv,
              "EngineSlot is a FIFO gate")
         aseg = srv.split("def acquire", 1)[1][:700]
@@ -40883,8 +40990,8 @@ def backend_tests(datadir, csv_path, json_path):
              "every background job dict must init cancel:False "
              "(%d flags vs %d jobs)" % (cf, len(kinds)))
         need('job["cancel"] = True' in src
-             and "ENGINE_SLOT.owner() == job_id" in src,
-             "load_cancel must set the flag + interrupt only the slot owner")
+             and 's.interrupt_job(job.get("tid"), job.get("engine"))' in src,
+             "load_cancel must set the flag + interrupt only its own job")
         need("for j in JOBS.values()" in src and "ENGINE_SLOT.wake()" in src,
              "query_cancel (panic) must flag all in-flight jobs + wake the slot")
         need("raise LoadCancelled()" in src,
@@ -42736,6 +42843,11 @@ def backend_tests(datadir, csv_path, json_path):
         ("H-2: Stop on a run queued on write_lock spares the SQLite lock "
          "holder and never executes", t_h2_stop_queued_sqlite_run_spares_lock_holder),
         ("H-2: BeatDaemon re-nudges per thread", t_h2_beat_renudge_is_per_thread),
+        ("H-3: a SQLite load cancel spares a concurrent DuckDB query",
+         t_h3_load_cancel_spares_the_other_engine),
+        ("H-3: cancel-all never aborts a foreground query while the slot "
+         "owner is between statements",
+         t_h3_cancel_all_spares_queries_while_owner_is_idle),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

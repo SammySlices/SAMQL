@@ -9688,6 +9688,36 @@ class Session:
             return entry.get("engine")
         return None
 
+    def interrupt_job(self, tid, engine=None):
+        """H-3: interrupt ONE background job's in-flight statement: the
+        statement its own thread ``tid`` is executing on its own engine
+        (``engine`` = "duckdb" / "sqlite"; both when unknown), via its
+        own cursor or the main connection while it holds it. No sweep of
+        other cursors, no sticky engine-wide cancel, and nothing when the
+        job is between statements (its job flag unwinds it). Because the
+        target is the job's thread, not "whoever holds the engine now",
+        there is no check-then-act race with the slot changing hands.
+        Returns True when a statement was interrupted."""
+        if tid is None:
+            return False
+        name = str(engine or "").lower()
+        if name == "duckdb":
+            engines = [getattr(self, "duckdb", None)]
+        elif name in ("sqlite", "local"):
+            engines = [self.db]
+        else:
+            engines = [self.db, getattr(self, "duckdb", None)]
+        hit = False
+        for eng in engines:
+            fn = getattr(eng, "interrupt_thread", None)
+            if not callable(fn):
+                continue
+            try:
+                hit = bool(fn(tid, pending=False)) or hit
+            except Exception:
+                pass
+        return hit
+
     def interrupt_loads(self):
         """Best-effort interrupt of any engine work currently in flight, used
         to cancel a running file load. A load runs a single big statement on
