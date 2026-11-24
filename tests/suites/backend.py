@@ -35130,6 +35130,68 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    @_pinned_engine_mode("dual")
+    def t_m7_concurrent_flows_keep_their_own_build_engine():
+        # M-7: _flow_build_target / _flow_build_epoch0 lived on the shared
+        # Session, so a LOCAL run and a DuckDB run in flight together read
+        # each other's build engine: the final read and the temp cleanup of
+        # one hit the other's engine.
+        import threading as _th
+        from samql_core.session import DUCKDB_TARGET, LOCAL_TARGET
+        s = _fresh_session()
+        try:
+            s.load_file(CSV, destination="sqlite", base_name="m7l")
+            s.load_file(CSV, destination="duckdb", base_name="m7d")
+
+            def graph(tbl):
+                return {"nodes": [
+                    {"id": "src", "type": "input", "config": {"table": tbl}},
+                    {"id": "u", "type": "union", "config": {}}],
+                    "edges": [{"from": {"node": "src", "port": "out"},
+                               "to": {"node": "u", "port": "in1"}}]}
+            gl, gd = graph("m7l"), graph("m7d")
+            need(s._flow_engine_target(gl) == LOCAL_TARGET
+                 and s._flow_engine_target(gd) == DUCKDB_TARGET,
+                 "the two flows are pinned to different engines")
+            want = s._engine_obj(DUCKDB_TARGET)[0].execute(
+                "SELECT COUNT(*) FROM m7d")[1][0][0]
+            barrier = _th.Barrier(2, timeout=20)
+            waited = set()
+            orig = s._shred_flow_prepass
+
+            def prepass(g, targets):
+                who = _th.current_thread().name
+                if who in ("m7l", "m7d") and who not in waited:
+                    waited.add(who)
+                    barrier.wait()   # both builds have set their engine
+                return orig(g, targets)
+            s._shred_flow_prepass = prepass
+            out = {}
+
+            def run(name, g):
+                try:
+                    out[name] = s.run_nodeflow(g, "u", "out")
+                except Exception as e:
+                    out[name] = {"error": repr(e)}
+            ts = [_th.Thread(target=run, args=(n, g), name=n, daemon=True)
+                  for n, g in (("m7l", gl), ("m7d", gd))]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(60)
+            for name in ("m7l", "m7d"):
+                r = out.get(name) or {}
+                need(not r.get("error"), "%s failed: %s" % (name, r.get("error")))
+                need(r.get("total_rows") == want,
+                     "%s rows: %r (want %d)" % (name, r.get("total_rows"), want))
+            for et in (DUCKDB_TARGET, LOCAL_TARGET):
+                eng = s._engine_obj(et)[0]
+                left = [t for t in (eng.list_tables() if hasattr(
+                    eng, "list_tables") else []) if "__nbflow_" in str(t)]
+                need(not left, "%s kept flow temps: %r" % (et, left))
+        finally:
+            s.shutdown()
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43153,6 +43215,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_m5_timed_out_python_node_stops_spinning),
         ("M-6: a failed parallel branch drops its siblings' tables",
          t_m6_failed_parallel_branch_drops_sibling_tables),
+        ("M-7: concurrent LOCAL and DuckDB flows keep their own build engine",
+         t_m7_concurrent_flows_keep_their_own_build_engine),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

@@ -760,8 +760,47 @@ class _CancelIter:
         return next(self._it)
 
 
+class _FlowBuildState(threading.local):
+    """Per-thread state of the flow build in progress (M-7)."""
+
+
+_FLOW_BUILD_FIELDS = {"_flow_build_target": "target",
+                      "_flow_build_epoch0": "epoch0"}
+
+
+def _flow_build_property(attr):
+    field = _FLOW_BUILD_FIELDS[attr]
+
+    def _state(self):
+        st = self.__dict__.get("_flow_build_state")
+        if st is None:
+            # dict.setdefault is atomic: two first builds share one object
+            st = self.__dict__.setdefault("_flow_build_state",
+                                          _FlowBuildState())
+        return st
+
+    def fget(self):
+        try:
+            return getattr(_state(self), field)
+        except AttributeError:
+            # unset on this thread: keep getattr(self, attr, default) working
+            raise AttributeError(attr) from None
+
+    def fset(self, value):
+        setattr(_state(self), field, value)
+
+    return property(fget, fset, doc=(
+        "M-7: the %s of the flow build running on THIS thread. It used to "
+        "be a plain Session attribute that concurrent runs overwrote, so a "
+        "LOCAL run could read a DuckDB run's engine for its final read and "
+        "temp cleanup." % field))
+
+
 class Session:
     MAX_CACHED_RESULTS = 24
+    # M-7: per-thread, see _flow_build_property
+    _flow_build_target = _flow_build_property("_flow_build_target")
+    _flow_build_epoch0 = _flow_build_property("_flow_build_epoch0")
     # Fetch a whole display page up front, so any result that fits on one
     # page never needs an off-heap store at all.
     _RESULT_BATCH = DISPLAY_LIMIT
@@ -5191,7 +5230,10 @@ class Session:
                     target_limits=limits, _allow_parallel=False,
                     _engine_override=branch, _persistent_tables=True,
                     query_id=query_id, refetch_sources=refetch_sources)
-                return out, local_names
+                # the build state is per thread (M-7): hand this branch's
+                # freshness stamp back to the run's own thread
+                return (out, local_names,
+                        getattr(self, "_flow_build_epoch0", None))
             except Exception:
                 # A failed worker never reaches the parent's completed-name
                 # list. Drop anything it managed to create before propagating
@@ -5202,6 +5244,7 @@ class Session:
                 branch.close()
 
         futures = []
+        epochs = []
         finished = False
         try:
             with ThreadPoolExecutor(
@@ -5210,10 +5253,12 @@ class Session:
                 futures = [pool.submit(worker, group) for group in groups]
                 try:
                     for future in as_completed(futures):
-                        out, names = future.result()
+                        out, names, ep = future.result()
                         with lock:
                             result.update(out)
                             completed_names.extend(names)
+                            if ep is not None:
+                                epochs.append(ep)
                 except BaseException:
                     # don't start branches that haven't begun
                     for f in futures:
@@ -5237,6 +5282,9 @@ class Session:
                 self._drop_flow_temps(engine_target, completed_names)
         if collect is not None:
             collect.extend(completed_names)
+        if epochs:
+            # the oldest branch stamp: a mutation after it expires the run
+            self._flow_build_epoch0 = min(epochs)
         return result
 
     def _materialize_flows(self, graph, targets, engine_target,
