@@ -2654,8 +2654,15 @@ class Session:
             except Exception:
                 pass
 
-    def _flow_cache_get(self, fp):
-        return self._flow_cache_registry.get(fp)
+    def _flow_cache_get(self, fp, pins=None):
+        """Look a fingerprint up. With ``pins`` (a running pass's pin list,
+        H-5) a hit is pinned atomically for that pass."""
+        if pins is None:
+            return self._flow_cache_registry.get(fp)
+        hit = self._flow_cache_registry.acquire(fp)
+        if hit is not None:
+            pins.append(fp)
+        return hit
 
     @staticmethod
     def _flow_type_width(type_name):
@@ -2724,11 +2731,20 @@ class Session:
                 pass
         return budget
 
-    def _flow_cache_put(self, fp, table, engine_target):
+    def _flow_cache_put(self, fp, table, engine_target, pins=None):
+        """Register a freshly built table. With ``pins`` (a running pass's
+        pin list, H-5/H-6) the entry is pinned for that pass and only
+        inserted if no other run registered the fingerprint first."""
         approx = self._flow_cache_estimate_bytes(table, engine_target)
         self._sync_flow_cache_limits()
-        return self._flow_cache_registry.put(
-            fp, table, engine_target, approx)
+        if pins is None:
+            return self._flow_cache_registry.put(
+                fp, table, engine_target, approx)
+        kept = self._flow_cache_registry.put(
+            fp, table, engine_target, approx, pin=True, if_absent=True)
+        if kept:
+            pins.append(fp)
+        return kept
 
     def _flow_cache_drop_table(self, engine_target, name):
         try:
@@ -5429,6 +5445,17 @@ class Session:
                 _re.sub(r"[^A-Za-z0-9]", "", str(prt)))
 
         def run_pass(fuse):
+            # H-5: every cache entry this pass reads or creates is pinned
+            # until the pass ends, so another put's trim (or a budget
+            # shrink) can't drop a table a later node still reads.
+            pins = []
+            try:
+                return _run_pass(fuse, pins)
+            finally:
+                if pins:
+                    self._flow_cache_registry.release(pins)
+
+        def _run_pass(fuse, pins):
             built = {}
             # Row-limited preview targets: (node, port) -> truncated copy.
             # Kept apart from ``built`` on purpose -- see build().
@@ -5624,7 +5651,7 @@ class Session:
                     persistent_fp = "%s_%s" % (persistent_fp, port_key)
                 # cache hit: reuse the materialised table if it still exists
                 if fp:
-                    cached = self._flow_cache_get(fp)
+                    cached = self._flow_cache_get(fp, pins=pins)
                     if cached is not None:
                         if self._table_exists(eng, cached):
                             built[key] = cached
@@ -5659,7 +5686,7 @@ class Session:
                         if fp and use_volatile_cache:
                             self._flow_cache_registry.record_miss()
                             kept = self._flow_cache_put(
-                                fp, restored, engine_target)
+                                fp, restored, engine_target, pins=pins)
                         if not kept and collect is not None:
                             collect.append(restored)
                         return restored
@@ -5679,11 +5706,17 @@ class Session:
                 if fp:
                     # content-addressed cache table; lifetime is the cache's
                     # (LRU), so it is NOT added to the per-pass drop list.
-                    name = "__nbcache_%s" % fp
+                    # H-6: a per-run name. Two runs that miss the same
+                    # fingerprint used to share "__nbcache_<fp>", so run B's
+                    # DROP+CREATE removed the table run A was reading. Each
+                    # run builds its own; the first to register it wins
+                    # the cache slot, the other's is a per-run temporary.
+                    name = "__nbcache_%s_%s" % (fp, _tok)
                     _exec_create(name, sql)
                     built[key] = name
                     self._flow_cache_registry.record_miss()
-                    kept = self._flow_cache_put(fp, name, engine_target)
+                    kept = self._flow_cache_put(fp, name, engine_target,
+                                                pins=pins)
                     if persistent_fp:
                         self._persistent_flow_publish(
                             eng, persistent_fp, name)

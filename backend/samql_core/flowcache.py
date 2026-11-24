@@ -27,6 +27,11 @@ class FlowCache:
             "stale": 0,
         }
         self.lock = threading.Lock()
+        # H-5: fingerprint -> number of running passes that read the entry.
+        # A pinned entry is never trimmed or dropped; superseded/cleared
+        # tables of a pinned fingerprint wait in _deferred until release.
+        self._pins = {}
+        self._deferred = {}
 
     def configure(self, max_entries=None, max_bytes=None):
         """Update limits and immediately trim the existing LRU.
@@ -45,17 +50,66 @@ class FlowCache:
             self._drop(target, table)
         return len(victims)
 
+    def _over_locked(self):
+        return ((self.max_entries and len(self.entries) > self.max_entries)
+                or (self.max_bytes and self.bytes_used > self.max_bytes))
+
     def _trim_locked(self):
+        """Evict oldest-first until within limits, SKIPPING pinned entries
+        (H-5): a running pass may still read them. While only pinned
+        entries remain the cache runs over budget; release() trims again."""
         victims = []
-        while self.entries and (
-                (self.max_entries and len(self.entries) > self.max_entries) or
-                (self.max_bytes and self.bytes_used > self.max_bytes)):
-            _fp, (old_table, old_target, old_bytes) = \
-                self.entries.popitem(last=False)
+        if not self._over_locked():
+            return victims
+        for fp in list(self.entries):
+            if not self._over_locked():
+                break
+            if self._pins.get(fp):
+                continue
+            old_table, old_target, old_bytes = self.entries.pop(fp)
             self.bytes_used = max(0, self.bytes_used - int(old_bytes or 0))
             self.stats["evictions"] += 1
             victims.append((old_target, old_table))
         return victims
+
+    def _victim_locked(self, fingerprint, victim, victims):
+        """Queue a table drop, deferring it while the fingerprint is pinned."""
+        if self._pins.get(fingerprint):
+            self._deferred.setdefault(fingerprint, []).append(victim)
+        else:
+            victims.append(victim)
+
+    def acquire(self, fingerprint):
+        """get() + pin, atomically: the table cannot be evicted between the
+        lookup and the pin. Pair every non-None result with release()."""
+        with self.lock:
+            ent = self.entries.get(fingerprint)
+            if ent is None:
+                return None
+            self.entries.move_to_end(fingerprint)
+            self._pins[fingerprint] = self._pins.get(fingerprint, 0) + 1
+            return ent[0]
+
+    def pinned(self, fingerprint):
+        with self.lock:
+            return self._pins.get(fingerprint, 0)
+
+    def release(self, fingerprints):
+        """Drop one pin per fingerprint; trim and run deferred drops once
+        nothing pins them. Keeps released entries most-recently-used."""
+        victims = []
+        with self.lock:
+            for fp in fingerprints:
+                n = self._pins.get(fp, 0) - 1
+                if n > 0:
+                    self._pins[fp] = n
+                    continue
+                self._pins.pop(fp, None)
+                victims.extend(self._deferred.pop(fp, ()))
+            victims.extend(self._trim_locked())
+        for target, table in victims:
+            self._drop(target, table)
+        return len(victims)
 
     def get(self, fingerprint):
         with self.lock:
@@ -83,12 +137,22 @@ class FlowCache:
                 victim = (ent[1], ent[0])
                 if stale:
                     self.stats["stale"] += 1
+                if drop and self._pins.get(fingerprint):
+                    self._deferred.setdefault(fingerprint, []).append(victim)
+                    victim = None
         if drop and victim is not None:
             self._drop(*victim)
         return ent is not None
 
-    def put(self, fingerprint, table, engine_target, approximate_bytes):
+    def put(self, fingerprint, table, engine_target, approximate_bytes,
+            pin=False, if_absent=False):
         """Insert an entry and evict old entries.
+
+        ``pin`` (H-5) pins the entry for the caller's pass, atomically with
+        the insert, so the trim this put runs can never evict it.
+        ``if_absent`` (H-6) leaves an existing live entry in place (another
+        run built the same fingerprint first) and returns False: the
+        caller keeps its own table as a per-run temporary.
 
         Returns ``False`` when the new table alone is larger than the byte
         budget.  Crucially, that table is *not* dropped here: the caller is
@@ -100,6 +164,8 @@ class FlowCache:
         victims = []
         accepted = True
         with self.lock:
+            if if_absent and fingerprint in self.entries:
+                return False
             old = self.entries.pop(fingerprint, None)
             if old is not None:
                 self.bytes_used = max(
@@ -109,7 +175,8 @@ class FlowCache:
                 # different backing table, reclaim the superseded one after
                 # releasing the registry lock.
                 if (old[0], old[1]) != (table, engine_target):
-                    victims.append((old[1], old[0]))
+                    self._victim_locked(fingerprint, (old[1], old[0]),
+                                        victims)
 
             if self.max_bytes and approximate_bytes > self.max_bytes:
                 self.stats["oversized"] += 1
@@ -119,6 +186,9 @@ class FlowCache:
                     table, engine_target, approximate_bytes)
                 self.bytes_used += approximate_bytes
                 self.entries.move_to_end(fingerprint)
+                if pin:
+                    self._pins[fingerprint] = \
+                        self._pins.get(fingerprint, 0) + 1
 
                 # Never drops an oversized just-created table: oversized
                 # entries are rejected before insertion. Ordinary limit
@@ -132,8 +202,8 @@ class FlowCache:
     def clear(self, reset_stats=False):
         victims = []
         with self.lock:
-            victims = [(target, table)
-                       for table, target, _size in self.entries.values()]
+            for fp, (table, target, _size) in self.entries.items():
+                self._victim_locked(fp, (target, table), victims)
             self.entries.clear()
             self.bytes_used = 0
             if reset_stats:

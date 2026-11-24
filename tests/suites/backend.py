@@ -9859,10 +9859,12 @@ def backend_tests(datadir, csv_path, json_path):
         src = open(os.path.join(BACKEND, "samql_core", "flowcache.py"),
                    encoding="utf-8").read()
         get_body = src.split("def get", 1)[1][:450]
-        put_body = src.split("def put", 1)[1][:3200]
+        put_body = src.split("def put", 1)[1][:4400]
         clr_body = src.split("def clear", 1)[1][:650]
         need("with self.lock:" in get_body, "FlowCache.get holds the lock")
-        need("with self.lock:" in put_body and "victims.append" in put_body,
+        need("with self.lock:" in put_body
+             and ("victims.append" in put_body
+                  or "self._victim_locked(" in put_body),
              "FlowCache.put mutates/evicts under the registry lock")
         need("with self.lock:" in clr_body,
              "FlowCache.clear snapshots under the lock")
@@ -34839,6 +34841,152 @@ def backend_tests(datadir, csv_path, json_path):
              "a foreground query is not aborted by cancel_all: %r"
              % out.get("q_err"))
 
+    def t_h5_flow_cache_pins_unit():
+        # H-5: FlowCache had no pins, so a put()'s trim (or a configure()
+        # budget shrink) dropped tables a running pass still read.
+        from samql_core.flowcache import FlowCache
+        dropped = []
+        fc = FlowCache(max_entries=2,
+                       drop_entry=lambda tgt, tbl: dropped.append(tbl))
+        fc.put("a", "TA", "e", 10, pin=True)
+        fc.put("b", "TB", "e", 10)
+        fc.put("c", "TC", "e", 10)
+        need("TA" not in dropped and fc.get("a") == "TA",
+             "a pinned entry survives the trim: %r" % dropped)
+        eq(dropped, ["TB"], "the oldest UNPINNED entry is evicted instead")
+        need(fc.acquire("c") == "TC", "acquire returns and pins a hit")
+        fc.configure(max_entries=1)
+        need("TA" not in dropped and "TC" not in dropped,
+             "a budget shrink keeps pinned entries: %r" % dropped)
+        fc.release(["a"])
+        need("TA" in dropped, "released, the over-budget entry is trimmed")
+        need(fc.get("c") == "TC", "a still-pinned entry stays")
+        fc.discard("c", drop=True)
+        need("TC" not in dropped,
+             "dropping a pinned entry's table waits for its release")
+        fc.release(["c"])
+        need("TC" in dropped, "... and happens on release")
+        eq(fc.put("x", "T1", "e", 1, if_absent=True), True, "first put")
+        eq(fc.put("x", "T2", "e", 1, if_absent=True), False,
+           "if_absent keeps the existing entry")
+        eq(fc.get("x"), "T1", "the first builder's table stays registered")
+
+    def _h5_diamond_graph():
+        # in -> B (union of in) and C (union of in, twice) -> D (join):
+        # B and C are distinct cached checkpoints that D reads after both
+        # are built. Every id joins 1 B row x 2 C rows = 120 rows.
+        return {
+            "nodes": [
+                {"id": "src", "type": "input", "config": {"table": "h5d"}},
+                {"id": "B", "type": "union", "config": {}},
+                {"id": "C", "type": "union", "config": {}},
+                {"id": "D", "type": "join", "config": {
+                    "keys": [{"left": "id", "right": "id"}],
+                    "mode": "inner"}}],
+            "edges": [
+                {"from": {"node": "src", "port": "out"},
+                 "to": {"node": "B", "port": "in1"}},
+                {"from": {"node": "src", "port": "out"},
+                 "to": {"node": "C", "port": "in1"}},
+                {"from": {"node": "src", "port": "out"},
+                 "to": {"node": "C", "port": "in2"}},
+                {"from": {"node": "B", "port": "out"},
+                 "to": {"node": "D", "port": "left"}},
+                {"from": {"node": "C", "port": "out"},
+                 "to": {"node": "D", "port": "right"}}]}
+
+    def t_h5_diamond_survives_tiny_flow_cache():
+        # H-5 end to end: with room for ONE cache entry, building C evicted
+        # B before D read it ("Table __nbcache_... does not exist").
+        s = _fresh_session()
+        try:
+            s.load_file(CSV, destination="auto", base_name="h5d")
+            s.flow_cache = True
+            s.flow_cache_max = 1
+            g = _h5_diamond_graph()
+            r = s.run_nodeflow(g, "D", "inner")
+            need(not r.get("error"),
+                 "the diamond runs with a one-entry cache: %s"
+                 % r.get("error"))
+            eq(r.get("total_rows"), 120, "every row joins")
+            r2 = s.run_nodeflow(g, "D", "inner")
+            need(not r2.get("error"), "and runs again (hits + trims): %s"
+                 % r2.get("error"))
+        finally:
+            s.shutdown()
+
+    def t_h6_same_fingerprint_runs_keep_their_tables():
+        # H-6: two runs missing the same fingerprint both built
+        # "__nbcache_<fp>" with DROP+CREATE on the shared connection, so
+        # run 2's DROP removed the table run 1 was about to read.
+        import threading as _th
+        s = _fresh_session()
+        try:
+            s.load_file(CSV, destination="auto", base_name="h5d")
+            s.flow_cache = True
+            g = _h5_diamond_graph()
+            et = s._flow_engine_target(g)
+            eng, _k = s._engine_obj(et)
+            barrier = _th.Barrier(2, timeout=20)
+            seen = set()
+            orig_get = s._flow_cache_get
+
+            def no_hits(fp, *a, **k):
+                if _th.current_thread().name not in seen:
+                    seen.add(_th.current_thread().name)
+                    barrier.wait()   # both runs miss before either builds
+                return None
+            s._flow_cache_get = no_hits
+            created, dropped, one_done = (_th.Event(), _th.Event(),
+                                          _th.Event())
+            orig_exec = eng.execute
+            first = {}
+
+            def execute(sql, *a, **k):
+                who = _th.current_thread().name
+                nb = "__nbcache_" in str(sql)
+                if (nb and who == "run2" and "DROP TABLE" in sql
+                        and not first.get("run2")):
+                    first["run2"] = True
+                    created.wait(20)
+                    try:
+                        return orig_exec(sql, *a, **k)
+                    finally:
+                        dropped.set()
+                        one_done.wait(20)
+                res = orig_exec(sql, *a, **k)
+                if (nb and who == "run1" and "CREATE" in sql
+                        and not first.get("run1")):
+                    first["run1"] = True
+                    created.set()
+                    dropped.wait(20)
+                return res
+            eng.execute = execute
+            out = {}
+
+            def run(name):
+                try:
+                    out[name] = s.run_nodeflow(g, "D", "inner")
+                except Exception as e:
+                    out[name] = {"error": repr(e)}
+                finally:
+                    if name == "run1":
+                        one_done.set()
+            ts = [_th.Thread(target=run, args=(n,), name=n, daemon=True)
+                  for n in ("run1", "run2")]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(120)
+            eng.execute = orig_exec
+            s._flow_cache_get = orig_get
+            for n in ("run1", "run2"):
+                need(n in out and not out[n].get("error"),
+                     "%s succeeds: %s" % (n, (out.get(n) or {}).get("error")))
+                eq(out[n].get("total_rows"), 120, "%s has every row" % n)
+        finally:
+            s.shutdown()
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -42848,6 +42996,12 @@ def backend_tests(datadir, csv_path, json_path):
         ("H-3: cancel-all never aborts a foreground query while the slot "
          "owner is between statements",
          t_h3_cancel_all_spares_queries_while_owner_is_idle),
+        ("H-5: FlowCache pins keep a running pass's tables through trims",
+         t_h5_flow_cache_pins_unit),
+        ("H-5: a diamond flow runs with a one-entry flow cache",
+         t_h5_diamond_survives_tiny_flow_cache),
+        ("H-6: two runs on the same fingerprint keep their own cache tables",
+         t_h6_same_fingerprint_runs_keep_their_tables),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
