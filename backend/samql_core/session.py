@@ -3789,9 +3789,7 @@ class Session:
         if reset:
             LT.clear_overrides()
             try:
-                if "load_thresholds" in self.config.data:
-                    del self.config.data["load_thresholds"]
-                    self.config.save()
+                self.config.delete("load_thresholds")
             except Exception:
                 pass
         elif updates:

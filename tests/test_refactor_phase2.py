@@ -35,8 +35,11 @@ def backend_cases(root, _csv, _skip):
         source = (Path(root) / "backend" / "samql_core" / "stores.py").read_text(
             encoding="utf-8"
         )
-        assert source.count("return atomic_write_json(self.path, self.entries)") == 3
-        assert "return atomic_write_json(self.path, self.data)" in source
+        assert source.count("return atomic_write_json(self.path, self.entries)") == 2
+        # L-6: config + history snapshot under a lock and write through the
+        # same atomic writer (pre-serialized text).
+        assert "ok = atomic_write_text(self.path, text)" in source
+        assert "return atomic_write_json(path, None, text=text)" in source
         # No store may recreate the old fixed-name temp-file implementation.
         assert 'with_suffix(".tmp")' not in source
         assert source.count("json.dump(") == 1

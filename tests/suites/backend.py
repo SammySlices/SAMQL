@@ -4874,8 +4874,10 @@ def backend_tests(datadir, csv_path, json_path):
         # Audit C: history entries are size-capped so a chain-inline retry
         # can't park megabytes in memory.
         from samql_core.stores import QueryHistoryStore
+        import threading as _thc
         h = QueryHistoryStore.__new__(QueryHistoryStore)
         h.entries = []
+        h._lock = _thc.RLock()   # L-6: the store mutates under its lock
         h._save = lambda: None
         QueryHistoryStore.add(h, "SELECT " + "x" * 300_000)
         need(len(h.entries[0]["sql"]) < 210_000
@@ -35453,6 +35455,69 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_l6_config_and_history_survive_concurrent_writers():
+        # L-6: ConfigStore and QueryHistoryStore had no lock. A concurrent
+        # set() could serialize the dict mid-mutation (the error was
+        # swallowed and that write lost), or an older snapshot could land
+        # on disk after a newer one.
+        import threading as _th
+        import uuid as _uuid
+        import random as _rnd
+        import time as _tm
+        from samql_core import stores as _st
+        from samql_core.stores import ConfigStore, QueryHistoryStore
+        tag = _uuid.uuid4().hex[:8]
+        # A slow disk: each atomic rename takes a moment, so writes that
+        # were serialized in one order can land in another.
+        orig_replace = _st._replace_retry
+
+        def slow_replace(*a, **kw):
+            _tm.sleep(_rnd.random() * 0.02)
+            return orig_replace(*a, **kw)
+
+        _st._replace_retry = slow_replace
+        try:
+            _l6_rounds(tag, ConfigStore, QueryHistoryStore, _th)
+        finally:
+            _st._replace_retry = orig_replace
+
+    def _l6_rounds(tag, ConfigStore, QueryHistoryStore, _th):
+        for rnd in range(3):
+            cfg = ConfigStore(filename="l6_cfg_%s_%d.json" % (tag, rnd))
+            hist = QueryHistoryStore(filename="l6_hist_%s_%d.json" % (tag, rnd))
+            hist.MAX_ENTRIES = 1000
+            failed = []
+            for store, meth in ((cfg, "save"), (hist, "_save")):
+                def _rec(_f=getattr(store, meth), _n=meth):
+                    ok = _f()
+                    if not ok:
+                        failed.append(_n)
+                    return ok
+                setattr(store, meth, _rec)
+            go = _th.Barrier(8)
+
+            def worker(i):
+                go.wait()
+                for k in range(50):
+                    cfg.set("k%d_%d" % (i, k), {"v": [i, k] * 20})
+                    hist.add("SELECT %d, %d" % (i, k))
+
+            ts = [_th.Thread(target=worker, args=(i,)) for i in range(8)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            need(not failed, "round %d: no save was swallowed (%d failed)"
+                 % (rnd, len(failed)))
+            back = ConfigStore(filename="l6_cfg_%s_%d.json" % (tag, rnd))
+            missing = [("k%d_%d" % (i, k)) for i in range(8) for k in range(50)
+                       if ("k%d_%d" % (i, k)) not in back.data]
+            need(not missing, "round %d: every config key persists "
+                 "(missing %d)" % (rnd, len(missing)))
+            hb = QueryHistoryStore(filename="l6_hist_%s_%d.json" % (tag, rnd))
+            eq(len(hb.entries), 400,
+               "round %d: every history entry persists" % rnd)
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43490,6 +43555,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_l3_cancelled_ids_bounded_and_outer_run_kept),
         ("L-5: an engine reset frees the old SQLite file",
          t_l5_engine_reset_frees_old_sqlite_file),
+        ("L-6: config and history stores keep every concurrent write",
+         t_l6_config_and_history_survive_concurrent_writers),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

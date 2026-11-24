@@ -11,6 +11,7 @@ import datetime as _dt
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 
 # Canonical durable config dir (SamQL-branded). Legacy name kept for
@@ -119,7 +120,41 @@ def _replace_retry(tmp, dst, tries=6, delay=0.025):
     return False
 
 
-def atomic_write_json(path, value, *, indent=2):
+class _OrderedWriter:
+    """L-6: serialize a store's snapshot under its lock, write outside it.
+
+    ``snapshot()`` is called under the store's lock and returns the JSON
+    text with a sequence number; ``write()`` replaces the file outside that
+    lock, one writer at a time, and skips a snapshot older than one already
+    on disk -- so a slow write can never put old content over new.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self._seq = 0
+        self._written = 0
+        self._io = threading.Lock()
+
+    def snapshot(self, value, indent=2):
+        self._seq += 1
+        return self._seq, json.dumps(value, indent=indent)
+
+    def write(self, seq, text):
+        with self._io:
+            if seq <= self._written:
+                return True   # a newer snapshot already holds this change
+            ok = atomic_write_text(self.path, text)
+            if ok:
+                self._written = seq
+            return ok
+
+
+def atomic_write_text(path, text):
+    """``atomic_write_json`` for JSON text that is already serialized."""
+    return atomic_write_json(path, None, text=text)
+
+
+def atomic_write_json(path, value, *, indent=2, text=None):
     """Write JSON to ``path`` with same-directory atomic replacement.
 
     The temporary file has a unique name so concurrent saves cannot trample
@@ -143,7 +178,10 @@ def atomic_write_json(path, value, *, indent=2):
             delete=False,
         ) as fh:
             tmp_path = Path(fh.name)
-            json.dump(value, fh, indent=indent)
+            if text is None:
+                json.dump(value, fh, indent=indent)
+            else:
+                fh.write(text)
             fh.flush()
             try:
                 os.fsync(fh.fileno())
@@ -226,20 +264,39 @@ class ConfigStore:
     def __init__(self, dirname=None, filename="config.json"):
         self.path = app_config_dir(dirname) / filename
         self.data = {}
+        # L-6: concurrent set() used to serialize the dict mid-mutation (the
+        # error was swallowed and the write lost) or land an older snapshot
+        # after a newer one. Mutate + snapshot under the lock; write outside.
+        self._lock = threading.RLock()
+        self._writer = _OrderedWriter(self.path)
         self._load()
 
     def _load(self):
         self.data = _load_json_container(self.path, dict)
 
     def save(self):
-        return atomic_write_json(self.path, self.data)
+        with self._lock:
+            seq, text = self._writer.snapshot(self.data)
+        return self._writer.write(seq, text)
 
     def get(self, key, default=None):
-        return self.data.get(key, default)
+        with self._lock:
+            return self.data.get(key, default)
 
     def set(self, key, value):
-        self.data[key] = value
-        self.save()
+        with self._lock:
+            self.data[key] = value
+            seq, text = self._writer.snapshot(self.data)
+        return self._writer.write(seq, text)
+
+    def delete(self, key):
+        """Remove ``key`` (if present) and save."""
+        with self._lock:
+            if key not in self.data:
+                return False
+            del self.data[key]
+            seq, text = self._writer.snapshot(self.data)
+        return self._writer.write(seq, text)
 
 
 class QueryHistoryStore:
@@ -249,6 +306,9 @@ class QueryHistoryStore:
     def __init__(self, dirname=None, filename="history.json"):
         self.path = app_config_dir(dirname) / filename
         self.entries = []
+        # L-6: see ConfigStore. Subclasses mutate under this lock too.
+        self._lock = threading.RLock()
+        self._writer = _OrderedWriter(self.path)
         self._load()
 
     def _load(self):
@@ -285,7 +345,9 @@ class QueryHistoryStore:
         return changed
 
     def _save(self):
-        return atomic_write_json(self.path, self.entries)
+        with self._lock:
+            seq, text = self._writer.snapshot(self.entries)
+        return self._writer.write(seq, text)
 
     def add(self, sql, target="__local__", row_count=None,
             elapsed_sec=None, error=None):
@@ -305,16 +367,19 @@ class QueryHistoryStore:
             "error": error,
             "ts": _dt.datetime.now().isoformat(timespec="seconds"),
         }
-        self.entries.append(entry)
-        self._prune_old()                           # drop anything past 30 days
-        if len(self.entries) > self.MAX_ENTRIES:
-            self.entries = self.entries[-self.MAX_ENTRIES:]
+        with self._lock:
+            self.entries.append(entry)
+            self._prune_old()                       # drop anything past 30 days
+            if len(self.entries) > self.MAX_ENTRIES:
+                self.entries = self.entries[-self.MAX_ENTRIES:]
         self._save()
 
     def search(self, needle):
         n = (needle or "").strip().lower()
         results = []
-        for e in reversed(self.entries):
+        with self._lock:
+            entries = list(self.entries)
+        for e in reversed(entries):
             if not n or n in e.get("sql", "").lower():
                 results.append(e)
         return results
@@ -322,11 +387,13 @@ class QueryHistoryStore:
     def clear(self):
         """.523: the nuclear reset -- forget every restorable load, exactly
         like a graceful shutdown does, so the next state is launch-empty."""
-        self.entries = []
+        with self._lock:
+            self.entries = []
         self._save()
 
     def all(self):
-        return list(reversed(self.entries))
+        with self._lock:
+            return list(reversed(self.entries))
 
 
 class SavedQueryStore(QueryHistoryStore):
@@ -340,41 +407,46 @@ class SavedQueryStore(QueryHistoryStore):
         if not name:
             return None
         now = _dt.datetime.now().isoformat(timespec="seconds")
-        for e in self.entries:
-            if e.get("name") == name:
-                e["sql"] = sql
-                if tags is not None:
-                    e["tags"] = list(tags)
-                e["last_used"] = now
-                self._save()
-                return e
-        new = {
-            "name": name,
-            "sql": sql,
-            "tags": list(tags or []),
-            "created_at": now,
-            "last_used": now,
-        }
-        self.entries.append(new)
-        self._save()
-        return new
+        with self._lock:
+            for e in self.entries:
+                if e.get("name") == name:
+                    e["sql"] = sql
+                    if tags is not None:
+                        e["tags"] = list(tags)
+                    e["last_used"] = now
+                    self._save()
+                    return e
+            new = {
+                "name": name,
+                "sql": sql,
+                "tags": list(tags or []),
+                "created_at": now,
+                "last_used": now,
+            }
+            self.entries.append(new)
+            self._save()
+            return new
 
     def delete(self, name):
-        before = len(self.entries)
-        self.entries = [e for e in self.entries if e.get("name") != name]
-        if len(self.entries) != before:
+        with self._lock:
+            before = len(self.entries)
+            self.entries = [e for e in self.entries if e.get("name") != name]
+            if len(self.entries) == before:
+                return False
             self._save()
             return True
-        return False
 
     def get(self, name):
-        for e in self.entries:
-            if e.get("name") == name:
-                return e
+        with self._lock:
+            for e in self.entries:
+                if e.get("name") == name:
+                    return e
         return None
 
     def all(self):
-        return sorted(self.entries,
+        with self._lock:
+            entries = list(self.entries)
+        return sorted(entries,
                       key=lambda e: e.get("last_used", ""),
                       reverse=True)
 
