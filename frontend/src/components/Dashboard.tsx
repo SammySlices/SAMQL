@@ -493,7 +493,14 @@ export const Dashboard: React.FC<{
     origH: number;
   } | null>(null);
   const { ui: confirmUi, ask: askConfirm } = useConfirmPop();
-  const runRef = useRef<{ queryId: string; ctrl: AbortController } | null>(null);
+  // M-8: a run belongs to the board it started on. Leaving that board (or
+  // unmounting) stops it, and its results and lastRunAt go to that board only.
+  const runRef = useRef<{
+    queryId: string;
+    ctrl: AbortController;
+    boardId: string;
+    cancelled: boolean;
+  } | null>(null);
   const dragRef = useRef<{
     id: string;
     mode: "move" | "resize";
@@ -518,6 +525,8 @@ export const Dashboard: React.FC<{
   const [, bumpDashHist] = useState(0);
 
   const doc = activeDashboard(workspace);
+  const activeIdRef = useRef(doc.id);
+  activeIdRef.current = doc.id;
   const widgetsLocked = !!doc.widgetsLocked;
   const widgetsSig = useMemo(() => JSON.stringify(doc.widgets), [doc.widgets]);
 
@@ -818,6 +827,21 @@ export const Dashboard: React.FC<{
     [pulse, setActiveDoc],
   );
 
+  const onToastRef = useRef(onToast);
+  onToastRef.current = onToast;
+  /** Stop the board run, if any, with one "Cancelled" toast unless `quiet`. */
+  const stopRun = useCallback((quiet = false) => {
+    const cur = runRef.current;
+    if (!cur || cur.cancelled) return;
+    cur.cancelled = true;
+    if (!quiet) onToastRef.current("warn", "Cancelled", "Dashboard run stopped.");
+    // Scoped cancel only — do not api.cancelAll() (that would kill IDE /
+    // Journal / NodeFlow runs that should keep going across tab switches).
+    cancelOne(cur.queryId, cur.ctrl);
+  }, []);
+
+  useEffect(() => () => stopRun(true), [stopRun]);
+
   const addDashboardBoard = useCallback(() => {
     const name = (window.prompt("New dashboard name:", "Dashboard") || "").trim();
     if (!name) return;
@@ -827,17 +851,19 @@ export const Dashboard: React.FC<{
       activeId: next.id,
       dashboards: [...prev.dashboards, next],
     }));
+    stopRun();
     setResults({});
     closeConfig();
     setSelectedId(null);
-  }, [closeConfig]);
+  }, [closeConfig, stopRun]);
 
   const switchBoard = useCallback((id: string) => {
     setWorkspace((prev) => ({ ...prev, activeId: id }));
+    stopRun();
     setResults({});
     closeConfig();
     setSelectedId(null);
-  }, [closeConfig]);
+  }, [closeConfig, stopRun]);
 
   const deleteDashboardBoard = useCallback(
     (anchor?: HTMLElement | null) => {
@@ -861,6 +887,7 @@ export const Dashboard: React.FC<{
               remaining[0]!.id;
             return { ...prev, dashboards: remaining, activeId: nextActive };
           });
+          stopRun();
           setResults({});
           closeConfig();
           setSelectedId(null);
@@ -869,7 +896,7 @@ export const Dashboard: React.FC<{
         "Delete",
       );
     },
-    [askConfirm, closeConfig, onToast, workspace],
+    [askConfirm, closeConfig, onToast, stopRun, workspace],
   );
 
   const openPicker = useCallback(
@@ -900,13 +927,8 @@ export const Dashboard: React.FC<{
   );
 
   const cancelRun = useCallback(async () => {
-    const cur = runRef.current;
-    if (!cur) return;
-    // Scoped cancel only — do not api.cancelAll() (that would kill IDE /
-    // Journal / NodeFlow runs that should keep going across tab switches).
-    cancelOne(cur.queryId, cur.ctrl);
-    onToast("warn", "Cancelled", "Dashboard run stopped.");
-  }, [onToast]);
+    stopRun();
+  }, [stopRun]);
 
   const runAll = useCallback(async () => {
     if (running) {
@@ -925,7 +947,11 @@ export const Dashboard: React.FC<{
     setRunning(true);
     const queryId = uid();
     const ctrl = new AbortController();
-    runRef.current = { queryId, ctrl };
+    const boardId = doc.id;
+    const run = { queryId, ctrl, boardId, cancelled: false };
+    runRef.current = run;
+    // Results land only while this run is live and its board is on screen.
+    const live = () => !run.cancelled && activeIdRef.current === boardId;
     registerRun(queryId, ctrl);
     // Stamp each widget with the epoch at run START: a mutation landing
     // mid-run advances dataEpoch past it and the widget badges stale.
@@ -934,6 +960,10 @@ export const Dashboard: React.FC<{
     let cancelled = false;
     try {
       for (const widget of bound) {
+        if (!live()) {
+          cancelled = true;
+          break;
+        }
         setResults((prev) => ({ ...prev, [widget.id]: { kind: "loading" } }));
         pulse(widget.id, "dash-anim-load", 900);
         try {
@@ -942,7 +972,10 @@ export const Dashboard: React.FC<{
             ctrl.signal,
             queryId,
           );
-          if (result.kind === "error" && result.message === "cancelled") {
+          if (
+            !live() ||
+            (result.kind === "error" && result.message === "cancelled")
+          ) {
             cancelled = true;
             break;
           }
@@ -958,7 +991,7 @@ export const Dashboard: React.FC<{
             onToast("error", widget.workflowName || "Widget", result.message);
           }
         } catch (e: any) {
-          if (isCancelledError(e, queryId)) {
+          if (!live() || isCancelledError(e, queryId)) {
             cancelled = true;
             break;
           }
@@ -969,22 +1002,26 @@ export const Dashboard: React.FC<{
         }
       }
       if (cancelled) {
-        onToast("warn", "Cancelled", "Dashboard run stopped.");
+        // A Stop already said so; this is a cancel from elsewhere.
+        if (!run.cancelled) onToast("warn", "Cancelled", "Dashboard run stopped.");
       } else {
         onToast("ok", "Dashboard updated", `Ran ${bound.length} widget(s).`);
       }
     } finally {
       const elapsed = Math.max(0, Math.round(performance.now() - startedAt));
-      setActiveDoc((d) => ({
-        ...d,
-        lastRunAt: Date.now(),
-        lastRunMs: elapsed,
+      // By id: the user may be on another board by now.
+      const lastRunAt = Date.now();
+      setWorkspace((prev) => ({
+        ...prev,
+        dashboards: prev.dashboards.map((d) =>
+          d.id === boardId ? { ...d, lastRunAt, lastRunMs: elapsed } : d,
+        ),
       }));
       unregisterRun(queryId, ctrl);
-      runRef.current = null;
+      if (runRef.current === run) runRef.current = null;
       setRunning(false);
     }
-  }, [cancelRun, doc.widgets, onToast, pulse, running, setActiveDoc]);
+  }, [cancelRun, doc.id, doc.widgets, onToast, pulse, running]);
 
   const persistWorkspace = useCallback(
     async (nameHint?: string) => {
@@ -1071,6 +1108,7 @@ export const Dashboard: React.FC<{
           return;
         }
         setWorkspace(imported.workspace);
+        stopRun();
         setResults({});
         onToast("ok", "Dashboard loaded", name);
         onWorkflowsChanged?.();
@@ -1092,11 +1130,12 @@ export const Dashboard: React.FC<{
       const next = { ...ws, savedName: name || ws.savedName };
       setWorkspace(next);
       saveDashboardWorkspace(next);
+      stopRun();
       setResults({});
       onToast("ok", "Dashboard loaded", name);
       onWorkflowsChanged?.();
     },
-    [onToast, onWorkflowsChanged],
+    [onToast, onWorkflowsChanged, stopRun],
   );
 
   const onPickDashboardFile = useCallback(

@@ -857,6 +857,75 @@ describe("Dashboard", () => {
     resolveRun({ columns: ["n"], rows: [[1]], total_rows: 1 });
   });
 
+  it("a run belongs to the board it started on (M-8)", async () => {
+    seedWorkspace((ws) => {
+      ws.dashboards[0].lastRunAt = undefined;
+      ws.dashboards.push({
+        ...ws.dashboards[0],
+        id: "b2",
+        name: "Board B",
+        widgets: [],
+        lastRunAt: undefined,
+        lastRunMs: undefined,
+      });
+    });
+    let resolveRun!: (v: unknown) => void;
+    apiMock.workflowLoad.mockResolvedValue({ graph: samqlGraph("browse") });
+    apiMock.nodeflowRun.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRun = resolve;
+        }),
+    );
+    const toast = vi.fn();
+    render(<Dashboard onToast={toast} />);
+    fireEvent.click(screen.getByTestId("dashboard-run"));
+    await waitFor(() => expect(apiMock.nodeflowRun).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId("dashboard-select"));
+    fireEvent.click(screen.getByTestId("dashboard-select-option-b2"));
+    // Leaving the board stops its run.
+    await waitFor(() => expect(cancelOneMock).toHaveBeenCalled());
+    await act(async () => {
+      resolveRun({ columns: ["n"], rows: [[1]], total_rows: 1 });
+    });
+    await waitFor(() => expect(screen.getByText("Run")).toBeTruthy());
+    const saved = loadDashboardWorkspace();
+    const a = saved.dashboards.find((d) => d.id === "main")!;
+    const b = saved.dashboards.find((d) => d.id === "b2")!;
+    expect(b.lastRunAt).toBeUndefined();
+    expect(a.lastRunAt).toBeTruthy();
+    expect(screen.queryByTestId("mock-grid")).toBeNull();
+  });
+
+  it("Cancel shows one toast, and unmount stops the run (M-8)", async () => {
+    seedWorkspace();
+    let resolveRun!: (v: unknown) => void;
+    apiMock.workflowLoad.mockResolvedValue({ graph: samqlGraph("browse") });
+    apiMock.nodeflowRun.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRun = resolve;
+        }),
+    );
+    const toast = vi.fn();
+    render(<Dashboard onToast={toast} />);
+    fireEvent.click(screen.getByTestId("dashboard-run"));
+    await waitFor(() => expect(screen.getByText("Cancel")).toBeTruthy());
+    cancelOneMock.mockImplementation(() => wasCancelledMock.mockReturnValue(true));
+    fireEvent.click(screen.getByTestId("dashboard-run"));
+    await act(async () => {
+      resolveRun({ columns: ["n"], rows: [[1]], total_rows: 1 });
+    });
+    await waitFor(() => expect(screen.getByText("Run")).toBeTruthy());
+    expect(toast.mock.calls.filter((c) => c[1] === "Cancelled")).toHaveLength(1);
+
+    cancelOneMock.mockClear();
+    fireEvent.click(screen.getByTestId("dashboard-run"));
+    await waitFor(() => expect(screen.getByText("Cancel")).toBeTruthy());
+    cleanup();
+    expect(cancelOneMock).toHaveBeenCalledTimes(1);
+  });
+
   it("persists via command save with kind=dashboard", async () => {
     seedWorkspace((ws) => {
       ws.savedName = "Board Pack";
