@@ -338,6 +338,13 @@ export function useNodeFlowExecutionController({
   // timer resets -- so a wedged node that returns after recovery can't let
   // the batch start its next node.
   const runBatchRef = useRef<{ cancelled: boolean } | null>(null);
+  // M-1: Run all spans more than its node runs -- after the terminals it
+  // still prunes columns and seeds the last-run previews over the network.
+  // Keep the workflow "running" (Stop shown, Run disabled) for all of it and
+  // refuse a second Run all meanwhile.
+  const allRunningRef = useRef<{ cancelled: boolean } | null>(null);
+  const [runAllActive, setRunAllActive] = useState(false);
+  const seedRunIdRef = useRef<string | null>(null);
   const batchCancelled = () =>
     cancelRequested.current || !!runBatchRef.current?.cancelled;
   const activeRunIds = useRef<Set<string>>(new Set());
@@ -527,7 +534,7 @@ export function useNodeFlowExecutionController({
    * target fails, so passing nodes remain inspectable up to the failed node.
    * Preview-limited so this does not rematerialize full tables for tracing.
    */
-  const seedLastRunCaches = async (terminalIds: string[]) => {
+  const seedLastRunCaches = async (terminalIds: string[], scope?: number) => {
     if (!terminalIds.length || cancelRequested.current) return;
     const snapNodes = liveRef.current.nodes;
     const snapEdges = liveRef.current.edges;
@@ -538,6 +545,7 @@ export function useNodeFlowExecutionController({
     const id = uid("nblr");
     const ctrl = new AbortController();
     registerRun(id, ctrl);
+    seedRunIdRef.current = id; // M-1: Stop reaches the seed too
     try {
       const r = await api.nodeflowRunBatch(
         graphForRun(),
@@ -556,7 +564,10 @@ export function useNodeFlowExecutionController({
         !mountedRef.current ||
         r.cancelled ||
         !r.ok ||
-        !r.results
+        !r.results ||
+        // M-1: a tab switch (new scope) while the seed ran: these rows
+        // belong to the old tab's cache keys, not this one's
+        (scope !== undefined && scope !== scopeVersionRef.current)
       ) {
         return;
       }
@@ -575,6 +586,7 @@ export function useNodeFlowExecutionController({
     } catch {
       /* best-effort; terminals may already be remembered */
     } finally {
+      if (seedRunIdRef.current === id) seedRunIdRef.current = null;
       unregisterRun(id, ctrl);
     }
   };
@@ -740,6 +752,12 @@ export function useNodeFlowExecutionController({
     runDepth.current = 0;
     runIdRef.current = null;
     cancelRequested.current = false;
+    // M-1: the scope's Run all is over too (its batch stays cancelled)
+    if (allRunningRef.current) {
+      allRunningRef.current.cancelled = true;
+      allRunningRef.current = null;
+      if (updateUi) setRunAllActive(false);
+    }
     if (clearLastRunCache) previewCache.current.clear();
     if (cancelRecoveryTimerRef.current != null) {
       window.clearTimeout(cancelRecoveryTimerRef.current);
@@ -856,6 +874,12 @@ export function useNodeFlowExecutionController({
     activeRunIds.current.clear();
     runScopesRef.current.clear();
     clearAllRunningNodes();
+    // M-1: release a wedged Run all too (its batch stays cancelled, H-7)
+    if (allRunningRef.current) {
+      allRunningRef.current.cancelled = true;
+      allRunningRef.current = null;
+      setRunAllActive(false);
+    }
     if (cancelRecoveryTimerRef.current != null) {
       window.clearTimeout(cancelRecoveryTimerRef.current);
       cancelRecoveryTimerRef.current = null;
@@ -871,6 +895,7 @@ export function useNodeFlowExecutionController({
     // there is nothing to stop). Then, if a foreground run is active, hard-kill
     // it as well and arm the grace timer.
     const ids = [...activeRunIds.current];
+    if (seedRunIdRef.current) ids.push(seedRunIdRef.current);
     const stuckId = runIdRef.current;
     void api.cancelAll().catch(() => {});
     if (runBatchRef.current) runBatchRef.current.cancelled = true;
@@ -2393,13 +2418,22 @@ export function useNodeFlowExecutionController({
     const batchScope = scopeVersionRef.current;
     // A new batch owns fresh cancellation state. Clear it before computing
     // terminals or starting any child run so no prior Stop can poison Run all.
+    if (allRunningRef.current) return; // M-1: one Run all at a time
     cancelRequested.current = false;
     const batch = { cancelled: false };
+    allRunningRef.current = batch;
+    setRunAllActive(true);
     runBatchRef.current = batch;
     try {
       await runAllBatch(batch, batchScope, params);
     } finally {
       if (runBatchRef.current === batch) runBatchRef.current = null;
+      // a cancel recovery may already have released a wedged batch, and a
+      // new Run all may own the flag now
+      if (allRunningRef.current === batch) {
+        allRunningRef.current = null;
+        if (mountedRef.current) setRunAllActive(false);
+      }
     }
   };
 
@@ -2712,7 +2746,7 @@ export function useNodeFlowExecutionController({
     // sinks. The isolated backend seed batch omits the failed node while still
     // returning its healthy upstream prefix.
     if (attemptedTerminalIds.length && !stopped()) {
-      await seedLastRunCaches(attemptedTerminalIds);
+      await seedLastRunCaches(attemptedTerminalIds, batchScope);
     }
     if (batchScope !== scopeVersionRef.current) return;
     // Open drawer: swap to new last-run rows (or clear if this node wasn't
@@ -2818,7 +2852,7 @@ export function useNodeFlowExecutionController({
     setPreview,
     previewHeight,
     setPreviewHeight,
-    running,
+    running: running || runAllActive,
     runningNodeIds,
     runId,
     status,

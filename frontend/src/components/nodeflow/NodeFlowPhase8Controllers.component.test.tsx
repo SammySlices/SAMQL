@@ -140,7 +140,7 @@ describe("Phase 8 NodeFlow controllers", () => {
     expect(setNodeErrors).not.toHaveBeenCalled();
   });
 
-  it("keeps concurrent run state active until the final request finishes", async () => {
+  it("a second Run all while one runs is a no-op; state clears when it finishes (M-1)", async () => {
     const first = deferred<any>();
     const second = deferred<any>();
     vi.spyOn(api, "nodeflowRun")
@@ -174,14 +174,17 @@ describe("Phase 8 NodeFlow controllers", () => {
     );
 
     let pendingA!: Promise<void>;
-    let pendingB!: Promise<void>;
+    let nodeflowRunCalls = 0;
     await act(async () => {
-      // Two overlapping Run-all / leaf runs (preview clicks no longer execute).
+      // M-1: a second Run all while one is in flight is a no-op -- it used
+      // to start a second batch that reset the first one's state.
       pendingA = result.current.runAll();
-      pendingB = result.current.runAll();
+      await result.current.runAll();
       await Promise.resolve();
       await Promise.resolve();
     });
+    nodeflowRunCalls = (api.nodeflowRun as any).mock.calls.length;
+    expect(nodeflowRunCalls).toBe(1);
     expect(result.current.running).toBe(true);
     expect(result.current.runningNodeIds).toEqual(new Set(["source-a"]));
 
@@ -189,13 +192,7 @@ describe("Phase 8 NodeFlow controllers", () => {
       first.resolve({ columns: ["id"], rows: [[1]], total_rows: 1 });
       await pendingA;
     });
-    expect(result.current.running).toBe(true);
-    expect(result.current.runningNodeIds).toEqual(new Set(["source-a"]));
-
-    await act(async () => {
-      second.resolve({ columns: ["id"], rows: [[2]], total_rows: 1 });
-      await pendingB;
-    });
+    expect(second).toBeTruthy();
     expect(result.current.running).toBe(false);
     expect(result.current.runningNodeIds.size).toBe(0);
     expect(result.current.status.kind).toBe("done");
