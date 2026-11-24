@@ -333,6 +333,13 @@ export function useNodeFlowExecutionController({
   const [runId, setRunId] = useState<string | null>(null);
   const runDepth = useRef(0);
   const cancelRequested = useRef(false);
+  // H-7: the Run all batch in flight. Stop marks it cancelled and nothing
+  // clears that mark -- unlike cancelRequested, which the cancel-recovery
+  // timer resets -- so a wedged node that returns after recovery can't let
+  // the batch start its next node.
+  const runBatchRef = useRef<{ cancelled: boolean } | null>(null);
+  const batchCancelled = () =>
+    cancelRequested.current || !!runBatchRef.current?.cancelled;
   const activeRunIds = useRef<Set<string>>(new Set());
   const runIdRef = useRef<string | null>(null);
   const runScopesRef = useRef<Map<string, number>>(new Map());
@@ -866,6 +873,7 @@ export function useNodeFlowExecutionController({
     const ids = [...activeRunIds.current];
     const stuckId = runIdRef.current;
     void api.cancelAll().catch(() => {});
+    if (runBatchRef.current) runBatchRef.current.cancelled = true;
     if (!ids.length) return;
     cancelRequested.current = true;
     setStatus({ kind: "running", text: "Cancelling…" });
@@ -1760,6 +1768,8 @@ export function useNodeFlowExecutionController({
     // Empty folder → server writes to the user's Downloads folder.
     const folder = (node.config.folder || "").trim();
     const id = startRun(`Exporting ${node.config.label}…`, [node.id]);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
       const r = await api.nodeflowExport(
         graphForApi(),
@@ -1768,6 +1778,7 @@ export function useNodeFlowExecutionController({
         node.config.format || "csv",
         node.config.base_name || "output",
         id,
+        ctrl.signal,
       );
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
@@ -1793,6 +1804,8 @@ export function useNodeFlowExecutionController({
       onToast("error", "Export failed", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
       return { ok: false };
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
@@ -1804,7 +1817,13 @@ export function useNodeFlowExecutionController({
   const doExportBatch = async (outs: NbNode[]): Promise<RunOutcome[]> => {
     const eachAlone = async (): Promise<RunOutcome[]> => {
       const rr: RunOutcome[] = [];
-      for (const n of outs) rr.push(await doExport(n));
+      for (const n of outs) {
+        if (batchCancelled()) {
+          rr.push({ ok: false, cancelled: true });
+          continue;
+        }
+        rr.push(await doExport(n));
+      }
       return rr;
     };
     // Empty folder is OK — the server writes to Downloads. Batch still
@@ -1820,8 +1839,10 @@ export function useNodeFlowExecutionController({
       outs.map((node) => node.id),
     );
     let r: Awaited<ReturnType<typeof api.nodeflowExportMany>>;
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      r = await api.nodeflowExportMany(graphForRun(), items, id);
+      r = await api.nodeflowExportMany(graphForRun(), items, id, ctrl.signal);
     } catch (e: any) {
       if (!isRunCurrent(id) || cancelRequested.current || isCancelledError(e, id)) {
         finishRun(id, { cancelled: true }, "");
@@ -1829,6 +1850,8 @@ export function useNodeFlowExecutionController({
       }
       finishRun(id, { error: e?.message || String(e) }, "");
       return eachAlone();
+    } finally {
+      unregisterRun(id, ctrl);
     }
     if (wasCancelled(r, id)) {
       finishRun(id, { cancelled: true }, "");
@@ -1866,8 +1889,10 @@ export function useNodeFlowExecutionController({
       return { ok: false };
     }
     const id = startRun(`Writing ${node.config.label}…`, [node.id]);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.nodeflowToTable(graphForRun(), node.id, name, id);
+      const r = await api.nodeflowToTable(graphForRun(), node.id, name, id, ctrl.signal);
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
         return { ok: false, cancelled: true };
@@ -1893,6 +1918,8 @@ export function useNodeFlowExecutionController({
       onToast("error", "Write failed", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
       return { ok: false };
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
@@ -2245,15 +2272,20 @@ export function useNodeFlowExecutionController({
     // is set, so we don't pre-require a loop-variable name here — a container
     // iterator binds each values row's columns as ${vars} and uses no var name.
     const id = startRun(`Iterating ${node.config.label}…`, [node.id]);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.iteratorRun({
-        node_id: node.id,
-        graph: graphForRun(),
-        query_id: id,
-      });
+      const r = await api.iteratorRun(
+        {
+          node_id: node.id,
+          graph: graphForRun(),
+          query_id: id,
+        },
+        ctrl.signal,
+      );
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
-        return { ok: false };
+        return { ok: false, cancelled: true };
       }
       if (r.error && !r.passes) {
         onToast("error", "Iterator failed", r.error);
@@ -2295,6 +2327,8 @@ export function useNodeFlowExecutionController({
       onToast("error", "Iterator failed", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
       return { ok: false };
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
@@ -2304,15 +2338,20 @@ export function useNodeFlowExecutionController({
       return { ok: false };
     }
     const id = startRun(`Repeating ${node.config.label}…`, [node.id]);
+    const ctrl = new AbortController();
+    registerRun(id, ctrl);
     try {
-      const r = await api.whileRun({
-        node_id: node.id,
-        graph: graphForRun(),
-        query_id: id,
-      });
+      const r = await api.whileRun(
+        {
+          node_id: node.id,
+          graph: graphForRun(),
+          query_id: id,
+        },
+        ctrl.signal,
+      );
       if (wasCancelled(r, id)) {
         finishRun(id, { cancelled: true }, "");
-        return { ok: false };
+        return { ok: false, cancelled: true };
       }
       if (r.error && !r.iterations) {
         onToast("error", "Controller failed", r.error);
@@ -2345,6 +2384,8 @@ export function useNodeFlowExecutionController({
       onToast("error", "Controller failed", e.message || String(e));
       finishRun(id, { error: e.message || String(e) }, "");
       return { ok: false };
+    } finally {
+      unregisterRun(id, ctrl);
     }
   };
 
@@ -2353,6 +2394,21 @@ export function useNodeFlowExecutionController({
     // A new batch owns fresh cancellation state. Clear it before computing
     // terminals or starting any child run so no prior Stop can poison Run all.
     cancelRequested.current = false;
+    const batch = { cancelled: false };
+    runBatchRef.current = batch;
+    try {
+      await runAllBatch(batch, batchScope, params);
+    } finally {
+      if (runBatchRef.current === batch) runBatchRef.current = null;
+    }
+  };
+
+  const runAllBatch = async (
+    batch: { cancelled: boolean },
+    batchScope: number,
+    params?: Record<string, string>,
+  ) => {
+    const stopped = () => cancelRequested.current || batch.cancelled;
     // Drop pre–Run-all FE preview hits so individual node views cannot stick
     // on stale last-run rows. Successful terminals + ancestors re-seed below.
     previewCache.current.clear();
@@ -2588,7 +2644,7 @@ export function useNodeFlowExecutionController({
       else waves.set(d, [n]);
     }
     for (const depth of [...waves.keys()].sort((a, b) => a - b)) {
-      if (results.some((r) => r.cancelled)) break;
+      if (stopped() || results.some((r) => r.cancelled)) break;
       const wave = waves.get(depth)!;
       let next = 0;
       const worker = async () => {
@@ -2596,10 +2652,11 @@ export function useNodeFlowExecutionController({
           // Stop must halt the whole workflow: once cancellation is requested,
           // no worker starts another node (the in-flight ones were already
           // aborted + interrupted by cancelRun).
-          if (cancelRequested.current) break;
+          if (stopped()) break;
           const n = wave[next++];
           const outcome = await runOne(n);
           results.push(outcome);
+          if (outcome.cancelled) batch.cancelled = true;
           if (outcome.ok) successfulTerminalIds.push(n.id);
         }
       };
@@ -2615,9 +2672,9 @@ export function useNodeFlowExecutionController({
     // SQL reading the just-written table sees committed rows. A leaf under a
     // failed or cancelled exporter is skipped — that exporter has already
     // reported, and the leaf's input would be missing or stale.
-    if (!results.some((r) => r.cancelled)) {
+    if (!stopped() && !results.some((r) => r.cancelled)) {
       for (const n of continuationLeaves) {
-        if (cancelRequested.current) break;
+        if (stopped()) break;
         let upstreamOk = true;
         for (const id of ancestorNodeIds(runEdges, [n.id])) {
           if (
@@ -2637,7 +2694,7 @@ export function useNodeFlowExecutionController({
       if (batchScope !== scopeVersionRef.current) return;
     }
 
-    if (results.some((r) => r.cancelled)) {
+    if (stopped() || results.some((r) => r.cancelled)) {
       onToast("warn", "Run all cancelled", `${results.filter((r) => r.ok).length} of ${totalTerminals} done`);
       return;
     }
@@ -2654,7 +2711,7 @@ export function useNodeFlowExecutionController({
     // terminal's ancestor closure (Select/Join/Filter/…), not only successful
     // sinks. The isolated backend seed batch omits the failed node while still
     // returning its healthy upstream prefix.
-    if (attemptedTerminalIds.length && !cancelRequested.current) {
+    if (attemptedTerminalIds.length && !stopped()) {
       await seedLastRunCaches(attemptedTerminalIds);
     }
     if (batchScope !== scopeVersionRef.current) return;

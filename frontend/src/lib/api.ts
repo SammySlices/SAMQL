@@ -1088,7 +1088,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  iteratorRun: (body: { node_id: string; graph: unknown; query_id?: string }) =>
+  iteratorRun: (
+    body: { node_id: string; graph: unknown; query_id?: string },
+    signal?: AbortSignal,
+  ) =>
     jsonFetch<{
       ok?: boolean;
       passes?: number;
@@ -1103,9 +1106,13 @@ export const api = {
     }>("/api/iterator/run", {
       method: "POST",
       body: JSON.stringify(body),
+      signal,
     }),
 
-  whileRun: (body: { node_id: string; graph: unknown; query_id?: string }) =>
+  whileRun: (
+    body: { node_id: string; graph: unknown; query_id?: string },
+    signal?: AbortSignal,
+  ) =>
     jsonFetch<{
       ok?: boolean;
       iterations?: number;
@@ -1119,6 +1126,7 @@ export const api = {
     }>("/api/while/run", {
       method: "POST",
       body: JSON.stringify(body),
+      signal,
     }),
 
   // --- saved secrets (DPAPI-encrypted passwords) ---
@@ -2141,6 +2149,7 @@ export const api = {
     format: string,
     base_name?: string,
     queryId?: string,
+    signal?: AbortSignal,
   ) =>
     jsonFetch<{
       ok?: boolean;
@@ -2159,6 +2168,7 @@ export const api = {
         base_name,
         query_id: queryId,
       }),
+      signal,
     }),
   nodeflowExportMany: (
     graph: unknown,
@@ -2169,6 +2179,7 @@ export const api = {
       base_name?: string;
     }[],
     queryId?: string,
+    signal?: AbortSignal,
   ) =>
     jsonFetch<{
       ok?: boolean;
@@ -2185,6 +2196,7 @@ export const api = {
     }>("/api/nodeflow/export-many", {
       method: "POST",
       body: JSON.stringify({ graph, items, query_id: queryId }),
+      signal,
     }),
   workflowsList: () =>
     jsonFetch<{
@@ -2317,6 +2329,7 @@ export const api = {
     node: string,
     name: string,
     queryId?: string,
+    signal?: AbortSignal,
   ) =>
     jsonFetch<{
       ok?: boolean;
@@ -2328,6 +2341,7 @@ export const api = {
     }>("/api/nodeflow/write", {
       method: "POST",
       body: JSON.stringify({ graph, node, name, query_id: queryId }),
+      signal,
     }),
   directoryRead: (path: string, query_id?: string, signal?: AbortSignal) =>
     jsonFetch<{
