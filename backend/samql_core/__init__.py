@@ -17,7 +17,7 @@ from __future__ import annotations
 __version__ = "2.16.4"
 # Iteration / build label. Bump the trailing sequence each delivered round so
 # the exact build can be confirmed in the UI (top bar) and the source bundle.
-BUILD = "2026-10-12.703"
+BUILD = "2026-11-24.704"
 APP_NAME = "SamQL"
 
 # ---- session orchestration -----------------------------------------

@@ -37,4 +37,4 @@ Confirm `/api/health` (or the AppWindow top bar) shows the expected `build`.
 
 ## What’s on beta today
 
-Build **2026-10-12.703** (v2.16.4): aggregate-runner cleanup. Temp artifacts remain inside a recreatable per-instance directory with a user-scoped fallback; stale structural and optional-dependency checks are explicitly quarantined; reconcile/cache tests match current key and identifier semantics; and HTTP test teardown no longer hangs at interpreter exit. See `VERSION` for the detailed build log.
+Build **2026-11-24.704** (v2.16.4): November audit fixes. Shared-host UI binding to the launching user (C-1), escaped waterfall tooltips plus a script-src CSP (H-1), load cancels that drop only their own tables (H-4), run-scoped Stop and cancel, NodeFlow Run all/Stop fixes, approved-only Python node scripts, and a test suite isolated from ~/.samql. See `VERSION` for the detailed build log.

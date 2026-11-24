@@ -2,12 +2,52 @@ SamQL — build log
 =================
 
 Product version: 2.16.4
-Current build:   2026-10-12.703
+Current build:   2026-11-24.704
 
 The build id is shown in the app's top bar (next to the version) and is served
 by GET /api/health as the "build" field, so you can confirm the running app
 matches what you reconstructed. Bump the trailing ".N" each delivered round
 (the value lives in backend/samql_core/__init__.py as BUILD).
+
+----------------------------------------------------------------------
+build 2026-11-24.704  (v2.16.4)
+
+AUDIT FIXES: SHARED-HOST ISOLATION, CANCEL SCOPING, NODEFLOW RUN CONTROL.
+
+All 29 findings of the November code audit are fixed, one commit per finding.
+
+Critical. C-1: on a shared Windows host the UI binds to the launching user.
+The instance token and attach file are user-scoped and the server checks the
+token, so another user on the same machine cannot attach to or drive your
+session.
+
+High. H-1: waterfall chart tooltip labels are HTML-escaped and the server
+sends a script-src Content-Security-Policy. H-4: cancelling a load drops only
+the tables that load created. H-2/H-3: Stop on one run, and a load cancel,
+interrupt only their own statements. H-5/H-6: flow-cache tables are pinned for
+the pass that uses them and each run gets its own. H-7: Stop halts the whole
+Run all batch. H-8: cancels are decided from structured signals, not from
+error wording. H-9: the test suite no longer reads or writes the real
+~/.samql, and dual-mode tests pin dual engine mode.
+
+Medium. M-1: Run all cannot start twice. M-2: the post-run column prune skips
+nodes edited while it probed. M-3: an upstream edit refreshes the charts below
+it. M-4: Python nodes run only approved scripts. M-5: a timed-out Python node
+thread stops. M-6: a failed parallel branch drops its siblings' tables. M-7:
+each flow build keeps its own engine and epoch. M-8: a Dashboard run belongs to
+the board it started on. M-10: flatten and shred caches stage under the
+instance directory.
+
+Low. L-1: xlsx header rows stay text. L-2: two exports in the same second keep
+both files. L-3/L-4: cancelled-run id sets are bounded. L-5: an engine reset
+frees the old SQLite file. L-6: config and history stores lock and write in
+order. L-7: the Python node input cap bounds the fetch. L-8: the mail-safe
+transport round trip is byte-exact. L-9: duckdb pinned below 2, the reconcile
+progress poll never stacks, one identifier quoter, and the checked-in text
+bundle tracks the release build.
+
+Not verified on Windows: the C-1 ACL, exclusive bind and PS1 launcher path,
+the L-8 Expand-SamQL.ps1 change, and the Edge e2e run.
 
 ----------------------------------------------------------------------
 build 2026-10-12.703  (v2.16.4)
