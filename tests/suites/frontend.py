@@ -309,9 +309,9 @@ def frontend_tests(do_build):
              "directoryRead must send query_id to the backend")
         # iterator + while loops (many statements, can run long) must also pass
         # the run id so Stop can cancel them
-        need(re.search(r"iteratorRun\(\{[^}]*query_id:\s*id", nb, re.S),
+        need(re.search(r"iteratorRun\(\s*\{[^}]*query_id:\s*id", nb, re.S),
              "doRunIterator must pass the run id for cancel")
-        need(re.search(r"whileRun\(\{[^}]*query_id:\s*id", nb, re.S),
+        need(re.search(r"whileRun\(\s*\{[^}]*query_id:\s*id", nb, re.S),
              "doRunWhile must pass the run id for cancel")
         # API node fetch must pass the run id so Stop can abort the fetch
         need(re.search(r"nodeApiFetch\(\s*\{[^}]*query_id:\s*id", nb, re.S),
@@ -2594,7 +2594,8 @@ console.log("OK");
              "activeRunIds.current.add(id)" in nb
              and "activeRunIds.current.clear()" in nb),
             ("Run-all stops launching new nodes once Stop is requested",
-             "if (cancelRequested.current) break;" in nb),
+             "const stopped = () => cancelRequested.current || batch.cancelled;" in nb
+             and "if (stopped()) break;" in nb),
             ("every run catch reports cancellation, not a spurious error",
              nb.count("cancelRequested.current || isCancelledError(e") >= 15),
         ]
@@ -5896,7 +5897,7 @@ console.log("OK");
                    "cancelById", "registerRun"):
             need(("export function " + fn) in rc,
                  "runController must export " + fn)
-        need('name === "AbortError"' in rc and "status === 0" in rc,
+        need('name === "AbortError"' in rc and "e.aborted === true" in rc,
              "isCancelledError must catch both a raw AbortError and the "
              "ApiError(0) timeout/abort mapping")
         need("abortRegistered" in rc and "cancelQuery" in rc
@@ -6371,7 +6372,7 @@ console.log("OK");
             ("Phase 8 stale and concurrency regressions ship",
              all(token in regressions for token in (
                  "drops a stale execution result after switching tabs",
-                 "keeps concurrent run state active until the final request finishes",
+                 "a second Run all while one runs is a no-op; state clears when it finishes (M-1)",
                  "keeps only the latest asynchronous workflow file open",
                  "reuses Run-all last-run rows on output click without recomputing",
                  "replaces open preview with post–Run-all last-run rows",
