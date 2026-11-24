@@ -913,16 +913,18 @@ def _attach_stage_values(session, graph, stages, row_index, cell_value,
 
 def _write_sheet(ws, headers, rows):
     from openpyxl.styles import Font, PatternFill, Alignment
+    from .xlsxsafe import text_row
     bold = Font(bold=True, color="FFFFFF")
     fill = PatternFill("solid", fgColor="305496")
-    ws.append(headers)
+    # L-1: field and file names are user data; none may become a formula.
+    ws.append(text_row(ws, headers))
     for ci, _h in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=ci)
         cell.font = bold
         cell.fill = fill
         cell.alignment = Alignment(vertical="center")
     for r in rows:
-        ws.append(r)
+        ws.append(text_row(ws, r))
     widths = [0] * len(headers)
     for ci, h in enumerate(headers):
         widths[ci] = len(str(h))

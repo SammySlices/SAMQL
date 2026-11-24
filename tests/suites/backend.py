@@ -16484,8 +16484,12 @@ def backend_tests(datadir, csv_path, json_path):
             sess.shutdown()
         src = open(os.path.join(BACKEND, "samql_core", "session.py"),
                    encoding="utf-8").read()
-        need('c.data_type = "s"' in src
-             and "WriteOnlyCell" in src,
+        guard = open(os.path.join(BACKEND, "samql_core", "xlsxsafe.py"),
+                     encoding="utf-8").read()
+        # L-1: the guard lives in one shared helper (headers use it too).
+        need('c.data_type = "s"' in guard
+             and "WriteOnlyCell" in guard
+             and "text_row(ws, list(cols))" in src,
              "the string-forcing writer is wired")
 
     def t_plan_pass7_filecache_manifest():
@@ -35315,6 +35319,53 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s2.shutdown()
 
+    def t_l1_xlsx_headers_and_lineage_stay_text():
+        # L-1: data cells were guarded against formula injection (.451,
+        # .522), but the header row of both xlsx exporters and every cell
+        # of the lineage workbook were not: a column named "=1+1" became a
+        # live <f> cell.
+        try:
+            import openpyxl  # noqa: F401
+        except Exception:
+            return
+        import tempfile as _tf
+        import zipfile as _zf
+        from samql_core import lineage as _lin
+
+        def formulas(path):
+            z = _zf.ZipFile(path)
+            return [n for n in z.namelist()
+                    if n.endswith(".xml") and "sheet" in n
+                    and b"<f>" in z.read(n)]
+
+        d = _tf.mkdtemp()
+        s = _fresh_session()
+        try:
+            rid = s.run_query('SELECT 1 AS "=1+1", \'=2+2\' AS b',
+                              target="auto")["result_id"]
+            p1 = os.path.join(d, "result.xlsx")
+            s.export(rid, "xlsx", out_path=p1)
+            eq(formulas(p1), [], "result export header stays text")
+            eng = s.db
+            p2 = os.path.join(d, "stream.xlsx")
+            s._stream_relation_to_file(
+                eng, 'SELECT 1 AS "=1+1", \'=2+2\' AS b', p2, "xlsx")
+            eq(formulas(p2), [], "streamed export header stays text")
+            wb = openpyxl.load_workbook(p2)
+            eq([c.value for c in next(wb.active.iter_rows())],
+               ["=1+1", "b"], "the header text survives as typed")
+        finally:
+            s.shutdown()
+        p3 = os.path.join(d, "lineage.xlsx")
+        _lin.write_lineage_xlsx({
+            "passthrough": [{"input_file": "=HYPERLINK(\"x\")",
+                             "source": "=1+1", "data_element": "a"}],
+            "derived": [{"input_file": "f", "source": "@cmd",
+                         "used_in": "u", "step": "s",
+                         "data_element": "=3+3"}],
+            "sql_flagged": set()}, p3)
+        eq(formulas(p3), [], "lineage workbook cells stay text")
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43344,6 +43395,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_m10_op_staging_is_per_instance),
         ("M-4: Python nodes run only approved code, without io/getattr/type or dunder access",
          t_m4_python_node_is_gated_and_narrower),
+        ("L-1: xlsx headers and the lineage workbook never hold formulas",
+         t_l1_xlsx_headers_and_lineage_stay_text),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

@@ -6794,21 +6794,16 @@ class Session:
                         "work without it.")
                 wb = openpyxl.Workbook(write_only=True)
                 ws = wb.create_sheet("data")
-                ws.append(cols)
                 # .522 audit: same guard as the .451 result exporter -- a
                 # string starting with "=" must stay TEXT, never become a
-                # live Excel formula (spreadsheet injection).
-                from openpyxl.cell.cell import WriteOnlyCell
+                # live Excel formula (spreadsheet injection). L-1: the
+                # header row too.
+                from .xlsxsafe import text_row
+                ws.append(text_row(ws, cols))
                 for b in _batches():
                     for r in b:
-                        out = []
-                        for v in r:
-                            c = WriteOnlyCell(
-                                ws, value="" if v is None else v)
-                            if getattr(c, "data_type", None) == "f":
-                                c.data_type = "s"
-                            out.append(c)
-                        ws.append(out)
+                        ws.append(text_row(
+                            ws, ["" if v is None else v for v in r]))
                         n += 1
                 wb.save(path)
             elif fmt == "parquet":
@@ -14073,22 +14068,16 @@ class Session:
                 "xlsx export requires openpyxl (pip install openpyxl)")
         wb = openpyxl.Workbook(write_only=True)
         ws = wb.create_sheet("results")
-        ws.append(list(cols))
         # .451 [PLAN PASS 8] fix: openpyxl promotes any string starting
         # with "=" to a LIVE FORMULA cell -- grid DATA became executable
         # Excel content on export (classic spreadsheet injection), and
         # the literal text was lost. Force every string cell to stay a
-        # string; numbers and None pass through untouched.
-        from openpyxl.cell.cell import WriteOnlyCell
+        # string; numbers and None pass through untouched. L-1: the
+        # header row too.
+        from .xlsxsafe import text_row
+        ws.append(text_row(ws, list(cols)))
         for r in view:
-            out = []
-            for v in r:
-                v = json_safe(v)
-                c = WriteOnlyCell(ws, value=v)
-                if getattr(c, "data_type", None) == "f":
-                    c.data_type = "s"
-                out.append(c)
-            ws.append(out)
+            ws.append(text_row(ws, [json_safe(v) for v in r]))
         wb.save(path)
 
     @staticmethod
