@@ -146,7 +146,9 @@ def _fetch_input(eng, in_rel: str | None):
     """Return ``(columns, rows)`` or ``(None, None)`` when unwired."""
     if not in_rel:
         return None, None
-    sql = "SELECT * FROM %s" % in_rel
+    # L-7: fetch at most cap+1 rows -- one past the cap proves "too many"
+    # without reading a huge upstream table into memory first.
+    sql = "SELECT * FROM %s LIMIT %d" % (in_rel, _MAX_INPUT_ROWS + 1)
     cols, rows = eng.execute(sql)
     if cols is None:
         return [], []
@@ -154,9 +156,8 @@ def _fetch_input(eng, in_rel: str | None):
     rows = list(rows or [])
     if len(rows) > _MAX_INPUT_ROWS:
         raise PythonNodeError(
-            "Python node input has %d rows (limit %d). "
-            "Filter or sample upstream first."
-            % (len(rows), _MAX_INPUT_ROWS)
+            "Python node input has more than %d rows. "
+            "Filter or sample upstream first." % _MAX_INPUT_ROWS
         )
     return cols, rows
 

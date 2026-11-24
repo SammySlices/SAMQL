@@ -35518,6 +35518,30 @@ def backend_tests(datadir, csv_path, json_path):
             eq(len(hb.entries), 400,
                "round %d: every history entry persists" % rnd)
 
+    def t_l7_python_node_input_cap_bounds_the_fetch():
+        # L-7: the Python node's 500,000-row input cap was checked after
+        # fetching EVERY row into memory; a huge upstream table was read in
+        # full just to be refused.
+        import re as _re
+        from samql_core import python_node as pn
+        seen = []
+
+        class _Eng:
+            def execute(self, sql):
+                seen.append(sql)
+                m = _re.search(r"LIMIT (\d+)", sql)
+                n = int(m.group(1)) if m else 10 ** 7
+                return ["a"], ((i,) for i in range(n))
+
+        try:
+            pn._fetch_input(_Eng(), '"big"')
+        except pn.PythonNodeError as e:
+            need("500" in str(e), "the error names the limit: %s" % e)
+        else:
+            raise AssertionError("an oversized input is refused")
+        need(seen and "LIMIT %d" % (pn._MAX_INPUT_ROWS + 1) in seen[0],
+             "the fetch asks for at most cap+1 rows: %r" % seen)
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43557,6 +43581,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_l5_engine_reset_frees_old_sqlite_file),
         ("L-6: config and history stores keep every concurrent write",
          t_l6_config_and_history_survive_concurrent_writers),
+        ("L-7: the Python node input cap bounds the fetch itself",
+         t_l7_python_node_input_cap_bounds_the_fetch),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
