@@ -148,9 +148,17 @@ if ($actualBodySha -ne $declaredBodySha) {
 # Only restore tokens that the APHEX packager can introduce.  A global
 # "[.]" replacement corrupts legitimate source literals (for example regex
 # fragments and the release tooling's own mail-safe marker handling).
+# L-8: the packer turns ".ext" into "[.]ext" and escapes a bracketed marker
+# the source really contains with one more dot, so "[.]ext" -> ".ext" and
+# "[" + n dots + "]ext" -> n-1 dots. The round trip is byte-exact.
 $dangerousExtensionPattern =
-  '(?i)\[\.\](exe|dll|msi|bat|cmd|scr|vbs|ps1|jar)(?=$|[^A-Za-z0-9])'
-$raw = [regex]::Replace($raw, $dangerousExtensionPattern, '.$1')
+  '(?i)\[(\.+)\](exe|dll|msi|bat|cmd|scr|vbs|ps1|jar)(?=$|[^A-Za-z0-9])'
+$raw = [regex]::Replace($raw, $dangerousExtensionPattern, {
+  param($m)
+  $dots = $m.Groups[1].Value
+  if ($dots.Length -eq 1) { '.' + $m.Groups[2].Value }
+  else { '[' + $dots.Substring(1) + ']' + $m.Groups[2].Value }
+})
 
 # --- split and validate every file section ---------------------------------
 $headerRx = [regex]'(?m)^===== FILE: (?<path>.*?) =====[ \t]*\r?\n'

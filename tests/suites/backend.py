@@ -35542,6 +35542,38 @@ def backend_tests(datadir, csv_path, json_path):
         need(seen and "LIMIT %d" % (pn._MAX_INPUT_ROWS + 1) in seen[0],
              "the fetch asks for at most cap+1 rows: %r" % seen)
 
+    def t_l8_transport_round_trip_is_byte_exact():
+        # L-8: the mail-safe transport defangs ".ps1" to "[.]ps1", and the
+        # expander turned EVERY "[.]ps1" back into ".ps1" -- including one
+        # the source file really contained (test_release_hardening.py
+        # writes "Test-SamQL-All[.]ps1" fixtures), so the round trip changed
+        # that file. Literal bracketed markers are now escaped at pack time
+        # (one more dot) and unescaped by the expander.
+        sys.path.insert(0, ROOT)
+        try:
+            from tools import package_release as _pr
+            from tools import release_preflight as _rp
+        finally:
+            sys.path.pop(0)
+        rel = json.load(open(os.path.join(ROOT, "RELEASE_MANIFEST.json"),
+                             encoding="utf-8"))
+        exts = rel["sourceTransport"]["dangerousExtensions"]
+        fang = "[" + "." + "]"
+        two = "[" + ".." + "]"
+        src = ("run x" + "." + "ps1; fixture a" + fang + "ps1; deeper b"
+               + two + "exe; plain " + fang + " marker; obj.execute(); "
+               "C" + "." + "EXE")
+        packed = _pr._defang(src, _pr._transport_pattern(rel))
+        need(not _rp._DANGEROUS_RX.search(packed),
+             "nothing dangerous survives packing: %r" % packed)
+        eq(_pr.refang_transport_text(packed, exts), src,
+           "pack + expand is byte-exact (python)")
+        eq(_rp._refang_transport_text(packed), src,
+           "pack + expand is byte-exact (preflight)")
+        exp = open(_root_script("Expand-SamQL.ps1"), encoding="utf-8").read()
+        need(r"\[(\.+)\](exe|" in exp,
+             "Expand-SamQL un-escapes by dot count, like the packer")
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43583,6 +43615,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_l6_config_and_history_survive_concurrent_writers),
         ("L-7: the Python node input cap bounds the fetch itself",
          t_l7_python_node_input_cap_bounds_the_fetch),
+        ("L-8: the mail-safe transport round trip is byte-exact",
+         t_l8_transport_round_trip_is_byte_exact),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

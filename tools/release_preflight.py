@@ -107,8 +107,10 @@ GENERATED_PARTS = {
 _DANGEROUS_RX = re.compile(
     r"(?i)\.(exe|dll|msi|bat|cmd|scr|vbs|ps1|jar)(?=$|[^A-Za-z0-9])"
 )
+# L-8: "[" + n dots + "]ext" -- the packer escapes a literal marker with
+# one more dot (see tools/package_release.py).
 _DEFANGED_DANGEROUS_RX = re.compile(
-    r"(?i)\[\.\](exe|dll|msi|bat|cmd|scr|vbs|ps1|jar)(?=$|[^A-Za-z0-9])"
+    r"(?i)\[(\.+)\](exe|dll|msi|bat|cmd|scr|vbs|ps1|jar)(?=$|[^A-Za-z0-9])"
 )
 _BUILD_RX = re.compile(r"^\d{4}-\d{2}-\d{2}\.\d+$")
 _SEMVER_RX = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
@@ -143,9 +145,11 @@ def _norm(value: str | Path) -> str:
 
 def _refang_transport_text(value: str) -> str:
     """Restore only dangerous-extension markers emitted by the packager."""
-    return _DEFANGED_DANGEROUS_RX.sub(
-        lambda match: f".{match.group(1)}", value
-    )
+    def _one(match: re.Match[str]) -> str:
+        dots, ext = match.group(1), match.group(2)
+        return "." + ext if len(dots) == 1 else "[" + dots[1:] + "]" + ext
+
+    return _DEFANGED_DANGEROUS_RX.sub(_one, value)
 
 
 def _alternate_rel(rel: str) -> str:
@@ -1250,7 +1254,8 @@ def _check_docs_and_transport(root: Path, release: dict[str, Any], checks: Check
     )
     # Expand's capture group must match RELEASE_MANIFEST dangerousExtensions
     # exactly so pack/expand cannot drift.
-    expand_m = re.search(r"\\\[\\.\\\]\((?P<exts>[^)]+)\)", expander)
+    expand_m = re.search(
+        r"\\\[(?:\\\.|\(\\\.\+\))\\\]\((?P<exts>[^)]+)\)", expander)
     declared = {
         str(item).lstrip(".").lower()
         for item in (dangerous or [])

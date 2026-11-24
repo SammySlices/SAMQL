@@ -83,28 +83,45 @@ def _extension_choices(extensions: list[str]) -> str:
     return choices
 
 
+# L-8: the transport is a bijection. ".ext" packs to "[.]ext", and a
+# bracketed marker the source really contains ("[.]ext", "[..]ext", ...)
+# packs with ONE MORE dot, so the expander can tell them apart: "[.]ext"
+# -> ".ext", and "[" + n dots + "]ext" -> n-1 dots. A literal "[.]ps1" in a
+# source file used to come back as ".ps1".
 def _defang_pattern(extensions: list[str]) -> re.Pattern[str]:
     return re.compile(
-        rf"(?i)\.(?P<extension>{_extension_choices(extensions)})"
+        rf"(?i)(?:\[(?P<dots>\.+)\]|\.)(?P<extension>{_extension_choices(extensions)})"
         r"(?=$|[^A-Za-z0-9])"
     )
 
 
 def _refang_pattern(extensions: list[str]) -> re.Pattern[str]:
     return re.compile(
-        rf"(?i)\[\.\](?P<extension>{_extension_choices(extensions)})"
+        rf"(?i)\[(?P<dots>\.+)\](?P<extension>{_extension_choices(extensions)})"
         r"(?=$|[^A-Za-z0-9])"
     )
 
 
+def _defang_match(match: re.Match[str]) -> str:
+    dots = match.group("dots")
+    return "[" + ("." if dots is None else dots + ".") + "]" + match.group("extension")
+
+
+def refang_match(match: re.Match[str]) -> str:
+    """The expander's inverse of ``_defang_match``."""
+    dots = match.group("dots")
+    if len(dots) == 1:
+        return "." + match.group("extension")
+    return "[" + dots[1:] + "]" + match.group("extension")
+
+
 def _defang(value: str, pattern: re.Pattern[str]) -> str:
-    return pattern.sub(lambda match: "[.]" + match.group("extension"), value)
+    return pattern.sub(_defang_match, value)
 
 
 def refang_transport_text(value: str, extensions: list[str]) -> str:
-    """Reverse mail defanging without rewriting ordinary ``[.]`` literals."""
-    pattern = _refang_pattern(extensions)
-    return pattern.sub(lambda match: "." + match.group("extension"), value)
+    """Exactly reverse mail defanging (L-8: literal markers included)."""
+    return _refang_pattern(extensions).sub(refang_match, value)
 
 
 def _generated_label(value: str | None) -> str:
