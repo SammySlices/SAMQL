@@ -9,22 +9,24 @@ import { api } from "./api";
 // is shared here.
 
 // True when a thrown error is really a cancellation rather than a genuine
-// failure: an aborted fetch, a client-side timeout (ApiError carries status 0),
-// or a backend "cancelled". Used so a Stop reads as "Cancelled", never a red
-// error, on every surface.
+// failure: the run was cancelled through the registry, the fetch was
+// aborted on purpose, or the backend flagged it `cancelled`. Used so a Stop
+// reads as "Cancelled", never a red error, on every surface.
+//
+// H-8: decided ONLY from those signals. Words in the message never count --
+// a binder error on a column like "cancel_dt" or a table like
+// "cancelled_trades" is a real failure -- and a client-side timeout or a
+// dropped connection (status 0) is a failure the user must see.
 export function isCancelledError(e: any, queryId?: string | null): boolean {
   // .519: a run the USER cancelled must read as cancelled even when the
   // failure surfaces as a network error -- the server aborts a cancelled
   // response mid-send, so the fetch rejects with "Failed to fetch".
   if (queryId && wasCancelled(queryId)) return true;
-  if (!e) return false;
-  if (e.name === "AbortError" || e.name === "TimeoutError") return true;
-  if (typeof e.status === "number" && e.status === 0) return true;
-  const m = String(e?.message ?? e).toLowerCase();
-  return (
-    m.includes("abort") || m.includes("cancel") || m.includes("timed out")
-  );
+  if (!e || typeof e !== "object") return false;
+  if (e.name === "AbortError") return true;
+  return e.aborted === true || e.cancelled === true;
 }
+
 
 // .519: the central run registry. Every surface registers its run's
 // AbortController under the query id, so a Cancel from ANYWHERE (the

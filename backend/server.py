@@ -235,6 +235,7 @@ from samql_core import tmputil  # noqa: E402
 from samql_core import _brand  # noqa: E402  (app icon / favicon / manifest)
 from samql_core.errfmt import err_str  # noqa: E402
 from samql_core.loaders import LoadCancelled  # noqa: E402
+from samql_core.session import _is_interrupt  # noqa: E402
 
 # Optional faster JSON encoder; falls back to the stdlib transparently.
 try:
@@ -5222,7 +5223,12 @@ class Handler(BaseHTTPRequestHandler):
                 log_server_error(method, path, 500, "ServerError",
                                  err_str(e), tb=tb,
                                  detail=_request_detail(body, ctx))
-                self._send_json(500, {"error": err_str(e)})
+                payload = {"error": err_str(e)}
+                # H-8: a structured flag, so the UI never has to guess a
+                # cancel from words in the message
+                if _is_interrupt(e):
+                    payload["cancelled"] = True
+                self._send_json(500, payload)
                 self.close_connection = True
                 return
             if isinstance(result, FileDownload):

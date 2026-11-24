@@ -7,6 +7,7 @@ import {
   isCancelledError,
   registerRun,
   unregisterRun,
+  wasCancelled,
 } from "../lib/runController";
 import type { TableInfo, ReconcileResult } from "../lib/types";
 import {
@@ -221,7 +222,8 @@ export const ReconcileModal: React.FC<Props> = ({
       runQid.current = null;
       runCtrl.current = null;
       if (report.error) {
-        if (/interrupt|cancel/i.test(report.error) || report.cancelled) {
+        // H-8: a structured cancel only -- never words in the error
+        if (report.cancelled === true || wasCancelled(qid)) {
           onToast("warn", "Reconcile cancelled", "Stopped at your request.");
         } else {
           onToast("error", "Reconcile failed", report.error);

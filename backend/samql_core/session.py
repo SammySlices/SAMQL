@@ -35,6 +35,7 @@ from . import loaders
 from . import applyvars
 from . import progress as opreg
 from . import watchdog
+from .engines import _is_sql_error as _engines_is_sql_error
 from .engines import (DBManager, DuckDBManager, HAS_DUCKDB,
                       total_physical_ram_bytes, _ExecKeepalive)
 from .nodeflow import sanitize_ident, NodeflowError
@@ -590,10 +591,15 @@ def _is_interrupt(exc):
     # after interrupt(); treat that as a cancel so journal/IDE runs report
     # cancelled instead of a spurious failure. Class-name matching covers
     # bare exceptions with an empty message (e.g. a plain LoadCancelled()).
-    return ("interrupt" in name or "cancel" in name
-            or "interrupt" in s or "cancel" in s
+    if ("interrupt" in name or "cancel" in name
             or s.strip() == "not an error"
-            or s.endswith(": not an error"))
+            or s.endswith(": not an error")):
+        return True
+    # H-8: a real SQL error whose message names a "cancel_dt" column or a
+    # "cancelled_trades" table is a failure, never a cancellation.
+    if _engines_is_sql_error(exc, s.strip()):
+        return False
+    return "interrupt" in s or "cancel" in s
 
 
 def _rename_row_vars(row, rename):

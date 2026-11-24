@@ -35014,6 +35014,52 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_h8_sql_errors_naming_cancel_are_not_cancels():
+        # H-8 (backend half): _is_interrupt matched "cancel"/"interrupt"
+        # anywhere in a message, so a Binder error on a "cancel_dt" column
+        # came back as {"cancelled": true} and the UI showed "Cancelled".
+        import sqlite3 as _sq
+        from samql_core.session import _is_interrupt as si
+        from samql_core.engines import _is_interrupt as ei
+        from samql_core import HAS_DUCKDB
+        errs = []
+        con = _sq.connect(":memory:")
+        con.execute("CREATE TABLE t(x)")
+        for q in ("SELECT cancel_dt FROM t", "SELECT * FROM cancelled_trades",
+                  "SELECT interrupt_flag FROM t"):
+            try:
+                con.execute(q)
+            except Exception as e:
+                errs.append(e)
+        if HAS_DUCKDB:
+            import duckdb as _dd
+            dc = _dd.connect()
+            dc.execute("CREATE TABLE t(x INT)")
+            for q in ("SELECT cancel_dt FROM t",
+                      "SELECT * FROM cancelled_trades",
+                      "SELECT abort_reason, interrupt_flag FROM t"):
+                try:
+                    dc.execute(q)
+                except Exception as e:
+                    errs.append(e)
+        need(len(errs) >= 3, "the probes raised")
+        for e in errs:
+            need(not si(e) and not ei(e),
+                 "a real SQL error is not a cancel: %r" % e)
+        # genuine cancels still classify
+        for e in (_sq.OperationalError("interrupted"),
+                  InterruptedError("query cancelled during row fetch"),
+                  RuntimeError("cancelled"), RuntimeError("not an error")):
+            need(si(e), "a cancel still reads as one: %r" % e)
+        if HAS_DUCKDB:
+            import duckdb as _dd
+            need(si(_dd.InterruptException("INTERRUPT Error: Interrupted!")),
+                 "DuckDB's InterruptException is a cancel")
+        src = open(os.path.join(BACKEND, "server.py"),
+                   encoding="utf-8").read()
+        need('payload["cancelled"] = True' in src,
+             "the 500 envelope carries a structured cancelled flag")
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43031,6 +43077,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_h6_same_fingerprint_runs_keep_their_tables),
         ("NodeFlow reconcile reads its own TEMP inputs (no own-cursor "
          "Catalog Error)", t_nodeflow_reconcile_reads_its_temp_inputs),
+        ("H-8: SQL errors that mention cancel/interrupt are not cancels",
+         t_h8_sql_errors_naming_cancel_are_not_cancels),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

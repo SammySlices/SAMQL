@@ -1427,7 +1427,8 @@ export const Notebook: React.FC<Props> = ({
             page: { columns: [], rows: [], total_rows: 0 },
           },
         });
-        if (d.error && !/interrupt|cancel/i.test(d.error))
+        // H-8: a structured cancel only -- never words in the error
+        if (d.error && (d as { cancelled?: boolean }).cancelled !== true)
           onToast("error", "Drill-down failed", d.error);
         return;
       }
@@ -1492,10 +1493,6 @@ export const Notebook: React.FC<Props> = ({
       }
       if ((pr as { error?: string }).error) {
         const err = (pr as { error?: string }).error || "";
-        if (/interrupt|cancel/i.test(err)) {
-          patch(id, { reconDetail: null });
-          return;
-        }
         patch(id, { reconDetail: null });
         onToast("error", "Profile failed", err);
         return;

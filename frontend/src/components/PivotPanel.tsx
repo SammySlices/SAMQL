@@ -498,7 +498,8 @@ const PivotPanelImpl: React.FC<Props> = ({ tables, result, onToast, onExpired, o
           return;
         if (res.error) {
           // Soft cancel: keep the previous grid (matches reconcile / VERSION).
-          if (/interrupt|cancel/i.test(res.error) || wasCancelled(qid)) {
+          // H-8: a structured cancel only -- never words in the error
+          if ((res as { cancelled?: boolean }).cancelled === true || wasCancelled(qid)) {
             onToast("warn", "Pivot cancelled", "Stopped at your request.");
             return;
           }

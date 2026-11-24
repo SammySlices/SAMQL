@@ -219,7 +219,8 @@ const ChartPanelImpl: React.FC<Props> = ({
       .then((d) => {
         if (ctrl.signal.aborted || wasCancelled(qid)) return;
         if (d.error) {
-          if (/interrupt|cancel/i.test(d.error) || wasCancelled(qid)) {
+          // H-8: a structured cancel only -- never words in the error
+          if ((d as { cancelled?: boolean }).cancelled === true || wasCancelled(qid)) {
             // Soft cancel: keep the previous chart (matches pivot / reconcile).
             return;
           }

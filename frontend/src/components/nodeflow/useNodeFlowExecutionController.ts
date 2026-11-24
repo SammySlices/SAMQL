@@ -1438,10 +1438,6 @@ export function useNodeFlowExecutionController({
           return;
         }
         if (r.error) {
-          if (/interrupt|cancel/i.test(r.error)) {
-            setChartEntry(node.id, {});
-            return;
-          }
           setChartEntry(node.id, { error: r.error });
           return;
         }

@@ -25,13 +25,31 @@ from .rows import DiskBackedRows, spill_rows
 from . import progress as opreg
 
 
+def _is_sql_error(exc, text):
+    """H-8: a genuine SQL error from the engine itself -- DuckDB's typed
+    exceptions (Binder/Catalog/Parser...) or SQLite's errors other than its
+    "interrupted" -- whose MESSAGE may still mention a column or table such
+    as "cancel_dt" or "cancelled_trades". Those are never cancellations."""
+    mod = (type(exc).__module__ or "").lower()
+    name = type(exc).__name__.lower()
+    if mod.startswith(("duckdb", "_duckdb")) and "interrupt" not in name:
+        return True
+    if isinstance(exc, sqlite3.Error):
+        return not text.startswith("interrupt")
+    return False
+
+
 def _is_interrupt(exc):
     """True if an exception came from a query/load being interrupted (a cancel
     via connection.interrupt()). Kept local to avoid importing the session
     layer (which imports this module)."""
     name = exc.__class__.__name__.lower()
+    if "interrupt" in name or "cancel" in name:
+        return True
     s = str(exc).lower()
-    return "interrupt" in name or "interrupt" in s or "cancel" in s
+    if _is_sql_error(exc, s.strip()):
+        return False
+    return "interrupt" in s or "cancel" in s
 
 
 # How long a foreground DB operation will wait for the engine connection lock

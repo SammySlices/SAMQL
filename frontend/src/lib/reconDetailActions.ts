@@ -151,10 +151,8 @@ export function createReconDetailController(opts: {
       );
       if (ctrl.signal.aborted || wasCancelled(qid) || d.cancelled) return;
       if (d.error) {
-        if (/interrupt|cancel/i.test(d.error) || wasCancelled(qid)) {
-          opts.toast("warn", "Drill-down cancelled", "Stopped at your request.");
-          return;
-        }
+        // H-8: cancels were handled above from structured signals; words
+        // in the error ("cancel_dt") never make a failure a cancel.
         opts.toast("error", "Drill-down failed", d.error);
         return;
       }
@@ -206,11 +204,6 @@ export function createReconDetailController(opts: {
         ctrl.signal,
       );
       if (ctrl.signal.aborted || wasCancelled(qid) || (p as any).cancelled) {
-        opts.patchRes(id, { profileLoading: false });
-        return;
-      }
-      if ((p as any).error && /interrupt|cancel/i.test(String((p as any).error))) {
-        opts.toast("warn", "Profile cancelled", "Stopped at your request.");
         opts.patchRes(id, { profileLoading: false });
         return;
       }

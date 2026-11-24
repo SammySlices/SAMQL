@@ -157,6 +157,7 @@ async function apiFetch<T>(
   const { timeoutMs, signal: callerSignal, headers: callerHeaders, ...rest } = opts;
   let ctrl: AbortController | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
   let signal: AbortSignal | null | undefined = callerSignal;
   const effTimeout =
     callerSignal != null
@@ -172,6 +173,7 @@ async function apiFetch<T>(
     _inflight.add(ctrl);
     if (effTimeout && effTimeout > 0) {
       timer = setTimeout(() => {
+        timedOut = true;
         try {
           ctrl!.abort();
         } catch {
@@ -202,17 +204,23 @@ async function apiFetch<T>(
       }
     }
     if (!res.ok) {
-      throw new ApiError(res.status, (data && data.error) || res.statusText);
+      throw new ApiError(res.status, (data && data.error) || res.statusText, {
+        cancelled: !!(data && data.cancelled === true),
+      });
     }
     return data as T;
   } catch (e: any) {
     if (e && (e.name === "AbortError" || e.name === "TimeoutError")) {
-      throw new ApiError(
-        0,
-        effTimeout
-          ? `Request timed out after ${Math.round(effTimeout / 1000)}s`
-          : "Request aborted",
-      );
+      if (timedOut || e.name === "TimeoutError") {
+        throw new ApiError(
+          0,
+          effTimeout
+            ? `Request timed out after ${Math.round(effTimeout / 1000)}s`
+            : "Request timed out",
+          { timedOut: true },
+        );
+      }
+      throw new ApiError(0, "Request aborted", { aborted: true });
     }
     throw e;
   } finally {
@@ -235,12 +243,29 @@ async function formFetch<T>(
   return apiFetch<T>(path, { ...opts, method: opts.method || "POST", body: form });
 }
 
+export type ApiErrorKind = {
+  /** The request was aborted on purpose (a Stop / abortInflight). */
+  aborted?: boolean;
+  /** The client-side timeout fired: a failure, not a user cancel. */
+  timedOut?: boolean;
+  /** The backend said so in a structured `cancelled: true` field. */
+  cancelled?: boolean;
+};
+
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  aborted: boolean;
+  timedOut: boolean;
+  cancelled: boolean;
+  constructor(status: number, message: string, kind: ApiErrorKind = {}) {
     super(message);
     this.status = status;
     this.name = "ApiError";
+    // H-8: callers classify a cancel from these flags, never from words in
+    // the message (a real "cancel_dt" binder error is not a cancel).
+    this.aborted = !!kind.aborted;
+    this.timedOut = !!kind.timedOut;
+    this.cancelled = !!kind.cancelled;
   }
 }
 
