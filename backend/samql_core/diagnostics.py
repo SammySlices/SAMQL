@@ -10,6 +10,7 @@ To add a future check (e.g. an engine health probe, a temp-dir audit, a config
 dump), write a function, decorate it, and it appears in the modal automatically.
 """
 import importlib.util as _ilu
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 import io
 import os
 import platform
@@ -489,7 +490,7 @@ def access_recipes(column, rows, access_style="struct", cast_to_json=False,
 def _access_recipes_struct(column, rows):
     """STRUCT/LIST recipes: 1-based list indexes + native UNNEST."""
     def q(name):
-        return '"%s"' % name.replace('"', '""') if _needs_quote(name) else name
+        return _sq_quote_ident(name) if _needs_quote(name) else name
 
     stack = []  # ancestors: dicts with depth/kind/first/all/unnests/alias_n
     counter = [0]
@@ -585,7 +586,7 @@ def _access_recipes_json(column, rows, cast_to_json=False, root_is_list=False):
     then alt. A root JSON[] / LIST column still uses a native UNNEST for its
     first ``(element)`` hop (1-based ``[1]`` on the list)."""
     def q(name):
-        return '"%s"' % name.replace('"', '""') if _needs_quote(name) else name
+        return _sq_quote_ident(name) if _needs_quote(name) else name
 
     base0 = q(column) + ("::JSON" if cast_to_json else "")
     elem_cast = "::JSON" if cast_to_json else ""
@@ -835,7 +836,7 @@ def build_unnest_pipeline_sql(table, select_sql, unnests, limit=None,
     CTE so multi-select outer scalars (empty unnest chain) repeat per exploded
     row without ``SELECT t.*``.
     """
-    tbl = '"%s"' % str(table).replace('"', '""')
+    tbl = _sq_quote_ident(table)
     hops = list(unnests or [])
     carry = list(carry or [])
     if not hops:
@@ -896,7 +897,7 @@ def field_access_sql(table, access, which="first"):
     """
     if not access:
         return None
-    tbl = '"%s"' % str(table).replace('"', '""')
+    tbl = _sq_quote_ident(table)
     if which == "first":
         expr = access.get("first")
         if not expr:
@@ -1153,7 +1154,7 @@ def _field_tree_from_root(root, colname="json", access_style="json",
         # Struct-style splices the path as SQL identifiers (double-quote
         # doubling); JSON-style needs a JSONPath member (C-style backslash).
         if access_style == "struct":
-            q = ('"%s"' % key.replace('"', '""')) if _needs_quote(key) else key
+            q = _sq_quote_ident(key) if _needs_quote(key) else key
             return "." + q
         return _json_path_seg(key)
 

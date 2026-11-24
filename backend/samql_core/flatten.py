@@ -5,6 +5,7 @@ JSONFlattener that turns nested JSON into a set of relational tables
 Lifted directly from the original single-file application. GUI-free.
 """
 import decimal
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 import json
 import os
 import pickle
@@ -126,7 +127,7 @@ def detect_key_column(coltypes):
 
 def _qi(ident):
     """Quote a DuckDB identifier."""
-    return '"' + str(ident).replace('"', '""') + '"'
+    return _sq_quote_ident(ident)
 
 
 def _sanitize_suffix(name):

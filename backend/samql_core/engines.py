@@ -8,6 +8,7 @@ Lifted directly from the original single-file application and stripped of
 all GUI references.
 """
 import contextlib
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 import time as _time_mod
 import itertools
 import json
@@ -699,7 +700,7 @@ def _quote_ident(name):
     """Quote a SQL identifier, escaping embedded double-quotes. A column or
     table name containing a `"` (e.g. from a SQL Server query alias) would
     otherwise break the generated DDL/DML."""
-    return '"' + str(name).replace('"', '""') + '"'
+    return _sq_quote_ident(name)
 
 
 def _columnarize(rows, columns, text_cols):
@@ -943,7 +944,7 @@ class DBManager(_ThreadCancelMixin):
                          "FLOAT", "NUMERIC", "DECIMAL")
 
         def Q(s):
-            return '"' + str(s).replace('"', '""') + '"'
+            return _sq_quote_ident(s)
 
         with self.write_lock:
             try:
@@ -2092,7 +2093,7 @@ def _struct_expand_select(col, typ):
     of scalars, or an opaque JSON value whose keys aren't known) is left
     alone."""
     t = (typ or "").strip().upper()
-    q = '"' + str(col).replace('"', '""') + '"'
+    q = _sq_quote_ident(col)
     if t.startswith("STRUCT") and t.endswith("[]"):
         return f"UNNEST({q}, recursive := true)"
     if t.startswith("STRUCT"):
@@ -2558,8 +2559,8 @@ class DuckDBManager(_ThreadCancelMixin):
                 for h in hits:
                     try:
                         self.conn.execute(
-                            'DROP VIEW IF EXISTS "temp"."main"."%s"'
-                            % h.replace('"', '""'))
+                            'DROP VIEW IF EXISTS "temp"."main".'
+                            + _sq_quote_ident(h))
                         dropped.append(h)
                     except Exception:
                         pass
@@ -3880,7 +3881,7 @@ class DuckDBManager(_ThreadCancelMixin):
         ty = alias.get(ty.upper(), ty)
 
         def Q(s):
-            return '"' + str(s).replace('"', '""') + '"'
+            return _sq_quote_ident(s)
 
         with self.write_lock:
             types = self.column_types(table)  # {name: TYPE}
@@ -4011,7 +4012,7 @@ class DuckDBManager(_ThreadCancelMixin):
                    if not out.get(c)]
         if missing:
             try:
-                sel = ", ".join('typeof("%s")' % c.replace('"', '""')
+                sel = ", ".join("typeof(%s)" % _sq_quote_ident(c)
                                 for c in missing)
                 got = None
                 if hasattr(self, "execute_read"):

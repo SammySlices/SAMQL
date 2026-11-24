@@ -8,6 +8,7 @@ and exposes loads, profiling, exports, the tables tree, and persistence.
 Everything here is GUI-free and safe to drive from an HTTP handler.
 """
 import csv as _csv
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 import datetime as _dt
 import hashlib
 import json
@@ -1936,7 +1937,7 @@ class Session:
         from .shred import _DUCKDB_RESERVED
         s = str(name)
         if _needs_quote(s) or s.lower() in _DUCKDB_RESERVED:
-            return '"%s"' % s.replace('"', '""')
+            return _sq_quote_ident(s)
         return s
 
     @staticmethod
@@ -6133,7 +6134,7 @@ class Session:
         multi_meas = len(measures) > 1
 
         def q(s):
-            return '"' + str(s).replace('"', '""') + '"'
+            return _sq_quote_ident(s)
 
         def lit(v):
             if isinstance(v, bool):
@@ -7121,17 +7122,17 @@ class Session:
         """
         if not name:
             return
-        q = str(name).replace('"', '""')
+        q = _sq_quote_ident(name)
         drops = (
             # DuckDB temp catalog (no-op / error on SQLite — ignored).
-            'DROP VIEW IF EXISTS "temp"."main"."%s"' % q,
-            'DROP TABLE IF EXISTS "temp"."main"."%s"' % q,
+            'DROP VIEW IF EXISTS "temp"."main".%s' % q,
+            'DROP TABLE IF EXISTS "temp"."main".%s' % q,
             # SQLite temp schema.
-            'DROP VIEW IF EXISTS temp."%s"' % q,
-            'DROP TABLE IF EXISTS temp."%s"' % q,
+            'DROP VIEW IF EXISTS temp.%s' % q,
+            'DROP TABLE IF EXISTS temp.%s' % q,
             # Main catalog: view then table (order matters for both engines).
-            'DROP VIEW IF EXISTS "%s"' % q,
-            'DROP TABLE IF EXISTS "%s"' % q,
+            'DROP VIEW IF EXISTS %s' % q,
+            'DROP TABLE IF EXISTS %s' % q,
         )
         for sql in drops:
             try:
@@ -8882,7 +8883,7 @@ class Session:
                 stale.append(name)
                 continue
             fwd = sqlutil.sql_path(path)
-            qn = '"%s"' % str(name).replace('"', '""')
+            qn = _sq_quote_ident(name)
             plans.append((qn, fwd))
         if stale:
             return stale, lambda: None
@@ -13641,8 +13642,8 @@ class Session:
             try:
                 with mgr.write_lock:
                     mgr.conn.execute(
-                        'DROP VIEW IF EXISTS "temp"."main"."%s"'
-                        % str(t).replace('"', '""'))
+                        'DROP VIEW IF EXISTS "temp"."main".%s'
+                        % _sq_quote_ident(t))
             except Exception:
                 pass
             for kw in ("TABLE", "VIEW"):
@@ -13793,7 +13794,7 @@ class Session:
         except Exception:
             pass
         fwd = sqlutil.sql_path(path)
-        qi = '"' + str(table).replace('"', '""') + '"'
+        qi = _sq_quote_ident(table)
         with duck.native_op_cursor() as (xc, lk):
             with lk:
                 with _ExecKeepalive(xc, duck._cancel,
@@ -14067,12 +14068,12 @@ class Session:
         Runs on the store's own engine via a read cursor (no write-lock
         contention; interruptible via the .471 cursor registration)."""
         eng = cr.store._engine
-        qcols = ", ".join('"%s"' % str(c).replace('"', '""')
+        qcols = ", ".join(_sq_quote_ident(c)
                           for c in cr.cols)
         order = "file_row_number"
         if sort_col and sort_col in cr.cols:
-            order = ('"%s" %s, file_row_number'
-                     % (str(sort_col).replace('"', '""'),
+            order = ('%s %s, file_row_number'
+                     % (_sq_quote_ident(sort_col),
                         "DESC" if descending else "ASC"))
         sel = ("SELECT %s FROM read_parquet('%s', file_row_number = true) "
                "ORDER BY %s"
@@ -14474,13 +14475,12 @@ class Session:
             if cols is None:
                 return None, []
             names = list(cols)
-            qt = '"' + str(table).replace('"', '""') + '"'
+            qt = _sq_quote_ident(table)
 
             def run(sql):
                 _c, rows = eng.execute(sql)
                 return rows or []
-            colref = (lambda i: '"'
-                      + str(names[int(i)]).replace('"', '""') + '"')
+            colref = (lambda i: _sq_quote_ident(names[int(i)]))
             castnum = ((lambda e: f"TRY_CAST({e} AS DOUBLE)")
                        if kind == "duckdb"
                        else (lambda e: f"CAST({e} AS REAL)"))
@@ -15422,7 +15422,7 @@ class Session:
     # ---- reconcile --------------------------------------------------
     @staticmethod
     def _rq(name):
-        return '"' + str(name).replace('"', '""') + '"'
+        return _sq_quote_ident(name)
 
     def _recon_engine(self, left, right):
         """Pick the engine holding both tables (DuckDB preferred). Raises

@@ -27,6 +27,7 @@ the editor, explicitly for code that arrived in someone else's workflow.
 from __future__ import annotations
 
 import ast
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 import hashlib
 import re
 import sys
@@ -252,7 +253,7 @@ def _normalize_out(out) -> tuple[list[str], list[tuple]]:
 
 
 def _quote_ident(name: str) -> str:
-    return '"%s"' % str(name).replace('"', '""')
+    return _sq_quote_ident(name)
 
 
 def _create_temp_table(eng, table_name: str, columns: list[str], rows: list[tuple]):

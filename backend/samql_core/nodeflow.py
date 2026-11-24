@@ -19,6 +19,7 @@ connected. ``cols_of(select_sql)`` returns the column names of a relation.
 """
 
 import re
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 from collections import deque
 
 
@@ -119,7 +120,7 @@ def explain_node_error(node, raw):
 
 
 def _q(ident):
-    return '"' + str(ident).replace('"', '""') + '"'
+    return _sq_quote_ident(ident)
 
 
 def _node_map(graph):
@@ -252,7 +253,7 @@ def _brackets_to_idents(expr):
             if j != -1:
                 inner = expr[i + 1:j].strip()
                 if inner:
-                    out.append('"%s"' % inner.replace('"', '""'))
+                    out.append(_sq_quote_ident(inner))
                     i = j + 1
                     continue
         out.append(ch)
@@ -635,7 +636,7 @@ def _rewrite_tables_regex(q, name_to_rel):
             tail = m.string[m.end():]
             if has_alias(tail):
                 return m.group(1) + " " + r
-            return '%s %s AS "%s"' % (m.group(1), r, nm.replace('"', '""'))
+            return '%s %s AS %s' % (m.group(1), r, _sq_quote_ident(nm))
 
         out = pat.sub(repl, out)
     return out

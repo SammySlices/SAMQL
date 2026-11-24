@@ -11,6 +11,7 @@ results) wraps a columnar Arrow table with lazy per-page materialization.
 Both are list-like: ``len()``, integer/slice indexing, and iteration.
 """
 import datetime as _dt
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 import os
 import sqlite3
 import threading
@@ -600,7 +601,7 @@ class ParquetResultStore:
                 f"FROM read_parquet('{self._fwd}', file_row_number = true))")
 
     def _collist(self):
-        return ", ".join('"' + str(c).replace('"', '""') + '"'
+        return ", ".join(_sq_quote_ident(c)
                          for c in self._cols)
 
     def _run(self, sql, params=None):
@@ -737,13 +738,12 @@ class ParquetResultStore:
                     pass
 
         def colref(i):
-            c = str(self._cols[int(i)]).replace('"', '""')
-            return f'"{c}"'
+            return _sq_quote_ident(self._cols[int(i)])
         return (run, self._src(), colref,
                 (lambda e: f"TRY_CAST({e} AS DOUBLE)"))
 
     def _qcol(self, ix):
-        return '"' + str(self._cols[int(ix)]).replace('"', '""') + '"'
+        return _sq_quote_ident(self._cols[int(ix)])
 
     def _where(self, terms):
         """Build a DuckDB WHERE fragment + params from filter terms, each a
@@ -894,8 +894,8 @@ class ParquetResultStore:
         return view
 
     def sorted_view(self, col_ix, descending=False):
-        col = str(self._cols[col_ix]).replace('"', '""')
-        order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"} '
+        col = _sq_quote_ident(self._cols[col_ix])
+        order = (f'ORDER BY {col} {"DESC" if descending else "ASC"} '
                  f'{"NULLS FIRST" if descending else "NULLS LAST"}, '
                  f'"__rn"')
         key = ("sort", int(col_ix), bool(descending))
@@ -905,8 +905,8 @@ class ParquetResultStore:
         if sort_ix is None:
             order = 'ORDER BY "__rn"'
         else:
-            col = str(self._cols[int(sort_ix)]).replace('"', '""')
-            order = (f'ORDER BY "{col}" {"DESC" if descending else "ASC"} '
+            col = _sq_quote_ident(self._cols[int(sort_ix)])
+            order = (f'ORDER BY {col} {"DESC" if descending else "ASC"} '
                      f'{"NULLS FIRST" if descending else "NULLS LAST"}, '
                      f'"__rn"')
         where, params = self._where(terms)

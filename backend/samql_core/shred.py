@@ -20,6 +20,7 @@ executing the emitted SQL is the session's job.
 """
 
 import re
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 import functools
 
 from .diagnostics import _needs_quote
@@ -53,7 +54,7 @@ def _q(name):
     # created case, so don't gamble on identifier case folding), AND any
     # reserved keyword (a bare reserved word is a parser error).
     if _needs_quote(s) or s != s.lower() or s.lower() in _DUCKDB_RESERVED:
-        return '"%s"' % s.replace('"', '""')
+        return _sq_quote_ident(s)
     return s
 
 
@@ -69,7 +70,7 @@ def _qq(name):
     identifier in build_flatten_sql; _q (conditional) still serves the shred
     node. _rq() on the session side is likewise always-quote, so table-name
     quoting stays consistent."""
-    return '"%s"' % str(name).replace('"', '""')
+    return _sq_quote_ident(name)
 
 
 _SANITIZE_RE = re.compile(r"[^\w]+", re.UNICODE)

@@ -13267,7 +13267,7 @@ def backend_tests(datadir, csv_path, json_path):
         need("for attempt in (0, 1):" in sess
              and "remaining = failed" in sess,
              "reuse cleanup retries an interrupted DROP")
-        need('DROP VIEW IF EXISTS "temp"."main"."%s"' in sess
+        need('DROP VIEW IF EXISTS "temp"."main".%s' in sess
              and 'for reg in ("view_backing", "table_sources",'
                  ' "table_columns",' in sess
              and '"table_origins")' in sess,
@@ -35590,6 +35590,45 @@ def backend_tests(datadir, csv_path, json_path):
                      "%s pins duckdb below 2: %r" % (name, line))
         eq(found, 2, "both requirements files install duckdb")
 
+    def t_l9_one_identifier_quoter():
+        # L-9: the identifier quoter was copied into a dozen helpers
+        # (flatten._qi, diagnostics.q, session.q, engines.Q, ...). A copy
+        # that drifts (say, loses the quote doubling) is an injection bug in
+        # one code path only. Every helper now delegates to
+        # sqlutil.quote_ident; only sqlutil spells the escaping out.
+        import ast as _ast
+        import glob as _glob
+        core = os.path.join(BACKEND, "samql_core")
+        files = sorted(_glob.glob(os.path.join(core, "*.py")))
+        files.append(os.path.join(BACKEND, "server.py"))
+        esc = "replace('\"', '\"\"')"
+        copies = []
+        for f in files:
+            if os.path.basename(f) == "sqlutil.py":
+                continue
+            src = open(f, encoding="utf-8").read()
+            for n in _ast.walk(_ast.parse(src)):
+                if not isinstance(n, (_ast.FunctionDef, _ast.Lambda)):
+                    continue
+                seg = _ast.get_source_segment(src, n) or ""
+                body = [ln for ln in seg.splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
+                # a small helper whose whole job is the escaping
+                if esc in seg and len(body) <= 12:
+                    copies.append("%s:%d %s" % (os.path.basename(f), n.lineno,
+                                                getattr(n, "name", "lambda")))
+        eq(copies, [], "no identifier-quoting helper outside sqlutil")
+        from samql_core import sqlutil as _su, flatten as _fl, shred as _sh
+        from samql_core import engines as _en, profiler as _pf
+        from samql_core import python_node as _pn, assistant as _as
+        for nm in ('a"b', "plain", 'x""y', "sp ace"):
+            want = _su.quote_ident(nm)
+            for f in (_fl._qi, _sh._qq, _en._quote_ident, _pf._q,
+                      _pn._quote_ident, _as._quote_ident):
+                eq(f(nm), want, "%s quotes %r like sqlutil" % (f.__name__, nm))
+        eq(_sh._q('a"b'), '"a""b"', "the conditional quoter still escapes")
+        eq(_sh._q("plain"), "plain", "and still leaves a plain name bare")
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43635,6 +43674,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_l8_transport_round_trip_is_byte_exact),
         ("L-9: duckdb is pinned below 2 in every requirements file",
          t_l9_duckdb_pinned_below_2),
+        ("L-9: one identifier quoter (sqlutil.quote_ident)",
+         t_l9_one_identifier_quoter),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

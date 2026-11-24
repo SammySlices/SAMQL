@@ -12,6 +12,7 @@ per-column "top values" need their own GROUP BY, and on enormous tables
 those run against a bounded sample so profiling stays responsive.
 """
 import math
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 
 from .inference import date_format_label, detect_date_format
 
@@ -23,7 +24,7 @@ TOPN_SAMPLE_ROWS = 1_000_000
 
 
 def _q(name):
-    return '"' + str(name).replace('"', '""') + '"'
+    return _sq_quote_ident(name)
 
 
 def _stringify(v):

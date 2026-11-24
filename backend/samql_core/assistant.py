@@ -25,6 +25,7 @@ load/join/flatten behaviour is changed by this module.
 from __future__ import annotations
 
 import json
+from .sqlutil import quote_ident as _sq_quote_ident  # L-9: one quoter
 import os
 import socket
 import subprocess
@@ -796,7 +797,7 @@ def find_pack(root=None, preferred_model=None):
 
 
 def _quote_ident(name):
-    return '"' + str(name).replace('"', '""') + '"'
+    return _sq_quote_ident(name)
 
 
 def schema_prompt(tables, dialect="native"):
