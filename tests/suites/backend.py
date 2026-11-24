@@ -35401,6 +35401,36 @@ def backend_tests(datadir, csv_path, json_path):
             srv._downloads_dir = orig
             s.shutdown()
 
+    def t_l3_cancelled_ids_bounded_and_outer_run_kept():
+        # L-3: every cancelled id stayed in _cancelled_runs for the life of
+        # the session (an id that never registered was never discarded),
+        # and _exec_target's finally popped the run registration even when
+        # an outer run had registered the same id first.
+        import uuid as _uuid
+        s = _fresh_session()
+        try:
+            outer = {"engine": None, "tid": -1}
+            with s._running_lock:
+                s._running["live"] = outer
+            s.cancel_query("live")
+            for _ in range(10000):
+                s.cancel_query(_uuid.uuid4().hex)
+            need(len(s._cancelled_runs) <= 5000,
+                 "cancelled ids stay bounded: %d" % len(s._cancelled_runs))
+            need(s._run_is_cancelled("live"),
+                 "a cancel for a run still in flight is never evicted")
+            with s._running_lock:
+                s._running.pop("live", None)
+            s._cancelled_runs.discard("live")
+
+            with s._running_lock:
+                s._running["q-outer"] = outer
+            s._exec_target("SELECT 1", "__local__", query_id="q-outer")
+            need(s._running.get("q-outer") is outer,
+                 "an inner statement restores the outer run's registration")
+        finally:
+            s.shutdown()
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43434,6 +43464,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_l1_xlsx_headers_and_lineage_stay_text),
         ("L-2: two saved exports in the same second keep both files",
          t_l2_two_saved_exports_never_overwrite),
+        ("L-3: cancelled run ids stay bounded; an inner statement keeps the outer registration",
+         t_l3_cancelled_ids_bounded_and_outer_run_kept),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

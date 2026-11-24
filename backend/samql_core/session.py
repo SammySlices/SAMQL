@@ -575,6 +575,55 @@ def _row_predicate(terms):
     return ok
 
 
+class _CancelledIds:
+    """L-3: the set of run ids the user asked to stop, bounded.
+
+    Set-like (``add`` / ``discard`` / ``in``). An id that never registered
+    a run was never discarded, so the old plain set grew for the life of
+    the session. Past ``cap`` entries, ids older than ``max_age`` are
+    dropped first, then the oldest; an id ``keep`` says is still running
+    is never evicted, so a long loop always sees its Stop.
+    """
+
+    def __init__(self, keep=None, cap=4096, max_age=3600.0):
+        self._t = {}
+        self._keep = keep or (lambda _q: False)
+        self.cap = cap
+        self.max_age = max_age
+
+    def add(self, qid):
+        self._t.pop(qid, None)
+        self._t[qid] = time.monotonic()
+        if len(self._t) > self.cap:
+            self._prune()
+
+    def _prune(self):
+        now = time.monotonic()
+        for q, t in list(self._t.items()):
+            if now - t > self.max_age and not self._keep(q):
+                del self._t[q]
+        if len(self._t) <= self.cap:
+            return
+        # Insertion order is age order (add re-inserts).
+        for q in list(self._t):
+            if len(self._t) <= self.cap // 2:
+                break
+            if not self._keep(q):
+                del self._t[q]
+
+    def discard(self, qid):
+        self._t.pop(qid, None)
+
+    def __contains__(self, qid):
+        return qid in self._t
+
+    def __len__(self):
+        return len(self._t)
+
+    def __iter__(self):
+        return iter(list(self._t))
+
+
 class _NullCtx:
     def __enter__(self):
         return self
@@ -1057,7 +1106,8 @@ class Session:
         # checks this between statements so a cancel that lands in the gap
         # between engine calls -- where interrupt() has nothing to hit -- still
         # stops it promptly, not one iteration later.
-        self._cancelled_runs = set()
+        self._cancelled_runs = _CancelledIds(
+            keep=lambda q: q in self._running)
         # Serialises lazy DuckDB construction so two concurrent first-ops can't
         # each build a manager (each opening its own connection + temp file).
         self._duckdb_lock = threading.Lock()
@@ -9670,9 +9720,13 @@ class Session:
                 "tid": threading.get_ident(),
                 "deferred": True,
             }
+        outer = None
         if query_id:
             _clear_thread_cancel(engine)
             with self._running_lock:
+                # L-3: an outer run (a flow, a loop) may already own this id;
+                # put its registration back when this statement ends.
+                outer = self._running.get(query_id)
                 self._running[query_id] = registration
         try:
             return self._exec_target_inner(sql, target, engine, kind,
@@ -9681,7 +9735,11 @@ class Session:
         finally:
             if query_id:
                 with self._running_lock:
-                    self._running.pop(query_id, None)
+                    if self._running.get(query_id) is registration:
+                        if outer is not None:
+                            self._running[query_id] = outer
+                        else:
+                            self._running.pop(query_id, None)
                 _clear_thread_cancel(engine)
 
     def reinterrupt_if_cancelled(self, query_id):
