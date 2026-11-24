@@ -12663,8 +12663,9 @@ def backend_tests(datadir, csv_path, json_path):
              "stage 0: the cancel entry point exists"),
             ("class _ReadCursorHandle", ss,
              "stage 1: own-cursor reads are interrupt targets"),
-            ("cancel=self._cancel)", eg,
-             "stage 2: the row FETCH polls the cancel flag"),
+            ("cancel=self._cancel_view())", eg,
+             "stage 2: the row FETCH polls the cancel flag (H-2: the "
+             "per-thread view)"),
             ("raw, cell_capped = _cap_page_rows(raw)", ss,
              "stage 3: page conversion is bounded (cap before convert)"),
             ("def _send_cancelled():", sv,
@@ -13043,8 +13044,9 @@ def backend_tests(datadir, csv_path, json_path):
                "the fetch heartbeats rows-so-far (watchdog sees progress)")
             eng = open(os.path.join(BACKEND, "samql_core", "engines.py"),
                        encoding="utf-8").read()
-            need("cancel=self._cancel)" in eng,
-                 "the engine's execute passes its cancel flag to the fetch")
+            need("cancel=self._cancel_view())" in eng,
+                 "the engine's execute passes its (H-2: per-thread) cancel "
+                 "flag to the fetch")
             need("if isinstance(_e, InterruptedError) or _is_interrupt(_e):"
                  in eng,
                  "a cancel PROPAGATES instead of degrading to the spill "
@@ -34584,6 +34586,153 @@ def backend_tests(datadir, csv_path, json_path):
              and "_open_window_or_browser(launch_url, mode)" in src,
              "main publishes the record and opens the tokenized URL")
 
+    def t_h2_stop_one_run_spares_duckdb_siblings():
+        # H-2: Stop on run A used to fall back to DuckDBManager.interrupt()
+        # whenever A had no own cursor: that set the sticky engine-wide
+        # _cancel and interrupted every native op -- killing run B's read
+        # on another tab. A cancel must reach run A only.
+        import threading as _th
+        import time as _tm
+        from samql_core import HAS_DUCKDB
+        if not HAS_DUCKDB:
+            skip("duckdb not installed")
+        s = _fresh_session()
+        eng = s.get_duckdb()
+        out = {}
+
+        def run_b():
+            try:
+                out["b"] = eng.execute_read(
+                    "SELECT count(*) FROM range(300000000) t(x) "
+                    "WHERE (x*7919) % 1000003 = 5")
+            except Exception as e:
+                out["b_err"] = repr(e)
+
+        def run_a(started, go):
+            out["a_tid"] = _th.get_ident()
+            s._register_run("qA", eng)
+            started.set()
+            go.wait(30)
+            try:
+                eng.execute("SELECT 42")
+                out["a_ran"] = True
+            except Exception as e:
+                out["a_err"] = repr(e)
+            finally:
+                s._unregister_run("qA")
+
+        started, go = _th.Event(), _th.Event()
+        tb = _th.Thread(target=run_b, daemon=True)
+        ta = _th.Thread(target=run_a, args=(started, go), daemon=True)
+        tb.start()
+        ta.start()
+        started.wait(10)
+        _tm.sleep(0.4)  # B is inside its read
+        try:
+            s.cancel_query("qA")
+            need(not eng._cancel.is_set(),
+                 "a per-run cancel never sets the engine-wide _cancel")
+        finally:
+            go.set()
+            tb.join(60)
+            ta.join(30)
+        need("b_err" not in out and out.get("b") is not None,
+             "run B's read survives run A's Stop: %r"
+             % out.get("b_err"))
+        need("a_ran" not in out and "a_err" in out
+             and "interrupt" in out["a_err"].lower(),
+             "run A, cancelled while idle, does not go on to execute: %r"
+             % out)
+        # the pending cancel is consumed by the run's end: the same thread
+        # (pooled) can run again
+        need(not eng.thread_cancelled(out["a_tid"]),
+             "unregistering the run clears its pending cancel")
+        cols, rows = eng.execute("SELECT 1")
+        need(rows and rows[0][0] == 1, "the engine still runs new work")
+
+    def t_h2_stop_queued_sqlite_run_spares_lock_holder():
+        # H-2 (SQLite): the run was registered as the bare engine, so
+        # cancelling run A while it QUEUED on write_lock interrupted
+        # whoever held the lock (run B), and A then executed anyway.
+        import threading as _th
+        import time as _tm
+        s = _fresh_session()
+        eng = s.db
+        out = {}
+        b_in = _th.Event()
+
+        def run_b():
+            try:
+                with eng.write_lock:
+                    b_in.set()
+                    out["b"] = eng.execute(
+                        "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL "
+                        "SELECT x+1 FROM r WHERE x<3000000) "
+                        "SELECT count(*) FROM r")
+            except Exception as e:
+                out["b_err"] = repr(e)
+
+        def run_a(registered):
+            s._register_run("qA2", eng)
+            registered.set()
+            try:
+                eng.execute("SELECT 42")  # blocks on B's write_lock
+                out["a_ran"] = True
+            except Exception as e:
+                out["a_err"] = repr(e)
+            finally:
+                s._unregister_run("qA2")
+
+        registered = _th.Event()
+        tb = _th.Thread(target=run_b, daemon=True)
+        tb.start()
+        b_in.wait(10)
+        ta = _th.Thread(target=run_a, args=(registered,), daemon=True)
+        ta.start()
+        registered.wait(10)
+        _tm.sleep(0.2)  # A is queued on write_lock, B is executing
+        s.cancel_query("qA2")
+        tb.join(60)
+        ta.join(60)
+        need("b_err" not in out and out.get("b") is not None
+             and out["b"][1][0][0] == 3000000,
+             "the lock holder's statement is not interrupted: %r"
+             % out.get("b_err"))
+        need("a_ran" not in out and "interrupt" in out.get("a_err", "").lower(),
+             "the queued, cancelled run never executes: %r" % out)
+
+    def t_h2_beat_renudge_is_per_thread():
+        # H-2: _beat_conn was last-writer-wins, so the BeatDaemon's cancel
+        # re-nudge could interrupt another run's connection. It now keeps
+        # one entry per executing thread and re-nudges only cancelled ones.
+        from samql_core import engines as _en
+
+        class _Conn:
+            def __init__(self):
+                self.hits = 0
+
+            def interrupt(self):
+                self.hits += 1
+
+        m = _en.DuckDBManager.__new__(_en.DuckDBManager)
+        m._cancel = threading.Event()
+        m._conn = _Conn()
+        m.write_lock = _en._DeadlineRLock()
+        m._beat_depth = 0
+        m._thread_cancel_init()
+        ca, cb = _Conn(), _Conn()
+        m._beat_map = {101: [ca, 1], 202: [cb, 1]}
+        m._beat_depth = 2
+        m._cancel_tids.add(101)
+        _en._beat_tick(m)
+        need(ca.hits == 1 and cb.hits == 0,
+             "only the cancelled thread's connection is re-nudged: %d/%d"
+             % (ca.hits, cb.hits))
+        m._cancel.set()
+        _en._beat_tick(m)
+        need(ca.hits == 2 and cb.hits == 1,
+             "Stop-everything still re-nudges every executing connection")
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -42582,6 +42731,11 @@ def backend_tests(datadir, csv_path, json_path):
          "with its token", t_c1_launcher_attaches_only_to_own),
         ("C-1: the server publishes and removes its instance record",
          t_c1_server_publishes_instance),
+        ("H-2: Stop on one run spares other runs' DuckDB queries",
+         t_h2_stop_one_run_spares_duckdb_siblings),
+        ("H-2: Stop on a run queued on write_lock spares the SQLite lock "
+         "holder and never executes", t_h2_stop_queued_sqlite_run_spares_lock_holder),
+        ("H-2: BeatDaemon re-nudges per thread", t_h2_beat_renudge_is_per_thread),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

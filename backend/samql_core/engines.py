@@ -69,18 +69,38 @@ class _DeadlineRLock:
       * `with lock:` acquires with the default deadline and may raise
         EngineBusy -- in which case the body never runs and nothing is held.
     """
-    __slots__ = ("_lock", "timeout")
+    __slots__ = ("_lock", "timeout", "_owner", "_count", "owner_mx")
 
     def __init__(self, timeout=ENGINE_LOCK_TIMEOUT):
         self._lock = threading.RLock()
         self.timeout = timeout
+        # H-2: which thread is executing on the engine's main connection.
+        # A per-run cancel may interrupt the main connection only while the
+        # cancelled run's own thread holds it; owner_mx makes "check owner,
+        # then interrupt" atomic against the hand-over to the next holder.
+        self._owner = None
+        self._count = 0
+        self.owner_mx = threading.Lock()
+
+    def _took(self):
+        me = threading.get_ident()
+        with self.owner_mx:
+            if self._owner == me:
+                self._count += 1
+            else:
+                self._owner = me
+                self._count = 1
 
     def acquire(self, blocking=True, timeout=-1):
         if not blocking:
-            return self._lock.acquire(blocking=False)
+            got = self._lock.acquire(blocking=False)
+            if got:
+                self._took()
+            return got
         if timeout is None or timeout < 0:
             timeout = self.timeout
         if self._lock.acquire(blocking=True, timeout=timeout):
+            self._took()
             return True
         raise EngineBusy(
             "The database engine is busy: another operation has held it too "
@@ -88,15 +108,146 @@ class _DeadlineRLock:
             "happening, restart the app.")
 
     def release(self):
+        with self.owner_mx:
+            if self._owner == threading.get_ident():
+                self._count -= 1
+                if self._count <= 0:
+                    self._owner = None
+                    self._count = 0
         self._lock.release()
+
+    def owner(self):
+        """Thread id currently holding the lock (None when free)."""
+        return self._owner
 
     def __enter__(self):
         self.acquire()
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        self._lock.release()
+        self.release()
         return False
+
+
+class RunCancelled(Exception):
+    """H-2: raised when a thread whose run was cancelled reaches the engine
+    (e.g. it was still queued on write_lock when Stop arrived). The message
+    carries 'interrupted' so every existing cancel check recognises it."""
+
+    def __init__(self, msg="interrupted: the run was cancelled"):
+        super().__init__(msg)
+
+
+class _ThreadCancelView:
+    """Event-shaped cancel flag for ONE engine call: set when the engine-wide
+    cancel is set (Stop-everything / reset) or when the CALLING thread's own
+    run was cancelled. Fetch loops call is_set() from the executing thread."""
+
+    __slots__ = ("_m",)
+
+    def __init__(self, mgr):
+        self._m = mgr
+
+    def is_set(self):
+        ev = getattr(self._m, "_cancel", None)
+        if ev is not None and ev.is_set():
+            return True
+        return threading.get_ident() in _cancel_tids_of(self._m)
+
+
+def _cancel_tids_of(mgr):
+    tids = getattr(mgr, "_cancel_tids", None)
+    return tids if tids is not None else ()
+
+
+class _ThreadCancelMixin:
+    """H-2: per-run (per-thread) cancellation for an engine manager.
+
+    ``interrupt()`` is the engine-wide hammer (Stop everything, reset): it
+    trips the sticky ``_cancel`` Event and interrupts every connection.
+    ``interrupt_thread(tid)`` reaches ONE run: that thread's own-cursor op
+    if it has one, else the main connection only while that thread holds
+    it. Otherwise the thread is flagged, and it raises RunCancelled when it
+    next reaches the engine. Nothing engine-wide is set, so other runs'
+    queries and fetch loops carry on."""
+
+    def _thread_cancel_init(self):
+        self._cancel_tids = set()
+        self._cancel_tids_lock = threading.Lock()
+        self._beat_map = {}
+
+    def _tids_lock(self):
+        lk = getattr(self, "_cancel_tids_lock", None)
+        if lk is None:
+            lk = self._cancel_tids_lock = threading.Lock()
+            if getattr(self, "_cancel_tids", None) is None:
+                self._cancel_tids = set()
+        return lk
+
+    def thread_cancelled(self, tid=None):
+        tid = threading.get_ident() if tid is None else tid
+        return tid in _cancel_tids_of(self)
+
+    def clear_thread_cancel(self, tid=None):
+        tid = threading.get_ident() if tid is None else tid
+        with self._tids_lock():
+            self._cancel_tids.discard(tid)
+
+    def _raise_if_thread_cancelled(self):
+        if threading.get_ident() in _cancel_tids_of(self):
+            raise RunCancelled()
+
+    def _cancel_view(self):
+        return _ThreadCancelView(self)
+
+    def _interrupt_main_if_owned(self, tid):
+        """Interrupt the main connection iff ``tid`` is executing on it,
+        atomically against the lock changing hands."""
+        conn = getattr(self, "_conn", None)
+        if conn is None:
+            return False
+        lock = getattr(self, "write_lock", None)
+        mx = getattr(lock, "owner_mx", None)
+        owner = getattr(lock, "owner", None)
+        if mx is None or owner is None:
+            return False
+        with mx:
+            on_conn = owner() == tid
+            if not on_conn:
+                # a streaming cursor on the main connection holds no lock;
+                # its beat scope says it is stepping right now
+                ent = (getattr(self, "_beat_map", None) or {}).get(tid)
+                on_conn = bool(ent) and ent[0] is conn
+            if not on_conn:
+                return False
+            try:
+                conn.interrupt()
+            except Exception:
+                pass
+            return True
+
+    def interrupt_thread(self, tid):
+        """Cancel the run executing on thread ``tid`` and nothing else.
+        Returns "native", "main" or "pending" (flagged for its next call)."""
+        with self._tids_lock():
+            self._cancel_tids.add(tid)
+        ops = getattr(self, "_native_ops", None)
+        if ops:
+            lk = getattr(self, "_native_ops_lock", None)
+            if lk is not None:
+                with lk:
+                    h = ops.get(tid)
+            else:
+                h = ops.get(tid)
+            if h is not None:
+                try:
+                    h.interrupt()
+                except Exception:
+                    pass
+                return "native"
+        if self._interrupt_main_if_owned(tid):
+            return "main"
+        return "pending"
 
 
 # Opening a fresh, empty on-disk DuckDB file is sub-second; a wait much longer
@@ -649,7 +800,7 @@ def _rewrite_columns_sanitized(exec_conn, table_name, cols, *,
     return new_cols
 
 
-class DBManager:
+class DBManager(_ThreadCancelMixin):
     """SQLite-backed engine. In-memory by default; disk-backed when
     ``disk_backed=True`` (lower peak RAM, spills to a temp file)."""
 
@@ -683,6 +834,7 @@ class DBManager:
         self._beat_depth = 0
         self._beat_tid = None
         self._beat_conn = None
+        self._thread_cancel_init()
         self._beatd = _BeatDaemon(self)
         self.table_columns = {}
         self.table_sources = {}
@@ -1130,6 +1282,9 @@ class DBManager:
         # outliving the 90s stall threshold false-flagged as stalled (and
         # the cancel re-nudge never ran). Every execute now beats.
         with self.write_lock, _BeatScope(self, self.conn):
+            # H-2: a run cancelled while it queued on write_lock must not
+            # go on to execute once it gets the lock.
+            self._raise_if_thread_cancelled()
             statements = self._split_statements(sql)
             if not statements:
                 return None, None
@@ -2007,22 +2162,49 @@ class _BeatDaemon:
                 return  # manager collected -> this thread retires
             try:
                 if getattr(m, "_beat_depth", 0) > 0:
-                    tid = getattr(m, "_beat_tid", None)
-                    if tid:
-                        try:
-                            opreg.beat_on_thread(tid)
-                        except Exception:
-                            pass
-                    cancel = getattr(m, "_cancel", None)
-                    conn = getattr(m, "_beat_conn", None)
-                    if (cancel is not None and cancel.is_set()
-                            and conn is not None):
-                        try:
-                            conn.interrupt()
-                        except Exception:
-                            pass
+                    _beat_tick(m)
             except Exception:
                 pass
+
+
+def _beat_tick(m):
+    """One heartbeat: beat EVERY executing thread's op, and re-nudge the
+    connection of each thread whose cancel is pending (H-2: per thread --
+    the old single _beat_conn was last-writer-wins, so a re-nudge could hit
+    another run's connection)."""
+    beat_map = getattr(m, "_beat_map", None)
+    if beat_map is None:
+        tid = getattr(m, "_beat_tid", None)
+        conn = getattr(m, "_beat_conn", None)
+        entries = [(tid, conn)] if tid else []
+    else:
+        entries = [(t, e[0]) for t, e in list(beat_map.items())]
+    cancel = getattr(m, "_cancel", None)
+    everything = cancel is not None and cancel.is_set()
+    tids = _cancel_tids_of(m)
+    for tid, conn in entries:
+        try:
+            opreg.beat_on_thread(tid)
+        except Exception:
+            pass
+        if conn is None:
+            continue
+        if everything:
+            try:
+                conn.interrupt()
+            except Exception:
+                pass
+        elif tid in tids:
+            if conn is getattr(m, "_conn", None):
+                try:
+                    m._interrupt_main_if_owned(tid)
+                except Exception:
+                    pass
+            else:
+                try:
+                    conn.interrupt()
+                except Exception:
+                    pass
 
 
 class _BeatScope:
@@ -2039,13 +2221,29 @@ class _BeatScope:
 
     def __enter__(self):
         m = self._m
-        m._beat_tid = threading.get_ident()
+        tid = threading.get_ident()
+        m._beat_tid = tid
         m._beat_conn = self._conn
+        bm = getattr(m, "_beat_map", None)
+        if bm is not None:
+            ent = bm.get(tid)
+            if ent is None:
+                bm[tid] = [self._conn, 1]
+            else:
+                ent[1] += 1
         m._beat_depth = getattr(m, "_beat_depth", 0) + 1
         return self
 
     def __exit__(self, *exc):
         m = self._m
+        bm = getattr(m, "_beat_map", None)
+        if bm is not None:
+            tid = threading.get_ident()
+            ent = bm.get(tid)
+            if ent is not None:
+                ent[1] -= 1
+                if ent[1] <= 0:
+                    bm.pop(tid, None)
         m._beat_depth = max(0, getattr(m, "_beat_depth", 1) - 1)
         if m._beat_depth == 0:
             m._beat_conn = None
@@ -2082,7 +2280,7 @@ class _DuckBranchCursor:
             pass
 
 
-class DuckDBManager:
+class DuckDBManager(_ThreadCancelMixin):
     """DuckDB-backed engine (optional; requires the duckdb package).
     Used for Parquet/large-CSV scans and analytical SQL."""
 
@@ -2143,6 +2341,7 @@ class DuckDBManager:
         self._beat_depth = 0
         self._beat_tid = None
         self._beat_conn = None
+        self._thread_cancel_init()
         self._beatd = _BeatDaemon(self)
         self._open()
 
@@ -2349,12 +2548,17 @@ class DuckDBManager:
             except Exception:
                 pass
         with self.write_lock, _BeatScope(self, self.conn):
+            # H-2: a run cancelled while it queued on write_lock must not
+            # go on to execute once it gets the lock.
+            self._raise_if_thread_cancelled()
             cur = self.conn.execute(sql)
             if cur.description is None:
                 return None, None
             cols = [d[0] for d in cur.description]
+            # per-thread view: another run's Stop no longer aborts this
+            # fetch ("cancelled during row fetch")
             rows = _fetch_rows_arrow_or_spill(cur, len(cols),
-                                              cancel=self._cancel)
+                                              cancel=self._cancel_view())
             return cols, rows
 
     def execute_cursor(self, sql, batch=1000, same_conn=False):
@@ -2512,6 +2716,9 @@ class DuckDBManager:
         with self._native_ops_lock:
             self._native_ops[_tid] = cur
         try:
+            # H-2: checked AFTER the cursor is registered, so a per-run
+            # cancel either finds the cursor or is seen here.
+            self._raise_if_thread_cancelled()
             with _BeatScope(self, cur):
                 c = cur.execute(sql)
                 if c.description is None:

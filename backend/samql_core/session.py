@@ -86,6 +86,18 @@ _OOM_MARKERS = ("outofmemoryexception", "out of memory",
                 "failed to allocate", "could not allocate")
 
 
+def _clear_thread_cancel(engine, tid=None):
+    """H-2: drop a pending per-run cancel for this thread on ``engine`` when
+    a run starts or ends, so a pooled thread never carries one run's Stop
+    into the next run."""
+    fn = getattr(engine, "clear_thread_cancel", None)
+    if callable(fn):
+        try:
+            fn(tid)
+        except Exception:
+            pass
+
+
 def _looks_like_oom(message):
     """True when an engine error text is a DuckDB out-of-memory failure."""
     lowered = str(message or "").lower()
@@ -9493,7 +9505,10 @@ class Session:
 
     def _exec_target(self, sql, target, query_id=None, prefer_locked=False):
         engine, kind = self._engine_obj(target)
-        registration = engine
+        # H-2: always a thread-aware registration. A bare engine made
+        # cancel_query fall back to engine.interrupt(), which trips the
+        # engine-wide sticky cancel and kills every sibling run.
+        registration = {"engine": engine, "tid": threading.get_ident()}
         if (query_id and kind == "duckdb"
                 and getattr(engine, "concurrent_reads", False)
                 and not prefer_locked):
@@ -9508,6 +9523,7 @@ class Session:
                 "deferred": True,
             }
         if query_id:
+            _clear_thread_cancel(engine)
             with self._running_lock:
                 self._running[query_id] = registration
         try:
@@ -9518,6 +9534,7 @@ class Session:
             if query_id:
                 with self._running_lock:
                     self._running.pop(query_id, None)
+                _clear_thread_cancel(engine)
 
     def reinterrupt_if_cancelled(self, query_id):
         """Watchdog escalation hook: when a STALLED op was already
@@ -9551,6 +9568,16 @@ class Session:
         if target is None:
             return
         try:
+            # H-2: a thread-aware engine cancels exactly that run: its own
+            # cursor, else the main connection only while that thread is
+            # executing on it, else a pending flag it meets on its next
+            # engine call. No engine-wide sticky cancel.
+            per_thread = getattr(target, "interrupt_thread", None)
+            if (tid is not None and not deferred
+                    and entry.get("handle") is None
+                    and callable(per_thread)):
+                per_thread(tid)
+                return
             ops = getattr(target, "_native_ops", None)
             if tid is not None and ops:
                 h = None
@@ -14033,6 +14060,7 @@ class Session:
         in the progress registry so it shows on the activity dashboard and the
         stall watchdog can see it."""
         if query_id and engine is not None:
+            _clear_thread_cancel(engine)
             with self._running_lock:
                 self._running[query_id] = {
                     "engine": engine,
@@ -14051,8 +14079,10 @@ class Session:
     def _unregister_run(self, query_id):
         if query_id:
             with self._running_lock:
-                self._running.pop(query_id, None)
+                entry = self._running.pop(query_id, None)
                 self._cancelled_runs.discard(query_id)
+            if isinstance(entry, dict) and entry.get("tid") is not None:
+                _clear_thread_cancel(entry.get("engine"), entry.get("tid"))
             try:
                 opreg.end(query_id)
             except Exception:
