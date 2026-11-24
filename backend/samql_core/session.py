@@ -4953,6 +4953,9 @@ class Session:
                 # fresh recon-* id and the outer Stop never reaches its
                 # milestone gates (and a propagating interrupt becomes a 500).
                 "query_id": query_id,
+                # the inputs are this connection's TEMP flow tables: a
+                # separate read cursor can't see them
+                "connection_local": True,
             })
         finally:
             eng.table_columns.pop(ltmp, None)
@@ -15502,8 +15505,13 @@ class Session:
         # cursor -- no write-lock contention with everything else).
         # Journal-staged inputs are TEMP views (connection-local), so
         # those keep the locked path.
+        # A NodeFlow reconcile registers its TEMP flow tables in
+        # table_columns for the call; "registered" is not "real" there, and
+        # an own-cursor read failed with "Table __nbcache_... does not
+        # exist" (connection_local marks that case).
         _both_real = (left in getattr(eng, "table_columns", {})
-                      and right in getattr(eng, "table_columns", {}))
+                      and right in getattr(eng, "table_columns", {})
+                      and not spec.get("connection_local"))
         _rd = (eng.execute_read
                if _both_real and hasattr(eng, "execute_read")
                else eng.execute)

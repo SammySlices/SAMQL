@@ -34987,6 +34987,33 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_nodeflow_reconcile_reads_its_temp_inputs():
+        # The NodeFlow reconcile registers its TEMP flow tables in the
+        # catalog for the call, so the summary counts took the own-cursor
+        # read path -- a separate DuckDB connection that cannot see them
+        # ("Table __nbcache_... does not exist"). Found while validating
+        # the audit fixes (the HTTP suite's one long-standing failure).
+        s = _fresh_session()
+        try:
+            g = {"nodes": [
+                    {"id": "l", "type": "sql", "config": {
+                        "sql": "SELECT 'a' AS k, 10 AS amt UNION ALL "
+                               "SELECT 'b', 20"}},
+                    {"id": "r", "type": "sql", "config": {
+                        "sql": "SELECT 'a' AS k, 10 AS amt UNION ALL "
+                               "SELECT 'b', 25"}},
+                    {"id": "rc", "type": "reconcile",
+                     "config": {"label": "rc"}}],
+                 "edges": [{"from": {"node": "l", "port": "out"},
+                            "to": {"node": "rc", "port": "left"}},
+                           {"from": {"node": "r", "port": "out"},
+                            "to": {"node": "rc", "port": "right"}}]}
+            r = s.run_nodeflow_reconcile(g, "rc", ["k"], ["amt"])
+            need(not r.get("error"), "the reconcile runs: %s"
+                 % r.get("error"))
+        finally:
+            s.shutdown()
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43002,6 +43029,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_h5_diamond_survives_tiny_flow_cache),
         ("H-6: two runs on the same fingerprint keep their own cache tables",
          t_h6_same_fingerprint_runs_keep_their_tables),
+        ("NodeFlow reconcile reads its own TEMP inputs (no own-cursor "
+         "Catalog Error)", t_nodeflow_reconcile_reads_its_temp_inputs),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
