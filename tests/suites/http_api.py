@@ -96,7 +96,13 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             resp = conn.getresponse()
             resp.read()
             csp = resp.getheader("Content-Security-Policy") or ""
+            ctype = resp.getheader("Content-Type") or ""
             conn.close()
+            if (path == "/some/client/route"
+                    and not ctype.startswith("text/html")):
+                # no frontend build (a clean checkout): client routes are a
+                # plain-text 404, not the HTML shell
+                continue
             need(csp, "%s: HTML response has a Content-Security-Policy" % path)
             directives = {
                 part.strip().split(" ", 1)[0]: part.strip()
