@@ -1412,6 +1412,26 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         need(d.get("preview") is True and d.get("preview_limit") == 2,
              "nodeflow preview metadata returned over HTTP")
 
+    def t_python_trust_http():
+        # M-4: an unapproved Python script is refused with a structured
+        # flag; POST /api/python/trust approves its exact text.
+        code = "out = [{'m4': 1}]  # http trust"
+        g = {"nodes": [{"id": "p", "type": "python",
+                        "config": {"code": code}}], "edges": []}
+        st, d = c.js("POST", "/api/nodeflow/run",
+                     {"graph": g, "node": "p", "port": "out"})
+        eq(st, 200, "nodeflow/run status")
+        need(d.get("python_untrusted") and d.get("node") == "p",
+             "unapproved script refused over HTTP: %r" % d)
+        st, d = c.js("POST", "/api/python/trust", {"codes": [code]})
+        eq(st, 200, "python/trust status")
+        need(d.get("ok") and len(d.get("hashes") or []) == 1,
+             "python/trust returns the approved hash: %r" % d)
+        st, d = c.js("POST", "/api/nodeflow/run",
+                     {"graph": g, "node": "p", "port": "out"})
+        need(not d.get("error"), "approved script runs: %r" % d.get("error"))
+        eq(d.get("total_rows"), 1, "approved script returns its row")
+
     def t_nodeflow_run_batch_http():
         # Multi-target Run all route. The scheduler may group shared branches
         # or parallelise disjoint DuckDB branches, but the HTTP contract always
@@ -1989,6 +2009,8 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             ("POST /api/result/{id}/page (projection)", t_page_projection),
             ("HTML responses carry a script-src 'self' CSP",
              t_html_content_security_policy),
+            ("POST /api/python/trust gates Python nodes (M-4)",
+             t_python_trust_http),
             ("POST /api/query/{id}/cancel", t_cancel_route),
             ("POST /api/result/{id}/export", t_export),
             ("POST /api/table/{name}/profile", t_profile),

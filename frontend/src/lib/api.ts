@@ -1129,6 +1129,13 @@ export const api = {
       signal,
     }),
 
+  // M-4: approve Python-node scripts (their exact text) to run here.
+  pythonTrust: (codes: string[]) =>
+    jsonFetch<{ ok: boolean; hashes?: string[]; error?: string }>(
+      "/api/python/trust",
+      { method: "POST", body: JSON.stringify({ codes }) },
+    ),
+
   // --- saved secrets (DPAPI-encrypted passwords) ---
   secretSet: (key: string, value: string) =>
     jsonFetch<{ ok: boolean; available: boolean }>("/api/secrets/set", {

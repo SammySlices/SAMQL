@@ -31,6 +31,7 @@ import {
 } from "./InspectorControls";
 import { InspectorShell } from "./InspectorShell";
 import { SqlJoinIdeWindow } from "./SqlJoinIdeWindow";
+import { PythonScriptEditor } from "./PythonScriptEditor";
 import {
   resolveSqlJoinWiredTables,
   sqlJoinEditorTables,
@@ -6955,21 +6956,10 @@ export const NodeFlowInspector: React.FC<{ context: NodeFlowInspectorContext }> 
               {inspectorType === "python" && (
                 <>
                   <label className="nb2-lbl">Python script</label>
-                  <textarea
-                    className="nb2-in nb2-sql-area"
-                    rows={Math.max(
-                      8,
-                      Math.min(
-                        80,
-                        String(sel.config.code || "").split("\n").length + 1,
-                      ),
-                    )}
-                    spellCheck={false}
-                    value={sel.config.code || ""}
-                    placeholder={
-                      "# columns / rows / df from optional input\nout = df"
-                    }
-                    onChange={(e) => patch(sel.id, { code: e.target.value })}
+                  <PythonScriptEditor
+                    code={sel.config.code || ""}
+                    onChange={(code) => patch(sel.id, { code })}
+                    onToast={onToast}
                   />
                   <div className="nb2-hint-sm">
                     Runs inside SamQL&apos;s bundled Python (pandas included

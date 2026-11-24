@@ -15,9 +15,19 @@ Accepted ``out`` shapes:
   * list of row dicts: ``[{"a": 1}, {"a": 2}]``
   * ``{"columns": [...], "rows": [[...], ...]}``
   * pandas ``DataFrame`` (preferred when using pandas)
+
+M-4 -- THIS IS NOT A SECURITY SANDBOX. The script runs in SamQL's own
+process with the user's permissions. The import allowlist, the narrowed
+builtins and the dunder-name check below only stop accidents and the most
+obvious escapes; pandas alone can read and write files. The real control is
+the trust gate: a script runs only once its exact code (``code_hash``) has
+been approved on this computer -- automatically for code the user types in
+the editor, explicitly for code that arrived in someone else's workflow.
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import re
 import sys
 import threading
@@ -31,15 +41,15 @@ _ALLOWED_MODULES = frozenset({
     "math", "datetime", "json", "re", "collections", "itertools",
     "statistics", "decimal", "fractions", "functools", "operator",
     "string", "textwrap", "copy", "hashlib", "base64", "uuid",
-    "calendar", "heapq", "bisect", "random", "csv", "io",
+    "calendar", "heapq", "bisect", "random", "csv",
 })
 
 _SAFE_BUILTIN_NAMES = (
     "abs", "all", "any", "bool", "dict", "enumerate", "float", "format",
-    "frozenset", "getattr", "hasattr", "int", "isinstance", "issubclass",
+    "frozenset", "hasattr", "int", "isinstance", "issubclass",
     "iter", "len", "list", "map", "max", "min", "next", "object", "pow",
     "print", "range", "repr", "reversed", "round", "set", "slice", "sorted",
-    "str", "sum", "tuple", "type", "zip", "Exception", "ValueError",
+    "str", "sum", "tuple", "zip", "Exception", "ValueError",
     "TypeError", "KeyError", "IndexError", "RuntimeError", "StopIteration",
     "True", "False", "None",
 )
@@ -47,6 +57,39 @@ _SAFE_BUILTIN_NAMES = (
 
 class PythonNodeError(Exception):
     """User-facing failure from a Python node."""
+
+
+class PythonNodeUntrusted(PythonNodeError):
+    """The script's code has not been approved on this computer (M-4)."""
+
+    def __init__(self, message, code_hash=None):
+        super().__init__(message)
+        self.code_hash = code_hash
+
+
+def code_hash(code) -> str:
+    """Identity of a script for the trust gate: sha256 of its exact text."""
+    return hashlib.sha256(str(code or "").encode("utf-8")).hexdigest()
+
+
+def _check_source(src: str) -> None:
+    """Refuse double-underscore attribute access and names: they are the
+    road from any object to ``object.__subclasses__()`` and the
+    interpreter's internals. Not a sandbox (see the module docstring)."""
+    try:
+        tree = ast.parse(src, "<python-node>", "exec")
+    except SyntaxError:
+        return  # compile() reports it with the usual message
+    for node in ast.walk(tree):
+        name = None
+        if isinstance(node, ast.Attribute):
+            name = node.attr
+        elif isinstance(node, ast.Name):
+            name = node.id
+        if name and name.startswith("__"):
+            raise PythonNodeError(
+                "Python nodes can't use double-underscore names "
+                "(%s, line %s)." % (name, getattr(node, "lineno", "?")))
 
 
 class PythonNodeCancelled(PythonNodeError):
@@ -299,6 +342,7 @@ def run_script(
     src = (code or "").strip()
     if not src:
         raise PythonNodeError("Write a Python script in the Python node.")
+    _check_source(src)
 
     try:
         timeout_s = float(timeout_s)

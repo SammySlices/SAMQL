@@ -366,6 +366,13 @@ detects each at runtime and shows its status in the top bar.
 | `pywebview`  | Open SamQL in a native desktop window instead of a browser  |
 | `pywin32`    | Windows auth / impersonation for SQL Server (Windows only)  |
 
+**Python nodes are not a sandbox.** A Python node's script runs inside SamQL
+with your Windows permissions; the import list and other limits only stop
+accidents (pandas alone can read and write files). So a script runs only once
+it is approved on this computer: scripts you type in the node's editor are
+approved for you, and a script that came in someone else's workflow runs only
+after you read it and choose **Approve script**.
+
 ---
 
 ## Working with large files

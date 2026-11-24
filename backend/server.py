@@ -3800,6 +3800,16 @@ class Api:
         return {"ok": ok, "available": s.secrets.available}
 
     @staticmethod
+    def python_trust(s, m, body, ctx):
+        """M-4: approve Python-node scripts (their exact text) to run on this
+        computer. The editor sends code the user typed; the node's Approve
+        script button sends code that arrived in someone else's workflow."""
+        codes = (body or {}).get("codes") or []
+        if not isinstance(codes, list):
+            return {"ok": False, "error": "codes must be a list"}
+        return s.trust_python_code([c for c in codes if isinstance(c, str)])
+
+    @staticmethod
     def secrets_delete(s, m, body, ctx):
         b = body or {}
         return {"ok": s.secrets.delete(b.get("key"))}
@@ -4600,6 +4610,7 @@ ROUTES = [
     ("POST", r"^/api/api-preview$", Api.api_preview),
     ("POST", r"^/api/secrets/available$", Api.secrets_available),
     ("POST", r"^/api/secrets/set$", Api.secrets_set),
+    ("POST", r"^/api/python/trust$", Api.python_trust),
     ("POST", r"^/api/secrets/delete$", Api.secrets_delete),
     ("POST", r"^/api/secrets/status$", Api.secrets_status),
     ("POST", r"^/api/connection-profiles/list$", Api.connection_profiles_list),

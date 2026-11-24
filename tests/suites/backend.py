@@ -29705,6 +29705,9 @@ def backend_tests(datadir, csv_path, json_path):
                 {"id": "p", "type": "python",
                  "config": {"code": 'out = [{"a": 1}, {"a": 2}]'}}],
                 "edges": []}
+            # M-4: Python runs only approved code
+            s.trust_python_code([n["config"]["code"] for n in g_py["nodes"]
+                                 if n["type"] == "python"])
             r_py = s.run_nodeflow(g_py, "p", "out")
             need(not r_py.get("error"), "standalone python node runs: %s"
                  % r_py.get("error"))
@@ -29720,6 +29723,9 @@ def backend_tests(datadir, csv_path, json_path):
                  }}],
                 "edges": [{"from": {"node": "i", "port": "out"},
                            "to": {"node": "p", "port": "in"}}]}
+            # M-4: Python runs only approved code
+            s.trust_python_code([n["config"]["code"] for n in g_py2["nodes"]
+                                 if n["type"] == "python"])
             r_py2 = s.run_nodeflow(g_py2, "p", "out")
             need(not r_py2.get("error"), "python with input runs: %s"
                  % r_py2.get("error"))
@@ -29745,6 +29751,9 @@ def backend_tests(datadir, csv_path, json_path):
                  }}],
                 "edges": [{"from": {"node": "i", "port": "out"},
                            "to": {"node": "p", "port": "in"}}]}
+            # M-4: Python runs only approved code
+            s.trust_python_code([n["config"]["code"] for n in g_pd["nodes"]
+                                 if n["type"] == "python"])
             r_pd = s.run_nodeflow(g_pd, "p", "out")
             need(not r_pd.get("error"), "pandas python node runs: %s"
                  % r_pd.get("error"))
@@ -35257,6 +35266,54 @@ def backend_tests(datadir, csv_path, json_path):
         d = T.op_cache_dir("samql_shred_cache")
         need(os.path.realpath(d).startswith(inst + os.sep)
              and os.path.isdir(d), "op_cache_dir: %r" % d)
+
+    def t_m4_python_node_is_gated_and_narrower():
+        # M-4: the Python node "sandbox" is not a boundary (pandas alone can
+        # read and write files), and a workflow from a colleague ran its
+        # Python without asking. Code now runs only once approved on this
+        # computer (by hash); the obvious escape hatches are closed too.
+        from samql_core import python_node as pn
+        for bad in ("import io",
+                    "getattr(1, 'real')",
+                    "type(1)",
+                    "x = ().__class__.__base__.__subclasses__()",
+                    "x = (1).__class__"):
+            try:
+                pn.run_script(bad + "\nout = [{'a': 1}]")
+            except pn.PythonNodeError:
+                pass
+            else:
+                raise AssertionError("allowed in a Python node: %r" % bad)
+        # A per-run nonce: approvals persist in config, and other tests
+        # approve their own scripts.
+        import uuid as _uuid
+        code = 'out = [{"a": 1}, {"a": 2}]  # m4 %s' % _uuid.uuid4().hex
+        g = {"nodes": [{"id": "p", "type": "python",
+                        "config": {"code": code}}], "edges": []}
+        s = _fresh_session()
+        try:
+            r = s.run_nodeflow(g, "p", "out")
+            need(r.get("error") and r.get("python_untrusted")
+                 and r.get("node") == "p",
+                 "unapproved code is refused, naming the node: %r" % r)
+            need(not s.python_code_trusted(code), "not trusted yet")
+            out = s.trust_python_code([code])
+            need(out.get("ok") and out.get("hashes") == [pn.code_hash(code)],
+                 "trust returns the approved hash: %r" % out)
+            r = s.run_nodeflow(g, "p", "out")
+            need(not r.get("error"), "approved code runs: %r" % r.get("error"))
+            g2 = {"nodes": [{"id": "p", "type": "python",
+                             "config": {"code": code + "\n"}}], "edges": []}
+            need(s.run_nodeflow(g2, "p", "out").get("python_untrusted"),
+                 "an edited script needs approval again")
+        finally:
+            s.shutdown()
+        s2 = _fresh_session()
+        try:
+            need(s2.python_code_trusted(code),
+                 "an approval persists for the next session")
+        finally:
+            s2.shutdown()
 
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
@@ -43285,6 +43342,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_m7_concurrent_flows_keep_their_own_build_engine),
         ("M-10: flatten and shred staging live under the instance dir",
          t_m10_op_staging_is_per_instance),
+        ("M-4: Python nodes run only approved code, without io/getattr/type or dunder access",
+         t_m4_python_node_is_gated_and_narrower),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

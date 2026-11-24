@@ -1444,6 +1444,32 @@ class Session:
         self._restore_started = False
         return {"ok": True, "nuked": stats}
 
+    # M-4: approved Python-node scripts, by code hash, persisted in config
+    _PY_TRUST_KEY = "python_trusted_code"
+    _PY_TRUST_MAX = 2000
+    _py_trust_lock = threading.Lock()
+
+    def python_code_trusted(self, code):
+        """True once this exact script has been approved on this computer."""
+        from . import python_node as _pn
+        return _pn.code_hash(code) in set(
+            self.config.get(self._PY_TRUST_KEY) or [])
+
+    def trust_python_code(self, codes):
+        """Approve scripts (their exact text) to run in Python nodes. Called
+        when the user types code in the editor, or reviews and approves the
+        code of a workflow that came from someone else."""
+        from . import python_node as _pn
+        hashes = [_pn.code_hash(c) for c in (codes or [])
+                  if isinstance(c, str) and c.strip()]
+        if hashes:
+            with self._py_trust_lock:
+                have = [h for h in (self.config.get(self._PY_TRUST_KEY) or [])
+                        if isinstance(h, str) and h not in hashes]
+                self.config.set(self._PY_TRUST_KEY,
+                                (have + hashes)[-self._PY_TRUST_MAX:])
+        return {"ok": True, "hashes": hashes}
+
     def optional_features(self):
         import importlib.util as _ilu
         from .secretstore import dpapi_available
@@ -5573,6 +5599,18 @@ class Session:
                         _tok,
                         _re.sub(r"[^A-Za-z0-9]", "", str(nid)))
                     from . import python_node as _pynode
+                    _code = cfg.get("code") or ""
+                    if _code.strip() and not self.python_code_trusted(_code):
+                        # M-4: Python runs with the user's permissions and is
+                        # not sandboxed, so a script runs only once approved.
+                        err = nodeflow.NodeRunError(
+                            "This Python node's script hasn't been approved "
+                            "on this computer. Python runs with your "
+                            "permissions and isn't sandboxed: open the node, "
+                            "review the script, then choose Approve script.",
+                            node_id=nid, node_type="python")
+                        err.python_untrusted = _pynode.code_hash(_code)
+                        raise err
                     try:
                         _pynode.run_into_table(
                             eng, side,
@@ -6431,6 +6469,10 @@ class Session:
         nid = getattr(e, "node_id", None)
         if nid:
             out["node"] = nid
+        if getattr(e, "python_untrusted", None):
+            # M-4: the UI offers the approval instead of a plain failure
+            out["python_untrusted"] = True
+            out["code_hash"] = e.python_untrusted
         return out
 
     def run_nodeflow(self, graph, node_id, port, query_id=None,
