@@ -62,6 +62,7 @@ backend/samql_core/stores.py
 backend/samql_core/tmputil.py
 backend/samql_core/watchdog.py
 backend/samql_core/webscrape.py
+backend/samql_instance.py
 backend/server.py
 build.sh
 build.ps1

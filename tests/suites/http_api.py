@@ -112,17 +112,18 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         eq(st, 200, "health still served")
 
     def t_api_token_and_json_limit():
-        # The HTML shell sets an HttpOnly capability cookie. Unauthenticated
-        # local processes still cannot use sensitive endpoints without it.
+        # C-1: the capability cookie is never handed to an unauthenticated
+        # caller. On a shared host every session shares loopback, so a bare
+        # GET / used to give ANY local user the token. Now it gets a 401
+        # page with no Set-Cookie and no token in the body.
         import http.client
         conn = http.client.HTTPConnection(host, port, timeout=10)
         conn.request("GET", "/")
         resp = conn.getresponse()
         body = resp.read()
-        eq(resp.status, 200, "HTML shell status")
-        cookies = resp.getheader("Set-Cookie") or ""
-        need("samql_api_token=" in cookies and "HttpOnly" in cookies,
-             "HTML shell sets an HttpOnly API capability cookie")
+        eq(resp.status, 401, "unauthenticated HTML shell is refused")
+        eq(resp.getheader("Set-Cookie"), None,
+           "no capability cookie for an unauthenticated GET /")
         need(httpd.samql_api_token.encode() not in body,
              "HTML body must not embed the process API token")
         conn.close()
@@ -153,6 +154,56 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
                 os.environ.pop("SAMQL_JSON_BODY_MB", None)
             else:
                 os.environ["SAMQL_JSON_BODY_MB"] = old
+
+    def t_html_token_handoff():
+        # C-1: the launcher opens /?t=<token>; the server swaps the query
+        # token for the HttpOnly cookie once and redirects to the clean URL,
+        # so the token leaves the address bar and history.
+        import http.client
+        import samql_instance as _si
+        tok = httpd.samql_api_token
+
+        def get(path, headers=None):
+            conn = http.client.HTTPConnection(host, port, timeout=10)
+            conn.request("GET", path, headers=dict(headers or {}))
+            resp = conn.getresponse()
+            body = resp.read()
+            conn.close()
+            return resp, body
+
+        resp, _ = get("/?t=" + tok)
+        eq(resp.status, 303, "valid launch token redirects")
+        eq(resp.getheader("Location"), "/", "redirect drops the token")
+        cookie = resp.getheader("Set-Cookie") or ""
+        need(("samql_api_token=%s" % tok) in cookie and "HttpOnly" in cookie
+             and "SameSite=Strict" in cookie,
+             "launch token becomes the HttpOnly cookie: %r" % cookie)
+        resp, _ = get("/data/view?x=1&t=%s&y=2" % tok)
+        eq(resp.status, 303, "deep link with a token redirects")
+        eq(resp.getheader("Location"), "/data/view?x=1&y=2",
+           "only the token is stripped from the query")
+        resp, body = get("/?t=wrong-token")
+        eq(resp.status, 401, "a wrong launch token is refused")
+        eq(resp.getheader("Set-Cookie"), None, "no cookie for a wrong token")
+        resp, body = get("/", {"Cookie": "samql_api_token=%s" % tok})
+        eq(resp.status, 200, "the cookie authenticates the shell")
+        eq(resp.getheader("Set-Cookie"), None,
+           "an authenticated shell does not re-issue the cookie")
+        resp, body = get("/", {"X-SamQL-Token": tok})
+        eq(resp.status, 200, "the header authenticates the shell (e2e)")
+        need(("samql_api_token=%s" % tok) in
+             (resp.getheader("Set-Cookie") or ""),
+             "a header-authenticated shell gets the cookie for its API calls")
+        need(tok.encode() not in body, "the shell never embeds the token")
+        resp, _ = get("/favicon.ico")
+        eq(resp.status, 200, "brand assets stay public for the 401 page")
+        st, d = Client(c.base).js("GET", "/api/health")
+        eq(d.get("instance"), _si.token_fingerprint(tok),
+           "health publishes the token fingerprint, not the token")
+        need(tok not in json.dumps(d), "health never carries the token")
+        eq(server._launch_url(host, port, tok),
+           "http://%s:%s/?t=%s" % (host, port, tok),
+           "the console/browser launch URL carries the token")
 
     def t_static_path_containment():
         import http.client
@@ -999,8 +1050,22 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         eq(st, 200, "status")
         eq(str(d.get("app", "")).lower(), "samql",
            "health must mark app=SamQL so a probe can recognise it")
-        need(server._probe_existing(host, port),
-             "probe should see this live SamQL instance")
+        # C-1: 'app: samql' alone no longer identifies OUR server -- on a
+        # shared host it may be another user's. The probe also needs this
+        # user's instance record whose token matches health's fingerprint.
+        import samql_instance as _si
+        _si.remove_instance(port)
+        eq(server._probe_existing(host, port), None,
+           "no instance record: a SamQL here is not provably ours")
+        _si.write_instance(port, "someone-elses-token")
+        eq(server._probe_existing(host, port), None,
+           "a record whose token doesn't match health is not ours")
+        _si.write_instance(port, httpd.samql_api_token)
+        try:
+            eq(server._probe_existing(host, port), httpd.samql_api_token,
+               "probe returns our token for our own live instance")
+        finally:
+            _si.remove_instance(port)
 
     def t_brand_favicon():
         # The server must return a real PNG at /favicon.ico and /app-icon.png
@@ -1038,8 +1103,8 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         sk.bind((host, 0))
         dead = sk.getsockname()[1]
         sk.close()
-        eq(server._probe_existing(host, dead), False,
-           "probe of a closed port is False")
+        eq(server._probe_existing(host, dead), None,
+           "probe of a closed port finds nothing")
 
     def t_single_instance_attaches():
         # a second launch against a running instance attaches and exits
@@ -1049,7 +1114,16 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         orig_argv = sys.argv
         server.webbrowser.open = lambda u, *a, **k: opened.__setitem__("url", u)
         sys.argv = ["server.py", "--host", host, "--port", str(port)]
+        import samql_instance as _si
         try:
+            # C-1: another user's SamQL on the port (no record of ours) is
+            # never attached to -- this launch falls through and starts its
+            # own server on a free port.
+            _si.remove_instance(port)
+            server._maybe_attach_to_running()
+            eq(opened["url"], None,
+               "a SamQL that isn't ours is not attached to")
+            _si.write_instance(port, httpd.samql_api_token)
             raised = False
             try:
                 server._maybe_attach_to_running()
@@ -1057,9 +1131,11 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
                 raised = True
                 eq(e.code, 0, "attach exits cleanly")
             need(raised, "second launch must attach + exit, not fall through")
-            eq(opened["url"], "http://%s:%s/" % (host, port),
-               "attach opens a browser to the running instance (no window)")
+            eq(opened["url"], "http://%s:%s/?t=%s"
+               % (host, port, httpd.samql_api_token),
+               "attach opens our running instance with its launch token")
         finally:
+            _si.remove_instance(port)
             server.webbrowser.open = orig_open
             sys.argv = orig_argv
 
@@ -1862,6 +1938,8 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
              t_request_boundary_security),
             ("API token + JSON request ceiling",
              t_api_token_and_json_limit),
+            ("C-1: GET /?t=<token> swaps the launch token for the cookie",
+             t_html_token_handoff),
             ("static serving rejects traversal + symlink escapes",
              t_static_path_containment),
             ("unknown multipart route reclaims its spool",

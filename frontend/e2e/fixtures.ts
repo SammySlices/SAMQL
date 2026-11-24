@@ -149,7 +149,12 @@ export async function openApp(
   expectedView: "ide" | "notebook" | "nodeflow" | "dashboard" = "ide",
 ): Promise<void> {
   await seedStorageBeforeBoot(page, entries);
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  // C-1: like the launcher, open with the launch token; the server swaps it
+  // for the HttpOnly cookie and redirects to "/".
+  const launchToken = process.env.SAMQL_API_TOKEN;
+  await page.goto(launchToken ? `/?t=${encodeURIComponent(launchToken)}` : "/", {
+    waitUntil: "domcontentloaded",
+  });
   const app = page.getByTestId("samql-app");
   await expect(app).toBeVisible();
   await expect(app).toHaveAttribute("data-ready", "true");

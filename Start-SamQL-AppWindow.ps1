@@ -196,6 +196,35 @@ function Test-SamQLHealth {
     }
 }
 
+# C-1: the token of the SamQL on port P when it is THIS user's, else $null.
+# Every session on an RDS/Citrix host shares loopback, so "app: SamQL" in
+# /api/health may be another user's server. Ours publishes the fingerprint
+# (first 16 hex of SHA-256) of the token in our private instance record.
+function Get-SamQLOwnedToken {
+    param([int]$P)
+    try {
+        $cfg = $env:SAMQL_CONFIG_DIR
+        if ([string]::IsNullOrWhiteSpace($cfg)) {
+            $cfg = Join-Path $HOME ".samql"
+        }
+        $rec = Join-Path (Join-Path $cfg "instances") "$P.json"
+        if (-not (Test-Path $rec)) { return $null }
+        $token = (Get-Content -Raw -LiteralPath $rec | ConvertFrom-Json).token
+        if ([string]::IsNullOrEmpty($token)) { return $null }
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = $null
+        $wc.Headers.Add("Cache-Control", "no-cache")
+        $body = $wc.DownloadString("http://127.0.0.1:$P/api/health")
+        if ($body -notmatch '"instance"\s*:\s*"([0-9a-f]+)"') { return $null }
+        $published = $Matches[1]
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($token))
+        $hex = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+        if ($hex.Substring(0, 16) -eq $published) { return $token }
+    } catch { }
+    return $null
+}
+
 # Best-effort BootBar stage from /api/health (empty string when unavailable).
 function Get-SamQLHealthStage {
     param([int]$P)
@@ -276,6 +305,9 @@ if (-not (Test-SamQLPort -P $Port)) {
     }
 } elseif (-not (Test-SamQLHealth -P $Port)) {
     Fail-Visibly "Port $Port is in use by something that is not SamQL."
+} elseif ($null -eq (Get-SamQLOwnedToken -P $Port)) {
+    # C-1: never attach to another user's server on a shared host.
+    Fail-Visibly "Port $Port is running another user's SamQL. Start yours with -Port and a free port."
 } else {
     Set-SplashText "Reusing the server on port $Port."
 }
@@ -385,15 +417,22 @@ if (($null -ne $pyCmd) -and (Test-Path $launcherPy)) {
 }
 
 # ---- Edge/Chrome --app window (fallback: no pywebview launcher found) ----
+# C-1: open with ?t=<token>; the server swaps it for the HttpOnly cookie and
+# redirects to the clean URL. A shell opened without it gets a 401 page.
+$launchToken = Get-SamQLOwnedToken -P $Port
+$openUrl = $url
+if ($null -ne $launchToken) {
+    $openUrl = "$url/?t=" + [System.Uri]::EscapeDataString($launchToken)
+}
 $bx = Find-BrowserExe -Which $Browser
 if ($null -eq $bx) {
     Set-SplashText "No Chrome or Edge found; opening a tab instead."
     Close-Splash
-    Start-Process $url
+    Start-Process $openUrl
     exit 0
 }
 Set-SplashText "Opening the app window..."
-$bargs = @("--app=$url")
+$bargs = @("--app=$openUrl")
 if ($WindowSize -match '^\d+,\d+$') {
     $bargs += "--window-size=$WindowSize"
 }

@@ -1,8 +1,15 @@
+import { randomBytes } from "node:crypto";
 import { defineConfig } from "@playwright/test";
 
 const python = process.env.SAMQL_TEST_PYTHON || "python";
 const port = Number(process.env.SAMQL_TEST_PORT || "8765");
 const baseURL = `http://127.0.0.1:${port}`;
+// C-1: the server only hands its HttpOnly cookie to a launch URL carrying
+// the token (/?t=...). Fix the token here so the server (webServer env) and
+// openApp() (workers inherit this env) agree on it.
+if (!process.env.SAMQL_API_TOKEN) {
+  process.env.SAMQL_API_TOKEN = randomBytes(24).toString("hex");
+}
 
 export default defineConfig({
   testDir: "./e2e",

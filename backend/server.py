@@ -36,12 +36,14 @@ import traceback
 import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, parse_qsl, unquote, urlencode
 
 # Make ``samql_core`` importable whether we run from source or frozen.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+
+import samql_instance  # noqa: E402  (stdlib-only; per-user instance records)
 
 
 # ---- single instance -------------------------------------------------------
@@ -71,8 +73,12 @@ def _ui_mode(args):
 
 
 def _probe_existing(host, port, timeout=0.6):
-    """True if a SamQL instance is already serving on host:port (identified by
-    the /api/health 'app' marker, so we don't mistake some other server)."""
+    """The launch token of OUR SamQL instance on host:port, else None.
+
+    C-1: the /api/health 'app' marker only says *a* SamQL answers. On a
+    shared Windows host (RDS/Citrix) every session shares loopback, so it may
+    be another user's server. It is ours only when this user's instance
+    record for the port holds a token whose fingerprint health publishes."""
     import urllib.request as _r
     import json as _j
     try:
@@ -82,9 +88,18 @@ def _probe_existing(host, port, timeout=0.6):
         with _op.open("http://%s:%s/api/health" % (host, port),
                         timeout=timeout) as resp:
             data = _j.loads(resp.read().decode("utf-8", "replace") or "{}")
-        return str(data.get("app", "")).lower() == "samql"
     except Exception:
-        return False
+        return None
+    return samql_instance.owned_token(port, data)
+
+
+def _launch_url(host, port, token=None):
+    """The URL that opens the UI: ``?t=`` is swapped for the HttpOnly cookie
+    by the server and stripped from the address bar (C-1)."""
+    base = "http://%s:%s/" % (host, port)
+    if not token:
+        return base
+    return base + "?" + urlencode({"t": str(token)})
 
 
 def _ask_focus(host, port, timeout=2.0):
@@ -115,9 +130,10 @@ def _maybe_attach_to_running():
     mode = _ui_mode(args)
     if mode == "none":
         return
-    if not _probe_existing(args.host, args.port):
+    token = _probe_existing(args.host, args.port)
+    if not token:
         return
-    url = "http://%s:%s/" % (args.host, args.port)
+    url = _launch_url(args.host, args.port, token)
     focused = False
     if mode == "window":
         focused = _ask_focus(args.host, args.port)
@@ -656,6 +672,30 @@ def _favicon_ico_bytes():
             if data and data[:4] == b"\x00\x00\x01\x00":
                 return data, "derived from %s %s" % (ptag, src_png)
     return _brand.app_ico(), "embedded"
+
+
+# C-1: what an unauthenticated browser gets instead of the shell. It names
+# the way in (the launcher, or the tokenized link the console prints) and
+# carries no secret.
+_LOCKED_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SamQL - open from the launcher</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font:16px/1.6 system-ui,Segoe UI,Roboto,sans-serif;
+         background:#16181c; color:#e7e9ee; display:flex;
+         min-height:100vh; align-items:center; justify-content:center; }
+  .card { max-width:620px; padding:40px; }
+  h1 { color:#54b949; margin:0 0 8px; font-size:28px; }
+  .muted { color:#9aa3b2; }
+</style></head><body><div class="card">
+<h1>SamQL</h1>
+<p>This SamQL server only opens for the person who started it.</p>
+<p class="muted">Open SamQL from its launcher (SamQL-AppWindow), or use the
+link printed in the SamQL console window. A bookmark of this address alone
+can't sign you in.</p>
+</div></body></html>"""
 
 
 # A friendly placeholder shown when the frontend has not been built yet.
@@ -1280,6 +1320,7 @@ def _graceful_shutdown(*_args):
         _wd.stop()
     except Exception:
         pass
+    _unpublish_instance()
     try:
         tmputil.cleanup_instance()
     except Exception as exc:
@@ -1297,6 +1338,31 @@ def _graceful_shutdown(*_args):
         _destroy_window()
     except Exception as exc:
         print("[samql] shutdown: window destroy failed: %s" % exc, file=sys.stderr)
+
+
+_PUBLISHED_PORT = [None]
+
+
+def _publish_instance(port, token):
+    try:
+        samql_instance.write_instance(port, token, os.getpid(), BUILD)
+        _PUBLISHED_PORT[0] = port
+    except Exception as exc:
+        # The UI still opens from this console's link; only the launcher's
+        # reattach needs the record.
+        print("[samql] could not write the instance record: %s" % exc,
+              file=sys.stderr)
+
+
+def _unpublish_instance():
+    port = _PUBLISHED_PORT[0]
+    if port is None:
+        return
+    _PUBLISHED_PORT[0] = None
+    try:
+        samql_instance.remove_instance(port, pid=os.getpid())
+    except Exception:
+        pass
 
 
 def _install_exit_handlers():
@@ -4765,9 +4831,6 @@ class Handler(BaseHTTPRequestHandler):
         headers = dict(extra_headers or {})
         if str(content_type or "").lower().startswith("text/html"):
             headers.setdefault("Content-Security-Policy", _HTML_CSP)
-            token = str(getattr(self.server, "samql_api_token", "") or "")
-            if token and "Set-Cookie" not in headers:
-                headers["Set-Cookie"] = _api_token_set_cookie(token)
         enc = None
         # Transparently gzip large, compressible payloads when the client
         # asks for it (result pages and the JS bundle compress a lot;
@@ -4911,10 +4974,53 @@ class Handler(BaseHTTPRequestHandler):
             supplied = _token_from_cookie_header(self.headers.get("Cookie"))
         return bool(supplied and hmac.compare_digest(expected, supplied))
 
-    def _emit_api_token_cookie(self):
-        token = str(getattr(self.server, "samql_api_token", "") or "")
-        if token:
-            self.send_header("Set-Cookie", _api_token_set_cookie(token))
+    def _shell_auth_headers(self):
+        """C-1: may this request see the HTML shell? Returns extra headers
+        when it may ({} for a valid cookie; the cookie itself for a valid
+        X-SamQL-Token header, which headless/e2e clients use), else None.
+        The cookie is never issued to an unauthenticated request -- every
+        session on a shared host can reach loopback."""
+        expected = str(getattr(self.server, "samql_api_token", "") or "")
+        if not expected:
+            return None
+        cookie = _token_from_cookie_header(self.headers.get("Cookie"))
+        if cookie and hmac.compare_digest(expected, cookie):
+            return {}
+        supplied = str(self.headers.get("X-SamQL-Token") or "")
+        if supplied and hmac.compare_digest(expected, supplied):
+            return {"Set-Cookie": _api_token_set_cookie(expected)}
+        return None
+
+    def _launch_token_handoff(self, parsed):
+        """C-1: GET <path>?t=<token> (the launcher's URL) sets the HttpOnly
+        cookie once and redirects to the same path without the token, so it
+        leaves the address bar. A wrong token falls through to the shell
+        gate, which refuses it."""
+        pairs = parse_qsl(parsed.query or "", keep_blank_values=True)
+        supplied = [v for k, v in pairs if k == "t"]
+        expected = str(getattr(self.server, "samql_api_token", "") or "")
+        if not supplied or not expected:
+            return False
+        if not hmac.compare_digest(expected, str(supplied[0])):
+            return False
+        rest = [(k, v) for k, v in pairs if k != "t"]
+        # Collapse leading slashes: "//host/" would be a scheme-relative
+        # redirect off-site.
+        location = "/" + (parsed.path or "/").lstrip("/")
+        if rest:
+            location += "?" + urlencode(rest)
+        self._send_bytes(303, b"", "text/plain", {
+            "Location": location,
+            "Set-Cookie": _api_token_set_cookie(expected),
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+        })
+        return True
+
+    def _send_locked_shell(self):
+        self._send_bytes(401, _LOCKED_HTML.encode("utf-8"),
+                         "text/html; charset=utf-8",
+                         {"Cache-Control": "no-store"})
 
     def _request_boundary_allowed(self):
         return self._request_host_allowed() and self._request_origin_allowed()
@@ -5003,6 +5109,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET":
             if self._serve_brand(path):
                 return
+            if self._launch_token_handoff(parsed):
+                return
             self._serve_static(path)
         else:
             self._send_json(405, {"error": "Method not allowed"})
@@ -5022,7 +5130,12 @@ class Handler(BaseHTTPRequestHandler):
         # Static UI assets also do not need the session; API routes below
         # still wait on get_session() as before.
         if path == "/api/health" and method in ("GET", "HEAD"):
-            self._send_json(200, _health_payload(SESSION))
+            payload = _health_payload(SESSION)
+            # C-1: a launcher proves a server is its OWN by matching this
+            # against the token in its private instance record.
+            payload["instance"] = samql_instance.token_fingerprint(
+                getattr(self.server, "samql_api_token", ""))
+            self._send_json(200, payload)
             return
         body = None
         raw = b""
@@ -5230,10 +5343,14 @@ class Handler(BaseHTTPRequestHandler):
         if frontend_dir is None:
             # No build yet: serve placeholder for the root, 404 otherwise.
             if path in ("/", "/index.html"):
+                auth = self._shell_auth_headers()
+                if auth is None:
+                    self._send_locked_shell()
+                    return
                 data = _inject_api_token_html(
                     _PLACEHOLDER_HTML.encode("utf-8"),
                     getattr(self.server, "samql_api_token", ""))
-                self._send_bytes(200, data, "text/html; charset=utf-8")
+                self._send_bytes(200, data, "text/html; charset=utf-8", auth)
             else:
                 self._send_bytes(404, b"Not found", "text/plain")
             return
@@ -5259,13 +5376,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
         ctype, _ = mimetypes.guess_type(full)
         ctype = ctype or "application/octet-stream"
+        auth = {}
+        if ctype == "text/html":
+            # C-1: the shell (and its SPA fallback) needs the capability.
+            # Assets stay public: they hold no secret.
+            auth = self._shell_auth_headers()
+            if auth is None:
+                self._send_locked_shell()
+                return
         try:
             with open(full, "rb") as f:
                 data = f.read()
         except Exception:
             self._send_bytes(500, b"Read error", "text/plain")
             return
-        headers = {}
+        headers = dict(auth)
         # long-cache fingerprinted assets, no-cache the HTML shell
         if "/assets/" in path:
             headers["Cache-Control"] = "public, max-age=31536000, immutable"
@@ -5284,15 +5409,13 @@ class Handler(BaseHTTPRequestHandler):
 # Server lifecycle / launcher
 # --------------------------------------------------------------------- #
 def _find_free_port(host, preferred):
-    for port in [preferred] + list(range(preferred + 1, preferred + 50)):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
-            sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sk.bind((host, port))
-                return port
-            except OSError:
-                continue
-    return preferred
+    # C-1: probe with the same exclusive bind the server uses. On Windows
+    # SO_REUSEADDR let this probe "succeed" on a port another user's SamQL
+    # was already listening on.
+    if not preferred:
+        return 0  # the OS picks an ephemeral port
+    port = samql_instance.free_port(preferred, host)
+    return port or preferred
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -5308,6 +5431,15 @@ class _QuietServer(ThreadingHTTPServer):
     print as usual so genuine bugs still surface.
     """
     daemon_threads = True
+    # C-1: never share a port that is already bound. On Windows
+    # SO_REUSEADDR lets a second socket bind another user's LISTENING port,
+    # so bind with SO_EXCLUSIVEADDRUSE instead (server_bind below).
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            samql_instance.exclusive_bind(self.socket)
+        super().server_bind()
 
     def handle_error(self, request, client_address):
         if isinstance(sys.exc_info()[1], ConnectionError):
@@ -5476,8 +5608,10 @@ def main(argv=None):
 
     # Defensive re-check (the module entry point also checks before the heavy
     # import): if a copy started in the meantime, surface it and stop.
-    if mode != "none" and _probe_existing(args.host, args.port):
-        url = "http://%s:%s/" % (args.host, args.port)
+    existing = (_probe_existing(args.host, args.port)
+                if mode != "none" else None)
+    if existing:
+        url = _launch_url(args.host, args.port, existing)
         if not (mode == "window" and _ask_focus(args.host, args.port)):
             try:
                 webbrowser.open(url)
@@ -5588,6 +5722,11 @@ def main(argv=None):
     httpd, port = make_server(args.host, args.port)
     _HTTPD = httpd
     url = f"http://{args.host}:{port}/"
+    # C-1: publish {port, pid, token} where only this user can read it, so
+    # this user's launcher can open the UI and recognise the server as its
+    # own. Removed again on exit.
+    _publish_instance(port, httpd.samql_api_token)
+    launch_url = _launch_url(args.host, port, httpd.samql_api_token)
 
     _install_exit_handlers()
 
@@ -5666,13 +5805,14 @@ def main(argv=None):
 
     bar.stop()  # clear the animation before printing the final status
     print(f"    - ready  ->  {url}   (build {BUILD})", flush=True)
+    print(f"    - open   ->  {launch_url}", flush=True)
     print(
         "    frontend: " +
         ("built" if _FRONTEND_DIR else "NOT built (placeholder shown)"),
         flush=True)
     print("\n  SamQL is running. Press Ctrl+C to stop.\n", flush=True)
 
-    launched = _open_window_or_browser(url, mode)
+    launched = _open_window_or_browser(launch_url, mode)
     try:
         if launched and launched[0] == "webview":
             _, webview, _url = launched

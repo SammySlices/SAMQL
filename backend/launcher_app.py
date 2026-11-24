@@ -25,12 +25,15 @@ backend's no-new-dependencies rule holds.
 import argparse
 import atexit
 import os
+import secrets
 import socket
 import subprocess
 import sys
 import threading
 import tempfile
 import time
+
+import samql_instance  # stdlib-only per-user instance records (C-1)
 
 # API nodes may target services on a private/LAN address.  This environment
 # override is inherited by the server launched below; cloud-metadata blocking
@@ -73,7 +76,20 @@ _AUMID_SET = []   # filled when SetCurrentProcessExplicitAppUserModelID succeeds
 # .534: one SamQL at a time -- a named mutex closes the double-click
 # race, and a window scan surfaces an already-open SamQL instead of
 # opening a second one.
-_MUTEX_NAME = "Local\\SamQL.AppWindow"
+def _user_tag():
+    """A stable, filesystem/kernel-name-safe tag for the signed-in user.
+    C-1: the launch mutex is per user, never shared across accounts."""
+    import hashlib
+    who = (os.environ.get("USERDOMAIN", "") + "\\"
+           + (os.environ.get("USERNAME") or os.environ.get("USER") or ""))
+    try:
+        who += "|" + os.path.expanduser("~")
+    except Exception:
+        pass
+    return hashlib.sha256(who.lower().encode("utf-8")).hexdigest()[:16]
+
+
+_MUTEX_NAME = "Local\\SamQL.AppWindow." + _user_tag()
 _MUTEX_HANDLE = []
 _MUTEX_WAIT_S = 10.0  # .537: grace for a booting first click's window
 # Must track SERVER_BOOT_TIMEOUT_S -- a shorter mutex budget used to treat a
@@ -419,6 +435,10 @@ def clean_child_env(env=None):
 
 
 _SERVER_PROC = None   # .512: the Popen of a server WE spawned (else None)
+# C-1: the API token of the server WE spawn. Generated once per launcher and
+# handed to every (re)spawn, so the window's HttpOnly cookie keeps working
+# after the supervisor restarts the backend.
+_LAUNCH_TOKEN = [None]
 _BOOT_PORT = [None]             # port of the server WE spawned (exit reaper)
 _LEAVE_SERVER_RUNNING = [False]  # intentional keeps (see below)
 
@@ -471,6 +491,7 @@ def start_server(port, splash):
                     | 0x00000200)  # CREATE_NEW_PROCESS_GROUP
     env = clean_child_env()
     env["SAMQL_PORT"] = str(port)
+    env["SAMQL_API_TOKEN"] = _launch_token()
     # Do NOT set SAMQL_PARENT_PID here: the browser --app fallback exits the
     # launcher immediately after opening Edge/Chrome, and a parent-watchdog
     # would kill the server under that window. Native AppWindow close calls
@@ -523,6 +544,40 @@ def start_server(port, splash):
             except Exception as e:
                 write_log("WARN could not start %s (%s)" % (path, e))
     return False
+
+
+def _launch_token():
+    """The token for servers this launcher spawns (C-1). An admin's
+    SAMQL_API_TOKEN wins; otherwise one random token per launcher."""
+    if not _LAUNCH_TOKEN[0]:
+        configured = (os.environ.get("SAMQL_API_TOKEN") or "").strip()
+        _LAUNCH_TOKEN[0] = configured or secrets.token_urlsafe(32)
+    return _LAUNCH_TOKEN[0]
+
+
+def _owned_token(port):
+    """C-1: the token of the SamQL on ``port`` when it is THIS user's
+    (its /api/health fingerprint matches our private instance record),
+    else None. 'app: samql' alone may be another user's server: every
+    session on an RDS/Citrix host shares loopback."""
+    return samql_instance.owned_token(port, _fetch_health(port))
+
+
+def _find_own_instance(exclude=None):
+    """(port, token) of a live SamQL of ours on any port, else (None, None).
+    A user moved off the preferred port by someone else's server finds
+    their own again on the next launch instead of starting another."""
+    for rec in samql_instance.list_instances():
+        try:
+            p = int(rec.get("port") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not p or p == exclude or not port_open(p):
+            continue
+        tok = _owned_token(p)
+        if tok:
+            return p, tok
+    return None, None
 
 
 def _server_alive_now(port):
@@ -2682,17 +2737,43 @@ def main(argv=None):
         splash.set_text("Opening SamQL...")
 
     we_started_server = False
+    launch_token = None
     if port_open(args.port):
         # .512: something answers -- make sure it's ACTUALLY SamQL before
         # attaching (a foreign process on 8765 used to get our window
         # pointed at it). The health probe is proxy-free (.509).
         if _is_samql(args.port):
-            write_log("INFO reusing the SamQL server already on port %d"
-                      % args.port)
-            _ping_maintenance(args.port)
+            # C-1: and that it is OURS. Another user's SamQL on a shared
+            # host answers the same health marker.
+            launch_token = _owned_token(args.port)
+            if launch_token:
+                write_log("INFO reusing the SamQL server already on port %d"
+                          % args.port)
+            else:
+                own_port, own_token = _find_own_instance(exclude=args.port)
+                if own_port:
+                    write_log("INFO port %d is another user's SamQL -- "
+                              "reusing our own server on port %d"
+                              % (args.port, own_port))
+                    args.port, launch_token = own_port, own_token
+                else:
+                    alt = samql_instance.free_port(args.port + 1)
+                    if not alt:
+                        fail_visibly(splash, "Port %d is held by another "
+                                     "user's SamQL and no free port was "
+                                     "found near it -- use --port."
+                                     % args.port)
+                    write_log("INFO port %d is another user's SamQL -- "
+                              "starting our own server on port %d"
+                              % (args.port, alt))
+                    args.port = alt
         else:
             fail_visibly(splash, "Port %d is in use by something that is "
                          "not SamQL -- close it or use --port." % args.port)
+    if launch_token:
+        # reusing our own live server: take the previous sessions'
+        # leftovers now (daemon thread; never blocks the handoff)
+        _ping_maintenance(args.port)
     if not port_open(args.port):
         if args.no_server:
             fail_visibly(splash, "SamQL is not running on port %d "
@@ -2724,8 +2805,11 @@ def main(argv=None):
         # .544: our own boot succeeded -- take the previous sessions'
         # leftovers (dead-instance temp + hard-exit _MEI orphans) now.
         _ping_maintenance(args.port)
+        launch_token = _launch_token()
 
-    url = "http://127.0.0.1:%d/" % args.port
+    # C-1: open with ?t=<token>; the server swaps it for the HttpOnly
+    # cookie and redirects to the clean URL.
+    url = samql_instance.launch_url(args.port, launch_token)
 
     # .546: if we started the server, supervise it while the window is
     # open -- respawn it in place if standby/a kill/a crash takes it, so

@@ -6173,7 +6173,7 @@ def backend_tests(datadir, csv_path, json_path):
                  "bracketed-dot markers")
             spec = open(os.path.join(BACKEND, "samql.spec"),
                         encoding="utf-8").read()
-            need('hiddenimports = ["samql_core"]' in spec
+            need('hiddenimports = ["samql_core", "samql_instance"]' in spec
                  and 'name="SamQL"' in spec
                  and "_brand.app_ico()" in spec
                  and "overwrite unconditionally" in spec,
@@ -9271,9 +9271,11 @@ def backend_tests(datadir, csv_path, json_path):
 
         def get(path):
             try:
-                with _ur7.urlopen(
-                        "http://127.0.0.1:%d%s" % (port7, path),
-                        timeout=10) as r:
+                # C-1: HTML needs the launch token (header form)
+                req7 = _ur7.Request(
+                    "http://127.0.0.1:%d%s" % (port7, path),
+                    headers={"X-SamQL-Token": httpd7.samql_api_token})
+                with _ur7.urlopen(req7, timeout=10) as r:
                     return r.status, r.read().decode("utf-8", "replace")
             except _ue7.HTTPError as he:
                 return he.code, he.read().decode("utf-8", "replace")
@@ -9647,7 +9649,7 @@ def backend_tests(datadir, csv_path, json_path):
             keep = {n2: getattr(_LA, n2) for n2 in
                     ("write_log", "find_samql_window", "focus_window",
                      "_acquire_single_instance", "port_open",
-                     "_is_samql", "make_splash", "open_native_window",
+                     "_is_samql", "_owned_token", "make_splash", "open_native_window",
                      "find_browser", "start_server",
                      "_MUTEX_WAIT_S", "_MUTEX_BOOT_WAIT_S",
                      "SERVER_BOOT_TIMEOUT_S", "_ping_maintenance",
@@ -9667,6 +9669,7 @@ def backend_tests(datadir, csv_path, json_path):
                 _LA.port_open = (
                     lambda p, **k: _tm4.time() - t0 >= port_flip_at)
                 _LA._is_samql = lambda p: True
+                _LA._owned_token = lambda p: "test-token"  # C-1: ours
                 _LA._ping_maintenance = lambda p: None
                 _LA.start_server = (
                     lambda port, sp: started.append(port) or True)
@@ -10336,7 +10339,7 @@ def backend_tests(datadir, csv_path, json_path):
         # the reuse ladder instead of exiting
         keep = {n: getattr(_LA, n) for n in
                 ("write_log", "find_samql_window", "focus_window",
-                 "_acquire_single_instance", "port_open", "_is_samql",
+                 "_acquire_single_instance", "port_open", "_is_samql", "_owned_token",
                  "make_splash", "open_native_window", "find_browser")}
         logs = []
         try:
@@ -10346,6 +10349,7 @@ def backend_tests(datadir, csv_path, json_path):
             _LA._acquire_single_instance = lambda: (True, False)
             _LA.port_open = lambda p, **k: True
             _LA._is_samql = lambda p: True
+            _LA._owned_token = lambda p: "test-token"  # C-1: ours
             _LA.open_native_window = lambda url, a, sp: True
             _LA.find_browser = lambda w: None
             _LA.make_splash = lambda: _tp2.SimpleNamespace(
@@ -10877,7 +10881,7 @@ def backend_tests(datadir, csv_path, json_path):
         # CONTINUES (reaches the server-reuse ladder) instead of failing
         keep = {n: getattr(_LA, n) for n in
                 ("write_log", "find_samql_window", "focus_window",
-                 "_acquire_single_instance", "port_open", "_is_samql",
+                 "_acquire_single_instance", "port_open", "_is_samql", "_owned_token",
                  "make_splash", "open_native_window", "find_browser",
                  "_MUTEX_WAIT_S", "_MUTEX_WINDOW_GRACE_S",
                  "_MUTEX_RECONNECT_WINDOW_GRACE_S",
@@ -10894,6 +10898,7 @@ def backend_tests(datadir, csv_path, json_path):
             _LA._peer_appwindow_process_alive = lambda: False
             _LA.port_open = lambda p, **k: True
             _LA._is_samql = lambda p: True
+            _LA._owned_token = lambda p: "test-token"  # C-1: ours
             _LA.open_native_window = lambda url, a, sp: True
             _LA.find_browser = lambda w: None
             _LA.make_splash = lambda: _ty7.SimpleNamespace(
@@ -11031,8 +11036,8 @@ def backend_tests(datadir, csv_path, json_path):
         la = open(os.path.join(BACKEND, "launcher_app.py"),
                   encoding="utf-8").read()
         for frag, why in (
-            ('_MUTEX_NAME = "Local\\\\SamQL.AppWindow"',
-             "the named mutex exists"),
+            ('_MUTEX_NAME = "Local\\\\SamQL.AppWindow." + _user_tag()',
+             "the named mutex exists, one per user (C-1)"),
             ("CreateMutexW", "the mutex is a kernel object"),
             ("== 183", "ERROR_ALREADY_EXISTS detected"),
             ("def find_samql_window", "the desktop scan exists"),
@@ -12722,7 +12727,7 @@ def backend_tests(datadir, csv_path, json_path):
         keep = {n: getattr(_LA, n) for n in
                 ("write_log", "_bundled_asset", "set_app_user_model_id",
                  "apply_app_icon", "set_relaunch_icon",
-                 "wait_for_app_window", "port_open", "_is_samql",
+                 "wait_for_app_window", "port_open", "_is_samql", "_owned_token",
                  "stop_server", "find_browser", "make_splash",
                  "find_samql_window", "focus_window",
                  "_acquire_single_instance")}
@@ -12744,6 +12749,7 @@ def backend_tests(datadir, csv_path, json_path):
             _LA._acquire_single_instance = lambda: (True, False)
             _LA.port_open = lambda p, **k: True
             _LA._is_samql = lambda p: True
+            _LA._owned_token = lambda p: "test-token"  # C-1: ours
             _LA.stop_server = lambda p: browser_asks.append("STOP?!")
             _LA.find_browser = lambda w: browser_asks.append(w) or None
             _LA.make_splash = lambda: _tyB.SimpleNamespace(
@@ -19501,7 +19507,7 @@ def backend_tests(datadir, csv_path, json_path):
              and ps.index("Add-Type -AssemblyName System.Windows.Forms")
              < ps.index("function Show-Splash")),
             ("the splash closes after the app window opens",
-             ps.index("--app=$url") < ps.rindex("Close-Splash")),
+             ps.index("--app=$openUrl") < ps.rindex("Close-Splash")),
             ("escape hatches",
              "-KeepConsole" in ps and "$NoSplash" in ps),
             ("the x86 Edge path is actually expandable",
@@ -19526,14 +19532,14 @@ def backend_tests(datadir, csv_path, json_path):
         checks = [
             (".486: prefers a NATIVE pywebview window (own icon, no "
              "browser) before the Edge --app fallback",
-             ps.index("SamQL-AppWindow.exe") < ps.index("--app=$url")
+             ps.index("SamQL-AppWindow.exe") < ps.index("--app=$openUrl")
              and "find_spec('webview')" in ps
              and 'Start-Process -FilePath $nativeExe' in ps
              and r'dist\SamQL-AppWindow\SamQL-AppWindow.exe' in ps
              and ps.index(r'dist\SamQL-AppWindow\SamQL-AppWindow.exe')
              < ps.index(r'dist\SamQL-AppWindow.exe')),
             ("chromeless app mode with a size option",
-             '--app=$url' in ps and "--window-size=" in ps),
+             '--app=$openUrl' in ps and "--window-size=" in ps),
             ("reuses a live server; starts one only when needed",
              "Test-SamQLPort" in ps and "Reusing the server on port" in ps
              and "$bootBudgetS = 300" in ps
@@ -34325,6 +34331,259 @@ def backend_tests(datadir, csv_path, json_path):
             except Exception:
                 pass
 
+    def t_c1_instance_records():
+        # C-1: the per-user instance record is the launcher's only proof that
+        # a server is its own. It must be private, atomic and verifiable.
+        import socket as _sk
+        import stat as _stat
+        import samql_instance as _si
+        cfg = tempfile.mkdtemp(prefix="samql_c1_")
+        env = {"SAMQL_CONFIG_DIR": cfg}
+        try:
+            eq(_si.instance_dir(env), os.path.join(cfg, "instances"),
+               "records live under the per-user config dir")
+            eq(_si.config_root({}), os.path.join(
+                os.path.expanduser("~"), ".samql"),
+               "the default root mirrors app_config_dir (~/.samql)")
+            path = _si.write_instance(8799, "tok-A", pid=4242, build="b1",
+                                      env=env)
+            eq(_si.read_instance(8799, env),
+               {"port": 8799, "pid": 4242, "token": "tok-A", "build": "b1"},
+               "the record round-trips")
+            if os.name != "nt":
+                eq(_stat.S_IMODE(os.stat(path).st_mode), 0o600,
+                   "the record is owner-only")
+                eq(_stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode),
+                   0o700, "the records dir is owner-only")
+            eq([n for n in os.listdir(os.path.dirname(path))
+                if n.endswith(".tmp")], [], "no temp file is left behind")
+            fp = _si.token_fingerprint("tok-A")
+            eq(len(fp), 16, "fingerprint is 64 bits of hex")
+            need("tok-A" not in fp, "fingerprint is not the token")
+            ours = {"app": "SamQL", "instance": fp}
+            eq(_si.owned_token(8799, ours, env), "tok-A",
+               "health fingerprint + our record = our server")
+            eq(_si.owned_token(8799, {"app": "SamQL",
+                                      "instance": _si.token_fingerprint(
+                                          "tok-B")}, env), None,
+               "another user's SamQL (other token) is not ours")
+            eq(_si.owned_token(8799, {"app": "SamQL"}, env), None,
+               "an older server with no fingerprint is not provably ours")
+            eq(_si.owned_token(8799, {"app": "other", "instance": fp}, env),
+               None, "a non-SamQL server is never ours")
+            eq(_si.owned_token(8800, ours, env), None,
+               "no record for the port: not ours")
+            _si.write_instance(8801, "tok-C", pid=1, env=env)
+            eq([r["port"] for r in _si.list_instances(env)], [8799, 8801],
+               "every record is listed by port")
+            eq(_si.remove_instance(8799, pid=999, env=env), False,
+               "another process's record is left alone")
+            eq(_si.remove_instance(8799, pid=4242, env=env), True,
+               "the owning process removes its record")
+            eq(_si.read_instance(8799, env), None, "removed")
+            eq(_si.launch_url(8765, "a/b+c"),
+               "http://127.0.0.1:8765/?t=a%2Fb%2Bc",
+               "the launch URL quotes the token")
+            eq(_si.launch_url(8765), "http://127.0.0.1:8765/",
+               "no token: the bare URL")
+
+            # exclusive bind: Windows must use SO_EXCLUSIVEADDRUSE, never
+            # SO_REUSEADDR (which shares another user's LISTENING port).
+            class FakeSock:
+                def __init__(self):
+                    self.opts = []
+
+                def setsockopt(self, level, opt, val):
+                    self.opts.append(opt)
+            fs = FakeSock()
+            old_opt = getattr(_sk, "SO_EXCLUSIVEADDRUSE", None)
+            _sk.SO_EXCLUSIVEADDRUSE = -5 if old_opt is None else old_opt
+            try:
+                eq(_si.exclusive_bind(fs, os_name="nt"), "exclusive",
+                   "Windows binds exclusively")
+                eq(fs.opts, [_sk.SO_EXCLUSIVEADDRUSE],
+                   "only SO_EXCLUSIVEADDRUSE is set on Windows")
+            finally:
+                if old_opt is None:
+                    del _sk.SO_EXCLUSIVEADDRUSE
+            fs = FakeSock()
+            _si.exclusive_bind(fs, os_name="posix")
+            eq(fs.opts, [_sk.SO_REUSEADDR],
+               "POSIX keeps SO_REUSEADDR (never shares a live listener)")
+            import server as _srv
+            eq(_srv._QuietServer.allow_reuse_address, os.name != "nt",
+               "the HTTP server never sets SO_REUSEADDR on Windows")
+
+            # free_port skips a port someone else is listening on
+            held = _sk.socket()
+            held.bind(("127.0.0.1", 0))
+            held.listen(1)
+            try:
+                busy = held.getsockname()[1]
+                got = _si.free_port(busy)
+                need(got and got != busy,
+                     "a listening port is skipped (%r -> %r)" % (busy, got))
+                eq(_srv._find_free_port("127.0.0.1", busy), got,
+                   "the server's probe uses the same exclusive check")
+                eq(_srv._find_free_port("127.0.0.1", 0), 0,
+                   "port 0 is left to the OS (ephemeral)")
+            finally:
+                held.close()
+        finally:
+            shutil.rmtree(cfg, ignore_errors=True)
+
+    def t_c1_launcher_attaches_only_to_own():
+        # C-1: the launcher used to attach to ANY SamQL on 8765 (health
+        # 'app: samql' only), so on a shared host user B's double-click
+        # opened B's window on user A's server. It now attaches only when
+        # the health fingerprint matches its own private record, opens the
+        # UI with ?t=<token>, and hands every spawn the same token.
+        import types as _ty
+        import samql_instance as _si
+        import launcher_app as _LA
+        need(_LA._MUTEX_NAME.startswith("Local\\SamQL.AppWindow.")
+             and _LA._MUTEX_NAME.endswith(_LA._user_tag())
+             and len(_LA._user_tag()) == 16,
+             "the launch mutex is per user: %r" % _LA._MUTEX_NAME)
+        old_env = {k: os.environ.get(k) for k in ("USERNAME", "USER")}
+        try:
+            os.environ["USERNAME"] = "alice"
+            os.environ["USER"] = "alice"
+            a = _LA._user_tag()
+            os.environ["USERNAME"] = "bob"
+            os.environ["USER"] = "bob"
+            need(_LA._user_tag() != a, "two users get two mutex names")
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        names = ("write_log", "find_samql_window", "focus_window",
+                 "_acquire_single_instance", "port_open", "_fetch_health",
+                 "make_splash", "open_native_window", "find_browser",
+                 "start_server", "wait_for_server_ready", "_ping_maintenance",
+                 "start_supervisor", "stop_supervisor", "stop_server",
+                 "_keep_server_requested", "_sweep_stale_mei_early",
+                 "_set_process_aumid")
+        keep = {n: getattr(_LA, n) for n in names}
+        keep_token = list(_LA._LAUNCH_TOKEN)
+        old_api = os.environ.pop("SAMQL_API_TOKEN", None)
+
+        def run(listening, health):
+            logs, started, opened = [], [], []
+            _LA.write_log = logs.append
+            _LA.find_samql_window = lambda: None
+            _LA.focus_window = lambda h: False
+            _LA._acquire_single_instance = lambda: (True, False)
+            _LA._sweep_stale_mei_early = lambda: None
+            _LA._set_process_aumid = lambda *a, **k: None
+            _LA.port_open = lambda p, **k: p in listening
+            _LA._fetch_health = lambda p: health.get(p)
+            _LA.make_splash = lambda: _ty.SimpleNamespace(
+                set_text=lambda t, error=False: None, close=lambda: None,
+                pump=lambda s=0: None)
+
+            def fake_start(port, sp):
+                started.append(port)
+                listening.add(port)
+                return True
+            _LA.start_server = fake_start
+            _LA.wait_for_server_ready = lambda p, sp=None: None
+            _LA._ping_maintenance = lambda p: None
+            _LA.start_supervisor = lambda p: None
+            _LA.stop_supervisor = lambda: None
+            _LA.stop_server = lambda p: None
+            _LA._keep_server_requested = lambda p: False
+            _LA.find_browser = lambda w: None
+            _LA.open_native_window = (
+                lambda url, a, sp: opened.append(url) or True)
+            rc = _LA.main(["--port", "8765"])
+            return rc, logs, started, opened
+
+        try:
+            # 1) another user's SamQL holds 8765 and we have no server:
+            #    start our own on a free port, never attach to theirs.
+            _si.remove_instance(8765)
+            theirs = {"app": "SamQL",
+                      "instance": _si.token_fingerprint("their-token")}
+            _LA._LAUNCH_TOKEN[0] = None
+            rc, logs, started, opened = run({8765}, {8765: theirs})
+            eq(rc, 0, "launch completes")
+            need(started and started[0] != 8765,
+                 "our own server starts on another port: %r" % started)
+            tok = _LA._LAUNCH_TOKEN[0]
+            need(tok, "the launcher minted a token for its server")
+            eq(opened, [_si.launch_url(started[0], tok)],
+               "the window opens OUR server with OUR token")
+            need(any("another user's SamQL" in l for l in logs),
+                 "the log says why it moved: %r" % logs)
+
+            # 2) our own SamQL on 8765 (record + matching fingerprint):
+            #    reuse it with its token, start nothing.
+            _si.write_instance(8765, "our-token")
+            ours = {"app": "SamQL",
+                    "instance": _si.token_fingerprint("our-token")}
+            rc, logs, started, opened = run({8765}, {8765: ours})
+            eq(started, [], "our live server is reused, not restarted")
+            eq(opened, [_si.launch_url(8765, "our-token")],
+               "reuse opens with the token from our record")
+
+            # 3) someone else on 8765 but ours on 8790: find and reuse ours.
+            _si.remove_instance(8765)
+            _si.write_instance(8790, "our-token")
+            rc, logs, started, opened = run(
+                {8765, 8790}, {8765: theirs, 8790: ours})
+            eq(started, [], "no second server of ours is started")
+            eq(opened, [_si.launch_url(8790, "our-token")],
+               "the launch finds our own server on its other port")
+
+            # 4) spawns carry the launcher's token (respawns reuse it, so
+            #    the window's cookie survives a supervisor restart).
+            _LA.start_server = keep["start_server"]
+            _LA._LAUNCH_TOKEN[0] = None
+            first = _LA._launch_token()
+            eq(_LA._launch_token(), first, "one token per launcher")
+            os.environ["SAMQL_API_TOKEN"] = "admin-token"
+            _LA._LAUNCH_TOKEN[0] = None
+            eq(_LA._launch_token(), "admin-token",
+               "an admin's SAMQL_API_TOKEN wins")
+        finally:
+            for n, v in keep.items():
+                setattr(_LA, n, v)
+            _LA._LAUNCH_TOKEN[:] = keep_token
+            if old_api is None:
+                os.environ.pop("SAMQL_API_TOKEN", None)
+            else:
+                os.environ["SAMQL_API_TOKEN"] = old_api
+            for p in (8765, 8790):
+                _si.remove_instance(p)
+        la = open(os.path.join(BACKEND, "launcher_app.py"),
+                  encoding="utf-8").read()
+        need('env["SAMQL_API_TOKEN"] = _launch_token()' in la,
+             "start_server hands the launch token to every spawn")
+
+    def t_c1_server_publishes_instance():
+        # C-1: server.main() publishes its record (owner-only) and removes
+        # it on shutdown; the record's token is the one the server checks.
+        import samql_instance as _si
+        import server as _srv
+        _srv._publish_instance(8811, "srv-token")
+        try:
+            rec = _si.read_instance(8811)
+            eq((rec or {}).get("token"), "srv-token", "record published")
+            eq((rec or {}).get("pid"), os.getpid(), "record names our pid")
+        finally:
+            _srv._unpublish_instance()
+        eq(_si.read_instance(8811), None, "record removed on shutdown")
+        src = open(os.path.join(BACKEND, "server.py"),
+                   encoding="utf-8").read()
+        need("_publish_instance(port, httpd.samql_api_token)" in src
+             and "_unpublish_instance()" in src
+             and "_open_window_or_browser(launch_url, mode)" in src,
+             "main publishes the record and opens the tokenized URL")
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -42317,6 +42576,12 @@ def backend_tests(datadir, csv_path, json_path):
          t_python_node_pandas_bindings),
         ("NodeFlow column-level data lineage export (Excel, 2 tabs)", t_nodeflow_lineage),
         ("cancel an in-flight load: unwind + drop partial table + cleanup helpers", t_load_cancel),
+        ("C-1: per-user instance records are private, atomic and "
+         "verifiable; binds are exclusive", t_c1_instance_records),
+        ("C-1: the launcher attaches only to its own SamQL and opens it "
+         "with its token", t_c1_launcher_attaches_only_to_own),
+        ("C-1: the server publishes and removes its instance record",
+         t_c1_server_publishes_instance),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

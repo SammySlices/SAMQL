@@ -75,7 +75,7 @@ else:
 
 datas = []
 binaries = []
-hiddenimports = ["samql_core"]
+hiddenimports = ["samql_core", "samql_instance"]
 
 # ---- bundle the built frontend (served from sys._MEIPASS/frontend_dist) ----
 # Refuse to ship a placeholder UI. An empty/missing dist used to only WARN
