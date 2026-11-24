@@ -14,6 +14,8 @@ import { NODEFLOW_COSMETIC_CONFIG_KEYS } from "../../lib/nodegraph";
 import {
   ancestorNodeIds,
   applyMissingRefPruneToNodes,
+  incomingEdgeSig,
+  pruneConfigSnapshot,
   columnProbeReqsForNodes,
 } from "../../lib/pruneNodeflowMissingAfterRun";
 import { getRunAllParallelNodeflows } from "../../lib/runAllConcurrency";
@@ -1154,24 +1156,40 @@ export function useNodeFlowExecutionController({
     if (!successfulTerminalIds.length) return;
     const snapNodes = liveRef.current.nodes;
     const snapEdges = liveRef.current.edges;
+    const scope = scopeVersionRef.current;
     const targets = ancestorNodeIds(snapEdges, successfulTerminalIds);
     const probes = columnProbeReqsForNodes(snapNodes, snapEdges, targets);
     if (!probes.length) return;
+    // M-2: the answer describes THIS graph; a node edited (or rewired) while
+    // the probe is in flight must not be pruned against it.
+    const snapConfigs = pruneConfigSnapshot(snapNodes, targets);
+    const snapInputs = new Map(
+      [...targets].map((id) => [id, incomingEdgeSig(snapEdges, id)]),
+    );
+    const graph = graphForRun();
     try {
       const r = await api.nodeflowColumnsBatch(
-        graphForRun(),
+        graph,
         probes.map((q) => ({ node: q.fromNode, port: q.fromPort })),
       );
+      if (scope !== scopeVersionRef.current || !mountedRef.current) return;
+      const liveEdges = liveRef.current.edges;
       const colsByNodeId: Record<string, Record<string, string[]>> = {};
       (r.results || []).forEach((res, i) => {
         const q = probes[i];
         if (!q || !res?.columns?.length) return;
+        if (incomingEdgeSig(liveEdges, q.nodeId) !== snapInputs.get(q.nodeId)) return;
         if (!colsByNodeId[q.nodeId]) colsByNodeId[q.nodeId] = {};
         colsByNodeId[q.nodeId][q.port] = res.columns;
       });
       if (!Object.keys(colsByNodeId).length) return;
       setNodes((prev) =>
-        applyMissingRefPruneToNodes(prev, targets, colsByNodeId),
+        applyMissingRefPruneToNodes(
+          prev,
+          targets,
+          colsByNodeId,
+          (id, config) => snapConfigs.get(id) === JSON.stringify(config ?? {}),
+        ),
       );
     } catch {
       /* best-effort post-run cleanup */

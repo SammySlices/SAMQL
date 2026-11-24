@@ -47,6 +47,32 @@ export function ancestorNodeIds(
  * Probe requests for each input port of nodes in `nodeIds` that can hold
  * column refs (select / pivot / stale-ref types).
  */
+/** Config signature per target id (top-level and group/iterator children). */
+export function pruneConfigSnapshot(
+  nodes: NbNode[],
+  targetIds: Set<string>,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const sig = (c: unknown) => JSON.stringify(c ?? {});
+  for (const n of nodes || []) {
+    if (targetIds.has(n.id)) out.set(n.id, sig(n.config));
+    if (n.type !== "group" && n.type !== "iterator") continue;
+    for (const child of (n.config?.children || []) as any[]) {
+      if (child?.id && targetIds.has(child.id)) out.set(child.id, sig(child.config));
+    }
+  }
+  return out;
+}
+
+/** Incoming-edge signature per node id. */
+export function incomingEdgeSig(edges: NbEdge[], id: string): string {
+  return (edges || [])
+    .filter((e) => e.to.node === id)
+    .map((e) => `${e.from.node}.${e.from.port}>${e.to.port}`)
+    .sort()
+    .join("|");
+}
+
 export function columnProbeReqsForNodes(
   nodes: NbNode[],
   edges: NbEdge[],
@@ -113,11 +139,16 @@ export function applyMissingRefPruneToNodes<T extends NbNode>(
   nodes: T[],
   targetIds: Set<string>,
   colsByNodeId: Record<string, Record<string, string[]>>,
+  // M-2: when given, a node (or group child) is pruned only while its config
+  // still matches the snapshot the columns were probed for.
+  unchangedSince?: (id: string, config: unknown) => boolean,
 ): T[] {
+  const ok = (id: string, config: unknown) =>
+    !unchangedSince || unchangedSince(id, config);
   let changed = false;
   const next = (nodes || []).map((n) => {
     let node = n;
-    if (targetIds.has(n.id) && colsByNodeId[n.id]) {
+    if (targetIds.has(n.id) && colsByNodeId[n.id] && ok(n.id, n.config)) {
       const pruned = pruneNodeConfigMissingRefs(
         n.type,
         n.config || {},
@@ -135,7 +166,7 @@ export function applyMissingRefPruneToNodes<T extends NbNode>(
       const child = children[i];
       if (!child?.id || !targetIds.has(child.id)) continue;
       const cols = colsByNodeId[child.id];
-      if (!cols) continue;
+      if (!cols || !ok(child.id, child.config)) continue;
       const pruned = pruneNodeConfigMissingRefs(
         child.type,
         child.config || {},
