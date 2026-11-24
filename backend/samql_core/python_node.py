@@ -293,7 +293,8 @@ def run_script(
     ``should_cancel`` (optional zero-arg callable) is polled from the main
     thread and enforced inside the worker via a per-line trace hook, so a
     Stop interrupts Python-level loops promptly instead of waiting out the
-    timeout. (A script blocked inside one long C-level call is still only
+    timeout. On a timeout or Stop the worker is also marked abandoned, and
+    the same hook unwinds it, so no script outlives its run. (A script blocked inside one long C-level call is still only
     bounded by ``timeout_s`` -- same limit as before.)"""
     src = (code or "").strip()
     if not src:
@@ -316,22 +317,28 @@ def run_script(
     }
 
     box: dict[str, Any] = {"exc": None}
+    # M-5: set when the caller gives up on the worker (timeout or Stop). The
+    # trace hook is always installed and checks it, so an abandoned script
+    # unwinds at its next line instead of spinning on the GIL for the life
+    # of the process. (A timeout also discards the run's cancel flag, so
+    # should_cancel alone could never stop it.)
+    abandoned = threading.Event()
+
+    def _trace(frame, event, arg):
+        if abandoned.is_set() or (
+                should_cancel is not None and should_cancel()):
+            raise PythonNodeCancelled("cancelled")
+        return _trace
 
     def _target():
-        if should_cancel is not None:
-            def _trace(frame, event, arg):
-                if should_cancel():
-                    raise PythonNodeCancelled("cancelled")
-                return _trace
-            sys.settrace(_trace)
+        sys.settrace(_trace)
         try:
             compiled = compile(src, "<python-node>", "exec")
             exec(compiled, ns, ns)  # noqa: S102 — intentional user script
         except Exception as exc:
             box["exc"] = exc
         finally:
-            if should_cancel is not None:
-                sys.settrace(None)
+            sys.settrace(None)
 
     th = threading.Thread(target=_target, name="samql-python-node", daemon=True)
     t0 = time.monotonic()
@@ -344,11 +351,13 @@ def run_script(
         if should_cancel is not None and should_cancel():
             # The trace hook normally kills the worker within a line or two;
             # give it that moment before declaring the cancel ourselves.
+            abandoned.set()
             th.join(0.5)
             raise PythonNodeCancelled("cancelled")
         if time.monotonic() >= deadline:
             break
     if th.is_alive():
+        abandoned.set()
         raise PythonNodeError(
             "Python node timed out after %.0f s." % timeout_s
         )

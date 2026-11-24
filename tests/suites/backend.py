@@ -35060,6 +35060,36 @@ def backend_tests(datadir, csv_path, json_path):
         need('payload["cancelled"] = True' in src,
              "the 500 envelope carries a structured cancelled flag")
 
+    def t_m5_timed_out_python_node_stops_spinning():
+        # M-5: the trace hook was installed only when should_cancel was
+        # passed, and a timeout never told the worker to stop -- so
+        # `while True: pass` left a samql-python-node thread spinning (and
+        # holding the GIL) for the life of the process.
+        import threading as _th
+        import time as _t
+        from samql_core import python_node as pn
+        before = {t.ident for t in _th.enumerate()}
+        for kw in ({}, {"should_cancel": lambda: False}):
+            try:
+                pn.run_script("while True:\n    pass\n", timeout_s=1, **kw)
+            except pn.PythonNodeError as e:
+                need("timed out" in str(e), "timeout error: %s" % e)
+            else:
+                raise AssertionError("an endless script must time out")
+        deadline = _t.monotonic() + 1.5
+        while _t.monotonic() < deadline:
+            live = [t for t in _th.enumerate()
+                    if t.name == "samql-python-node" and t.ident not in before]
+            if not live:
+                break
+            _t.sleep(0.05)
+        need(not live, "a timed-out Python node thread is still running: %r"
+             % live)
+        # a normal script is unaffected
+        cols, rows = pn.run_script("out = [{'a': 1}, {'a': 2}]")
+        need(cols == ["a"] and len(rows) == 2, "normal script: %r %r"
+             % (cols, rows))
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43079,6 +43109,8 @@ def backend_tests(datadir, csv_path, json_path):
          "Catalog Error)", t_nodeflow_reconcile_reads_its_temp_inputs),
         ("H-8: SQL errors that mention cancel/interrupt are not cancels",
          t_h8_sql_errors_naming_cancel_are_not_cancels),
+        ("M-5: a timed-out Python node thread stops instead of spinning",
+         t_m5_timed_out_python_node_stops_spinning),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
