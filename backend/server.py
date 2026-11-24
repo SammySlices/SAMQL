@@ -905,6 +905,27 @@ def _token_meta(token):
             .replace("<", "&lt;").replace(">", "&gt;"))
 
 
+# H-1: defence in depth for data-driven HTML. Chart tooltips and other
+# ECharts formatters write strings with innerHTML; if a data value ever reaches
+# one unescaped, this policy keeps it from running script in the app origin
+# (which carries the API cookie to every route, including the Python node).
+# The shell has one inline <style> (first-paint background) and React/ECharts
+# set inline styles, so style-src keeps 'unsafe-inline'; script never does.
+_HTML_CSP = "; ".join((
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self'",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'self'",
+))
+
+
 def _api_token_set_cookie(token):
     """HttpOnly cookie carries the capability; it must not appear in HTML."""
     return ("samql_api_token=%s; Path=/; HttpOnly; SameSite=Strict"
@@ -4743,6 +4764,7 @@ class Handler(BaseHTTPRequestHandler):
     def _send_bytes(self, status, data, content_type, extra_headers=None):
         headers = dict(extra_headers or {})
         if str(content_type or "").lower().startswith("text/html"):
+            headers.setdefault("Content-Security-Policy", _HTML_CSP)
             token = str(getattr(self.server, "samql_api_token", "") or "")
             if token and "Set-Cookie" not in headers:
                 headers["Set-Cookie"] = _api_token_set_cookie(token)

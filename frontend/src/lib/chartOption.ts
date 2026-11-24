@@ -36,6 +36,22 @@ const THEMES: Record<"dark" | "light", ThemeColors> = {
 /** Chart chrome colors per theme (axis/grid/bg/text/border). */
 export { THEMES };
 
+/**
+ * Escape text for ECharts HTML tooltips. A function `formatter` returns a
+ * string that ECharts writes with `innerHTML`, so any data value interpolated
+ * into it (category labels come straight from loaded CSV/API/SharePoint
+ * cells) must be escaped or a cell such as `<img onerror=...>` runs script in
+ * the app origin. Kept local so this module stays free of an echarts import.
+ */
+export function escapeTooltipHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export function paletteColors(p?: ChartPalette): string[] {
   return PALETTES[(p as ChartPalette) || "samql"] || PALETTES.samql;
 }
@@ -566,7 +582,7 @@ export function buildChartOption(data: ChartData): Record<string, any> {
           const label = labels[idx] ?? String(idx);
           const change = changes[idx] ?? 0;
           const level = levels[idx] ?? 0;
-          return `${label}<br/>Change: ${change.toLocaleString()}<br/>Total: ${level.toLocaleString()}`;
+          return `${escapeTooltipHtml(label)}<br/>Change: ${escapeTooltipHtml(change.toLocaleString())}<br/>Total: ${escapeTooltipHtml(level.toLocaleString())}`;
         },
         ...tooltip,
       },

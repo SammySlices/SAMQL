@@ -85,6 +85,32 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
         st, d = c.js("GET", "/api/health", headers={"Host": "evil.example"})
         eq(st, 403, "unapproved Host rejected")
 
+    def t_html_content_security_policy():
+        # H-1: data-driven HTML (chart tooltips) must not be able to run
+        # script even if an escape is missed somewhere. Every HTML response
+        # carries a CSP that forbids inline and foreign script.
+        import http.client
+        for path in ("/", "/index.html", "/some/client/route"):
+            conn = http.client.HTTPConnection(host, port, timeout=10)
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            resp.read()
+            csp = resp.getheader("Content-Security-Policy") or ""
+            conn.close()
+            need(csp, "%s: HTML response has a Content-Security-Policy" % path)
+            directives = {
+                part.strip().split(" ", 1)[0]: part.strip()
+                for part in csp.split(";") if part.strip()}
+            script = directives.get("script-src", "")
+            need(script.startswith("script-src 'self'"),
+                 "%s: script-src is self-only: %r" % (path, csp))
+            need("unsafe-inline" not in script and "unsafe-eval" not in script,
+                 "%s: script-src allows no inline/eval: %r" % (path, csp))
+            need(directives.get("object-src") == "object-src 'none'",
+                 "%s: plugins disabled: %r" % (path, csp))
+        st, raw = c.call("GET", "/api/health")
+        eq(st, 200, "health still served")
+
     def t_api_token_and_json_limit():
         # The HTML shell sets an HttpOnly capability cookie. Unauthenticated
         # local processes still cannot use sensitive endpoints without it.
@@ -1877,6 +1903,8 @@ def http_tests(datadir, csv_path, json_path, host, port, online):
             ("POST /api/result/{id}/page", t_page),
             ("POST /api/result/{id}/page (filters)", t_filter),
             ("POST /api/result/{id}/page (projection)", t_page_projection),
+            ("HTML responses carry a script-src 'self' CSP",
+             t_html_content_security_policy),
             ("POST /api/query/{id}/cancel", t_cancel_route),
             ("POST /api/result/{id}/export", t_export),
             ("POST /api/table/{name}/profile", t_profile),

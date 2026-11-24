@@ -79,3 +79,42 @@ describe("Y axis scaling", () => {
     expect((opt.yAxis as any).scale).toBe(true);
   });
 });
+
+describe("chartOption tooltip escaping (H-1)", () => {
+  it("escapes HTML in waterfall category labels before ECharts writes innerHTML", () => {
+    const hostile = '<img src=x onerror=alert(1)>';
+    const opt = buildChartOption({
+      chart_type: "waterfall",
+      x: "x",
+      y: "y",
+      labels: [hostile, "b&c"],
+      series: [{ name: "y", values: [10, 4] }],
+    });
+    const html = opt.tooltip.formatter([{ dataIndex: 0 }]) as string;
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).toContain("<br/>Change:");
+    const second = opt.tooltip.formatter([{ dataIndex: 1 }]) as string;
+    expect(second.startsWith("b&amp;c<br/>")).toBe(true);
+  });
+
+  it("uses no HTML-string tooltip formatter that interpolates raw data elsewhere", () => {
+    // Every chart type is built; any function formatter must escape its
+    // category text the same way.
+    const hostile = '"><svg onload=alert(1)>';
+    for (const chart_type of ["bar", "line", "area", "pie", "donut", "scatter", "waterfall", "change"]) {
+      const opt = buildChartOption({
+        chart_type: chart_type as ChartData["chart_type"],
+        x: "x",
+        y: "y",
+        labels: [hostile],
+        series: [{ name: hostile, values: [1] }],
+      });
+      const f = opt.tooltip?.formatter;
+      if (typeof f === "function") {
+        const out = String(f([{ dataIndex: 0, name: hostile, seriesName: hostile, value: 1 }]));
+        expect(out).not.toContain("<svg");
+      }
+    }
+  });
+});
