@@ -11527,9 +11527,9 @@ class Session:
         cache_made = None
         if parquet is None:
             try:
-                cdir = os.path.join(tempfile.gettempdir(),
-                                    "samql_flatten_cache")
-                os.makedirs(cdir, exist_ok=True)
+                # M-10: per-instance staging -- the boot sweep of the old
+                # global dir could delete a live op's cache
+                cdir = tmputil.op_cache_dir("samql_flatten_cache")
                 parquet = os.path.join(
                     cdir, "%s_%s.parquet"
                     % (re.sub(r"[^A-Za-z0-9_]+", "_", table)[:40],
@@ -12025,9 +12025,9 @@ class Session:
             # exactly as it was.
             mgr = self.duckdb
             try:
-                cdir = os.path.join(tempfile.gettempdir(),
-                                    "samql_shred_cache")
-                os.makedirs(cdir, exist_ok=True)
+                # M-10: per-instance staging -- the boot sweep of the old
+                # global dir could delete a live op's cache
+                cdir = tmputil.op_cache_dir("samql_shred_cache")
                 cache = os.path.join(
                     cdir, "%s_%s.parquet"
                     % (re.sub(r"[^A-Za-z0-9_]+", "_", table)[:40],

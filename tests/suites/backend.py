@@ -8431,7 +8431,8 @@ def backend_tests(datadir, csv_path, json_path):
         import tempfile as _tf
         import os as _os2
 
-        cdir = _os2.path.join(_tf.gettempdir(), "samql_flatten_cache")
+        from samql_core import tmputil as _tmpu
+        cdir = _tmpu.op_cache_dir("samql_flatten_cache")   # M-10
         before = (set(_gl.glob(_os2.path.join(cdir, "*.parquet")))
                   if _os2.path.isdir(cdir) else set())
 
@@ -35192,6 +35193,71 @@ def backend_tests(datadir, csv_path, json_path):
         finally:
             s.shutdown()
 
+    def t_m10_op_staging_is_per_instance():
+        # M-10: flatten/shred staged their parquet under the GLOBAL
+        # <tmp>/samql_flatten_cache and samql_shred_cache, which the boot
+        # sweep (run after serve_forever starts) deletes wholesale -- it
+        # could delete this instance's early flatten, or another live
+        # instance's. Staging now lives under this process's instance dir.
+        import contextlib as _cl
+        import threading as _th
+        from samql_core import tmputil as T
+        from samql_core.session import Session as _S
+        inst = os.path.realpath(T.instance_dir())
+        seen = []
+
+        class _Cur:
+            def execute(self, sql):
+                import re as _re
+                m = _re.search(r"TO '([^']+)'", sql)
+                if m:
+                    seen.append(m.group(1))
+                    open(m.group(1), "wb").close()
+
+        class _Mgr:
+            table_sources = {"t": None}
+            table_columns = {"t": ["id", "fees"]}
+            _cancel = _th.Event()
+            write_lock = _th.RLock()
+
+            def _column_types_raw(self, t):
+                return {"id": "BIGINT", "fees": "STRUCT(amt DOUBLE)[]"}
+
+            def execute(self, sql):
+                raise RuntimeError("stop after staging")
+
+            def sync_catalog(self):
+                pass
+
+            def native_op_cursor(self):
+                @_cl.contextmanager
+                def cm():
+                    yield _Cur(), _th.RLock()
+                return cm()
+
+        s = _S()
+        s.duckdb = _Mgr()
+        try:
+            s.flatten_table("t", base="m10")
+        finally:
+            s.duckdb = None
+            s.shutdown()
+        need(seen, "the flatten staged a parquet cache")
+        for p in seen:
+            need(os.path.realpath(p).startswith(inst + os.sep),
+                 "flatten staging %r is not under the instance dir %r"
+                 % (p, inst))
+        src = open(os.path.join(BACKEND, "samql_core", "session.py"),
+                   encoding="utf-8").read()
+        need('tmputil.op_cache_dir("samql_shred_cache")' in src
+             and 'tmputil.op_cache_dir("samql_flatten_cache")' in src
+             and src.count("samql_shred_cache") == 1
+             and src.count("samql_flatten_cache") == 1,
+             "shred and flatten staging use the per-instance dir")
+        d = T.op_cache_dir("samql_shred_cache")
+        need(os.path.realpath(d).startswith(inst + os.sep)
+             and os.path.isdir(d), "op_cache_dir: %r" % d)
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43217,6 +43283,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_m6_failed_parallel_branch_drops_sibling_tables),
         ("M-7: concurrent LOCAL and DuckDB flows keep their own build engine",
          t_m7_concurrent_flows_keep_their_own_build_engine),
+        ("M-10: flatten and shred staging live under the instance dir",
+         t_m10_op_staging_is_per_instance),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

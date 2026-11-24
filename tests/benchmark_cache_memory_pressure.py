@@ -139,7 +139,9 @@ def _prefix_counts(inst: str) -> dict[str, int]:
 
 
 def _shred_cache_dir() -> str:
-    return os.path.join(tempfile.gettempdir(), "samql_shred_cache")
+    # M-10: shred staging is per instance (this process)
+    from samql_core import tmputil
+    return tmputil.op_cache_dir("samql_shred_cache")
 
 
 def _max_tables_from_env(default: int) -> int:
@@ -865,8 +867,6 @@ def run_suite(*, self_test: bool, work_dir: Path,
             "Windows WorkingSet often does not shrink promptly after "
             "free_memory/_reclaim; prefer instance/qr_/cached_results/"
             "duckdb_mb signals for reclaim health",
-            "samql_shred_cache is global under system temp — concurrent "
-            "SamQL PIDs may leave unrelated files",
             "self-test fixtures are below JSON on-disk threshold (~64 MiB) "
             "so they materialize in-engine and do not grow filecache; "
             "full mode (≥64 MiB NDJSON) exercises fc_* accumulation",

@@ -265,12 +265,25 @@ def _sweep_temp_root():
     return removed
 
 
-def sweep_op_caches():
-    """Wipe one-shot flatten/shred staging dirs under system temp.
+def op_cache_dir(name):
+    """Per-instance staging dir for one-shot op caches (flatten, shred).
 
-    Call at process startup only: these caches are per-operation staging
-    (not shared across sessions). A crash can leave multi-GB leftovers;
-    nothing live holds them across a restart.
+    M-10: staging used to live in a GLOBAL ``<tmp>/<name>`` that the boot
+    sweep deletes wholesale, so the sweep (run after the server starts)
+    could delete this instance's early flatten, or another live
+    instance's. Under ``instance_dir()`` it belongs to this process and is
+    reclaimed with it (stale instance dirs of dead PIDs are swept)."""
+    d = os.path.join(instance_dir(), name)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def sweep_op_caches():
+    """Wipe the LEGACY global flatten/shred staging dirs under system temp.
+
+    Call at process startup only. Builds before M-10 staged there; current
+    builds stage under their own instance dir (``op_cache_dir``), so these
+    are only leftovers. A crash can leave multi-GB leftovers.
     """
     removed = 0
     parent = tempfile.gettempdir()
