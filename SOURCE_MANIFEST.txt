@@ -62,6 +62,7 @@ backend/samql_core/stores.py
 backend/samql_core/tmputil.py
 backend/samql_core/watchdog.py
 backend/samql_core/webscrape.py
+backend/samql_core/xlsxsafe.py
 backend/samql_instance.py
 backend/server.py
 build.sh
@@ -199,7 +200,10 @@ frontend/src/components/nodeflow/NodeFlowScene.tsx
 frontend/src/components/nodeflow/NodeFlowStatusBar.tsx
 frontend/src/components/nodeflow/NodeFlowTabBar.tsx
 frontend/src/components/nodeflow/Phase10Remediation.component.test.tsx
+frontend/src/components/nodeflow/PythonScriptEditor.m4.component.test.tsx
+frontend/src/components/nodeflow/PythonScriptEditor.tsx
 frontend/src/components/nodeflow/SqlJoinIdeWindow.tsx
+frontend/src/components/nodeflow/chartUpstreamEdit.m3.component.test.tsx
 frontend/src/components/nodeflow/nodeDefinitions.component.test.ts
 frontend/src/components/nodeflow/nodeDefinitions.ts
 frontend/src/components/nodeflow/nodeDragInspector.component.test.ts
@@ -207,6 +211,9 @@ frontend/src/components/nodeflow/nodeFlowGraphCommands.component.test.ts
 frontend/src/components/nodeflow/nodeFlowGraphCommands.ts
 frontend/src/components/nodeflow/nodeFlowRenderModel.component.test.ts
 frontend/src/components/nodeflow/nodeFlowRenderModel.ts
+frontend/src/components/nodeflow/postRunPrune.m2.component.test.tsx
+frontend/src/components/nodeflow/runAllReentry.m1.component.test.tsx
+frontend/src/components/nodeflow/runAllStop.h7.component.test.tsx
 frontend/src/components/nodeflow/runAllWriteContinuation.component.test.tsx
 frontend/src/components/nodeflow/sqlJoinTableNames.component.test.ts
 frontend/src/components/nodeflow/sqlJoinTableNames.ts
@@ -331,6 +338,8 @@ frontend/src/lib/resultExportFormats.ts
 frontend/src/lib/runAllConcurrency.component.test.ts
 frontend/src/lib/runAllConcurrency.ts
 frontend/src/lib/runController.cancel.component.test.ts
+frontend/src/lib/runController.h8.component.test.ts
+frontend/src/lib/runController.l4.component.test.ts
 frontend/src/lib/runController.ts
 frontend/src/lib/selectFields.component.test.ts
 frontend/src/lib/selectFields.ts
