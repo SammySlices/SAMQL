@@ -422,6 +422,21 @@ export function useNodeFlowExecutionController({
       const nodeId = parts[parts.length - 2];
       if (nodeId && closure.has(nodeId)) previewCache.current.delete(key);
     }
+    // M-3: a chart's cache signature covers its own spec, not the graph
+    // above it. Mark downstream charts stale (keeping their data on screen)
+    // so the next ensureChartFor -- hydration re-runs on the graph change --
+    // fetches fresh numbers instead of returning early.
+    let charts: typeof chartDataRef.current | null = null;
+    for (const id of closure) {
+      const entry = chartDataRef.current[id];
+      if (!entry?.sig) continue;
+      charts = charts || { ...chartDataRef.current };
+      charts[id] = { ...entry, sig: undefined };
+    }
+    if (charts) {
+      chartDataRef.current = charts;
+      setChartData(charts);
+    }
     const open = previewRef.current;
     if (
       open &&
