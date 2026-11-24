@@ -5201,19 +5201,40 @@ class Session:
             finally:
                 branch.close()
 
+        futures = []
+        finished = False
         try:
             with ThreadPoolExecutor(
                     max_workers=min(workers, len(groups)),
                     thread_name_prefix="nodeflow-branch") as pool:
                 futures = [pool.submit(worker, group) for group in groups]
-                for future in as_completed(futures):
-                    out, names = future.result()
-                    with lock:
-                        result.update(out)
-                        completed_names.extend(names)
-        except Exception:
-            self._drop_flow_temps(engine_target, completed_names)
-            raise
+                try:
+                    for future in as_completed(futures):
+                        out, names = future.result()
+                        with lock:
+                            result.update(out)
+                            completed_names.extend(names)
+                except BaseException:
+                    # don't start branches that haven't begun
+                    for f in futures:
+                        f.cancel()
+                    raise
+            finished = True
+        finally:
+            if not finished:
+                # M-6: the first failure left as_completed before the other
+                # branches reported. The pool has now waited for every
+                # running branch, so collect what each one that succeeded
+                # built -- those are regular tables and would otherwise stay.
+                for f in futures:
+                    if f.cancelled() or not f.done():
+                        continue
+                    if f.exception() is not None:
+                        continue
+                    for nm in f.result()[1]:
+                        if nm not in completed_names:
+                            completed_names.append(nm)
+                self._drop_flow_temps(engine_target, completed_names)
         if collect is not None:
             collect.extend(completed_names)
         return result

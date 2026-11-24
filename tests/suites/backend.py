@@ -35090,6 +35090,46 @@ def backend_tests(datadir, csv_path, json_path):
         need(cols == ["a"] and len(rows) == 2, "normal script: %r %r"
              % (cols, rows))
 
+    def t_m6_failed_parallel_branch_drops_sibling_tables():
+        # M-6: the first future.result() that raised left as_completed, so a
+        # sibling branch that finished later had its regular (persistent)
+        # __nbflow_ tables never collected or dropped.
+        import time as _t
+        from samql_core.session import DUCKDB_TARGET
+        s = _fresh_session()
+        try:
+            s.parallel_nodeflows = True
+            s._sync_flow_cache_limits = lambda: {"parallel_workers": 2}
+            s._independent_flow_target_groups = (
+                lambda graph, targets: [[("A", "out")], [("B", "out")]])
+            graph = {"nodes": [{"id": "A", "type": "filter"},
+                               {"id": "B", "type": "filter"}],
+                     "edges": []}
+
+            def fake_build(graph, group, engine_target, collect, **kw):
+                branch = kw["_engine_override"]
+                if group[0][0] == "A":
+                    raise RuntimeError("branch A failed")
+                _t.sleep(0.5)
+                branch.execute('CREATE TABLE "__nbflow_m6_b" AS SELECT 1 AS x')
+                collect.append("__nbflow_m6_b")
+                return {group[0]: "__nbflow_m6_b"}
+            s._materialize_flows = fake_build
+            try:
+                s._parallel_flow_groups(graph, [("A", "out"), ("B", "out")],
+                                        DUCKDB_TARGET, [], {})
+            except RuntimeError as e:
+                need("branch A failed" in str(e), "the branch error: %s" % e)
+            else:
+                raise AssertionError("the failed branch must propagate")
+            eng, _k = s._engine_obj(DUCKDB_TARGET)
+            _c, rows = eng.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name LIKE '__nbflow_%'")
+            need(not rows, "a sibling branch's tables leaked: %r" % (rows,))
+        finally:
+            s.shutdown()
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43111,6 +43151,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_h8_sql_errors_naming_cancel_are_not_cancels),
         ("M-5: a timed-out Python node thread stops instead of spinning",
          t_m5_timed_out_python_node_stops_spinning),
+        ("M-6: a failed parallel branch drops its siblings' tables",
+         t_m6_failed_parallel_branch_drops_sibling_tables),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",
