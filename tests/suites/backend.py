@@ -35629,6 +35629,54 @@ def backend_tests(datadir, csv_path, json_path):
         eq(_sh._q('a"b'), '"a""b"', "the conditional quoter still escapes")
         eq(_sh._q("plain"), "plain", "and still leaves a plain name bare")
 
+    def t_l9_repo_text_bundle_is_current():
+        # L-9: samql_txt/ shipped the .673 bundle while the release was .703,
+        # and nothing noticed. The preflight now checks the checked-in text
+        # bundle against the release build and the manifest, and
+        # package_release.write_repo_bundle regenerates it.
+        import shutil as _shu
+        from pathlib import Path
+        import tempfile as _tf
+        sys.path.insert(0, ROOT)
+        try:
+            from tools import package_release as _pr
+            from tools import release_preflight as _rp
+        finally:
+            sys.path.pop(0)
+        name = "repo text bundle is current"
+        got = [c for c in _rp.run_preflight(Path(ROOT)) if c.name == name]
+        eq(len(got), 1, "the preflight checks the repo text bundle")
+        need(got[0].ok, "the checked-in bundle is current: %s" % got[0].detail)
+        # write_repo_bundle replaces a stale bundle with the current one
+        tmp = Path(_tf.mkdtemp(prefix="t_l9_bundle_"))
+        try:
+            entries = _rp.load_manifest(Path(ROOT) / "SOURCE_MANIFEST.txt")
+            for rel in entries + ["SOURCE_MANIFEST.txt",
+                                  "RELEASE_MANIFEST.json"]:
+                dst = tmp / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _shu.copyfile(Path(ROOT) / rel, dst)
+            (tmp / "samql_txt").mkdir()
+            stale = tmp / "samql_txt" / "samql_full_source_all_tests_ui_old.1.txt"
+            stale.write_text("stale\n", encoding="utf-8")
+            checks = _rp.Checks()
+            _rp._check_repo_bundle(tmp, _rp._json(tmp / "RELEASE_MANIFEST.json"),
+                                   checks, entries)
+            need(not checks.items[0].ok, "a stale bundle fails the check")
+            out = _pr.write_repo_bundle(tmp)
+            need(not stale.exists(), "the stale bundle is removed")
+            eq([p.name for p in (tmp / "samql_txt").iterdir()], [out.name],
+               "exactly one bundle remains")
+            body, _e, _sha = _pr.build_bundle_bytes(tmp)
+            eq(out.read_bytes(), body, "the written bundle is the current one")
+            checks = _rp.Checks()
+            _rp._check_repo_bundle(tmp, _rp._json(tmp / "RELEASE_MANIFEST.json"),
+                                   checks, entries)
+            need(checks.items[0].ok, "a fresh bundle passes: %s"
+                 % checks.items[0].detail)
+        finally:
+            _shu.rmtree(tmp, ignore_errors=True)
+
     def t_load_cancel_keeps_unrelated_tables():
         # H-4: cancelling a load used to drop EVERY table that appeared on
         # either engine since the request arrived -- including an IDE
@@ -43676,6 +43724,8 @@ def backend_tests(datadir, csv_path, json_path):
          t_l9_duckdb_pinned_below_2),
         ("L-9: one identifier quoter (sqlutil.quote_ident)",
          t_l9_one_identifier_quoter),
+        ("L-9: the checked-in text bundle matches the release build",
+         t_l9_repo_text_bundle_is_current),
         ("H-4: load cancel drops only its own tables, never a concurrent "
          "IDE/other-surface table", t_load_cancel_keeps_unrelated_tables),
         ("H-4: snapshot_table_names tolerates concurrent catalog mutation",

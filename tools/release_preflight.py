@@ -1299,6 +1299,55 @@ def _check_docs_and_transport(root: Path, release: dict[str, Any], checks: Check
     )
 
 
+REPO_BUNDLE_DIR = "samql_txt"
+REPO_BUNDLE_PREFIX = "samql_full_source_all_tests_ui_"
+
+
+def _check_repo_bundle(
+    root: Path,
+    release: dict[str, Any],
+    checks: Checks,
+    manifest_entries: list[str],
+) -> None:
+    """L-9: the checked-in text bundle must be the current release's.
+
+    ``samql_txt/`` once shipped the .673 bundle under a .703 release. The
+    bundle must carry the release build in its name and header and list
+    every manifest file. Regenerate it with
+    ``python tools/package_release.py --repo-bundle``.
+    """
+    folder = root / REPO_BUNDLE_DIR
+    if not folder.is_dir():
+        return
+    build = str(release.get("build") or "")
+    want = f"{REPO_BUNDLE_PREFIX}{build}.txt"
+    found = sorted(p.name for p in folder.glob(REPO_BUNDLE_PREFIX + "*.txt"))
+    problems: list[str] = []
+    if found != [want]:
+        problems.append(f"expected only {want}, found {found!r}")
+    else:
+        with (folder / want).open("rb") as fh:
+            head = fh.read(2048).decode("utf-8", "replace")
+        m_build = re.search(r"^#\s+build:\s+(\S+)", head, re.M)
+        m_files = re.search(r"^#\s+files:\s+(\d+)", head, re.M)
+        if not m_build or m_build.group(1) != build:
+            problems.append(
+                f"header build {m_build.group(1) if m_build else None!r} != {build!r}"
+            )
+        if not m_files or int(m_files.group(1)) != len(manifest_entries):
+            problems.append(
+                f"header files {m_files.group(1) if m_files else None!r} != "
+                f"{len(manifest_entries)} manifest entries"
+            )
+    checks.add(
+        "repo text bundle is current",
+        not problems,
+        want if not problems
+        else "; ".join(problems)
+        + " (run: python tools/package_release.py --repo-bundle)",
+    )
+
+
 def run_preflight(root: Path) -> list[Check]:
     root = root.resolve()
     checks = Checks()
@@ -1336,6 +1385,7 @@ def run_preflight(root: Path) -> list[Check]:
     _check_quality_and_ci(root, release, checks)
     _check_complete_test_extract(root, release, checks, manifest_entries)
     _check_docs_and_transport(root, release, checks)
+    _check_repo_bundle(root, release, checks, manifest_entries)
     return checks.items
 
 

@@ -26,7 +26,13 @@ try:  # supports both ``python tools/...`` and ``import tools...``
         decode_transport_text,
         sha256_bytes,
     )
-    from .release_preflight import load_manifest, resolve_manifest_path, run_preflight
+    from .release_preflight import (
+        REPO_BUNDLE_DIR,
+        REPO_BUNDLE_PREFIX,
+        load_manifest,
+        resolve_manifest_path,
+        run_preflight,
+    )
 except ImportError:  # pragma: no cover - normal direct-script path
     from aphex_transport import (
         build_transport_text,
@@ -34,7 +40,13 @@ except ImportError:  # pragma: no cover - normal direct-script path
         decode_transport_text,
         sha256_bytes,
     )
-    from release_preflight import load_manifest, resolve_manifest_path, run_preflight
+    from release_preflight import (
+        REPO_BUNDLE_DIR,
+        REPO_BUNDLE_PREFIX,
+        load_manifest,
+        resolve_manifest_path,
+        run_preflight,
+    )
 
 HEADER_RX = re.compile(r"(?m)^===== FILE: (?P<path>.*?) =====[ \t]*\n")
 BODY_MARKER = b"===== FILE: "
@@ -348,6 +360,27 @@ def _publish_release_companions(
     _atomic_write_bytes(report_path, report.encode("utf-8"))
 
 
+def write_repo_bundle(root: Path) -> Path:
+    """L-9: regenerate the checked-in ``samql_txt/`` text bundle.
+
+    Writes the current release's full-source bundle (verified section by
+    section against the manifest) and removes any older bundle there, so
+    the release preflight's "repo text bundle is current" check passes.
+    """
+    root = root.resolve()
+    build = str(_release(root)["build"])
+    bundle, entries, _body_sha = build_bundle_bytes(root)
+    verify_bundle(root, bundle, entries)
+    folder = root / REPO_BUNDLE_DIR
+    folder.mkdir(exist_ok=True)
+    target = folder / f"{REPO_BUNDLE_PREFIX}{build}.txt"
+    _atomic_write_bytes(target, bundle)
+    for old in folder.glob(REPO_BUNDLE_PREFIX + "*.txt"):
+        if old.name != target.name:
+            old.unlink()
+    return target
+
+
 def package_release(
     root: Path,
     output_dir: Path,
@@ -465,10 +498,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--root", type=Path, default=Path(__file__).resolve().parents[1]
     )
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--json", action="store_true", help="print package metadata as JSON")
+    parser.add_argument(
+        "--repo-bundle",
+        action="store_true",
+        help="only regenerate the checked-in samql_txt/ text bundle",
+    )
     args = parser.parse_args(argv)
+    if args.repo_bundle:
+        path = write_repo_bundle(args.root)
+        print(f"Wrote {path}")
+        return 0
+    if args.output_dir is None:
+        parser.error("--output-dir is required (or pass --repo-bundle)")
 
     result = package_release(
         args.root,
