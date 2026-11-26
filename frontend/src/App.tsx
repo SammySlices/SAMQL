@@ -18,6 +18,7 @@ import { api,
   saveToDownloads,
   stampResultEpoch } from "./lib/api";
 import type { RootIdChoice } from "./lib/api";
+import { planResultTabRerun, rerunFieldsFrom } from "./lib/sqlSideEffects";
 import { dropManyConfirmMessage } from "./lib/dropManyConfirm";
 import { menuPos } from "./lib/menuPos";
 import { startPointerDrag } from "./lib/pointerDrag";
@@ -1480,6 +1481,7 @@ export default function App() {
                       queryId,
                       page: res,
                       sql: trimmed,
+                      ...rerunFieldsFrom(res, target),
                       sortCol: null,
                       descending: false,
                       filters: [],
@@ -1517,6 +1519,7 @@ export default function App() {
               visibleColumns: null,
               view: "grid",
               sql: trimmed,
+              ...rerunFieldsFrom(res, target),
               statements:
                 (res.statements?.length ?? 0) > 1
                   ? res.statements
@@ -1851,6 +1854,10 @@ export default function App() {
                 ranDataEpoch: stampedEpoch,
                 dataStale: stampedEpoch !== dataEpoch,
                 page: { ...pg, result_id: ent.result_id },
+                // Q-C1: the pill's own statement is what an expiry re-runs.
+                rerunSql: pg.sql || undefined,
+                rerunTarget: pg.target || t.rerunTarget,
+                rerunPreviewLimit: undefined,
                 sortCol: null,
                 descending: false,
                 filters: [],
@@ -2617,10 +2624,32 @@ export default function App() {
     [toast, setResTabs, setActiveResId, patchRes],
   );
 
-  // re-run a specific result tab's query and refresh its rows in place
-  const rerunResultTab = async (id: string): Promise<string | null> => {
+  // re-run a specific result tab's query and refresh its rows in place.
+  // Q-C1: re-runs ONLY the statement that produced this grid (never the tab's
+  // whole editor script), read-only, on the tab's own engine target, with its
+  // own preview cap. A grid produced by a statement that can change data is
+  // never re-run automatically: it is marked stale for the user to re-run.
+  // `refusal: "throw"` lets the paging rail show the reason as its one toast.
+  const rerunResultTab = async (
+    id: string,
+    refusal: "toast" | "throw" = "toast",
+  ): Promise<string | null> => {
     const r = resTabsRef.current.find((x) => x.id === id);
-    if (!r || r.kind !== "result" || !r.sql) return null;
+    if (!r || r.kind !== "result") return null;
+    const plan = planResultTabRerun(r);
+    const refuse = (reason: "write" | "missing"): null => {
+      setResTabs((prev) =>
+        prev.map((x) => (x.id === id ? { ...x, dataStale: true } : x)),
+      );
+      const msg =
+        reason === "write"
+          ? "This grid came from a statement that changes data, so it is not re-run automatically. Run it again from the editor to refresh it."
+          : "This result expired. Run the query again to refresh it.";
+      if (refusal === "throw") throw new Error(msg);
+      toast("warn", "Result not refreshed", msg);
+      return null;
+    };
+    if (plan.kind === "refuse") return refuse(plan.reason);
     const oldRid = r.resultId;
     // Same Run/Stop machinery as the main path: supersede any in-flight query
     // (abort the fetch + interrupt the backend) and run this re-run with a
@@ -2637,15 +2666,27 @@ export default function App() {
     }));
     registerRun(queryId, ctrl); // .519: Activity Stop can abort this fetch
     let freshResultId: string | null = null;
+    let writeRefused = false;
     try {
       const res = await api.query(
-        r.sql, target, readOnly, queryId, ctrl.signal,
-        undefined, undefined,
-        // .458: a tab that carried a statement ledger refetches WITH one,
-        // so its pills never point at discarded results.
-        r.statements ? { per_statement: true } : undefined,
+        plan.sql,
+        plan.target ?? target,
+        /* read_only: a re-run must never write */ true,
+        queryId,
+        ctrl.signal,
+        // plan.sql is the backend's post-translation statement: run it native
+        undefined,
+        undefined,
+        {
+          surface: "ide",
+          label: r.title,
+          ...(plan.previewLimit ? { preview_limit: plan.previewLimit } : {}),
+        },
       );
-      if (!res.error && res.result_id != null) {
+      if (res.error && /read-only/i.test(res.error)) {
+        // The backend classed it as a write: same outcome as the client guard.
+        writeRefused = true;
+      } else if (!res.error && res.result_id != null) {
         freshResultId = res.result_id;
         setResTabs((prev) =>
           prev.map((x) =>
@@ -2657,18 +2698,16 @@ export default function App() {
                   dataStale: false,
                   queryId,
                   page: res,
+                  rerunSql: res.sql || plan.sql,
+                  rerunTarget: res.target || plan.target,
                   sortCol: null,
                   descending: false,
                   filters: [],
                   allColumns: res.columns || [],
                   visibleColumns: null,
-                  statements:
-                    (res.statements?.length ?? 0) > 1
-                      ? res.statements
-                      : undefined,
-                  activeStmt: res.statements?.find(
-                    (e) => e.result_id === res.result_id,
-                  )?.index,
+                  // the other statement pills pointed at results that are gone
+                  statements: undefined,
+                  activeStmt: undefined,
                 }
               : x,
           ),
@@ -2706,9 +2745,10 @@ export default function App() {
       unregisterRun(queryId);
       endRun(key, ctrl);
     }
+    if (writeRefused) return refuse("write");
     return freshResultId;
   };
-  rerunExpiredResultRef.current = (id) => rerunResultTab(id);
+  rerunExpiredResultRef.current = (id) => rerunResultTab(id, "throw");
 
   // change a loaded column's type from the grid, then auto-refresh + persist
   const changeColType = async (
