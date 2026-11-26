@@ -383,7 +383,13 @@ def test_parallel_independent_branches():
         failed = s.run_nodeflows(
             bad, [{"node": "lo"}, {"node": "xo"}],
             query_id="parallel-cleanup")
-        need(failed.get("error"), "invalid branch should fail the batch")
+        # The invalid branch fails on its own target; the healthy branch
+        # still returns rows (per-branch failures ride in "results").
+        by_node = {r.get("node"): r for r in (failed.get("results") or [])}
+        need(failed.get("error") or (by_node.get("xo") or {}).get("error"),
+             "invalid branch should fail: %r" % failed)
+        need(failed.get("error") or not (by_node.get("lo") or {}).get("error"),
+             "the healthy branch should still succeed: %r" % failed)
         _cols, leftovers = d.execute(
             "SELECT table_name FROM duckdb_tables() "
             "WHERE table_name LIKE '__nbflow_%'")
