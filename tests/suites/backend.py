@@ -3164,7 +3164,17 @@ def backend_tests(datadir, csv_path, json_path):
             calls["n"] += 1
             return real_digest(path, size)
 
+        # Q-H4: small files are now hashed in full by OW._digest_for, which
+        # never reaches filecache.content_digest, so count the watcher's own
+        # digest entry point as well.
+        real_ow_digest = OW._digest_for
+
+        def counting_ow_digest(path, size):
+            calls["n"] += 1
+            return real_ow_digest(path, size)
+
         _fc.content_digest = counting_digest
+        OW._digest_for = counting_ow_digest
         try:
             p = os.path.join(d, "vals.csv")
             open(p, "w", newline="").write("id,v\n1,a\n")
@@ -3185,6 +3195,7 @@ def backend_tests(datadir, csv_path, json_path):
                "poll digest counter stays 0 on cheap match")
         finally:
             _fc.content_digest = real_digest
+            OW._digest_for = real_ow_digest
             try:
                 s.shutdown()
             except Exception:
@@ -6400,7 +6411,10 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         css = open(os.path.join(FRONTEND, "src", "styles.css"),
                    encoding="utf-8").read()
-        need("per_statement: true" in app
+        # Q-C1: the expired-tab rerun no longer re-sends the whole script
+        # with per_statement; the ledger is requested by the main Run.
+        need(("per_statement: true" in app
+              or "per_statement: previewLimit == null" in app)
              and "const openStmt" in app
              and app.count("openStmt(") >= 1
              and "stmtStrip(activeResultTab)" in app
@@ -28088,6 +28102,305 @@ def backend_tests(datadir, csv_path, json_path):
         except Exception as e:
             need(False, "a cyclic graph must not crash fingerprinting: %s" % e)
 
+    def t_nf_c1_fingerprint_long_chain():
+        # NF-C1 (audit 2026-11-25): each node's fingerprint text embedded its
+        # inputs' full JSON text, re-escaped per level, so it DOUBLED per node:
+        # 24 nodes took 9.5 s, ~27 ran out of memory, on every run/preview.
+        # Fingerprints now embed fixed-size digests and walk iteratively.
+        from samql_core import nodeflow as _nf
+        import json as _json
+
+        def chain(n):
+            nodes = [{"id": "n0", "type": "input", "config": {"table": "t"}}]
+            edges = []
+            for i in range(1, n):
+                nodes.append({"id": "n%d" % i, "type": "filter",
+                              "config": {"condition": 'x > "%d"' % i}})
+                edges.append({"from": {"node": "n%d" % (i - 1),
+                                       "port": "true" if i > 1 else "out"},
+                              "to": {"node": "n%d" % i, "port": "in"}})
+            return {"nodes": nodes, "edges": edges}
+
+        g = chain(300)
+        t0 = time.monotonic()
+        f = _nf.flow_fingerprints(g, {}, 0, "sqlite")
+        dt = time.monotonic() - t0
+        need(dt < 0.5, "a 300-node chain fingerprints in < 0.5 s (%.2f s)" % dt)
+        eq(len(f), 300, "every chain node gets a fingerprint")
+        need(all(len(v) == 16 for v in f.values()),
+             "fingerprints stay fixed-size however deep the chain")
+        g2 = _json.loads(_json.dumps(g))
+        g2["nodes"][150]["config"]["condition"] = "x > 0"
+        f2 = _nf.flow_fingerprints(g2, {}, 0, "sqlite")
+        need(all(f2["n%d" % i] == f["n%d" % i] for i in range(150)),
+             "an edit leaves every upstream fingerprint unchanged")
+        need(all(f2["n%d" % i] != f["n%d" % i] for i in range(150, 300)),
+             "an edit changes the node and everything downstream")
+        # Deeper than Python's recursion limit: the walk is iterative.
+        big = _nf.flow_fingerprints(chain(3000), {}, 0, "sqlite")
+        eq(len(big), 3000, "a 3000-node chain is fingerprinted (no recursion cap)")
+
+        # A 40-level diamond ladder: shared subtrees are digested once.
+        nodes = [{"id": "r", "type": "input", "config": {"table": "t"}}]
+        edges, prev = [], "r"
+        for i in range(40):
+            a, b, j = "a%d" % i, "b%d" % i, "j%d" % i
+            nodes += [{"id": a, "type": "filter", "config": {"c": 1}},
+                      {"id": b, "type": "filter", "config": {"c": 2}},
+                      {"id": j, "type": "join", "config": {}}]
+            edges += [
+                {"from": {"node": prev, "port": "out"}, "to": {"node": a, "port": "in"}},
+                {"from": {"node": prev, "port": "out"}, "to": {"node": b, "port": "in"}},
+                {"from": {"node": a, "port": "out"}, "to": {"node": j, "port": "left"}},
+                {"from": {"node": b, "port": "out"}, "to": {"node": j, "port": "right"}}]
+            prev = j
+        t0 = time.monotonic()
+        fd = _nf.flow_fingerprints({"nodes": nodes, "edges": edges}, {}, 0, "sqlite")
+        dt = time.monotonic() - t0
+        need(dt < 0.5, "a 40-level diamond ladder fingerprints in < 0.5 s (%.2f s)" % dt)
+        eq(len(fd), 121, "every diamond node gets a fingerprint")
+        need(fd["a0"] != fd["b0"], "the two sides of a diamond stay distinct")
+
+        # Cycles and missing inputs are still omitted, and only they are:
+        # a node downstream of a cycle is omitted, an unrelated one is not.
+        gc = {"nodes": [{"id": "p", "type": "filter"}, {"id": "q", "type": "filter"},
+                        {"id": "d", "type": "filter"}, {"id": "i", "type": "input"},
+                        {"id": "m", "type": "filter"}],
+              "edges": [{"from": {"node": "p"}, "to": {"node": "q"}},
+                        {"from": {"node": "q"}, "to": {"node": "p"}},
+                        {"from": {"node": "q"}, "to": {"node": "d"}},
+                        {"from": {"node": "ghost"}, "to": {"node": "m"}}]}
+        eq(set(_nf.flow_fingerprints(gc, {}, 0, "sqlite")), {"i"},
+           "cyclic, below-cycle and missing-input nodes are omitted")
+
+    def t_nf_c1_long_chain_runs_with_cache_on():
+        # NF-C1 end to end: a 30-node Filter chain runs through the real
+        # Session with the flow cache ON (the default) in well under a second
+        # of fingerprinting, and returns the same rows as with the cache off.
+        s = _fresh_session()
+        try:
+            graph = {"nodes": [{"id": "n0", "type": "input",
+                                "config": {"table": "nf_base"}}], "edges": []}
+            et = s._flow_engine_target(graph)
+            eng, _ = s._engine_obj(et)
+            eng.execute("CREATE TABLE nf_base (x INTEGER)")
+            eng.execute("INSERT INTO nf_base VALUES (1),(5),(40),(70)")
+            for i in range(1, 30):
+                graph["nodes"].append({"id": "n%d" % i, "type": "filter",
+                                       "config": {"condition": "x > %d" % i}})
+                graph["edges"].append({"from": {"node": "n%d" % (i - 1),
+                                                "port": "true" if i > 1 else "out"},
+                                       "to": {"node": "n%d" % i, "port": "in"}})
+            s.flow_cache = True
+            t0 = time.monotonic()
+            r = s.run_nodeflow(graph, "n29", "true")
+            dt = time.monotonic() - t0
+            need(not r.get("error"), "30-node chain runs: %s" % r.get("error"))
+            eq(sorted(row[0] for row in (r.get("rows") or [])), [40, 70],
+               "the chain returns the right rows")
+            need(dt < 10.0, "30-node chain finishes promptly with the cache on "
+                 "(%.2f s; it used to run out of memory)" % dt)
+            s.flow_cache = False
+            r_off = s.run_nodeflow(graph, "n29", "true")
+            eq(sorted(row[0] for row in (r_off.get("rows") or [])), [40, 70],
+               "cache on and cache off agree")
+        finally:
+            s.shutdown()
+
+    def t_q_h1_sqlite_write_waits_for_running_load():
+        # Q-H1 (audit 2026-11-25): on SQLite an IDE write ran INSIDE a running
+        # load's open transaction; its commit() committed the load's partial
+        # batch, the load's own COMMIT then failed ("no transaction is
+        # active") and the load dropped its table. execute_cursor now holds
+        # write_lock for anything that mutates, so the write waits instead.
+        from samql_core.engines import DBManager
+        db = DBManager()
+        started, release = threading.Event(), threading.Event()
+
+        def rows():
+            for i in range(50000):
+                yield (i, "a")
+            started.set()
+            release.wait(10)
+            for i in range(50000, 60000):
+                yield (i, "b")
+
+        out = {}
+
+        def load():
+            try:
+                out["load"] = db.add_table_streaming(
+                    "qh1_big", ["n", "tag"], rows(), chunk=10000)
+            except Exception as e:  # pragma: no cover - the bug's symptom
+                out["load"] = e
+
+        def ide_write():
+            try:
+                out["write"] = db.execute_cursor(
+                    "CREATE TABLE qh1_z AS SELECT 1 AS v")
+            except Exception as e:
+                out["write"] = e
+
+        lt = threading.Thread(target=load)
+        lt.start()
+        try:
+            need(started.wait(10), "the load reached its mid-stream pause")
+            wt = threading.Thread(target=ide_write)
+            wt.start()
+            time.sleep(0.4)
+            need(wt.is_alive(), "the IDE write waits while the load is running")
+        finally:
+            release.set()
+            lt.join(30)
+        wt.join(30)
+        need(not isinstance(out.get("load"), Exception),
+             "the load completes: %r" % (out.get("load"),))
+        eq(out["load"][1], 60000, "the load reports every row")
+        need(not isinstance(out.get("write"), Exception),
+             "the IDE write completes after the load: %r" % (out.get("write"),))
+        eq(db.execute("SELECT COUNT(*) FROM qh1_big")[1][0][0], 60000,
+           "the loaded table exists with every row")
+        eq(db.execute("SELECT v FROM qh1_z")[1], [(1,)], "the IDE table exists")
+        need(not db.conn.in_transaction, "no transaction is left open")
+
+        # A failing mutating script rolls back and leaves no open transaction
+        # (an open one makes every later SQLite load fail).
+        db.execute_cursor("CREATE TABLE qh1_t (v INTEGER)")
+        try:
+            db.execute_cursor("INSERT INTO qh1_t VALUES (1); "
+                              "INSERT INTO qh1_missing VALUES (1)")
+            need(False, "the failing script raises")
+        except Exception:
+            pass
+        need(not db.conn.in_transaction, "a failed write leaves no open transaction")
+        eq(db.execute("SELECT COUNT(*) FROM qh1_t")[1][0][0], 0,
+           "the failed script's earlier INSERT is rolled back")
+        # A bare COMMIT also waits for the lock (it would commit a load too).
+        db.write_lock.acquire()
+        try:
+            commit_err = []
+
+            def _bare_commit():
+                try:
+                    db.execute_cursor("COMMIT")
+                except Exception as exc:  # no transaction left to commit
+                    commit_err.append(exc)
+            ct = threading.Thread(target=_bare_commit)
+            ct.start()
+            time.sleep(0.3)
+            need(ct.is_alive(), "a bare COMMIT waits for the engine lock")
+        finally:
+            db.write_lock.release()
+        ct.join(10)
+        need(not ct.is_alive(), "the bare COMMIT runs once the lock frees")
+        # Scripts ending in a read still stream the read (no lock held).
+        cols, first, cur = db.execute_cursor(
+            "INSERT INTO qh1_t VALUES (2); SELECT * FROM qh1_big", batch=100)
+        need(cur is not None and len(first) == 100,
+             "a write-then-SELECT script streams its final read")
+        try:
+            cur.close()
+        except Exception:
+            pass
+        eq(db.execute("SELECT COUNT(*) FROM qh1_t")[1][0][0], 1,
+           "the script's write is committed")
+
+    def t_q_h4_same_length_edit_is_detected():
+        # Q-H4 (audit 2026-11-25): a same-length edit (Y->N) between the
+        # sampled digest windows looked like a pure touch, and poll() then
+        # ADOPTED the new stat as baseline, masking the edit for good. Only a
+        # full-file digest may now call a stat change a touch.
+        from samql_core import originwatch as _ow
+        from samql_core.originwatch import OriginWatch
+        from samql_core.session import LOCAL_TARGET
+        d = tempfile.mkdtemp(prefix="qh4_")
+        s = _fresh_session()
+        try:
+            p = os.path.join(d, "flags.csv")
+            with open(p, "w", newline="") as fh:
+                fh.write("id,flag\n")
+                for i in range(200000):
+                    fh.write("%07d,Y\n" % i)
+            size = os.path.getsize(p)
+            # A byte the old sampled digest never read: for a ~2 MB file it
+            # hashes five 64 KiB windows at 0, 20, 40, 60 and 80%, so 70% is
+            # between two of them (checked below with the digest itself).
+            off = (size * 7) // 10
+            with open(p, "rb") as fh:
+                fh.seek(off)
+                chunk = fh.read(64)
+            off += chunk.index(b"Y")
+
+            def edit_same_length():
+                st = os.stat(p)
+                with open(p, "r+b") as fh:
+                    fh.seek(off)
+                    fh.write(b"N")
+                os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5 * 10**9))
+
+            from samql_core import filecache as _fc
+            before = _fc.content_digest(p)
+            st0 = os.stat(p)
+            with open(p, "r+b") as fh:
+                fh.seek(off)
+                fh.write(b"N")
+            eq(_fc.content_digest(p), before,
+               "the test edit falls between the sampled digest windows")
+            with open(p, "r+b") as fh:
+                fh.seek(off)
+                fh.write(b"Y")
+            os.utime(p, ns=(st0.st_atime_ns, st0.st_mtime_ns))
+
+            # Watcher level: flagged on the first poll, and stays flagged.
+            ow = OriginWatch()
+            ow.register("sqlite", "flags", p)
+            edit_same_length()
+            need(("sqlite", "flags") in ow.poll(force=True),
+                 "a same-length edit is flagged on the first poll")
+            ow.poll(force=True)
+            need(ow.is_changed("sqlite", "flags"),
+                 "the edit stays pending (its stat is not adopted)")
+
+            # End to end: load, edit, sidebar poll, then the IDE sees 'N'.
+            with open(p, "r+b") as fh:
+                fh.seek(off)
+                fh.write(b"Y")
+            loaded = s.load_file(p, destination="sqlite", base_name="qh4flags")
+            tbl = loaded[0]["name"]
+            r0 = s.run_query("SELECT COUNT(*) FROM \"%s\" WHERE flag = 'N'" % tbl,
+                             target=LOCAL_TARGET, surface="ide", query_id="qh4-a")
+            eq(r0.get("rows"), [[0]], "no N rows before the edit")
+            edit_same_length()
+            s.tables_tree()  # the sidebar poll that used to adopt the stat
+            r1 = s.run_query("SELECT COUNT(*) FROM \"%s\" WHERE flag = 'N'" % tbl,
+                             target=LOCAL_TARGET, surface="ide", query_id="qh4-b")
+            eq(r1.get("rows"), [[1]], "the IDE sees the same-length edit")
+
+            # A pure touch on a small file is still not a change.
+            p2 = os.path.join(d, "small.csv")
+            with open(p2, "w") as fh:
+                fh.write("a\n1\n")
+            ow.register("sqlite", "small", p2)
+            st = os.stat(p2)
+            os.utime(p2, ns=(st.st_atime_ns, st.st_mtime_ns + 5 * 10**9))
+            need(("sqlite", "small") not in ow.poll(force=True),
+                 "a pure touch on a fully hashed file is not a change")
+            # Above the full-hash cap a sampled match proves nothing: any stat
+            # change counts as changed (a reload, never stale data).
+            old_cap = _ow.FULL_DIGEST_MAX_BYTES
+            _ow.FULL_DIGEST_MAX_BYTES = 1
+            try:
+                ow.register("sqlite", "big", p2)
+                st = os.stat(p2)
+                os.utime(p2, ns=(st.st_atime_ns, st.st_mtime_ns + 5 * 10**9))
+                need(("sqlite", "big") in ow.poll(force=True),
+                     "a touch on a file too big to hash in full counts as changed")
+            finally:
+                _ow.FULL_DIGEST_MAX_BYTES = old_cap
+        finally:
+            s.shutdown()
+            shutil.rmtree(d, ignore_errors=True)
+
     def t_flow_cache_lru():
         # LRU semantics + eviction actually drops the backing table.
         from samql_core.session import LOCAL_TARGET
@@ -43624,6 +43937,14 @@ def backend_tests(datadir, csv_path, json_path):
         ("NodeFlow flow compiles, previews + exports", t_nodeflow_compile_run),
         ("flow cache: fingerprints (deterministic, scoped, projection-aware)",
          t_flow_fingerprints),
+        ("NF-C1: flow fingerprints stay fixed-size on long chains / diamonds",
+         t_nf_c1_fingerprint_long_chain),
+        ("NF-C1: a 30-node chain runs with the flow cache on",
+         t_nf_c1_long_chain_runs_with_cache_on),
+        ("Q-H1: a SQLite IDE write waits for a running load (no early commit)",
+         t_q_h1_sqlite_write_waits_for_running_load),
+        ("Q-H4: a same-length source edit is detected and reloaded",
+         t_q_h4_same_length_edit_is_detected),
         ("flow cache: LRU eviction drops the backing table", t_flow_cache_lru),
         ("flow cache: incremental reuse + parity with cache off",
          t_flow_cache_incremental),
