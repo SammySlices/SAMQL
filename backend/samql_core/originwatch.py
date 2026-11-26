@@ -1,6 +1,7 @@
 """File-origin signatures for loaded tables (IDE / Journal / NodeFlow).
 
-Lightweight polling of mtime/size/ctime/inode + bounded content digest —
+Lightweight polling of mtime/size/ctime/inode + content digest (full-file
+up to FULL_DIGEST_MAX_BYTES, sampled above it) —
 same posture as directory/appendfolder and filecache. Session poll handlers
 reload inputs in place and clear last-run caches (result grids, Journal
 pages, NodeFlow reuse) when a signature flips.
@@ -54,12 +55,38 @@ def cheap_stat(path):
         return None
 
 
+# Q-H4: files up to this size are hashed IN FULL, so "same digest" really
+# means "same bytes". Above it only a sampled digest is affordable, and a
+# sampled match can never prove a file unchanged (an edit between the sampled
+# windows looks identical), so poll() treats any stat change on such a file
+# as a content change. That costs a reload, never wrong data.
+FULL_DIGEST_MAX_BYTES = 64 * 1024 * 1024
+
+
 def _digest_for(path, size):
-    from . import filecache as _fc
+    """``"full:<hex>"`` for files up to ``FULL_DIGEST_MAX_BYTES``, otherwise
+    ``"smp:<hex>"`` (bounded samples, filecache.content_digest), or ``""``
+    when the file can't be read. Only a ``full:`` digest can confirm that a
+    stat change was a pure touch."""
     try:
-        return _fc.content_digest(path, int(size))
+        size = int(size)
+        if size <= FULL_DIGEST_MAX_BYTES:
+            import hashlib
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return "full:" + h.hexdigest()[:32]
+        from . import filecache as _fc
+        return "smp:" + _fc.content_digest(path, size)
     except Exception:
         return ""
+
+
+def digest_proves_unchanged(prior_digest, new_digest):
+    """True only when both digests cover the WHOLE file and are equal."""
+    return (isinstance(prior_digest, str) and prior_digest.startswith("full:")
+            and prior_digest == new_digest)
 
 
 def file_token(path, *, prior=None, force_digest=False):
@@ -338,20 +365,29 @@ class OriginWatch:
                 else:
                     # Cheap mismatch (or no baseline). A pure touch -- mtime/
                     # ctime/ino moved but size identical and the content
-                    # digest still matches -- is NOT a content change, so
-                    # confirm with a bounded digest before forcing a full
-                    # reload + epoch bump + cross-surface cache clears.
+                    # is byte-for-byte the same -- is NOT a content change,
+                    # so confirm before forcing a full reload + epoch bump +
+                    # cross-surface cache clears.
+                    #
+                    # Q-H4: only a FULL-file digest can confirm that. The old
+                    # sampled digest matched a same-length edit that fell
+                    # between its windows (Y->N, one digit of an amount),
+                    # and the new stat was then adopted as the baseline, so
+                    # the edit stayed masked for good. A file too big to
+                    # hash in full (smp: digest) is treated as changed.
                     changed = True
                     if (
                         prior is not None
                         and isinstance(prior, (tuple, list))
                         and len(prior) >= 5
                         and int(prior[1] or 0) == int(cheap[1])
-                        and prior[4]
+                        and isinstance(prior[4], str)
+                        and prior[4].startswith("full:")
                         and self._last_poll_digests < MAX_DIGESTS_PER_POLL
                     ):
                         self._last_poll_digests += 1
-                        if _digest_for(path, cheap[1]) == prior[4]:
+                        if digest_proves_unchanged(
+                                prior[4], _digest_for(path, cheap[1])):
                             changed = False
                             # Adopt the new cheap stat so later polls
                             # short-circuit without another digest.
