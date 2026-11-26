@@ -24,3 +24,5 @@ VERSION text eol=lf
 *.html text eol=lf
 *.svg text eol=lf
 *.txt text eol=lf
+*.dat text eol=lf
+*.samql text eol=lf

@@ -1,8 +1,8 @@
 ############################################################
 # SamQL source bundle
 #   build:     2026-11-24.704
-#   files:     435
-#   sha256:    565d9ce1c48fc0fd07d62088fe982dab6014f517842487798d1fd93015f7652d  (of the section body below)
+#   files:     437
+#   sha256:    15a0e18f1811bad30b83610501917344104de046cae98c3701ab67cfc1f42cc0  (of the section body below)
 #   generated: 2026-07-20 14:29:07 UTC
 #   contents:  complete source + tests + UI (Test-SamQL-All ready)
 #   reconstruct with Expand-SamQL[.]ps1 (this header is ignored)
@@ -34,6 +34,8 @@ VERSION text eol=lf
 *.html text eol=lf
 *.svg text eol=lf
 *.txt text eol=lf
+*.dat text eol=lf
+*.samql text eol=lf
 ===== FILE: .github/RELEASE_NOTES.md =====
 **SamQL AppWindow — build 2026-11-24.704 (v2.16.4)**
 
@@ -2805,7 +2807,7 @@ Archive the following together:
   "phase": 10,
   "generatedAt": "2026-07-20T14:29:07Z",
   "sourceManifest": "SOURCE_MANIFEST.txt",
-  "sourceFileCount": 435,
+  "sourceFileCount": 437,
   "runtime": {
     "pythonMinimum": "3.10",
     "nodeMinimum": "20.19",
@@ -3057,6 +3059,7 @@ frontend/package-lock.json
 frontend/package.json
 frontend/playwright.config.ts
 frontend/src/App.component.test.tsx
+frontend/src/App.rerunExpired.component.test.tsx
 frontend/src/App.tsx
 frontend/src/AuditAsyncOwnership.component.test.tsx
 frontend/src/components/AboutModal.tsx
@@ -3314,6 +3317,7 @@ frontend/src/lib/settingsViewToggles.component.test.tsx
 frontend/src/lib/sql.ts
 frontend/src/lib/sqlFunctions.ts
 frontend/src/lib/sqlProfiles.ts
+frontend/src/lib/sqlSideEffects.ts
 frontend/src/lib/sqlStrLiteral.component.test.ts
 frontend/src/lib/staleNodeflowColumnRefs.component.test.ts
 frontend/src/lib/staleNodeflowColumnRefs.ts
@@ -32097,6 +32101,7 @@ import os
 import shutil
 import sys
 import sqlite3
+import re
 import tempfile
 import threading
 from . import sqlutil
@@ -32919,6 +32924,12 @@ def _drop_sqlite_file(conn_box, path):
             pass
 
 
+# Q-H1: statements that open/close transactions on SQLite's single shared
+# connection. execute_cursor runs them under write_lock like a write.
+_TXN_CONTROL_LEADS = frozenset(
+    ("begin", "commit", "end", "rollback", "savepoint", "release"))
+
+
 class DBManager(_ThreadCancelMixin):
     """SQLite-backed engine. In-memory by default; disk-backed when
     ``disk_backed=True`` (lower peak RAM, spills to a temp file)."""
@@ -33431,29 +33442,86 @@ class DBManager(_ThreadCancelMixin):
         return self.execute(sql)
 
     def execute_cursor(self, sql, batch=1000):
+        """Run ``sql`` and return ``(cols, first_rows, tail_cursor)``.
+
+        Q-H1: SQLite has ONE connection, and ``add_table_streaming`` holds
+        ``write_lock`` across its own BEGIN ... COMMIT on it. This path used
+        to take no lock at all, so an IDE write ran INSIDE a load's open
+        transaction and its ``commit()`` committed the load's partial batch;
+        the load's own COMMIT then failed ("no transaction is active") and
+        its error path dropped the table. Now:
+
+          * every statement that can mutate runs under ``write_lock`` (so it
+            waits for a running load to commit) and is committed, or rolled
+            back on error, while the lock is still held;
+          * a pure read keeps the unlocked streaming tail, so a long SELECT
+            never holds the connection lock while the grid pages it;
+          * a script whose LAST statement is a read (``INSERT ...; SELECT``)
+            runs its earlier statements and commits under the lock, then
+            releases it and streams the final read exactly like a plain one.
+        """
+        from .sqlutil import classify_sql_statement
         statements = self._split_statements(sql)
         if not statements:
             return None, None, None
-        if len(statements) > 1:
-            pre = self.conn.cursor()
-            for s in statements[:-1]:
-                self._mark_busy(+1)
+        last = statements[-1]
+        # Transaction control (BEGIN/COMMIT/ROLLBACK/...) classifies as a
+        # "read" for read-only mode, but on the shared connection a bare
+        # COMMIT would commit a running load just like a write would.
+        lead = re.match(r"\s*([A-Za-z]+)", last or "")
+        last_is_read = (
+            classify_sql_statement(last) == "read"
+            and not (lead and lead.group(1).lower() in _TXN_CONTROL_LEADS))
+        pre = statements[:-1] if last_is_read else statements
+        if pre:
+            with self.write_lock:
+                self._raise_if_thread_cancelled()
+                cur = self.conn.cursor()
                 try:
-                    with _BeatScope(self, self.conn):
-                        pre.execute(s)
+                    for s in pre:
+                        self._mark_busy(+1)
+                        try:
+                            with _BeatScope(self, self.conn):
+                                cur.execute(s)
+                        finally:
+                            self._mark_busy(-1)
+                    if last_is_read:
+                        out = None
+                    elif not cur.description:
+                        out = (None, None, None)
+                    else:
+                        # A write that returns rows (RETURNING, a PRAGMA):
+                        # drain it under the lock so nothing stays stepping
+                        # on the shared connection after we commit.
+                        cols = [d[0] for d in cur.description]
+                        out = (cols, [tuple(r) for r in cur.fetchall()], None)
+                    if self.conn.in_transaction:
+                        self.conn.commit()
+                except BaseException:
+                    if self.conn.in_transaction:
+                        try:
+                            self.conn.rollback()
+                        except Exception:
+                            pass
+                    raise
                 finally:
-                    self._mark_busy(-1)
-            self.conn.commit()
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+            if out is not None:
+                return out
+        # A pure read: no lock, so cancel/progress reach it and a long
+        # result streams without blocking the engine.
         cur = self.conn.cursor()
         try:
             self._mark_busy(+1)
             try:
                 with _BeatScope(self, self.conn):
-                    cur.execute(statements[-1])
+                    cur.execute(last)
             finally:
                 self._mark_busy(-1)
             if not cur.description:
-                self.conn.commit()
                 try:
                     cur.close()
                 except Exception:
@@ -45445,9 +45513,15 @@ def flow_fingerprints(graph, needed_map=None, epoch=0, engine="sqlite",
         inedges.setdefault(t.get("node"), []).append(
             (t.get("port") or "", f.get("node"), f.get("port") or "out"))
 
+    # NF-C1: group the projection map by node once (the old per-node scan of
+    # the whole map was O(nodes * map)).
+    need_by_node = {}
+    for k, v in needed_map.items():
+        need_by_node.setdefault(k[0], []).append(v)
+
     def need_rep(nid):
         # the projection this node's output must carry; None anywhere == all
-        outs = [v for (k, v) in needed_map.items() if k[0] == nid]
+        outs = need_by_node.get(nid)
         if not outs or any(v is None for v in outs):
             return "*"
         s = set()
@@ -45455,51 +45529,87 @@ def flow_fingerprints(graph, needed_map=None, epoch=0, engine="sqlite",
             s |= v
         return sorted(s)
 
-    memo = {}
-    visiting = set()
-    cyclic = set()
+    # NF-C1: each node's representation embeds its inputs' FIXED-SIZE digest,
+    # never their full text. The old version embedded each input's whole JSON
+    # text, which json.dumps re-escaped at every level, so the text doubled
+    # per node and a ~25-node chain built hundreds of MB on every run.
+    #
+    # The walk is iterative (explicit stack) so a very long chain cannot hit
+    # Python's recursion limit. A node whose subtree reaches a cycle or a
+    # missing node gets None and is omitted from the result, exactly as before.
+    _PENDING = object()
+    memo = {}  # nid -> hex digest | None (cyclic / missing below) | _PENDING
 
-    def subtree(nid):
-        if nid in memo:
-            return memo[nid]
-        if nid in visiting:
-            cyclic.add(nid)
-            return "<cycle>"
-        node = nodes.get(nid)
-        if node is None:
-            return "<missing>"
-        visiting.add(nid)
-        ins = sorted(inedges.get(nid, []),
-                     key=lambda x: (x[0], str(x[1]), x[2]))
-        kids = [tp + ">" + subtree(src) + "@" + sp for (tp, src, sp) in ins]
-        rep = _json.dumps(
-            {"t": node.get("type"), "c": node.get("config") or {},
-             "n": need_rep(nid), "in": kids},
-            sort_keys=True, separators=(",", ":"), default=str)
-        visiting.discard(nid)
-        memo[nid] = rep
-        return rep
+    def _ins(nid):
+        return sorted(inedges.get(nid, []),
+                      key=lambda x: (x[0], str(x[1]), x[2]))
+
+    def subtree(root):
+        if root in memo:
+            d = memo[root]
+            return None if d is _PENDING else d
+        if root not in nodes:
+            return None
+        memo[root] = _PENDING
+        stack = [(root, iter(_ins(root)))]
+        while stack:
+            nid, it = stack[-1]
+            descended = False
+            for _tp, src, _sp in it:
+                if src in memo:
+                    continue  # done, or on the stack (a cycle: None below)
+                if src not in nodes:
+                    memo[src] = None
+                    continue
+                memo[src] = _PENDING
+                stack.append((src, iter(_ins(src))))
+                descended = True
+                break
+            if descended:
+                continue
+            stack.pop()
+            kids, ok = [], True
+            for tp, src, sp in _ins(nid):
+                d = memo.get(src)
+                if d is None or d is _PENDING:  # missing, cyclic, or below one
+                    ok = False
+                    break
+                kids.append([tp, d, sp])
+            if not ok:
+                memo[nid] = None
+                continue
+            node = nodes[nid]
+            rep = _json.dumps(
+                {"t": node.get("type"), "c": node.get("config") or {},
+                 "n": need_rep(nid), "in": kids},
+                sort_keys=True, separators=(",", ":"), default=str)
+            memo[nid] = hashlib.sha256(rep.encode("utf-8")).hexdigest()
+        d = memo.get(root)
+        return None if d is _PENDING else d
 
     try:
         digest_chars = max(16, min(int(digest_chars), 40))
     except Exception:
         digest_chars = 16
-    prefix = "v1|%s|%s|" % (epoch, engine)
+    # "v2": the representation changed, so keys from the old scheme (incl.
+    # restart-persistent cache files) age out instead of colliding.
+    prefix = "v2|%s|%s|" % (epoch, engine)
     out = {}
     for nid in nodes:
         try:
-            rep = subtree(nid)
+            d = subtree(nid)
         except Exception:
             continue
-        if nid in cyclic or "<cycle>" in rep or "<missing>" in rep:
+        if d is None:
             continue
         out[nid] = hashlib.sha1(
-            (prefix + rep).encode("utf-8")).hexdigest()[:digest_chars]
+            (prefix + d).encode("utf-8")).hexdigest()[:digest_chars]
     return out
 ===== FILE: backend/samql_core/originwatch.py =====
 """File-origin signatures for loaded tables (IDE / Journal / NodeFlow).
 
-Lightweight polling of mtime/size/ctime/inode + bounded content digest —
+Lightweight polling of mtime/size/ctime/inode + content digest (full-file
+up to FULL_DIGEST_MAX_BYTES, sampled above it) —
 same posture as directory/appendfolder and filecache. Session poll handlers
 reload inputs in place and clear last-run caches (result grids, Journal
 pages, NodeFlow reuse) when a signature flips.
@@ -45553,12 +45663,38 @@ def cheap_stat(path):
         return None
 
 
+# Q-H4: files up to this size are hashed IN FULL, so "same digest" really
+# means "same bytes". Above it only a sampled digest is affordable, and a
+# sampled match can never prove a file unchanged (an edit between the sampled
+# windows looks identical), so poll() treats any stat change on such a file
+# as a content change. That costs a reload, never wrong data.
+FULL_DIGEST_MAX_BYTES = 64 * 1024 * 1024
+
+
 def _digest_for(path, size):
-    from . import filecache as _fc
+    """``"full:<hex>"`` for files up to ``FULL_DIGEST_MAX_BYTES``, otherwise
+    ``"smp:<hex>"`` (bounded samples, filecache.content_digest), or ``""``
+    when the file can't be read. Only a ``full:`` digest can confirm that a
+    stat change was a pure touch."""
     try:
-        return _fc.content_digest(path, int(size))
+        size = int(size)
+        if size <= FULL_DIGEST_MAX_BYTES:
+            import hashlib
+            h = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            return "full:" + h.hexdigest()[:32]
+        from . import filecache as _fc
+        return "smp:" + _fc.content_digest(path, size)
     except Exception:
         return ""
+
+
+def digest_proves_unchanged(prior_digest, new_digest):
+    """True only when both digests cover the WHOLE file and are equal."""
+    return (isinstance(prior_digest, str) and prior_digest.startswith("full:")
+            and prior_digest == new_digest)
 
 
 def file_token(path, *, prior=None, force_digest=False):
@@ -45837,20 +45973,29 @@ class OriginWatch:
                 else:
                     # Cheap mismatch (or no baseline). A pure touch -- mtime/
                     # ctime/ino moved but size identical and the content
-                    # digest still matches -- is NOT a content change, so
-                    # confirm with a bounded digest before forcing a full
-                    # reload + epoch bump + cross-surface cache clears.
+                    # is byte-for-byte the same -- is NOT a content change,
+                    # so confirm before forcing a full reload + epoch bump +
+                    # cross-surface cache clears.
+                    #
+                    # Q-H4: only a FULL-file digest can confirm that. The old
+                    # sampled digest matched a same-length edit that fell
+                    # between its windows (Y->N, one digit of an amount),
+                    # and the new stat was then adopted as the baseline, so
+                    # the edit stayed masked for good. A file too big to
+                    # hash in full (smp: digest) is treated as changed.
                     changed = True
                     if (
                         prior is not None
                         and isinstance(prior, (tuple, list))
                         and len(prior) >= 5
                         and int(prior[1] or 0) == int(cheap[1])
-                        and prior[4]
+                        and isinstance(prior[4], str)
+                        and prior[4].startswith("full:")
                         and self._last_poll_digests < MAX_DIGESTS_PER_POLL
                     ):
                         self._last_poll_digests += 1
-                        if _digest_for(path, cheap[1]) == prior[4]:
+                        if digest_proves_unchanged(
+                                prior[4], _digest_for(path, cheap[1])):
                             changed = False
                             # Adopt the new cheap stat so later polls
                             # short-circuit without another digest.
@@ -58928,6 +59073,7 @@ class Session:
                     "filtered": bool(filters),
                     "sql": cr.sql,
                     "engine": cr.engine,
+                    "target": getattr(cr, "target", None),
                     "cell_capped": False,
                     "result_capped": bool(cr.capped),
                     "result_cap": cr.cap if cr.capped else None,
@@ -58964,6 +59110,9 @@ class Session:
                 "filtered": bool(filters),
                 "sql": cr.sql,
                 "engine": cr.engine,
+                # Q-C1: the engine target this statement resolved to, so an
+                # expired grid re-runs its own statement where it first ran.
+                "target": getattr(cr, "target", None),
                 "cell_capped": cell_capped,
                 "result_capped": bool(cr.capped),
                 "result_cap": cr.cap if cr.capped else None,
@@ -84946,6 +85095,256 @@ describe("App runtime behavior", () => {
     expect(screen.getByTestId("sidebar-tables")).not.toHaveTextContent("stale_catalog");
   });
 });
+===== FILE: frontend/src/App.rerunExpired.component.test.tsx =====
+import React from "react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+
+const apiMock = vi.hoisted(() => ({
+  health: vi.fn(),
+  tables: vi.fn(),
+  history: vi.fn(),
+  saved: vi.fn(),
+  workflowsList: vi.fn(),
+  assistantStatus: vi.fn(),
+  query: vi.fn(),
+  page: vi.fn(),
+  discardResult: vi.fn(),
+}));
+
+vi.mock("./lib/api", () => ({
+  api: new Proxy(apiMock, {
+    get(target, prop: string) {
+      if (prop in target) return target[prop as keyof typeof target];
+      return vi.fn(async () => ({}));
+    },
+  }),
+  ApiError: class ApiError extends Error {
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
+  },
+  exportResultToFile: vi.fn(),
+  registerBgCancel: vi.fn(() => vi.fn()),
+  saveToDownloads: vi.fn(),
+  stampResultEpoch: vi.fn((_result, fallback: number) => fallback),
+}));
+
+vi.mock("./components/ServerWatchdog", () => ({ ServerWatchdog: () => null }));
+vi.mock("./components/FieldExplorer", () => ({ FieldExplorer: () => null }));
+vi.mock("./components/NodeFlow", () => ({
+  NodeFlow: (props: {
+    active?: boolean;
+    showTables?: boolean;
+    inspectorOverTables?: boolean;
+  }) => (
+    <div
+      data-testid="nodeflow-view"
+      data-active={props.active === false ? "0" : "1"}
+      data-show-tables={props.showTables ? "1" : "0"}
+      data-inspector-over-tables={props.inspectorOverTables ? "1" : "0"}
+    >
+      NodeFlow
+    </div>
+  ),
+}));
+vi.mock("./components/Dashboard", () => ({
+  Dashboard: (props: { active?: boolean }) => (
+    <div
+      data-testid="dashboard-view"
+      data-active={props.active === false ? "0" : "1"}
+    >
+      Dashboard
+    </div>
+  ),
+}));
+vi.mock("./components/Notebook", () => ({
+  Notebook: (props: {
+    assistantOpen?: boolean;
+    onAssistantToggle?: () => void;
+  }) => (
+    <>
+      <textarea data-testid="notebook-sql-editor" aria-label="Journal editor" />
+      {props.onAssistantToggle && (
+        <button
+          type="button"
+          data-testid="sql-assistant-journal-fab"
+          aria-pressed={!!props.assistantOpen}
+          onClick={props.onAssistantToggle}
+        >
+          SQL assistant
+        </button>
+      )}
+    </>
+  ),
+}));
+vi.mock("./components/Sidebar", () => ({
+  Sidebar: (props: {
+    tables: { name: string }[];
+    onRefresh: () => void;
+    tablesPinned?: boolean;
+    onToggleTablesPin?: () => void;
+  }) => (
+    <aside>
+      <output data-testid="sidebar-tables">
+        {props.tables.map((table) => table.name).join(",")}
+      </output>
+      <button onClick={props.onRefresh}>Refresh tables</button>
+      <button
+        data-testid="mock-tables-pin"
+        aria-pressed={!!props.tablesPinned}
+        onClick={props.onToggleTablesPin}
+      >
+        Pin tables
+      </button>
+    </aside>
+  ),
+}));
+vi.mock("./components/ActivityShared", () => ({
+  useActivityStatus: () => ({ status: null }),
+  useEngineReset: () => ({ reset: vi.fn(), resetting: false }),
+  useTasks: () => ({ activeCount: 0, opsCount: 0, stalled: false }),
+  useWinDrag: () => ({
+    pos: { x: 40, y: 40 },
+    setPos: vi.fn(),
+    startDrag: vi.fn(),
+    dragging: false,
+    settled: false,
+    winRef: { current: null },
+  }),
+  ActivityMonitor: () => null,
+  TaskWatcher: () => null,
+}));
+
+const health = {
+  version: "2.15.90",
+  build: "2026-07-11.579",
+  features: { duckdb: true, pyarrow: true, openpyxl: true },
+};
+
+async function renderFreshApp() {
+  const { default: App } = await import("./App");
+  return render(<App />);
+}
+
+const SCRIPT = "INSERT INTO audit VALUES (1);\nSELECT * FROM audit";
+
+function seedSession() {
+  localStorage.setItem(
+    "samql.session.v1",
+    JSON.stringify({
+      version: 2,
+      edTabs: [{ id: "tab", title: "Query", sql: SCRIPT }],
+      activeId: "tab",
+      // The IDE's CURRENT target differs from where the result ran, so the
+      // test also proves the re-run uses the tab's own target.
+      target: "__duckdb__",
+    }),
+  );
+}
+
+async function runScriptOnce(firstResult: Record<string, unknown>) {
+  seedSession();
+  apiMock.query.mockResolvedValueOnce(firstResult);
+  await renderFreshApp();
+  await waitFor(() =>
+    expect(screen.getByTestId("samql-app")).toHaveAttribute("data-ready", "true"),
+  );
+  fireEvent.click(screen.getByTestId("run-query"));
+  await waitFor(() => expect(apiMock.query).toHaveBeenCalledTimes(1));
+  await waitFor(() =>
+    expect(screen.getAllByTestId("grid-col-header").length).toBeGreaterThan(0),
+  );
+  expect(apiMock.query.mock.calls[0][0]).toBe(SCRIPT);
+}
+
+describe("Q-C1: an expired result tab never re-runs its script", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    localStorage.clear();
+    apiMock.health.mockReset().mockResolvedValue(health);
+    apiMock.tables.mockReset().mockResolvedValue({ tables: [], data_epoch: 0 });
+    apiMock.history.mockReset().mockResolvedValue([]);
+    apiMock.saved.mockReset().mockResolvedValue([]);
+    apiMock.workflowsList.mockReset().mockResolvedValue({ workflows: [] });
+    apiMock.discardResult.mockReset().mockResolvedValue({ ok: true });
+    apiMock.query.mockReset();
+    apiMock.page.mockReset();
+  });
+
+  it("re-runs only the producing SELECT, read-only, on the tab's own target", async () => {
+    await runScriptOnce({
+      result_id: "r1",
+      columns: ["v"],
+      rows: [[1]],
+      total_rows: 1,
+      stmt_kind: "write",
+      sql: "SELECT * FROM audit",
+      target: "__local__",
+      engine: "sqlite",
+      statements: [
+        { index: 0, sql_preview: "INSERT INTO audit VALUES (1)", total_rows: 1 },
+        { index: 1, sql_preview: "SELECT * FROM audit", result_id: "r1", total_rows: 1 },
+      ],
+    });
+    // The sort finds the result expired (another tab's write bumped the epoch).
+    apiMock.page
+      .mockResolvedValueOnce({ error: "result expired", columns: [], rows: [], total_rows: 0 })
+      .mockResolvedValue({
+        columns: ["v"], rows: [[1]], total_rows: 1, offset: 0,
+        sql: "SELECT * FROM audit", target: "__local__",
+      });
+    apiMock.query.mockResolvedValueOnce({
+      result_id: "r2",
+      columns: ["v"],
+      rows: [[1]],
+      total_rows: 1,
+      stmt_kind: "read",
+      sql: "SELECT * FROM audit",
+      target: "__local__",
+    });
+
+    fireEvent.click(screen.getAllByTestId("grid-col-header")[0]);
+
+    await waitFor(() => expect(apiMock.query).toHaveBeenCalledTimes(2));
+    const [sql, target, readOnly, , , dialect, , opts] =
+      apiMock.query.mock.calls[1];
+    expect(sql).toBe("SELECT * FROM audit");
+    expect(sql).not.toMatch(/insert/i);
+    expect(target).toBe("__local__");
+    expect(readOnly).toBe(true);
+    expect(dialect).toBeUndefined();
+    expect(opts?.per_statement).toBeFalsy();
+    await waitFor(() => expect(apiMock.page).toHaveBeenCalledTimes(2));
+    expect(apiMock.page.mock.calls[1][0]).toBe("r2");
+  });
+
+  it("never auto-re-runs a grid that a write produced; marks it stale", async () => {
+    await runScriptOnce({
+      result_id: "r1",
+      columns: ["v"],
+      rows: [[1]],
+      total_rows: 1,
+      stmt_kind: "write",
+      sql: "INSERT INTO audit VALUES (1) RETURNING *",
+      target: "__duckdb__",
+      engine: "duckdb",
+    });
+    apiMock.page.mockResolvedValue({
+      error: "result expired", columns: [], rows: [], total_rows: 0,
+    });
+
+    fireEvent.click(screen.getAllByTestId("grid-col-header")[0]);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("result-data-stale-chip")).toBeTruthy(),
+    );
+    expect(apiMock.query).toHaveBeenCalledTimes(1);
+  });
+});
 ===== FILE: frontend/src/App.tsx =====
 import React, {
   lazy,
@@ -84967,6 +85366,7 @@ import { api,
   saveToDownloads,
   stampResultEpoch } from "./lib/api";
 import type { RootIdChoice } from "./lib/api";
+import { planResultTabRerun, rerunFieldsFrom } from "./lib/sqlSideEffects";
 import { dropManyConfirmMessage } from "./lib/dropManyConfirm";
 import { menuPos } from "./lib/menuPos";
 import { startPointerDrag } from "./lib/pointerDrag";
@@ -86429,6 +86829,7 @@ export default function App() {
                       queryId,
                       page: res,
                       sql: trimmed,
+                      ...rerunFieldsFrom(res, target),
                       sortCol: null,
                       descending: false,
                       filters: [],
@@ -86466,6 +86867,7 @@ export default function App() {
               visibleColumns: null,
               view: "grid",
               sql: trimmed,
+              ...rerunFieldsFrom(res, target),
               statements:
                 (res.statements?.length ?? 0) > 1
                   ? res.statements
@@ -86800,6 +87202,10 @@ export default function App() {
                 ranDataEpoch: stampedEpoch,
                 dataStale: stampedEpoch !== dataEpoch,
                 page: { ...pg, result_id: ent.result_id },
+                // Q-C1: the pill's own statement is what an expiry re-runs.
+                rerunSql: pg.sql || undefined,
+                rerunTarget: pg.target || t.rerunTarget,
+                rerunPreviewLimit: undefined,
                 sortCol: null,
                 descending: false,
                 filters: [],
@@ -87566,10 +87972,32 @@ export default function App() {
     [toast, setResTabs, setActiveResId, patchRes],
   );
 
-  // re-run a specific result tab's query and refresh its rows in place
-  const rerunResultTab = async (id: string): Promise<string | null> => {
+  // re-run a specific result tab's query and refresh its rows in place.
+  // Q-C1: re-runs ONLY the statement that produced this grid (never the tab's
+  // whole editor script), read-only, on the tab's own engine target, with its
+  // own preview cap. A grid produced by a statement that can change data is
+  // never re-run automatically: it is marked stale for the user to re-run.
+  // `refusal: "throw"` lets the paging rail show the reason as its one toast.
+  const rerunResultTab = async (
+    id: string,
+    refusal: "toast" | "throw" = "toast",
+  ): Promise<string | null> => {
     const r = resTabsRef.current.find((x) => x.id === id);
-    if (!r || r.kind !== "result" || !r.sql) return null;
+    if (!r || r.kind !== "result") return null;
+    const plan = planResultTabRerun(r);
+    const refuse = (reason: "write" | "missing"): null => {
+      setResTabs((prev) =>
+        prev.map((x) => (x.id === id ? { ...x, dataStale: true } : x)),
+      );
+      const msg =
+        reason === "write"
+          ? "This grid came from a statement that changes data, so it is not re-run automatically. Run it again from the editor to refresh it."
+          : "This result expired. Run the query again to refresh it.";
+      if (refusal === "throw") throw new Error(msg);
+      toast("warn", "Result not refreshed", msg);
+      return null;
+    };
+    if (plan.kind === "refuse") return refuse(plan.reason);
     const oldRid = r.resultId;
     // Same Run/Stop machinery as the main path: supersede any in-flight query
     // (abort the fetch + interrupt the backend) and run this re-run with a
@@ -87586,15 +88014,27 @@ export default function App() {
     }));
     registerRun(queryId, ctrl); // .519: Activity Stop can abort this fetch
     let freshResultId: string | null = null;
+    let writeRefused = false;
     try {
       const res = await api.query(
-        r.sql, target, readOnly, queryId, ctrl.signal,
-        undefined, undefined,
-        // .458: a tab that carried a statement ledger refetches WITH one,
-        // so its pills never point at discarded results.
-        r.statements ? { per_statement: true } : undefined,
+        plan.sql,
+        plan.target ?? target,
+        /* read_only: a re-run must never write */ true,
+        queryId,
+        ctrl.signal,
+        // plan.sql is the backend's post-translation statement: run it native
+        undefined,
+        undefined,
+        {
+          surface: "ide",
+          label: r.title,
+          ...(plan.previewLimit ? { preview_limit: plan.previewLimit } : {}),
+        },
       );
-      if (!res.error && res.result_id != null) {
+      if (res.error && /read-only/i.test(res.error)) {
+        // The backend classed it as a write: same outcome as the client guard.
+        writeRefused = true;
+      } else if (!res.error && res.result_id != null) {
         freshResultId = res.result_id;
         setResTabs((prev) =>
           prev.map((x) =>
@@ -87606,18 +88046,16 @@ export default function App() {
                   dataStale: false,
                   queryId,
                   page: res,
+                  rerunSql: res.sql || plan.sql,
+                  rerunTarget: res.target || plan.target,
                   sortCol: null,
                   descending: false,
                   filters: [],
                   allColumns: res.columns || [],
                   visibleColumns: null,
-                  statements:
-                    (res.statements?.length ?? 0) > 1
-                      ? res.statements
-                      : undefined,
-                  activeStmt: res.statements?.find(
-                    (e) => e.result_id === res.result_id,
-                  )?.index,
+                  // the other statement pills pointed at results that are gone
+                  statements: undefined,
+                  activeStmt: undefined,
                 }
               : x,
           ),
@@ -87655,9 +88093,10 @@ export default function App() {
       unregisterRun(queryId);
       endRun(key, ctrl);
     }
+    if (writeRefused) return refuse("write");
     return freshResultId;
   };
-  rerunExpiredResultRef.current = (id) => rerunResultTab(id);
+  rerunExpiredResultRef.current = (id) => rerunResultTab(id, "throw");
 
   // change a loaded column's type from the grid, then auto-refresh + persist
   const changeColType = async (
@@ -155804,7 +156243,14 @@ export interface ResultTab {
   released?: boolean;
   loadingMore?: boolean;
   view?: "grid" | "chart" | "pivot";
+  /** The editor text this tab was run from (display / history only). */
   sql?: string;
+  /** Q-C1: the single statement that produced the grid (backend's own
+   * record, post-dialect), the engine target it resolved to, and the
+   * preview cap. An expired result re-runs ONLY this, read-only. */
+  rerunSql?: string;
+  rerunTarget?: string;
+  rerunPreviewLimit?: number;
   statements?: StatementEntry[];
   activeStmt?: number;
   /** Optional NodeFlow graph attached when this result came from a flow run. */
@@ -173892,6 +174338,8 @@ export function executionGraphSignature(
 ===== FILE: frontend/src/lib/notebook.ts =====
 import { backupLocalStorageValue, runMigrations } from "./migrations";
 import { quoteSqlIdent } from "./sql";
+import { isSideEffectSql } from "./sqlSideEffects";
+export { isSideEffectSql };
 
 // Notebook-mode logic: cell-chaining (let a cell query an earlier cell's
 // result by name) and localStorage persistence of the cell list. Chaining is
@@ -174672,11 +175120,27 @@ export interface JournalRunPlan {
   reusedIds: string[];
   waves: string[][];
   graph: JournalDependencyGraph;
+  /** Run-all ordering edges per cell: the name references from `graph` plus
+   * the side-effect barriers (J-H1). A cell starts only after every id here
+   * that is also being run has settled. */
+  deps: Record<string, string[]>;
 }
 
 /** Plan Run all so fresh cells are not sent to the server again.
  * Stale independent cells share a wave; stale dependencies are completed in
- * earlier waves. Fresh dependencies remain available through chain reuse. */
+ * earlier waves. Fresh dependencies remain available through chain reuse.
+ *
+ * J-H1: dependencies used to come ONLY from cell-name references, so a cell
+ * that writes table `stage` and a cell that reads `stage` had no edge, shared
+ * a wave and ran concurrently (the reader saw "table not found", the old rows,
+ * or was stamped with the pre-write epoch and expired at once). Cells with
+ * side effects (isSideEffectSql) are now barriers that keep document order:
+ *   - every cell after a barrier waits for it;
+ *   - a barrier waits for every cell since the previous barrier (so an
+ *     UPDATE never runs under a SELECT written above it);
+ *   - a barrier always runs (its effect is the point of running it), and once
+ *     one runs, every later cell runs too, since its data may have changed.
+ * Independent read-only cells between two barriers still run in parallel. */
 export function planJournalRunAll(
   list: ChainCell[],
   groups: { id: string; name: string }[],
@@ -174688,13 +175152,31 @@ export function planJournalRunAll(
   const runnable = list.filter(
     (c) => c.type === "sql" && typeof c.code === "string" && c.code.trim(),
   );
+  const depSets: Record<string, Set<string>> = {};
+  for (const c of runnable) depSets[c.id] = new Set(graph.depIds[c.id] || []);
   const reusedIds: string[] = [];
   const runIds: string[] = [];
+  let lastBarrier: string | null = null;
+  let barrierRuns = false;
+  let sinceBarrier: string[] = [];
   for (const c of runnable) {
-    if (cellIsFresh(c, compiledById[c.id], !!cappedById[c.id], dataEpoch))
-      reusedIds.push(c.id);
-    else runIds.push(c.id);
+    const barrier = isSideEffectSql(c.code);
+    if (lastBarrier) depSets[c.id].add(lastBarrier);
+    if (barrier) for (const b of sinceBarrier) depSets[c.id].add(b);
+    const fresh =
+      !barrier &&
+      !barrierRuns &&
+      cellIsFresh(c, compiledById[c.id], !!cappedById[c.id], dataEpoch);
+    (fresh ? reusedIds : runIds).push(c.id);
+    if (barrier) {
+      lastBarrier = c.id;
+      barrierRuns = true;
+      sinceBarrier = [];
+    }
+    sinceBarrier.push(c.id);
   }
+  const deps: Record<string, string[]> = {};
+  for (const id of Object.keys(depSets)) deps[id] = Array.from(depSets[id]);
 
   const order = new Map(runnable.map((c, i) => [c.id, i] as const));
   const pending = new Set(runIds);
@@ -174702,9 +175184,7 @@ export function planJournalRunAll(
   while (pending.size) {
     const wave = runIds.filter((id) => {
       if (!pending.has(id)) return false;
-      return (graph.depIds[id] || []).every(
-        (dep) => !pending.has(dep),
-      );
+      return (deps[id] || []).every((dep) => !pending.has(dep));
     });
     // Defensive fallback for a hand-edited/corrupt notebook. Normal notebook
     // references are backward-only, so this branch is never needed in healthy
@@ -174718,7 +175198,7 @@ export function planJournalRunAll(
     waves.push(wave);
     for (const id of wave) pending.delete(id);
   }
-  return { runIds, reusedIds, waves, graph };
+  return { runIds, reusedIds, waves, graph, deps };
 }
 
 /** The journal dependency export as CSV (Cell, SQL, uses, feeds) with a BOM
@@ -175032,6 +175512,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildJournalDependencyGraph,
   createNotebook,
+  isSideEffectSql,
   listNotebooks,
   planJournalRunAll,
   setNotebookSaveIdentity,
@@ -175196,6 +175677,68 @@ describe("Journal dependency optimization", () => {
     const graph = buildJournalDependencyGraph(cells);
     expect(graph.depIds.chart).toEqual(["a"]);
     expect(graph.depIds.reconcile).toEqual(["a", "b"]);
+  });
+});
+
+describe("J-H1: Run all orders cells that write tables", () => {
+  it("runs a CREATE cell before the cell that reads its table (audit repro)", () => {
+    // The audit's repro: [CTAS stage, SELECT FROM stage, UPDATE stage] used to
+    // plan as ONE wave ["a","b","c"] because there is no cell-name reference.
+    const cells = [
+      sql("a", "cell1", "CREATE OR REPLACE TABLE stage AS SELECT 1 AS n"),
+      sql("b", "cell2", "SELECT count(*) FROM stage"),
+      sql("c", "cell3", "UPDATE stage SET n = 2"),
+    ];
+    const plan = planJournalRunAll(cells, [], { a: "A", b: "B", c: "C" });
+    expect(plan.waves).toEqual([["a"], ["b"], ["c"]]);
+    expect(plan.deps.b).toContain("a");
+    expect(plan.deps.c).toEqual(expect.arrayContaining(["a", "b"]));
+  });
+
+  it("never reuses a reader below a write cell, even when it looks fresh", () => {
+    const cells = [
+      sql("w", "cell1", "CREATE TABLE stage AS SELECT 1 AS n"),
+      fresh("r", "cell2", "SELECT * FROM stage", "R"),
+    ];
+    const plan = planJournalRunAll(cells, [], { w: "W", r: "R" });
+    expect(plan.reusedIds).toEqual([]);
+    expect(plan.waves).toEqual([["w"], ["r"]]);
+  });
+
+  it("keeps independent reads between two writes parallel", () => {
+    const cells = [
+      sql("w", "cell1", "CREATE TABLE stage AS SELECT 1 AS n"),
+      sql("r", "cell2", "SELECT * FROM stage"),
+      sql("w2", "cell3", "INSERT INTO stage VALUES (2)"),
+      sql("s", "cell4", "SELECT count(*) FROM stage"),
+      sql("t", "cell5", "SELECT max(n) FROM stage"),
+    ];
+    const plan = planJournalRunAll(cells, [], {});
+    expect(plan.waves).toEqual([["w"], ["r"], ["w2"], ["s", "t"]]);
+  });
+
+  it("still reuses fresh read-only cells above the first write", () => {
+    const cells = [
+      fresh("a", "cell1", "SELECT 1 AS n", "A"),
+      sql("w", "cell2", "CREATE TABLE t2 AS SELECT * FROM cell1"),
+    ];
+    const plan = planJournalRunAll(cells, [], { a: "A", w: "W" });
+    expect(plan.reusedIds).toEqual(["a"]);
+    expect(plan.waves).toEqual([["w"]]);
+  });
+
+  it("classifies by statement lead, not by words inside text", () => {
+    expect(isSideEffectSql("SELECT 'update' AS kind")).toBe(false);
+    expect(isSideEffectSql("SELECT replace(name, 'a', 'b') FROM t")).toBe(false);
+    expect(isSideEffectSql('SELECT "delete" FROM t -- drop table t')).toBe(false);
+    expect(isSideEffectSql("/* create */ SELECT last_update FROM t")).toBe(false);
+    expect(isSideEffectSql("WITH x AS (SELECT 1) SELECT * FROM x")).toBe(false);
+    expect(isSideEffectSql("create or replace table s as select 1")).toBe(true);
+    expect(isSideEffectSql("SELECT 1; DELETE FROM t")).toBe(true);
+    expect(isSideEffectSql("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x")).toBe(true);
+    expect(isSideEffectSql("EXPLAIN ANALYZE DELETE FROM t")).toBe(true);
+    expect(isSideEffectSql("BEGIN; UPDATE t SET a = 1; COMMIT")).toBe(true);
+    expect(isSideEffectSql("SELECT * INTO #tmp FROM t")).toBe(true);
   });
 });
 ===== FILE: frontend/src/lib/pivotExport.component.test.ts =====
@@ -179774,6 +180317,106 @@ export function lastProfileName(raw: string | null): string {
 // Trim a user-supplied profile name; empty -> "".
 export function sanitizeProfileName(raw: string): string {
   return (raw || "").trim().slice(0, 80);
+}
+===== FILE: frontend/src/lib/sqlSideEffects.ts =====
+/** Client-side "can this SQL change data?" classifier, shared by the Journal
+ * Run-all planner (J-H1) and the IDE's expired-result re-run (Q-C1). */
+
+// J-H1: statement leads that change data, schema or session state. Mirrors the
+// backend's sqlutil._WRITE_LEADERS plus transaction control, which on SQLite's
+// shared connection commits or rolls back other work just like a write does.
+export const SIDE_EFFECT_LEADS = new Set([
+  "insert", "update", "delete", "merge", "upsert", "truncate", "drop",
+  "alter", "create", "replace", "grant", "revoke", "exec", "execute",
+  "sp_executesql", "call", "copy", "attach", "detach", "install", "load",
+  "set", "reset", "pragma", "checkpoint", "vacuum", "export", "import",
+  "use", "backup", "restore", "bulk", "comment", "analyze",
+  "begin", "commit", "rollback", "end", "savepoint", "release", "abort",
+]);
+
+// One left-to-right pass, so a quote inside a comment (or `--` inside a
+// string) is read the way the engine reads it.
+const SQL_NOISE_RE =
+  /--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^']|'')*'|"(?:[^"]|"")*"|`[^`]*`|\$\$[\s\S]*?\$\$/g;
+
+/** True when running `sql` can change what another cell reads: any statement
+ * that writes a table, changes the schema or session state, or opens/closes a
+ * transaction. Classified per statement on its LEADING keyword (after comments
+ * and quoted text are blanked), so `SELECT replace(a, 'x', 'y')` or a string
+ * literal 'update' is not a write. A leading WITH writes only when it carries
+ * DML; SELECT ... INTO (SQL Server) creates a table; EXPLAIN ANALYZE <write>
+ * runs the write. Uncertain cases lean toward "side effect": a false positive
+ * only costs parallelism, a false negative races a reader against its table. */
+export function isSideEffectSql(sql: string): boolean {
+  const body = String(sql || "").replace(SQL_NOISE_RE, " ");
+  for (const stmt of body.split(";")) {
+    const words = stmt.match(/[A-Za-z_][A-Za-z0-9_]*/g);
+    if (!words || !words.length) continue;
+    const lead = words[0].toLowerCase();
+    if (SIDE_EFFECT_LEADS.has(lead)) return true;
+    if (lead === "with" && /\b(insert|update|delete|merge|upsert)\b/i.test(stmt))
+      return true;
+    if (lead === "explain" &&
+        words.slice(1, 4).some((w) => SIDE_EFFECT_LEADS.has(w.toLowerCase())))
+      return true;
+    if (lead === "select" && /\binto\b/i.test(stmt)) return true;
+  }
+  return false;
+}
+
+
+/** What an expired IDE result tab may re-run on its own (Q-C1). */
+export type ResultRerunPlan =
+  | {
+      kind: "rerun";
+      /** The ONE statement that produced the grid, in the engine's SQL. */
+      sql: string;
+      /** The engine target that statement resolved to when it ran. */
+      target?: string;
+      /** Row cap when the grid was a preview run. */
+      previewLimit?: number;
+    }
+  | { kind: "refuse"; reason: "write" | "missing" };
+
+export interface RerunnableResult {
+  rerunSql?: string;
+  rerunTarget?: string;
+  rerunPreviewLimit?: number;
+  page?: { sql?: string; target?: string } | null;
+}
+
+/** Q-C1: an expired result tab used to re-send the WHOLE editor script (the
+ * tab's `sql`), INSERTs and all, whenever a sort, scroll or tab switch found
+ * its result expired. Only the statement that produced the grid may be re-run
+ * automatically, and never one that can change data: that grid is marked
+ * stale and the user re-runs it on purpose. The statement comes from the
+ * backend's own record (`page.sql`, i.e. `_CachedResult.sql`), captured on
+ * the tab at run time; the editor script is never a fallback. */
+export function planResultTabRerun(r: RerunnableResult): ResultRerunPlan {
+  const sql = String(r.rerunSql ?? r.page?.sql ?? "").trim();
+  if (!sql) return { kind: "refuse", reason: "missing" };
+  if (isSideEffectSql(sql)) return { kind: "refuse", reason: "write" };
+  const target = r.rerunTarget ?? r.page?.target ?? undefined;
+  return {
+    kind: "rerun",
+    sql,
+    ...(target ? { target } : {}),
+    ...(r.rerunPreviewLimit ? { previewLimit: r.rerunPreviewLimit } : {}),
+  };
+}
+
+/** The fields to stamp on a result tab from the response that produced it. */
+export function rerunFieldsFrom(
+  res: { sql?: string; target?: string; preview?: boolean;
+         preview_limit?: number } | null | undefined,
+  fallbackTarget?: string,
+): { rerunSql?: string; rerunTarget?: string; rerunPreviewLimit?: number } {
+  return {
+    rerunSql: res?.sql ? String(res.sql) : undefined,
+    rerunTarget: res?.target || fallbackTarget || undefined,
+    rerunPreviewLimit:
+      res?.preview && res.preview_limit ? Number(res.preview_limit) : undefined,
+  };
 }
 ===== FILE: frontend/src/lib/sqlStrLiteral.component.test.ts =====
 import { describe, expect, it } from "vitest";
@@ -208505,7 +209148,17 @@ def backend_tests(datadir, csv_path, json_path):
             calls["n"] += 1
             return real_digest(path, size)
 
+        # Q-H4: small files are now hashed in full by OW._digest_for, which
+        # never reaches filecache.content_digest, so count the watcher's own
+        # digest entry point as well.
+        real_ow_digest = OW._digest_for
+
+        def counting_ow_digest(path, size):
+            calls["n"] += 1
+            return real_ow_digest(path, size)
+
         _fc.content_digest = counting_digest
+        OW._digest_for = counting_ow_digest
         try:
             p = os.path.join(d, "vals.csv")
             open(p, "w", newline="").write("id,v\n1,a\n")
@@ -208526,6 +209179,7 @@ def backend_tests(datadir, csv_path, json_path):
                "poll digest counter stays 0 on cheap match")
         finally:
             _fc.content_digest = real_digest
+            OW._digest_for = real_ow_digest
             try:
                 s.shutdown()
             except Exception:
@@ -211741,7 +212395,10 @@ def backend_tests(datadir, csv_path, json_path):
                    encoding="utf-8").read()
         css = open(os.path.join(FRONTEND, "src", "styles.css"),
                    encoding="utf-8").read()
-        need("per_statement: true" in app
+        # Q-C1: the expired-tab rerun no longer re-sends the whole script
+        # with per_statement; the ledger is requested by the main Run.
+        need(("per_statement: true" in app
+              or "per_statement: previewLimit == null" in app)
              and "const openStmt" in app
              and app.count("openStmt(") >= 1
              and "stmtStrip(activeResultTab)" in app
@@ -233429,6 +234086,305 @@ def backend_tests(datadir, csv_path, json_path):
         except Exception as e:
             need(False, "a cyclic graph must not crash fingerprinting: %s" % e)
 
+    def t_nf_c1_fingerprint_long_chain():
+        # NF-C1 (audit 2026-11-25): each node's fingerprint text embedded its
+        # inputs' full JSON text, re-escaped per level, so it DOUBLED per node:
+        # 24 nodes took 9.5 s, ~27 ran out of memory, on every run/preview.
+        # Fingerprints now embed fixed-size digests and walk iteratively.
+        from samql_core import nodeflow as _nf
+        import json as _json
+
+        def chain(n):
+            nodes = [{"id": "n0", "type": "input", "config": {"table": "t"}}]
+            edges = []
+            for i in range(1, n):
+                nodes.append({"id": "n%d" % i, "type": "filter",
+                              "config": {"condition": 'x > "%d"' % i}})
+                edges.append({"from": {"node": "n%d" % (i - 1),
+                                       "port": "true" if i > 1 else "out"},
+                              "to": {"node": "n%d" % i, "port": "in"}})
+            return {"nodes": nodes, "edges": edges}
+
+        g = chain(300)
+        t0 = time.monotonic()
+        f = _nf.flow_fingerprints(g, {}, 0, "sqlite")
+        dt = time.monotonic() - t0
+        need(dt < 0.5, "a 300-node chain fingerprints in < 0.5 s (%.2f s)" % dt)
+        eq(len(f), 300, "every chain node gets a fingerprint")
+        need(all(len(v) == 16 for v in f.values()),
+             "fingerprints stay fixed-size however deep the chain")
+        g2 = _json.loads(_json.dumps(g))
+        g2["nodes"][150]["config"]["condition"] = "x > 0"
+        f2 = _nf.flow_fingerprints(g2, {}, 0, "sqlite")
+        need(all(f2["n%d" % i] == f["n%d" % i] for i in range(150)),
+             "an edit leaves every upstream fingerprint unchanged")
+        need(all(f2["n%d" % i] != f["n%d" % i] for i in range(150, 300)),
+             "an edit changes the node and everything downstream")
+        # Deeper than Python's recursion limit: the walk is iterative.
+        big = _nf.flow_fingerprints(chain(3000), {}, 0, "sqlite")
+        eq(len(big), 3000, "a 3000-node chain is fingerprinted (no recursion cap)")
+
+        # A 40-level diamond ladder: shared subtrees are digested once.
+        nodes = [{"id": "r", "type": "input", "config": {"table": "t"}}]
+        edges, prev = [], "r"
+        for i in range(40):
+            a, b, j = "a%d" % i, "b%d" % i, "j%d" % i
+            nodes += [{"id": a, "type": "filter", "config": {"c": 1}},
+                      {"id": b, "type": "filter", "config": {"c": 2}},
+                      {"id": j, "type": "join", "config": {}}]
+            edges += [
+                {"from": {"node": prev, "port": "out"}, "to": {"node": a, "port": "in"}},
+                {"from": {"node": prev, "port": "out"}, "to": {"node": b, "port": "in"}},
+                {"from": {"node": a, "port": "out"}, "to": {"node": j, "port": "left"}},
+                {"from": {"node": b, "port": "out"}, "to": {"node": j, "port": "right"}}]
+            prev = j
+        t0 = time.monotonic()
+        fd = _nf.flow_fingerprints({"nodes": nodes, "edges": edges}, {}, 0, "sqlite")
+        dt = time.monotonic() - t0
+        need(dt < 0.5, "a 40-level diamond ladder fingerprints in < 0.5 s (%.2f s)" % dt)
+        eq(len(fd), 121, "every diamond node gets a fingerprint")
+        need(fd["a0"] != fd["b0"], "the two sides of a diamond stay distinct")
+
+        # Cycles and missing inputs are still omitted, and only they are:
+        # a node downstream of a cycle is omitted, an unrelated one is not.
+        gc = {"nodes": [{"id": "p", "type": "filter"}, {"id": "q", "type": "filter"},
+                        {"id": "d", "type": "filter"}, {"id": "i", "type": "input"},
+                        {"id": "m", "type": "filter"}],
+              "edges": [{"from": {"node": "p"}, "to": {"node": "q"}},
+                        {"from": {"node": "q"}, "to": {"node": "p"}},
+                        {"from": {"node": "q"}, "to": {"node": "d"}},
+                        {"from": {"node": "ghost"}, "to": {"node": "m"}}]}
+        eq(set(_nf.flow_fingerprints(gc, {}, 0, "sqlite")), {"i"},
+           "cyclic, below-cycle and missing-input nodes are omitted")
+
+    def t_nf_c1_long_chain_runs_with_cache_on():
+        # NF-C1 end to end: a 30-node Filter chain runs through the real
+        # Session with the flow cache ON (the default) in well under a second
+        # of fingerprinting, and returns the same rows as with the cache off.
+        s = _fresh_session()
+        try:
+            graph = {"nodes": [{"id": "n0", "type": "input",
+                                "config": {"table": "nf_base"}}], "edges": []}
+            et = s._flow_engine_target(graph)
+            eng, _ = s._engine_obj(et)
+            eng.execute("CREATE TABLE nf_base (x INTEGER)")
+            eng.execute("INSERT INTO nf_base VALUES (1),(5),(40),(70)")
+            for i in range(1, 30):
+                graph["nodes"].append({"id": "n%d" % i, "type": "filter",
+                                       "config": {"condition": "x > %d" % i}})
+                graph["edges"].append({"from": {"node": "n%d" % (i - 1),
+                                                "port": "true" if i > 1 else "out"},
+                                       "to": {"node": "n%d" % i, "port": "in"}})
+            s.flow_cache = True
+            t0 = time.monotonic()
+            r = s.run_nodeflow(graph, "n29", "true")
+            dt = time.monotonic() - t0
+            need(not r.get("error"), "30-node chain runs: %s" % r.get("error"))
+            eq(sorted(row[0] for row in (r.get("rows") or [])), [40, 70],
+               "the chain returns the right rows")
+            need(dt < 10.0, "30-node chain finishes promptly with the cache on "
+                 "(%.2f s; it used to run out of memory)" % dt)
+            s.flow_cache = False
+            r_off = s.run_nodeflow(graph, "n29", "true")
+            eq(sorted(row[0] for row in (r_off.get("rows") or [])), [40, 70],
+               "cache on and cache off agree")
+        finally:
+            s.shutdown()
+
+    def t_q_h1_sqlite_write_waits_for_running_load():
+        # Q-H1 (audit 2026-11-25): on SQLite an IDE write ran INSIDE a running
+        # load's open transaction; its commit() committed the load's partial
+        # batch, the load's own COMMIT then failed ("no transaction is
+        # active") and the load dropped its table. execute_cursor now holds
+        # write_lock for anything that mutates, so the write waits instead.
+        from samql_core.engines import DBManager
+        db = DBManager()
+        started, release = threading.Event(), threading.Event()
+
+        def rows():
+            for i in range(50000):
+                yield (i, "a")
+            started.set()
+            release.wait(10)
+            for i in range(50000, 60000):
+                yield (i, "b")
+
+        out = {}
+
+        def load():
+            try:
+                out["load"] = db.add_table_streaming(
+                    "qh1_big", ["n", "tag"], rows(), chunk=10000)
+            except Exception as e:  # pragma: no cover - the bug's symptom
+                out["load"] = e
+
+        def ide_write():
+            try:
+                out["write"] = db.execute_cursor(
+                    "CREATE TABLE qh1_z AS SELECT 1 AS v")
+            except Exception as e:
+                out["write"] = e
+
+        lt = threading.Thread(target=load)
+        lt.start()
+        try:
+            need(started.wait(10), "the load reached its mid-stream pause")
+            wt = threading.Thread(target=ide_write)
+            wt.start()
+            time.sleep(0.4)
+            need(wt.is_alive(), "the IDE write waits while the load is running")
+        finally:
+            release.set()
+            lt.join(30)
+        wt.join(30)
+        need(not isinstance(out.get("load"), Exception),
+             "the load completes: %r" % (out.get("load"),))
+        eq(out["load"][1], 60000, "the load reports every row")
+        need(not isinstance(out.get("write"), Exception),
+             "the IDE write completes after the load: %r" % (out.get("write"),))
+        eq(db.execute("SELECT COUNT(*) FROM qh1_big")[1][0][0], 60000,
+           "the loaded table exists with every row")
+        eq(db.execute("SELECT v FROM qh1_z")[1], [(1,)], "the IDE table exists")
+        need(not db.conn.in_transaction, "no transaction is left open")
+
+        # A failing mutating script rolls back and leaves no open transaction
+        # (an open one makes every later SQLite load fail).
+        db.execute_cursor("CREATE TABLE qh1_t (v INTEGER)")
+        try:
+            db.execute_cursor("INSERT INTO qh1_t VALUES (1); "
+                              "INSERT INTO qh1_missing VALUES (1)")
+            need(False, "the failing script raises")
+        except Exception:
+            pass
+        need(not db.conn.in_transaction, "a failed write leaves no open transaction")
+        eq(db.execute("SELECT COUNT(*) FROM qh1_t")[1][0][0], 0,
+           "the failed script's earlier INSERT is rolled back")
+        # A bare COMMIT also waits for the lock (it would commit a load too).
+        db.write_lock.acquire()
+        try:
+            commit_err = []
+
+            def _bare_commit():
+                try:
+                    db.execute_cursor("COMMIT")
+                except Exception as exc:  # no transaction left to commit
+                    commit_err.append(exc)
+            ct = threading.Thread(target=_bare_commit)
+            ct.start()
+            time.sleep(0.3)
+            need(ct.is_alive(), "a bare COMMIT waits for the engine lock")
+        finally:
+            db.write_lock.release()
+        ct.join(10)
+        need(not ct.is_alive(), "the bare COMMIT runs once the lock frees")
+        # Scripts ending in a read still stream the read (no lock held).
+        cols, first, cur = db.execute_cursor(
+            "INSERT INTO qh1_t VALUES (2); SELECT * FROM qh1_big", batch=100)
+        need(cur is not None and len(first) == 100,
+             "a write-then-SELECT script streams its final read")
+        try:
+            cur.close()
+        except Exception:
+            pass
+        eq(db.execute("SELECT COUNT(*) FROM qh1_t")[1][0][0], 1,
+           "the script's write is committed")
+
+    def t_q_h4_same_length_edit_is_detected():
+        # Q-H4 (audit 2026-11-25): a same-length edit (Y->N) between the
+        # sampled digest windows looked like a pure touch, and poll() then
+        # ADOPTED the new stat as baseline, masking the edit for good. Only a
+        # full-file digest may now call a stat change a touch.
+        from samql_core import originwatch as _ow
+        from samql_core.originwatch import OriginWatch
+        from samql_core.session import LOCAL_TARGET
+        d = tempfile.mkdtemp(prefix="qh4_")
+        s = _fresh_session()
+        try:
+            p = os.path.join(d, "flags.csv")
+            with open(p, "w", newline="") as fh:
+                fh.write("id,flag\n")
+                for i in range(200000):
+                    fh.write("%07d,Y\n" % i)
+            size = os.path.getsize(p)
+            # A byte the old sampled digest never read: for a ~2 MB file it
+            # hashes five 64 KiB windows at 0, 20, 40, 60 and 80%, so 70% is
+            # between two of them (checked below with the digest itself).
+            off = (size * 7) // 10
+            with open(p, "rb") as fh:
+                fh.seek(off)
+                chunk = fh.read(64)
+            off += chunk.index(b"Y")
+
+            def edit_same_length():
+                st = os.stat(p)
+                with open(p, "r+b") as fh:
+                    fh.seek(off)
+                    fh.write(b"N")
+                os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5 * 10**9))
+
+            from samql_core import filecache as _fc
+            before = _fc.content_digest(p)
+            st0 = os.stat(p)
+            with open(p, "r+b") as fh:
+                fh.seek(off)
+                fh.write(b"N")
+            eq(_fc.content_digest(p), before,
+               "the test edit falls between the sampled digest windows")
+            with open(p, "r+b") as fh:
+                fh.seek(off)
+                fh.write(b"Y")
+            os.utime(p, ns=(st0.st_atime_ns, st0.st_mtime_ns))
+
+            # Watcher level: flagged on the first poll, and stays flagged.
+            ow = OriginWatch()
+            ow.register("sqlite", "flags", p)
+            edit_same_length()
+            need(("sqlite", "flags") in ow.poll(force=True),
+                 "a same-length edit is flagged on the first poll")
+            ow.poll(force=True)
+            need(ow.is_changed("sqlite", "flags"),
+                 "the edit stays pending (its stat is not adopted)")
+
+            # End to end: load, edit, sidebar poll, then the IDE sees 'N'.
+            with open(p, "r+b") as fh:
+                fh.seek(off)
+                fh.write(b"Y")
+            loaded = s.load_file(p, destination="sqlite", base_name="qh4flags")
+            tbl = loaded[0]["name"]
+            r0 = s.run_query("SELECT COUNT(*) FROM \"%s\" WHERE flag = 'N'" % tbl,
+                             target=LOCAL_TARGET, surface="ide", query_id="qh4-a")
+            eq(r0.get("rows"), [[0]], "no N rows before the edit")
+            edit_same_length()
+            s.tables_tree()  # the sidebar poll that used to adopt the stat
+            r1 = s.run_query("SELECT COUNT(*) FROM \"%s\" WHERE flag = 'N'" % tbl,
+                             target=LOCAL_TARGET, surface="ide", query_id="qh4-b")
+            eq(r1.get("rows"), [[1]], "the IDE sees the same-length edit")
+
+            # A pure touch on a small file is still not a change.
+            p2 = os.path.join(d, "small.csv")
+            with open(p2, "w") as fh:
+                fh.write("a\n1\n")
+            ow.register("sqlite", "small", p2)
+            st = os.stat(p2)
+            os.utime(p2, ns=(st.st_atime_ns, st.st_mtime_ns + 5 * 10**9))
+            need(("sqlite", "small") not in ow.poll(force=True),
+                 "a pure touch on a fully hashed file is not a change")
+            # Above the full-hash cap a sampled match proves nothing: any stat
+            # change counts as changed (a reload, never stale data).
+            old_cap = _ow.FULL_DIGEST_MAX_BYTES
+            _ow.FULL_DIGEST_MAX_BYTES = 1
+            try:
+                ow.register("sqlite", "big", p2)
+                st = os.stat(p2)
+                os.utime(p2, ns=(st.st_atime_ns, st.st_mtime_ns + 5 * 10**9))
+                need(("sqlite", "big") in ow.poll(force=True),
+                     "a touch on a file too big to hash in full counts as changed")
+            finally:
+                _ow.FULL_DIGEST_MAX_BYTES = old_cap
+        finally:
+            s.shutdown()
+            shutil.rmtree(d, ignore_errors=True)
+
     def t_flow_cache_lru():
         # LRU semantics + eviction actually drops the backing table.
         from samql_core.session import LOCAL_TARGET
@@ -248965,6 +249921,14 @@ def backend_tests(datadir, csv_path, json_path):
         ("NodeFlow flow compiles, previews + exports", t_nodeflow_compile_run),
         ("flow cache: fingerprints (deterministic, scoped, projection-aware)",
          t_flow_fingerprints),
+        ("NF-C1: flow fingerprints stay fixed-size on long chains / diamonds",
+         t_nf_c1_fingerprint_long_chain),
+        ("NF-C1: a 30-node chain runs with the flow cache on",
+         t_nf_c1_long_chain_runs_with_cache_on),
+        ("Q-H1: a SQLite IDE write waits for a running load (no early commit)",
+         t_q_h1_sqlite_write_waits_for_running_load),
+        ("Q-H4: a same-length source edit is detected and reloaded",
+         t_q_h4_same_length_edit_is_detected),
         ("flow cache: LRU eviction drops the backing table", t_flow_cache_lru),
         ("flow cache: incremental reuse + parity with cache off",
          t_flow_cache_incremental),

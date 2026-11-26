@@ -90,6 +90,7 @@ frontend/package-lock.json
 frontend/package.json
 frontend/playwright.config.ts
 frontend/src/App.component.test.tsx
+frontend/src/App.rerunExpired.component.test.tsx
 frontend/src/App.tsx
 frontend/src/AuditAsyncOwnership.component.test.tsx
 frontend/src/components/AboutModal.tsx
@@ -347,6 +348,7 @@ frontend/src/lib/settingsViewToggles.component.test.tsx
 frontend/src/lib/sql.ts
 frontend/src/lib/sqlFunctions.ts
 frontend/src/lib/sqlProfiles.ts
+frontend/src/lib/sqlSideEffects.ts
 frontend/src/lib/sqlStrLiteral.component.test.ts
 frontend/src/lib/staleNodeflowColumnRefs.component.test.ts
 frontend/src/lib/staleNodeflowColumnRefs.ts
