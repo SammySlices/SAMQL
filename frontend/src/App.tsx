@@ -412,14 +412,20 @@ export default function App() {
       settingsFlyoutLeaveTimer.current = null;
     }
   }, []);
+  // Which flyout the pointer opened by hovering. A click that lands right
+  // after that hover must keep the flyout open: a real click always enters
+  // the row first, so toggling on it would close what the hover just opened.
+  const settingsFlyoutHoverOpened = useRef<"toolbar" | "visual" | null>(null);
   const closeSettingsFlyout = useCallback(() => {
     clearSettingsFlyoutLeave();
+    settingsFlyoutHoverOpened.current = null;
     setSettingsFlyout(null);
   }, [clearSettingsFlyoutLeave]);
   const scheduleCloseSettingsFlyout = useCallback(() => {
     clearSettingsFlyoutLeave();
     settingsFlyoutLeaveTimer.current = window.setTimeout(() => {
       settingsFlyoutLeaveTimer.current = null;
+      settingsFlyoutHoverOpened.current = null;
       setSettingsFlyout(null);
     }, 120);
   }, [clearSettingsFlyoutLeave]);
@@ -449,8 +455,13 @@ export default function App() {
   ) => {
     clearSettingsFlyoutLeave();
     const r = el.getBoundingClientRect();
+    // Click after a hover-open pins the flyout; a later click toggles it.
+    const hoverOpened = settingsFlyoutHoverOpened.current === kind;
+    settingsFlyoutHoverOpened.current = null;
     setSettingsFlyout((cur) =>
-      cur?.kind === kind ? null : { kind, x: r.right - 3, y: r.top },
+      cur?.kind === kind && !hoverOpened
+        ? null
+        : { kind, x: r.right - 3, y: r.top },
     );
   };
   const showSettingsFlyout = (
@@ -459,6 +470,7 @@ export default function App() {
   ) => {
     clearSettingsFlyoutLeave();
     const r = el.getBoundingClientRect();
+    if (settingsFlyout?.kind !== kind) settingsFlyoutHoverOpened.current = kind;
     setSettingsFlyout({ kind, x: r.right - 3, y: r.top });
   };
   // floating field-access explorer; stays open across IDE / Journal / Node

@@ -2,7 +2,7 @@
 # SamQL source bundle
 #   build:     2026-11-24.704
 #   files:     437
-#   sha256:    ec49ae464086733caa878fb10ae87d527d255f0022dfa8b22e421873f07de558  (of the section body below)
+#   sha256:    74a393e506b4414ceed683a3cb0837be51212360ef5cd316141a791a28411517  (of the section body below)
 #   generated: 2026-07-20 14:29:07 UTC
 #   contents:  complete source + tests + UI (Test-SamQL-All ready)
 #   reconstruct with Expand-SamQL[.]ps1 (this header is ignored)
@@ -80071,23 +80071,35 @@ async function openPreviewViaOutput(
   page: import("@playwright/test").Page,
   nodeId = "formula",
 ): Promise<void> {
-  const responsePromise = page.waitForResponse((response) => {
+  // After Run all, a transform's output preview is served from the last-run
+  // cache, so the click may make no request. If it does peek, the peek must
+  // succeed.
+  const peeks: import("@playwright/test").Response[] = [];
+  const onResponse = (response: import("@playwright/test").Response) => {
     const path = new URL(response.url()).pathname;
-    return response.request().method() === "POST" && path === "/api/nodeflow/run";
-  });
-  await page
-    .locator(`[data-testid="nodeflow-node"][data-node-id="${nodeId}"] .nb2-port.out`)
-    .click();
-  const response = await responsePromise;
-  const body = (await readJsonOrText(response)) as Record<string, unknown>;
-  expect(
-    response.ok(),
-    `NodeFlow preview failed (${response.status()}): ${JSON.stringify(body)}`,
-  ).toBeTruthy();
-  expect(body.error, `NodeFlow preview returned an error: ${JSON.stringify(body)}`).toBeFalsy();
-  const preview = page.getByTestId("nodeflow-preview");
-  await expect(preview).toBeVisible();
-  await expect(preview.getByTestId("result-grid")).toBeVisible();
+    if (response.request().method() === "POST" && path === "/api/nodeflow/run") {
+      peeks.push(response);
+    }
+  };
+  page.on("response", onResponse);
+  try {
+    await page
+      .locator(`[data-testid="nodeflow-node"][data-node-id="${nodeId}"] .nb2-port.out`)
+      .click();
+    const preview = page.getByTestId("nodeflow-preview");
+    await expect(preview).toBeVisible();
+    await expect(preview.getByTestId("result-grid")).toBeVisible();
+  } finally {
+    page.off("response", onResponse);
+  }
+  for (const response of peeks) {
+    const body = (await readJsonOrText(response)) as Record<string, unknown>;
+    expect(
+      response.ok(),
+      `NodeFlow preview failed (${response.status()}): ${JSON.stringify(body)}`,
+    ).toBeTruthy();
+    expect(body.error, `NodeFlow preview returned an error: ${JSON.stringify(body)}`).toBeFalsy();
+  }
 }
 
 test("NodeFlow reruns after an upstream edit and persists the changed graph", async ({
@@ -85760,14 +85772,20 @@ export default function App() {
       settingsFlyoutLeaveTimer.current = null;
     }
   }, []);
+  // Which flyout the pointer opened by hovering. A click that lands right
+  // after that hover must keep the flyout open: a real click always enters
+  // the row first, so toggling on it would close what the hover just opened.
+  const settingsFlyoutHoverOpened = useRef<"toolbar" | "visual" | null>(null);
   const closeSettingsFlyout = useCallback(() => {
     clearSettingsFlyoutLeave();
+    settingsFlyoutHoverOpened.current = null;
     setSettingsFlyout(null);
   }, [clearSettingsFlyoutLeave]);
   const scheduleCloseSettingsFlyout = useCallback(() => {
     clearSettingsFlyoutLeave();
     settingsFlyoutLeaveTimer.current = window.setTimeout(() => {
       settingsFlyoutLeaveTimer.current = null;
+      settingsFlyoutHoverOpened.current = null;
       setSettingsFlyout(null);
     }, 120);
   }, [clearSettingsFlyoutLeave]);
@@ -85797,8 +85815,13 @@ export default function App() {
   ) => {
     clearSettingsFlyoutLeave();
     const r = el.getBoundingClientRect();
+    // Click after a hover-open pins the flyout; a later click toggles it.
+    const hoverOpened = settingsFlyoutHoverOpened.current === kind;
+    settingsFlyoutHoverOpened.current = null;
     setSettingsFlyout((cur) =>
-      cur?.kind === kind ? null : { kind, x: r.right - 3, y: r.top },
+      cur?.kind === kind && !hoverOpened
+        ? null
+        : { kind, x: r.right - 3, y: r.top },
     );
   };
   const showSettingsFlyout = (
@@ -85807,6 +85830,7 @@ export default function App() {
   ) => {
     clearSettingsFlyoutLeave();
     const r = el.getBoundingClientRect();
+    if (settingsFlyout?.kind !== kind) settingsFlyoutHoverOpened.current = kind;
     setSettingsFlyout({ kind, x: r.right - 3, y: r.top });
   };
   // floating field-access explorer; stays open across IDE / Journal / Node
@@ -179635,6 +179659,31 @@ describe("Settings View consolidations", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("settings-toolbar-toggle")).toBeNull(),
     );
+  });
+
+  it("keeps a hover-opened flyout open when the same row is clicked", async () => {
+    // A real click always hovers the row first. The hover opens the flyout,
+    // so the click must not toggle it shut (Playwright Edge e2e caught this).
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    const row = screen.getByTestId("settings-visual-toggles");
+    fireEvent.mouseEnter(row);
+    expect(screen.getByTestId("eye-care-toggle")).toBeTruthy();
+    fireEvent.click(row);
+    expect(screen.getByTestId("eye-care-toggle")).toBeTruthy();
+    expect(row).toHaveAttribute("aria-expanded", "true");
+    // A second click on the pinned flyout still closes it.
+    fireEvent.click(row);
+    expect(screen.queryByTestId("eye-care-toggle")).toBeNull();
+    // Without a hover (keyboard), click toggles open.
+    fireEvent.click(row);
+    expect(screen.getByTestId("eye-care-toggle")).toBeTruthy();
   });
 });
 ===== FILE: frontend/src/lib/sql.ts =====
