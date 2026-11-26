@@ -803,4 +803,29 @@ describe("Settings View consolidations", () => {
       expect(screen.queryByTestId("settings-toolbar-toggle")).toBeNull(),
     );
   });
+
+  it("keeps a hover-opened flyout open when the same row is clicked", async () => {
+    // A real click always hovers the row first. The hover opens the flyout,
+    // so the click must not toggle it shut (Playwright Edge e2e caught this).
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("samql-app")).toHaveAttribute(
+        "data-ready",
+        "true",
+      ),
+    );
+    fireEvent.click(screen.getByTestId("settings-button"));
+    const row = screen.getByTestId("settings-visual-toggles");
+    fireEvent.mouseEnter(row);
+    expect(screen.getByTestId("eye-care-toggle")).toBeTruthy();
+    fireEvent.click(row);
+    expect(screen.getByTestId("eye-care-toggle")).toBeTruthy();
+    expect(row).toHaveAttribute("aria-expanded", "true");
+    // A second click on the pinned flyout still closes it.
+    fireEvent.click(row);
+    expect(screen.queryByTestId("eye-care-toggle")).toBeNull();
+    // Without a hover (keyboard), click toggles open.
+    fireEvent.click(row);
+    expect(screen.getByTestId("eye-care-toggle")).toBeTruthy();
+  });
 });

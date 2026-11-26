@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import sqlite3
+import re
 import tempfile
 import threading
 from . import sqlutil
@@ -838,6 +839,12 @@ def _drop_sqlite_file(conn_box, path):
             pass
 
 
+# Q-H1: statements that open/close transactions on SQLite's single shared
+# connection. execute_cursor runs them under write_lock like a write.
+_TXN_CONTROL_LEADS = frozenset(
+    ("begin", "commit", "end", "rollback", "savepoint", "release"))
+
+
 class DBManager(_ThreadCancelMixin):
     """SQLite-backed engine. In-memory by default; disk-backed when
     ``disk_backed=True`` (lower peak RAM, spills to a temp file)."""
@@ -1350,29 +1357,86 @@ class DBManager(_ThreadCancelMixin):
         return self.execute(sql)
 
     def execute_cursor(self, sql, batch=1000):
+        """Run ``sql`` and return ``(cols, first_rows, tail_cursor)``.
+
+        Q-H1: SQLite has ONE connection, and ``add_table_streaming`` holds
+        ``write_lock`` across its own BEGIN ... COMMIT on it. This path used
+        to take no lock at all, so an IDE write ran INSIDE a load's open
+        transaction and its ``commit()`` committed the load's partial batch;
+        the load's own COMMIT then failed ("no transaction is active") and
+        its error path dropped the table. Now:
+
+          * every statement that can mutate runs under ``write_lock`` (so it
+            waits for a running load to commit) and is committed, or rolled
+            back on error, while the lock is still held;
+          * a pure read keeps the unlocked streaming tail, so a long SELECT
+            never holds the connection lock while the grid pages it;
+          * a script whose LAST statement is a read (``INSERT ...; SELECT``)
+            runs its earlier statements and commits under the lock, then
+            releases it and streams the final read exactly like a plain one.
+        """
+        from .sqlutil import classify_sql_statement
         statements = self._split_statements(sql)
         if not statements:
             return None, None, None
-        if len(statements) > 1:
-            pre = self.conn.cursor()
-            for s in statements[:-1]:
-                self._mark_busy(+1)
+        last = statements[-1]
+        # Transaction control (BEGIN/COMMIT/ROLLBACK/...) classifies as a
+        # "read" for read-only mode, but on the shared connection a bare
+        # COMMIT would commit a running load just like a write would.
+        lead = re.match(r"\s*([A-Za-z]+)", last or "")
+        last_is_read = (
+            classify_sql_statement(last) == "read"
+            and not (lead and lead.group(1).lower() in _TXN_CONTROL_LEADS))
+        pre = statements[:-1] if last_is_read else statements
+        if pre:
+            with self.write_lock:
+                self._raise_if_thread_cancelled()
+                cur = self.conn.cursor()
                 try:
-                    with _BeatScope(self, self.conn):
-                        pre.execute(s)
+                    for s in pre:
+                        self._mark_busy(+1)
+                        try:
+                            with _BeatScope(self, self.conn):
+                                cur.execute(s)
+                        finally:
+                            self._mark_busy(-1)
+                    if last_is_read:
+                        out = None
+                    elif not cur.description:
+                        out = (None, None, None)
+                    else:
+                        # A write that returns rows (RETURNING, a PRAGMA):
+                        # drain it under the lock so nothing stays stepping
+                        # on the shared connection after we commit.
+                        cols = [d[0] for d in cur.description]
+                        out = (cols, [tuple(r) for r in cur.fetchall()], None)
+                    if self.conn.in_transaction:
+                        self.conn.commit()
+                except BaseException:
+                    if self.conn.in_transaction:
+                        try:
+                            self.conn.rollback()
+                        except Exception:
+                            pass
+                    raise
                 finally:
-                    self._mark_busy(-1)
-            self.conn.commit()
+                    try:
+                        cur.close()
+                    except Exception:
+                        pass
+            if out is not None:
+                return out
+        # A pure read: no lock, so cancel/progress reach it and a long
+        # result streams without blocking the engine.
         cur = self.conn.cursor()
         try:
             self._mark_busy(+1)
             try:
                 with _BeatScope(self, self.conn):
-                    cur.execute(statements[-1])
+                    cur.execute(last)
             finally:
                 self._mark_busy(-1)
             if not cur.description:
-                self.conn.commit()
                 try:
                     cur.close()
                 except Exception:

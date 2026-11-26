@@ -3572,9 +3572,15 @@ def flow_fingerprints(graph, needed_map=None, epoch=0, engine="sqlite",
         inedges.setdefault(t.get("node"), []).append(
             (t.get("port") or "", f.get("node"), f.get("port") or "out"))
 
+    # NF-C1: group the projection map by node once (the old per-node scan of
+    # the whole map was O(nodes * map)).
+    need_by_node = {}
+    for k, v in needed_map.items():
+        need_by_node.setdefault(k[0], []).append(v)
+
     def need_rep(nid):
         # the projection this node's output must carry; None anywhere == all
-        outs = [v for (k, v) in needed_map.items() if k[0] == nid]
+        outs = need_by_node.get(nid)
         if not outs or any(v is None for v in outs):
             return "*"
         s = set()
@@ -3582,44 +3588,79 @@ def flow_fingerprints(graph, needed_map=None, epoch=0, engine="sqlite",
             s |= v
         return sorted(s)
 
-    memo = {}
-    visiting = set()
-    cyclic = set()
+    # NF-C1: each node's representation embeds its inputs' FIXED-SIZE digest,
+    # never their full text. The old version embedded each input's whole JSON
+    # text, which json.dumps re-escaped at every level, so the text doubled
+    # per node and a ~25-node chain built hundreds of MB on every run.
+    #
+    # The walk is iterative (explicit stack) so a very long chain cannot hit
+    # Python's recursion limit. A node whose subtree reaches a cycle or a
+    # missing node gets None and is omitted from the result, exactly as before.
+    _PENDING = object()
+    memo = {}  # nid -> hex digest | None (cyclic / missing below) | _PENDING
 
-    def subtree(nid):
-        if nid in memo:
-            return memo[nid]
-        if nid in visiting:
-            cyclic.add(nid)
-            return "<cycle>"
-        node = nodes.get(nid)
-        if node is None:
-            return "<missing>"
-        visiting.add(nid)
-        ins = sorted(inedges.get(nid, []),
-                     key=lambda x: (x[0], str(x[1]), x[2]))
-        kids = [tp + ">" + subtree(src) + "@" + sp for (tp, src, sp) in ins]
-        rep = _json.dumps(
-            {"t": node.get("type"), "c": node.get("config") or {},
-             "n": need_rep(nid), "in": kids},
-            sort_keys=True, separators=(",", ":"), default=str)
-        visiting.discard(nid)
-        memo[nid] = rep
-        return rep
+    def _ins(nid):
+        return sorted(inedges.get(nid, []),
+                      key=lambda x: (x[0], str(x[1]), x[2]))
+
+    def subtree(root):
+        if root in memo:
+            d = memo[root]
+            return None if d is _PENDING else d
+        if root not in nodes:
+            return None
+        memo[root] = _PENDING
+        stack = [(root, iter(_ins(root)))]
+        while stack:
+            nid, it = stack[-1]
+            descended = False
+            for _tp, src, _sp in it:
+                if src in memo:
+                    continue  # done, or on the stack (a cycle: None below)
+                if src not in nodes:
+                    memo[src] = None
+                    continue
+                memo[src] = _PENDING
+                stack.append((src, iter(_ins(src))))
+                descended = True
+                break
+            if descended:
+                continue
+            stack.pop()
+            kids, ok = [], True
+            for tp, src, sp in _ins(nid):
+                d = memo.get(src)
+                if d is None or d is _PENDING:  # missing, cyclic, or below one
+                    ok = False
+                    break
+                kids.append([tp, d, sp])
+            if not ok:
+                memo[nid] = None
+                continue
+            node = nodes[nid]
+            rep = _json.dumps(
+                {"t": node.get("type"), "c": node.get("config") or {},
+                 "n": need_rep(nid), "in": kids},
+                sort_keys=True, separators=(",", ":"), default=str)
+            memo[nid] = hashlib.sha256(rep.encode("utf-8")).hexdigest()
+        d = memo.get(root)
+        return None if d is _PENDING else d
 
     try:
         digest_chars = max(16, min(int(digest_chars), 40))
     except Exception:
         digest_chars = 16
-    prefix = "v1|%s|%s|" % (epoch, engine)
+    # "v2": the representation changed, so keys from the old scheme (incl.
+    # restart-persistent cache files) age out instead of colliding.
+    prefix = "v2|%s|%s|" % (epoch, engine)
     out = {}
     for nid in nodes:
         try:
-            rep = subtree(nid)
+            d = subtree(nid)
         except Exception:
             continue
-        if nid in cyclic or "<cycle>" in rep or "<missing>" in rep:
+        if d is None:
             continue
         out[nid] = hashlib.sha1(
-            (prefix + rep).encode("utf-8")).hexdigest()[:digest_chars]
+            (prefix + d).encode("utf-8")).hexdigest()[:digest_chars]
     return out

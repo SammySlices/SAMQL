@@ -10445,6 +10445,7 @@ class Session:
                     "filtered": bool(filters),
                     "sql": cr.sql,
                     "engine": cr.engine,
+                    "target": getattr(cr, "target", None),
                     "cell_capped": False,
                     "result_capped": bool(cr.capped),
                     "result_cap": cr.cap if cr.capped else None,
@@ -10481,6 +10482,9 @@ class Session:
                 "filtered": bool(filters),
                 "sql": cr.sql,
                 "engine": cr.engine,
+                # Q-C1: the engine target this statement resolved to, so an
+                # expired grid re-runs its own statement where it first ran.
+                "target": getattr(cr, "target", None),
                 "cell_capped": cell_capped,
                 "result_capped": bool(cr.capped),
                 "result_cap": cr.cap if cr.capped else None,

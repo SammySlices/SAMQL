@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildJournalDependencyGraph,
   createNotebook,
+  isSideEffectSql,
   listNotebooks,
   planJournalRunAll,
   setNotebookSaveIdentity,
@@ -166,5 +167,67 @@ describe("Journal dependency optimization", () => {
     const graph = buildJournalDependencyGraph(cells);
     expect(graph.depIds.chart).toEqual(["a"]);
     expect(graph.depIds.reconcile).toEqual(["a", "b"]);
+  });
+});
+
+describe("J-H1: Run all orders cells that write tables", () => {
+  it("runs a CREATE cell before the cell that reads its table (audit repro)", () => {
+    // The audit's repro: [CTAS stage, SELECT FROM stage, UPDATE stage] used to
+    // plan as ONE wave ["a","b","c"] because there is no cell-name reference.
+    const cells = [
+      sql("a", "cell1", "CREATE OR REPLACE TABLE stage AS SELECT 1 AS n"),
+      sql("b", "cell2", "SELECT count(*) FROM stage"),
+      sql("c", "cell3", "UPDATE stage SET n = 2"),
+    ];
+    const plan = planJournalRunAll(cells, [], { a: "A", b: "B", c: "C" });
+    expect(plan.waves).toEqual([["a"], ["b"], ["c"]]);
+    expect(plan.deps.b).toContain("a");
+    expect(plan.deps.c).toEqual(expect.arrayContaining(["a", "b"]));
+  });
+
+  it("never reuses a reader below a write cell, even when it looks fresh", () => {
+    const cells = [
+      sql("w", "cell1", "CREATE TABLE stage AS SELECT 1 AS n"),
+      fresh("r", "cell2", "SELECT * FROM stage", "R"),
+    ];
+    const plan = planJournalRunAll(cells, [], { w: "W", r: "R" });
+    expect(plan.reusedIds).toEqual([]);
+    expect(plan.waves).toEqual([["w"], ["r"]]);
+  });
+
+  it("keeps independent reads between two writes parallel", () => {
+    const cells = [
+      sql("w", "cell1", "CREATE TABLE stage AS SELECT 1 AS n"),
+      sql("r", "cell2", "SELECT * FROM stage"),
+      sql("w2", "cell3", "INSERT INTO stage VALUES (2)"),
+      sql("s", "cell4", "SELECT count(*) FROM stage"),
+      sql("t", "cell5", "SELECT max(n) FROM stage"),
+    ];
+    const plan = planJournalRunAll(cells, [], {});
+    expect(plan.waves).toEqual([["w"], ["r"], ["w2"], ["s", "t"]]);
+  });
+
+  it("still reuses fresh read-only cells above the first write", () => {
+    const cells = [
+      fresh("a", "cell1", "SELECT 1 AS n", "A"),
+      sql("w", "cell2", "CREATE TABLE t2 AS SELECT * FROM cell1"),
+    ];
+    const plan = planJournalRunAll(cells, [], { a: "A", w: "W" });
+    expect(plan.reusedIds).toEqual(["a"]);
+    expect(plan.waves).toEqual([["w"]]);
+  });
+
+  it("classifies by statement lead, not by words inside text", () => {
+    expect(isSideEffectSql("SELECT 'update' AS kind")).toBe(false);
+    expect(isSideEffectSql("SELECT replace(name, 'a', 'b') FROM t")).toBe(false);
+    expect(isSideEffectSql('SELECT "delete" FROM t -- drop table t')).toBe(false);
+    expect(isSideEffectSql("/* create */ SELECT last_update FROM t")).toBe(false);
+    expect(isSideEffectSql("WITH x AS (SELECT 1) SELECT * FROM x")).toBe(false);
+    expect(isSideEffectSql("create or replace table s as select 1")).toBe(true);
+    expect(isSideEffectSql("SELECT 1; DELETE FROM t")).toBe(true);
+    expect(isSideEffectSql("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x")).toBe(true);
+    expect(isSideEffectSql("EXPLAIN ANALYZE DELETE FROM t")).toBe(true);
+    expect(isSideEffectSql("BEGIN; UPDATE t SET a = 1; COMMIT")).toBe(true);
+    expect(isSideEffectSql("SELECT * INTO #tmp FROM t")).toBe(true);
   });
 });

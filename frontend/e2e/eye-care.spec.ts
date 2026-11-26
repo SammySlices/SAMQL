@@ -114,7 +114,7 @@ test("Eye Care enlarges text, buttons, and restores on toggle off", async ({
   );
   expect(Number.parseFloat(scale)).toBeCloseTo(1.25, 2);
 
-  const menuItem = page.getByRole("button", { name: "Eye Care: on" });
+  const menuItem = page.getByRole("menuitemcheckbox", { name: "Eye Care: on" });
   const menuBox = await menuItem.boundingBox();
   expect(menuBox!.height).toBeGreaterThan(18);
 

@@ -162,6 +162,16 @@ class Rig:
         out = self.sess._materialize_flows(graph, targets, et, collect)
         return out, collect, et
 
+    def temp_cols(self, et, name):
+        """Columns of a flow temp, read on the engine that built it.
+
+        run_query routes LOCAL_TARGET by the session's engine mode (DuckDB
+        by default), so it cannot see a temp materialised in SQLite; the
+        engine object for ``et`` can."""
+        eng, _kind = self.sess._engine_obj(et)
+        cols, _rows = eng.execute('SELECT * FROM "%s" LIMIT 0' % name)
+        return list(cols or [])
+
     def drop(self, et, names):
         self.sess._drop_flow_temps(et, names)
 
@@ -313,8 +323,7 @@ def t_pushdown_multi_consumer_union(rig):
     out, collect, et = rig.materialize(g, [("o1", "out"), ("o2", "out")])
     src_temps = [c for c in collect if c.endswith("_s__out")]
     eq(len(src_temps), 1, "shared source materialised once")
-    cols = rig.sess.run_query('SELECT * FROM "%s" LIMIT 0' % src_temps[0],
-                              target=et).get("columns")
+    cols = rig.temp_cols(et, src_temps[0])
     eqset(cols, {"a", "b"}, "shared source temp has only the union columns")
     rig.drop(et, collect)
 
@@ -520,8 +529,7 @@ def t_shared_checkpoint_is_narrow(rig):
     need(len(out) == 2, "both shared-filter targets materialized")
     filt = [name for name in collect if name.endswith("_f__true")]
     eq(len(filt), 1, "shared filter checkpoint is built once")
-    cols = rig.sess.run_query('SELECT * FROM "%s" LIMIT 0' % filt[0],
-                              target=et).get("columns")
+    cols = rig.temp_cols(et, filt[0])
     eqset(cols, {"a", "b"},
           "condition-only c is dropped before the reusable checkpoint")
     rig.drop(et, collect)

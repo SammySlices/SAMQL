@@ -47,7 +47,14 @@ export interface ResultTab {
   released?: boolean;
   loadingMore?: boolean;
   view?: "grid" | "chart" | "pivot";
+  /** The editor text this tab was run from (display / history only). */
   sql?: string;
+  /** Q-C1: the single statement that produced the grid (backend's own
+   * record, post-dialect), the engine target it resolved to, and the
+   * preview cap. An expired result re-runs ONLY this, read-only. */
+  rerunSql?: string;
+  rerunTarget?: string;
+  rerunPreviewLimit?: number;
   statements?: StatementEntry[];
   activeStmt?: number;
   /** Optional NodeFlow graph attached when this result came from a flow run. */

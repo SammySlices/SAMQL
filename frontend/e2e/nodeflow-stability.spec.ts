@@ -108,23 +108,35 @@ async function openPreviewViaOutput(
   page: import("@playwright/test").Page,
   nodeId = "formula",
 ): Promise<void> {
-  const responsePromise = page.waitForResponse((response) => {
+  // After Run all, a transform's output preview is served from the last-run
+  // cache, so the click may make no request. If it does peek, the peek must
+  // succeed.
+  const peeks: import("@playwright/test").Response[] = [];
+  const onResponse = (response: import("@playwright/test").Response) => {
     const path = new URL(response.url()).pathname;
-    return response.request().method() === "POST" && path === "/api/nodeflow/run";
-  });
-  await page
-    .locator(`[data-testid="nodeflow-node"][data-node-id="${nodeId}"] .nb2-port.out`)
-    .click();
-  const response = await responsePromise;
-  const body = (await readJsonOrText(response)) as Record<string, unknown>;
-  expect(
-    response.ok(),
-    `NodeFlow preview failed (${response.status()}): ${JSON.stringify(body)}`,
-  ).toBeTruthy();
-  expect(body.error, `NodeFlow preview returned an error: ${JSON.stringify(body)}`).toBeFalsy();
-  const preview = page.getByTestId("nodeflow-preview");
-  await expect(preview).toBeVisible();
-  await expect(preview.getByTestId("result-grid")).toBeVisible();
+    if (response.request().method() === "POST" && path === "/api/nodeflow/run") {
+      peeks.push(response);
+    }
+  };
+  page.on("response", onResponse);
+  try {
+    await page
+      .locator(`[data-testid="nodeflow-node"][data-node-id="${nodeId}"] .nb2-port.out`)
+      .click();
+    const preview = page.getByTestId("nodeflow-preview");
+    await expect(preview).toBeVisible();
+    await expect(preview.getByTestId("result-grid")).toBeVisible();
+  } finally {
+    page.off("response", onResponse);
+  }
+  for (const response of peeks) {
+    const body = (await readJsonOrText(response)) as Record<string, unknown>;
+    expect(
+      response.ok(),
+      `NodeFlow preview failed (${response.status()}): ${JSON.stringify(body)}`,
+    ).toBeTruthy();
+    expect(body.error, `NodeFlow preview returned an error: ${JSON.stringify(body)}`).toBeFalsy();
+  }
 }
 
 test("NodeFlow reruns after an upstream edit and persists the changed graph", async ({

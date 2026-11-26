@@ -1,5 +1,7 @@
 import { backupLocalStorageValue, runMigrations } from "./migrations";
 import { quoteSqlIdent } from "./sql";
+import { isSideEffectSql } from "./sqlSideEffects";
+export { isSideEffectSql };
 
 // Notebook-mode logic: cell-chaining (let a cell query an earlier cell's
 // result by name) and localStorage persistence of the cell list. Chaining is
@@ -780,11 +782,27 @@ export interface JournalRunPlan {
   reusedIds: string[];
   waves: string[][];
   graph: JournalDependencyGraph;
+  /** Run-all ordering edges per cell: the name references from `graph` plus
+   * the side-effect barriers (J-H1). A cell starts only after every id here
+   * that is also being run has settled. */
+  deps: Record<string, string[]>;
 }
 
 /** Plan Run all so fresh cells are not sent to the server again.
  * Stale independent cells share a wave; stale dependencies are completed in
- * earlier waves. Fresh dependencies remain available through chain reuse. */
+ * earlier waves. Fresh dependencies remain available through chain reuse.
+ *
+ * J-H1: dependencies used to come ONLY from cell-name references, so a cell
+ * that writes table `stage` and a cell that reads `stage` had no edge, shared
+ * a wave and ran concurrently (the reader saw "table not found", the old rows,
+ * or was stamped with the pre-write epoch and expired at once). Cells with
+ * side effects (isSideEffectSql) are now barriers that keep document order:
+ *   - every cell after a barrier waits for it;
+ *   - a barrier waits for every cell since the previous barrier (so an
+ *     UPDATE never runs under a SELECT written above it);
+ *   - a barrier always runs (its effect is the point of running it), and once
+ *     one runs, every later cell runs too, since its data may have changed.
+ * Independent read-only cells between two barriers still run in parallel. */
 export function planJournalRunAll(
   list: ChainCell[],
   groups: { id: string; name: string }[],
@@ -796,13 +814,31 @@ export function planJournalRunAll(
   const runnable = list.filter(
     (c) => c.type === "sql" && typeof c.code === "string" && c.code.trim(),
   );
+  const depSets: Record<string, Set<string>> = {};
+  for (const c of runnable) depSets[c.id] = new Set(graph.depIds[c.id] || []);
   const reusedIds: string[] = [];
   const runIds: string[] = [];
+  let lastBarrier: string | null = null;
+  let barrierRuns = false;
+  let sinceBarrier: string[] = [];
   for (const c of runnable) {
-    if (cellIsFresh(c, compiledById[c.id], !!cappedById[c.id], dataEpoch))
-      reusedIds.push(c.id);
-    else runIds.push(c.id);
+    const barrier = isSideEffectSql(c.code);
+    if (lastBarrier) depSets[c.id].add(lastBarrier);
+    if (barrier) for (const b of sinceBarrier) depSets[c.id].add(b);
+    const fresh =
+      !barrier &&
+      !barrierRuns &&
+      cellIsFresh(c, compiledById[c.id], !!cappedById[c.id], dataEpoch);
+    (fresh ? reusedIds : runIds).push(c.id);
+    if (barrier) {
+      lastBarrier = c.id;
+      barrierRuns = true;
+      sinceBarrier = [];
+    }
+    sinceBarrier.push(c.id);
   }
+  const deps: Record<string, string[]> = {};
+  for (const id of Object.keys(depSets)) deps[id] = Array.from(depSets[id]);
 
   const order = new Map(runnable.map((c, i) => [c.id, i] as const));
   const pending = new Set(runIds);
@@ -810,9 +846,7 @@ export function planJournalRunAll(
   while (pending.size) {
     const wave = runIds.filter((id) => {
       if (!pending.has(id)) return false;
-      return (graph.depIds[id] || []).every(
-        (dep) => !pending.has(dep),
-      );
+      return (deps[id] || []).every((dep) => !pending.has(dep));
     });
     // Defensive fallback for a hand-edited/corrupt notebook. Normal notebook
     // references are backward-only, so this branch is never needed in healthy
@@ -826,7 +860,7 @@ export function planJournalRunAll(
     waves.push(wave);
     for (const id of wave) pending.delete(id);
   }
-  return { runIds, reusedIds, waves, graph };
+  return { runIds, reusedIds, waves, graph, deps };
 }
 
 /** The journal dependency export as CSV (Cell, SQL, uses, feeds) with a BOM
