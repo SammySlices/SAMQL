@@ -2,7 +2,7 @@
 # SamQL source bundle
 #   build:     2026-11-24.704
 #   files:     437
-#   sha256:    74a393e506b4414ceed683a3cb0837be51212360ef5cd316141a791a28411517  (of the section body below)
+#   sha256:    9765a99d0af3fc9f29c35f2da8c550cbd5e4c109853adb6fbc73e66a9f774d07  (of the section body below)
 #   generated: 2026-07-20 14:29:07 UTC
 #   contents:  complete source + tests + UI (Test-SamQL-All ready)
 #   reconstruct with Expand-SamQL[.]ps1 (this header is ignored)
@@ -79033,7 +79033,7 @@ test("Eye Care enlarges text, buttons, and restores on toggle off", async ({
   );
   expect(Number.parseFloat(scale)).toBeCloseTo(1.25, 2);
 
-  const menuItem = page.getByRole("button", { name: "Eye Care: on" });
+  const menuItem = page.getByRole("menuitemcheckbox", { name: "Eye Care: on" });
   const menuBox = await menuItem.boundingBox();
   expect(menuBox!.height).toBeGreaterThan(18);
 
